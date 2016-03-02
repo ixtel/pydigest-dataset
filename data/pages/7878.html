@@ -1,0 +1,150 @@
+<html><body><div><div class="entry-content">
+
+                
+
+                <p>Работа с API сервисов это всегда история по типу "Ожидание...реальность". Ибо даже простое API может скушать день, а то и 2 дня рабочего времени. </p>
+<p>API Вконтакте не исключение. Уже есть очень много материалов на тему использования этого интерфейса:</p>
+<p><a href="http://habrahabr.ru/search/page2/?q=vk+api&amp;target_type=posts&amp;order_by=relevance">http://habrahabr.ru/search/page2/?q=vk+api&amp;target_type=posts&amp;order_by=relevance</a> </p>
+<p>Много практических задач решили с помощью API:</p>
+
+<p>И даже уже есть несколько готовых реализаций-библиотек для работы с Вконтакте:</p>
+
+<p>И из раз в раз гугл мучается от запросов "Vk.com api". Пользователи ищут примеры авторизация, документацию, примеры использования. 
+Поэтому я приведу один из вариантов старта в API Вконтакте, а именно. Мы отправим <code>hello world</code> другу.</p>
+<h2>Начнем - получим APP_ID и SECRET_KEY</h2>
+<p>Стоит отметить, что API Вконтакте неплохо описано - включив мозг можно понять что и куда тыкать. 
+В этом можно убедится самостоятельно - <a href="https://vk.com/dev/main">https://vk.com/dev/main</a></p>
+<p>Для того чтобы начать делать запросы в API необходимо получить APP_ID и SECRET_KEY - это свойственно почти всем современным сервисам.
+Для этого идем на страницу <a href="https://vk.com/apps?act=manage">https://vk.com/apps?act=manage</a>
+Видим примерно такую картину:</p>
+<p><img alt="vk" src="http://old.pynsk.ru/images/posts/vk_api_post_1.png"/></p>
+<p>Создаем свое приложение:</p>
+<p><img alt="vk" src="http://old.pynsk.ru/images/posts/vk_api_post_2.png"/></p>
+<p>Выбираем "Standalone-приложение" - для нашего сайта это в самый раз</p>
+<p>В итоге получаем приложение:</p>
+<p><img alt="vk" src="http://old.pynsk.ru/images/posts/vk_api_post_3.png"/></p>
+<p>На странице "настройки" видим <code>ID приложения</code> и <code>Защищенный ключ</code>:</p>
+<p><img alt="vk" src="http://old.pynsk.ru/images/posts/vk_api_post_4.png"/></p>
+<p>Запишите их, они нам понадобятся. 
+А также не забудьте включить приложение.
+А еще в <code>Права доступа</code> укажите необходимые доступы - можно указать все, пока не разобрались что к чему.</p>
+<p>В результате мы получили <code>ID приложения</code> и <code>Защищенный ключ</code>, которые называются часто <code>APP_ID</code> и <code>SECRET_KEY</code>.</p>
+<h2>Получим ACCESS_TOKEN</h2>
+<p>Получили какие-то <code>APP_ID</code> и <code>SECRET_KEY</code>, а везде в документации просят <code>ACCESS_TOKEN</code>. 
+Давай-те научимся его получать.  </p>
+<p>В качестве обертки над API возьмем <code>vk</code> (почему? без причины, понравилась эта обертка), установим:</p>
+
+
+
+<p>А затем возьмем готовый код (<code>все написано за нас</code>).
+Для примера возьмем возьмем <a href="https://gist.github.com/st4lk/4708673">готовый кусок кода</a> и немного преобразуем по Python3:</p>
+<div class="highlight"><pre><span class="c1"># -*- encoding: utf-8 -*-</span>
+
+<span class="kn">from</span> <span class="nn">__future__</span> <span class="kn">import</span> <span class="n">unicode_literals</span>
+<span class="kn">import</span> <span class="nn">pprint</span>
+<span class="kn">from</span> <span class="nn">urllib.parse</span> <span class="kn">import</span> <span class="n">parse_qs</span>
+<span class="kn">import</span> <span class="nn">webbrowser</span>
+<span class="kn">import</span> <span class="nn">pickle</span>
+<span class="kn">from</span> <span class="nn">datetime</span> <span class="kn">import</span> <span class="n">datetime</span><span class="p">,</span> <span class="n">timedelta</span>
+<span class="kn">import</span> <span class="nn">vk</span>
+<span class="kn">import</span> <span class="nn">time</span>
+
+<span class="c1"># id of vk.com application</span>
+<span class="n">APP_ID</span> <span class="o">=</span> <span class="o">&lt;</span><span class="err">ВСТАВИТЬ</span> <span class="err">ТВОЙ</span> <span class="n">APP_ID</span><span class="o">&gt;</span>
+<span class="c1"># file, where auth data is saved</span>
+<span class="n">AUTH_FILE</span> <span class="o">=</span> <span class="s1">'.auth_data'</span>
+<span class="c1"># chars to exclude from filename</span>
+<span class="n">FORBIDDEN_CHARS</span> <span class="o">=</span> <span class="s1">'/</span><span class="se">\\</span><span class="s1">\?%*:|"&lt;&gt;!'</span>
+
+<span class="k">def</span> <span class="nf">get_saved_auth_params</span><span class="p">():</span>
+    <span class="n">access_token</span> <span class="o">=</span> <span class="bp">None</span>
+    <span class="n">user_id</span> <span class="o">=</span> <span class="bp">None</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">AUTH_FILE</span><span class="p">,</span> <span class="s1">'rb'</span><span class="p">)</span> <span class="k">as</span> <span class="n">pkl_file</span><span class="p">:</span>
+            <span class="n">token</span> <span class="o">=</span> <span class="n">pickle</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">pkl_file</span><span class="p">)</span>
+            <span class="n">expires</span> <span class="o">=</span> <span class="n">pickle</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">pkl_file</span><span class="p">)</span>
+            <span class="n">uid</span> <span class="o">=</span> <span class="n">pickle</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">pkl_file</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">datetime</span><span class="o">.</span><span class="n">now</span><span class="p">()</span> <span class="o">&lt;</span> <span class="n">expires</span><span class="p">:</span>
+            <span class="n">access_token</span> <span class="o">=</span> <span class="n">token</span>
+            <span class="n">user_id</span> <span class="o">=</span> <span class="n">uid</span>
+    <span class="k">except</span> <span class="ne">IOError</span><span class="p">:</span>
+        <span class="k">pass</span>
+    <span class="k">return</span> <span class="n">access_token</span><span class="p">,</span> <span class="n">user_id</span>
+
+
+<span class="k">def</span> <span class="nf">save_auth_params</span><span class="p">(</span><span class="n">access_token</span><span class="p">,</span> <span class="n">expires_in</span><span class="p">,</span> <span class="n">user_id</span><span class="p">):</span>
+    <span class="n">expires</span> <span class="o">=</span> <span class="n">datetime</span><span class="o">.</span><span class="n">now</span><span class="p">()</span> <span class="o">+</span> <span class="n">timedelta</span><span class="p">(</span><span class="n">seconds</span><span class="o">=</span><span class="nb">int</span><span class="p">(</span><span class="n">expires_in</span><span class="p">))</span>
+    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">AUTH_FILE</span><span class="p">,</span> <span class="s1">'wb'</span><span class="p">)</span> <span class="k">as</span> <span class="n">output</span><span class="p">:</span>
+        <span class="n">pickle</span><span class="o">.</span><span class="n">dump</span><span class="p">(</span><span class="n">access_token</span><span class="p">,</span> <span class="n">output</span><span class="p">)</span>
+        <span class="n">pickle</span><span class="o">.</span><span class="n">dump</span><span class="p">(</span><span class="n">expires</span><span class="p">,</span> <span class="n">output</span><span class="p">)</span>
+        <span class="n">pickle</span><span class="o">.</span><span class="n">dump</span><span class="p">(</span><span class="n">user_id</span><span class="p">,</span> <span class="n">output</span><span class="p">)</span>
+
+
+<span class="k">def</span> <span class="nf">get_auth_params</span><span class="p">():</span>
+    <span class="n">auth_url</span> <span class="o">=</span> <span class="p">(</span><span class="s2">"https://oauth.vk.com/authorize?client_id={app_id}"</span>
+                <span class="s2">"&amp;scope=wall,messages&amp;redirect_uri=http://oauth.vk.com/blank.html"</span>
+                <span class="s2">"&amp;display=page&amp;response_type=token"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">app_id</span><span class="o">=</span><span class="n">APP_ID</span><span class="p">))</span>
+    <span class="n">webbrowser</span><span class="o">.</span><span class="n">open_new_tab</span><span class="p">(</span><span class="n">auth_url</span><span class="p">)</span>
+    <span class="n">redirected_url</span> <span class="o">=</span> <span class="nb">input</span><span class="p">(</span><span class="s2">"Paste here url you were redirected:</span><span class="se">\n</span><span class="s2">"</span><span class="p">)</span>
+    <span class="n">aup</span> <span class="o">=</span> <span class="n">parse_qs</span><span class="p">(</span><span class="n">redirected_url</span><span class="p">)</span>
+    <span class="n">aup</span><span class="p">[</span><span class="s1">'access_token'</span><span class="p">]</span> <span class="o">=</span> <span class="n">aup</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span>
+        <span class="s1">'https://oauth.vk.com/blank.html#access_token'</span><span class="p">)</span>
+    <span class="n">save_auth_params</span><span class="p">(</span><span class="n">aup</span><span class="p">[</span><span class="s1">'access_token'</span><span class="p">][</span><span class="mi">0</span><span class="p">],</span> <span class="n">aup</span><span class="p">[</span><span class="s1">'expires_in'</span><span class="p">][</span><span class="mi">0</span><span class="p">],</span>
+                     <span class="n">aup</span><span class="p">[</span><span class="s1">'user_id'</span><span class="p">][</span><span class="mi">0</span><span class="p">])</span>
+    <span class="k">return</span> <span class="n">aup</span><span class="p">[</span><span class="s1">'access_token'</span><span class="p">][</span><span class="mi">0</span><span class="p">],</span> <span class="n">aup</span><span class="p">[</span><span class="s1">'user_id'</span><span class="p">][</span><span class="mi">0</span><span class="p">]</span>
+
+
+<span class="k">def</span> <span class="nf">get_api</span><span class="p">(</span><span class="n">access_token</span><span class="p">):</span>
+    <span class="n">session</span> <span class="o">=</span> <span class="n">vk</span><span class="o">.</span><span class="n">Session</span><span class="p">(</span><span class="n">access_token</span><span class="o">=</span><span class="n">access_token</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">vk</span><span class="o">.</span><span class="n">API</span><span class="p">(</span><span class="n">session</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">main</span><span class="p">():</span>
+    <span class="n">access_token</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">get_saved_auth_params</span><span class="p">()</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">access_token</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">_</span><span class="p">:</span>
+        <span class="n">access_token</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">get_auth_params</span><span class="p">()</span>
+    <span class="n">api</span> <span class="o">=</span> <span class="n">get_api</span><span class="p">(</span><span class="n">access_token</span><span class="p">)</span>
+
+<span class="n">main</span><span class="p">()</span>
+</pre></div>
+
+
+<p>Что же делает этот код? Сначала мы читаем файл <code>AUTH_FILE</code>, если такой файл есть, то выгребаем от туда токен и проверяем - протух ли он или еще нет.</p>
+<p>Если же токена нет или протух, то скрипт генерирует ссылку для авторизации и открывает ее в браузере. 
+Браузер откроется, vk api попросит доступ к вашим данным. </p>
+<p>После авторизации необходимо скопировать ссылку страницы в консоль и нажать Enter - скрипт сам достанет нужные параметры и сохранит в файл.</p>
+<p>Ссылка, которая будет в браузере примерно такая:</p>
+<div class="highlight"><pre>https://oauth.vk.com/blank.html#access_token=147a6effsfsd342452345ea8b59e03ef0538f20e0a474887bb46299fc99aed4bfsda11c0be900&amp;expires_in=86400&amp;user_id=16932517
+</pre></div>
+
+
+<p>Теперь у нас есть <code>ACCESS_TOKEN</code>, осталось малое дело - написать другу сообщение</p>
+<h2>Пишем другу сообщение с помощью API</h2>
+<p>Модифицируем функцию main, а также добавим функцию <code>send_message</code> (угадайте что она делает):</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">send_message</span><span class="p">(</span><span class="n">api</span><span class="p">,</span> <span class="n">user_id</span><span class="p">,</span> <span class="n">message</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="n">data_dict</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="s1">'user_id'</span><span class="p">:</span> <span class="n">user_id</span><span class="p">,</span>
+        <span class="s1">'message'</span><span class="p">:</span> <span class="n">message</span><span class="p">,</span>
+    <span class="p">}</span>
+    <span class="n">data_dict</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">api</span><span class="o">.</span><span class="n">messages</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="o">**</span><span class="n">data_dict</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">main</span><span class="p">():</span>
+    <span class="n">access_token</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">get_saved_auth_params</span><span class="p">()</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">access_token</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">_</span><span class="p">:</span>
+        <span class="n">access_token</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">get_auth_params</span><span class="p">()</span>
+    <span class="n">api</span> <span class="o">=</span> <span class="n">get_api</span><span class="p">(</span><span class="n">access_token</span><span class="p">)</span>
+
+    <span class="n">users</span> <span class="o">=</span> <span class="p">[</span><span class="o">&lt;</span><span class="err">СПИСОК</span> <span class="n">ID</span><span class="s1">'шников пользователей&gt;]</span>
+    <span class="n">user_text</span> <span class="o">=</span> <span class="s2">"Привет. Я научился с помощью API писать сообщение"</span>
+    <span class="k">for</span> <span class="n">user_id</span> <span class="ow">in</span> <span class="n">users</span><span class="p">:</span>
+        <span class="k">print</span><span class="p">(</span><span class="s2">"User "</span><span class="p">,</span> <span class="n">user_id</span><span class="p">)</span>
+        <span class="n">res</span> <span class="o">=</span> <span class="n">send_message</span><span class="p">(</span><span class="n">api</span><span class="p">,</span> <span class="n">user_id</span><span class="o">=</span><span class="n">user_id</span><span class="p">,</span> <span class="n">message</span><span class="o">=</span><span class="n">user_text</span><span class="p">)</span>
+        <span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+        <span class="k">print</span><span class="p">(</span><span class="n">res</span><span class="p">)</span>
+</pre></div>
+
+
+<p>Объедините эти два исходника и сможете отправить другу сообщение с помощью VK API</p>
+            </div>
+            
+</div></body></html>

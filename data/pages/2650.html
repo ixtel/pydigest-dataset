@@ -1,0 +1,64 @@
+<html><body><div><div class="post-body bordered-bottom col-md-8">
+                    <p>If you use Python and you use SQL databases, you probably use <a href="http://www.sqlalchemy.org/">SQLAlchemy</a>. It's an <abbr title="Object-Relational Mapper">ORM</abbr>, it's a SQL <abbr title="Domain Specific Language">DSL</abbr>, it's extremely powerful and flexible.</p>
+
+<p>If you use a web app framework, you generally want to tie the lifecycle of your database transactions into the lifecycle of your HTTP request handling. Different web frameworks offer different approaches for this; if you use the <a href="http://www.pylonsproject.org/projects/pyramid/about">Pyramid</a> web framework, you have probably encountered something called the <a href="http://zodb.readthedocs.org/en/latest/transactions.html">Zope Transaction Manager</a>.</p>
+
+<p>There's actually three Python packages at work here; if you use the Pyramid scaffold with SQLAlchemy support, they automatically get integrated into your app. Here's how they work.</p>
+
+<p><a href="https://pypi.python.org/pypi/transaction"><code>transaction</code></a> is the transaction manager itself. On its own it does nothing useful. However, you can register "data managers" with it and it will use two-phase commit to make sure either all managers commit or none do. You'll import the <code>transaction</code> module and use it to issue "commits", "aborts" (rollbacks) and "dooms". (A "doomed" transaction will be rolled back but not just yet; perhaps you want to keep working with it, but ensure it cannot be committed.)</p>
+
+<p><a href="https://pypi.python.org/pypi/pyramid_tm"><code>pyramid_tm</code></a> is a Pyramid <a href="http://docs.pylonsproject.org/projects/pyramid/en/1.5-branch/glossary.html#term-tween">tween</a>, which is a wrapper around your Pyramid app that integrates with the request processing. It automatically commits the transaction manager if the request completes without incident; alternatively, if an exception arises, it will abort the transaction.</p>
+
+<p><a href="https://pypi.python.org/pypi/zope.sqlalchemy"><code>zope.sqlalchemy</code></a> hooks into the <a href="http://docs.sqlalchemy.org/en/rel_0_9/orm/session.html">SQLAlchemy Session</a> event system to integrate it into the transaction manager. The Pyramid scaffold uses the session <a href="http://docs.sqlalchemy.org/en/rel_0_9/orm/deprecated.html#sqlalchemy.orm.interfaces.SessionExtension">extension</a> option in SQLAlchemy; however, that's deprecated and the current best practice is to register <a href="http://docs.sqlalchemy.org/en/rel_0_9/orm/events.html#sqlalchemy.orm.events.SessionEvents">session events</a> instead.</p>
+
+<p>So those three packages and their responsibilities are:</p>
+
+<ul>
+<li><code>transaction</code> provides coordination</li>
+<li><code>pyramid_tm</code> links the Zope transaction to the Pyramid request</li>
+<li><code>zope.sqlalchemy</code> links the SQLAlchemy Session to the Zope transaction</li>
+</ul>
+
+<h2 id="practicalmatters">Practical matters</h2>
+
+<p>The setup in the Pyramid <code>alchemy</code> scaffold looks a bit like this:</p>
+
+<ul>
+<li>the INI file adds <code>pyramid_tm</code> to the <code>pyramid.includes</code> list, which is equivalent to calling <code>config.include('pyramid_tm')</code> during app initialization</li>
+<li><code>models.py</code> sets up a "scoped" SQLAlchemy session using the <code>ZopeTransactionExtension</code> from <code>zope.sqlalchemy</code>. This is not great, but it works.</li>
+<li><code>views.py</code> shows an example of using the scoped SQLAlchemy <code>DBSession</code> for a query; however, it does not show how to use the transaction manager.</li>
+</ul>
+
+
+
+<p>The important parts here are lines 15 and 17. Line 15 imports the <code>ZopeTransactionExtension</code>, line 17 uses it when setting up the <code>sessionmaker</code>. Line 17 also wraps the <code>sessionmaker</code> in a <a href="http://docs.sqlalchemy.org/en/rel_0_9/orm/contextual.html"><code>scoped_session</code></a> which keeps track of the sessions made by the <code>sessionmaker</code> and ensures you always get the same session in the same thread (and that different threads get different sessions). A <code>scoped_session</code> isn't actually a session, but it works as a proxy for most situations. You can call <code>DBSession.query(MyModel)</code> on it, even though it's merely a registry for the session; the call gets proxied on through.</p>
+
+<p>As I said, it works for <strong>most situations</strong>. The SQLAlchemy session tracks its dirty state and if it doesn't believe it's "dirty" (no writes have occurred), the transaction won't get committed even if the request completes without incident. After all, there's no point, right? But you might have run UPDATE or INSERT statements using <a href="http://docs.sqlalchemy.org/en/rel_0_9/orm/session_api.html#sqlalchemy.orm.session.Session.execute"><code>session.execute()</code></a> and then you would want the transaction to be committed. The solution here is to use the <code>zope.sqlalchemy.mark_changed(session)</code> function. However, you must pass it the actual session in use, not the <code>session_maker</code>; it uses <a href="https://docs.python.org/2.7/library/functions.html#id"><code>id()</code></a> to track sessions and the <code>session_maker</code> will have a different id. So you would simply need to run run <code>zope.sqlalchemy.mark_changed(DBSession())</code>; calling the <code>session_maker</code> returns the actual session for that thread.</p>
+
+
+
+<p>This is the scaffold-generated <code>views.py</code>. It doesn't show how to use the transaction module, but that's pretty easy to learn so you don't really need to see that here. The big problem is actually on line 7. See, DBSession is what you'd call a "threadlocal". Essentially it's a global with a different value for each thread, so you don't see threading issues. You do still have all the issues of managing globals with mutable state; this can be especially annoying for your tests. (Also, the <a href="http://docs.sqlalchemy.org/en/rel_0_9/orm/contextual.html#using-thread-local-scope-with-web-applications">SQLAlchemy docs</a> recommend not using it if you have another choice.)</p>
+
+<p>Finally, let's look at the generated <code>__init__.py</code> where the main function lives:  </p>
+
+
+
+<p>There's two main things done here; first we set up the SQLAlchemy database connection, then we configure the WSGI app. We'll come back to this in a bit.</p>
+
+<p>Here's how I'd set up the SQLAlchemy session:</p>
+
+  
+
+<p>This is the same table setup as the scaffolded <code>models.py</code>, but instead of having a global DBSession, each request has a <code>request.db_session</code> property. The first time you access that property, it creates a session and attaches it to the request. This gets you the request isolation you want for the session without using the threadlocal. It also uses the <code>zope.sqlalchemy.register()</code> method to hook up the transaction manager; this is preferred since the extension system is deprecated. As a convenient side effect, since we're not using the <code>scoped_session</code> anymore, we won't have any problems when using <code>mark_changed(request.db_session)</code>.</p>
+
+<p>Since the <code>models.py</code> has an <code>includeme</code> function, the <code>__init__.py</code> file gets simplified. Remove lines 13-15 and simply add <code>config.include('.models')</code> after the configurator is created. There's no reason for the app's main function to know how to set up the DB; keep that in the <code>models.py</code> file.</p>
+
+<p>Now that the DB session hangs off the request object, you may find yourself jumping through a few hoops to pass it into model code that wants to emit queries. In my opinion, that is usually a sign of design problems; I would not want one model object to be emitting queries for another model. However, if you want to do this, you can use the <code>sqlalchemy.orm.session.object_session(instance)</code> function to get the session some model instance is in. (Just note it cannot give you a session if the instance is newly constructed and hasn't been added to a session!)</p>
+
+<p>The transaction manager is still provided as a threadlocal under this design; I'm working on a way to fix that. But I think this is a good setup for now.</p>
+
+<p>Edit: I should give credit where it's due; I developed this SQLAlchemy setup based on Michael Merickel's <a href="https://github.com/mmerickel/zzzeek_pycon2014_atmcraft">fork</a> of SQLAlchemy lead developer Mike Bayer's <a href="https://bitbucket.org/zzzeek/pycon2014_atmcraft/overview">ATMCRAFT</a> demo.</p>
+
+<p>Edit: I have been asked how you write tests with this setup. I wrote an <a href="https://metaclassical.com/testing-pyramid-apps-without-a-scoped-session/">extensive example</a>.</p>
+                </div>
+            </div></body></html>

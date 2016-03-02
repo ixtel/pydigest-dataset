@@ -1,0 +1,163 @@
+<html><body><div><div class="post shortcuts_item" id="post_241646">
+    <p class="published">27 октября 2014 в 16:50</p>
+    <h1 class="title">
+      
+        <span class="post_title">Рецепты Django. Part 1 — AJAX формы</span>
+
+      <a href="/sandbox/" class="flag flag_sandbox" title="Перейти в песочницу">из песочницы</a>
+
+
+    </h1>
+
+      
+
+
+    <div class="content html_format"><p>
+      Здравствуй, хабраюзер!</p>
+<p>
+Возможно, у меня уже начался </p><a href="http://vimeo.com/58698917/">кризис среднего возраста</a><p>, но летом я начал работу над крупным Open Source проектом. Впрочем, о нём немного позже</p><s>, когда за код не будет стыдно</s><p>. Итак, хочу поделиться рядом сниппетов, которые мне приходилось писать, чтобы соответсовать концепции DRY</p><sup>Don't Repeat Youself</sup><p>. Посему собираюсь написать несколько статей.</p><p>
+Кстати, можете обратить внимание на </p><a href="http://habrahabr.ru/post/212047/">предыдущую мою статью</a><p>.
+
+</p><h3>Начну с реализации AJAX.</h3><p>
+Сразу хочу оговориться — не так давно я нашёл на сайте джанги </p><a href="https://docs.djangoproject.com/en/dev/topics/class-based-views/generic-editing/#ajax-example">пример</a><p> для реализации ajax формы. Как выяснилось, я сделал практически то же самое, однако я это сделал сам и я доволен=) Ниже я приведу свой пример и разберу его.
+</p><img src="http://www.pvsm.ru/images/lyogkii-sokrashatel-ssylok-na-ASP-NET-2.png" alt="image"/>
+<p>
+Прошу под кат.
+</p><a name="habracut"/><p>
+Говоря об обработке форм в джанге, с учётом появления модуля </p><b><i>django.views.generic</i></b><p> ещё в релизе 1.5, нельзя не обратить внимание на класс FormView. Поскольку именно от него наследуются все остальные generic классы для обработки форм, его я и избрал объектом своих экспериментов.
+
+</p><h2>Итак, поехали:<h2><hr/><br/>
+<h3>Backend</h3><br/>
+За обработку возвращаемого результата отвечают методы <i>is_valid(self, form)</i> и <i>is_invalid(self, form)</i> в случае соответствия формы требованиям <i>is_valid()</i> и нет, соотсветственно. Пробираясь наверх по предкам до <b>FormMixin</b> мы видим следующее:<br/>
+<pre><code class="python">    def form_valid(self, form):
+        """
+        If the form is valid, redirect to the supplied URL.
+        """
+        return HttpResponseRedirect(self.get_success_url())
+
+    def form_invalid(self, form):
+        """
+        If the form is invalid, re-render the context data with the
+        data-filled form and errors.
+        """
+        return self.render_to_response(self.get_context_data(form=form))
+</code></pre><br/>
+<br/>
+В случае с методом <i>is_valid()</i> нам мешает только редирект. Поэтому мы смело можем заменить этот код необходимым нам ответом:<br/>
+<pre><code class="python">from django.shortcuts import HttpResponse
+
+def form_valid(self, form):
+        return HttpResponse('OK')
+</code></pre><br/>
+В итоге мы получаем код <b>HTTP 200</b> на выходе, который ожидает <i>jquery</i>.<br/>
+<br/>
+Также я позволил себе подсмотреть в класс <b>ModelFormMixin</b> и добавить сохранение формы перед ответом. В итоге получился вот такой гибрид:<br/>
+<pre><code class="python">    def form_valid(self, form):
+        form.save()
+        return HttpResponse('OK')
+</code></pre><br/>
+<br/>
+С ответом в случае ошибки формы несколько сложнее — нам надо вернуть словарь ошибок и отобразить их для пользователя. Впрочем, задача легко выполняется с использованием стандартного аттрибута <i>errors</i> формы:<br/>
+<pre><code class="python">import json
+from django.http import HttpResponseBadRequest
+
+    def form_invalid(self, form):
+        errors_dict = json.dumps(dict([(k, [e for e in v]) for k, v in form.errors.items()]))
+        return HttpResponseBadRequest(json.dumps(errors_dict))
+</code></pre><br/>
+<br/>
+<h4>AjaxFormMixin</h4><br/>
+Таким образом мы получаем следующий класс:<br/>
+<pre><code class="python">from django.views.generic import FormView
+
+class AjaxFormMixin(FormView):
+
+    template_name = 'form_ajax.html'  # Поскольку существенная часть форм в проекте рендерятся одним шаблоном, то зачем его везде указывать=) Впрочем, эта строка несущественна.
+
+    def form_valid(self, form):
+        form.save()
+        return HttpResponse('OK')
+
+    def form_invalid(self, form):
+        errors_dict = json.dumps(dict([(k, [e for e in v]) for k, v in form.errors.items()]))
+        return HttpResponseBadRequest(json.dumps(errors_dict))
+</code></pre><br/>
+<br/>
+У нас теперь есть класс, который мы можем смело наследовать, как любой другой типа <b>Class-based views</b>. Вызов будет выглядеть примерно следующим:<br/>
+<pre><code class="python">from django.contrib.auth.forms import PasswordChangeForm # если кому-то будет полезно;-)
+
+class PasswordChange(AjaxFormMixin):
+
+    form_class = PasswordChangeForm
+</code></pre><br/>
+<br/>
+Он может быть использован в качестве <b>CreateView</b> лишь с той оговоркой, что мы метод <i>__init__()</i> родительского класса <b>FormMixin</b> не воспринимает аргумент model и нам придётся проделать эту работу самостоятельно:<br/>
+<pre><code class="python">from django.forms.models import modelform_factory
+
+class TaskUserAssign(AjaxFormMixin):
+    form_class = modelform_factory(models.TaskRole)
+</code></pre><br/>
+<br/>
+<h4>AjaxUpdateFormMixin</h4><br/>
+Итак, у нас есть базовый класс для обработки ajax форм. Почему бы не последовать <i>django-way</i> и не создать для себя ещё один <i>generic</i> «по образу и подобию» для обновления. В том же модуле <b><i>django.views.generic</i></b> мы находим класс <b>UpdateView</b> и ответ для нас — нам нужен аттрибут <i>object</i> для нашего класса… Вуаля:<br/>
+<pre><code class="python">class AjaxUpdateFormMixin(AjaxFormMixin, UpdateView):
+
+    def get(self, request, *args, **kwargs):
+        self.object = self.get_object()
+        return super(AjaxFormMixin, self).get(request, *args, **kwargs)
+
+    def post(self, request, *args, **kwargs):
+        self.object = self.get_object()
+        return super(AjaxFormMixin, self).post(request, *args, **kwargs)
+</code></pre><br/>
+Без затей мы копируем код, вот только наследуем всё остальное от уже имеющегося у нас класса <b>AjaxFormMixin</b>. Кстати, у данного класса уже есть аттрибут model, поскольку унаследовали мы его от <b>UpdateView</b>, корни которого уходят к <b>ModelFormMixin</b>.<br/>
+<br/>
+В итоге у нас есть набор классов, поддерживающих создание, изменение объектов и другие с ними действия (по необходимости переопределить <i>is_valid()</i> а также <i>/dev/brain</i> и <i>/dev/hands</i> по вкусу) с ajax ответами, для свободного <s>не запрещённого законом</s> наследования.<br/>
+<hr/><br/>
+P.S. Цель статьи была не столько в демонстрации моих достижений (хотя чего уж тут лукавить), а в разборе самого процесса. Немного позже, когда мой ассистент доработает код морды приложения, мы дополним статью ещё и кодом front-end составляющей. А пока всем спасибо за внимание.</h2></h2>
+      <p class="clear"/>
+    </div>
+
+    
+  
+
+      <div class="infopanel_wrapper js-user_93261">
+    <ul class="postinfo-panel postinfo-panel_post" id="infopanel_post_241646">
+
+          <li class="postinfo-panel__item">
+            
+          </li>
+
+      <li class="postinfo-panel__item">
+        <p class="views-count_post" title="Просмотры публикации">20,2k</p>
+      </li>
+
+      <li class="postinfo-panel__item">
+        <p class="favorite-wjt favorite">
+            <button type="button" disabled="disabled" class="favorite-wjt__button favorite-wjt__button_disabled" title="Только зарегистрированные пользователи могут добавлять публикации в избранное">
+              <span>Добавить в избранное</span>
+            </button>
+          <span class="favorite-wjt__counter js-favs_count" title="Количество пользователей, добавивших публикацию в избранное">151</span>
+        </p>
+      </li>
+
+
+
+
+      
+        <li class="postinfo-panel__item postinfo-panel__item_socials  postinfo-panel__item_socials_right ">
+          
+        </li>
+
+      
+    </ul>
+  </div>
+
+        
+
+  
+
+  </div>
+
+
+      </div></body></html>

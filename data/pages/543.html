@@ -1,0 +1,66 @@
+<html><body><div><div class="post-body entry-content" id="post-body-2008917807116905239" itemprop="description articleBody"><p>
+Ok, though question... so, first a little bit of background:</p>
+<p>
+The Python garbage collector is useful for collecting reference cycles, but objects are collected by default when their reference count reaches 0, so, most of the time objects will be collected properly and the collector is only useful when you have a cycle.
+</p><p>
+Also, there's no guarantee when it'll bump in to do a collection, so, if you're doing UI programming (i.e.: using something as Qt), and you use multiple threads, if you have a cycle, it's possible that the cycle is broken on a collect out of the main thread, which can cause your application to crash if an UI object is collected!
+</p><p>
+In this case, even if you're careful about collecting things, there's always the case where you have an exception and the object goes to sys.exc_info and becomes alive for much more time than you'd intend, so, if you are using an UI framework, at least making sure that you only collect in the UI thread is a must (see below code which helps doing that).
+</p><p>
+So, personally, I think that in Python the garbage collector should always be turned off (which can even make your code a lot faster in many situations) and the gc module should be used as a debug tool to find cycles which may occur -- and those should be treated as application errors!
+</p><p>
+weakref.ref() is one of the most useful things for breaking the cycles and if you need references to methods use a WeakMethodRef: </p><a href="http://code.activestate.com/recipes/81253/">http://code.activestate.com/recipes/81253/</a>
+<p>
+Below is some code to make manual garbage-collection (credit to </p><span>Erik Janssens) -- while developing the method check() should usually return self.debug_cycles() -- if you want you can use the remaining code to leave as a tool to break cycles in a real application if you want to play safe (although I think disabling it altogether is better if you make sure you don't have cycles) ...</span>
+<span><br/></span>
+<span>Also, while we're talking about cycles and garbage collection, make sure you never override __del__... Python has an optional callable in weakref.ref() which can be used to do things when an object is collected -- and which doesn't have the problems related to __del__.</span>
+
+
+<pre><code>class GarbageCollector(QObject):
+    '''
+    Disable automatic garbage collection and instead collect manually
+    every INTERVAL milliseconds.
+
+    This is done to ensure that garbage collection only happens in the GUI
+    thread, as otherwise Qt can crash.
+    '''
+
+    INTERVAL = 10000
+
+    def __init__(self, parent, debug=False):
+        QObject.__init__(self, parent)
+        self.debug = debug
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.check)
+
+        self.threshold = gc.get_threshold()
+        gc.disable()
+        self.timer.start(self.INTERVAL)
+
+    def check(self):
+        #return self.debug_cycles() # uncomment to just debug cycles
+        l0, l1, l2 = gc.get_count()
+        if self.debug:
+            print ('gc_check called:', l0, l1, l2)
+        if l0 &gt; self.threshold[0]:
+            num = gc.collect(0)
+            if self.debug:
+                print ('collecting gen 0, found:', num, 'unreachable')
+            if l1 &gt; self.threshold[1]:
+                num = gc.collect(1)
+                if self.debug:
+                    print ('collecting gen 1, found:', num, 'unreachable')
+                if l2 &gt; self.threshold[2]:
+                    num = gc.collect(2)
+                    if self.debug:
+                        print ('collecting gen 2, found:', num, 'unreachable')
+
+    def debug_cycles(self):
+        gc.set_debug(gc.DEBUG_SAVEALL)
+        gc.collect()
+        for obj in gc.garbage:
+            print (obj, repr(obj), type(obj))</code></pre>
+<p/>
+</div>
+</div></body></html>

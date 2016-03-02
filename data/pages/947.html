@@ -1,0 +1,153 @@
+<html><body><div><div class="content html_format"><p>
+      От переводчика:</p>
+<p>
+Статья, которую я предлагаю вам почитать, не нова — она опубликована аж 29 марта. Но на Реддите ее запостили всего несколько дней назад, да и актуальности своей она точно не потеряла. Интересность ее в том, что автор на простом и коротком примере демонстрирует практическое применение трех больших и популярных библиотек: numpy, scipy и pygame. Про первые две многие слышали, но все больше в контексте научных работ, так что интересно посмотреть на их применение в «обычной» жизни. В конце статьи прекрасная видео-демонстрация результата, хотя бы ее точно стоит посмотреть.
+</p><p>
+Авторский код сохранен без изменений, несмотря на то, что он оформлен не по PEP-8 и за его валидность я не ручаюсь. Настоящий рабочий код так или иначе есть на ГитХабе, ссылку вы найдете в конце статьи.
+
+</p><i>Запишите звук, измените тон 50 раз и сопоставьте каждому новому звуку клавишу на клавиатуре компьютера. Получится Пианопьютер!</i>
+
+<a name="habracut"/>
+<p>
+Звук можно закодировать как массив (или список, </p><i>list</i><p>) значений, примерно вот так:
+
+</p><img src="https://habrastorage.org/getpro/habr/post_images/1ab/672/698/1ab672698be5b500d744996c69f6004a.png"/>
+<p>
+Чтобы проиграть этот звук вдвое быстрее, удалим каждое второе значение в массиве:
+
+</p><img src="https://habrastorage.org/getpro/habr/post_images/308/899/32a/30889932ae1f54b35caa5623a90494f3.png"/>
+<p>
+Сделав это, мы не только сократили вдвое длительность звука, но и удвоили его частоту, поэтому и его тон стал выше.
+</p><p>
+Напротив, если повторить каждое значение, то получится более медленный звук, с более длинным периодом, а значит, и ниже тоном:
+
+</p><img src="https://habrastorage.org/getpro/habr/post_images/4d0/c1d/1cc/4d0c1d1ccfb8799f4ba7a32aaad46516.png"/>
+<p>
+Вот простая функция на Питоне, которая меняет скорость звука соответственно переданному коэффициенту:
+
+</p><pre><code class="python">import numpy as np
+
+def speedx(sound_array, factor):
+    """ Multiplies the sound's speed by some `factor` """
+    indices = np.round( np.arange(0, len(snd_array), factor) )
+    indices = indices[indices &lt; len(snd_array)].astype(int)
+    return sound_array[ indices.astype(int) ]</code></pre>
+<p>
+Cложнее изменить длительность, сохранив при этом тон (растягивание звука), или изменить тон, сохранив длительность (смещение тона).
+
+</p><h4>Растягивание звука</h4>
+<p>
+Растянуть звук можно, используя классический метод </p><i>фазового вокодера</i><p> (</p><i>phase vocoder</i><p>). Сначала разбиваем звук на пересекающиеся куски, а затем перемещаем их так, чтобы они пересекались больше (чтобы сократить звук) или меньше (чтобы его растянуть), как на картинке:
+
+</p><img src="//habrastorage.org/files/35b/d83/d56/35bd83d5602e48709eb8d952c2f77636.png"/>
+<p>
+Сложность здесь заключается в том, что передвинутые куски могут плохо взаимодействовать, и необходима определенная фазовая трансформация, чтобы этого не произошло. Вот код на Питоне, вольно переписанный </p><a href="http://audioprograming.wordpress.com/2012/03/02/a-phase-vocoder-in-python/">отсюда</a><p>:
+
+</p><pre><code class="python">def stretch(sound_array, f, window_size, h):
+    """ Stretches the sound by a factor `f` """
+
+    phase  = np.zeros(window_size)
+    hanning_window = np.hanning(window_size)
+    result = np.zeros( len(sound_array) /f + window_size)
+
+    for i in np.arange(0, len(sound_array)-(window_size+h), h*f):
+
+        # two potentially overlapping subarrays
+        a1 = sound_array[i: i + window_size]
+        a2 = sound_array[i + h: i + window_size + h]
+
+        # resynchronize the second array on the first
+        s1 =  np.fft.fft(hanning_window * a1)
+        s2 =  np.fft.fft(hanning_window * a2)
+        phase = (phase + np.angle(s2/s1)) % 2*np.pi
+        a2_rephased = np.fft.ifft(np.abs(s2)*np.exp(1j*phase))
+
+        # add to result
+        i2 = int(i/f)
+        result[i2 : i2 + window_size] += hanning_window*a2_rephased
+
+    result = ((2**(16-4)) * result/result.max()) # normalize (16bit)
+
+    return result.astype('int16')</code></pre>
+
+<h4>Смещение тона</h4>
+<p>
+После растягивания звука смещение тона делается просто. Чтобы получить более высокий тон, растягиваем звук, сохраняя тон, а затем ускоряем результат, чтобы финальный звук имел ту же длину, что и изначальный, но более высокий тон из-за изменения скорости.
+</p><p>
+Удвоение частоты звука повысит тон на одну октаву, или 12 полутонов. Таким образом, чтобы повысить тона на </p><i>n</i><p> полутонов, надо умножить высоту на 2^(n/12):
+
+</p><pre><code class="python">def pitchshift(snd_array, n, window_size=2**13, h=2**11):
+    """ Changes the pitch of a sound by ``n`` semitones. """
+    factor = 2**(1.0 * n / 12.0)
+    stretched = stretch(snd_array, 1.0/factor, window_size, h)
+    return speedx(stretched[window_size:], factor)</code></pre>
+
+<h4>Приложение: Пианопьютер</h4>
+<p>
+Давайте испытаем наш новый тоносместитель. Для начала стукнем по чаше:
+
+</p><iframe src="https://www.youtube.com/embed/oXm0CLp40ws?feature=oembed" frameborder="0" allowfullscreen="">VIDEO</iframe>
+<p>
+Затем создадим 50 производных звуков от очень низкого до очень высокого:
+
+</p><pre><code class="python">from scipy.io import wavfile
+
+fps, bowl_sound = wavfile.read("bowl.wav")
+tones = range(-25,25)
+transposed = [pitchshift(bowl_sound, n) for n in tones]</code></pre>
+<p>
+Каждой клавише на клавиатуре назначим звук, следуя порядку, заданному в </p><a href="https://raw.githubusercontent.com/Zulko/pianoputer/master/typewriter.kb">этом файле</a><p>, вот так:
+
+</p><img src="//habrastorage.org/files/f2e/9a3/ca0/f2e9a3ca063d4192975dfca694bf2a62.jpg"/>
+<p>
+А вот код на Питоне, который превращает ваш компьютер в пианино (</p><i>пианопьютер</i><p>):
+
+</p><pre><code class="python">import pygame
+
+pygame.mixer.init(fps, -16, 1, 512) # so flexible ;)
+screen = pygame.display.set_mode((640,480)) # for the focus
+
+# Get a list of the order of the keys of the keyboard in right order.
+# ``keys`` is like ['Q','W','E','R' ...] 
+keys = open('typewriter.kb').read().split('\n')
+
+sounds = map(pygame.sndarray.make_sound, transposed)
+key_sound = dict( zip(keys, sounds) )
+is_playing = {k: False for k in keys}
+
+while True:
+
+    event =  pygame.event.wait()
+
+    if event.type in (pygame.KEYDOWN, pygame.KEYUP):
+        key = pygame.key.name(event.key)
+
+    if event.type == pygame.KEYDOWN:
+
+        if (key in key_sound.keys()) and (not is_playing[key]):
+            key_sound[key].play(fade_ms=50)
+            is_playing[key] = True
+
+        elif event.key == pygame.K_ESCAPE:
+            pygame.quit()
+            raise KeyboardInterrupt
+
+    elif event.type == pygame.KEYUP and key in key_sound.keys():
+
+        key_sound[key].fadeout(50) # stops with 50ms fadeout
+        is_playing[key] = False</code></pre>
+<p>
+Вот и все! А теперь я сыграю вам традиционную турецкую песенку (</p><i>на самом деле нет. Прим. пер.</i><p>)!
+
+</p><iframe src="https://www.youtube.com/embed/z410eauCnHc?feature=oembed" frameborder="0" allowfullscreen="">VIDEO</iframe>
+<p>
+Если хотите попробовать то же самое дома, вот </p><a href="https://github.com/Zulko/pianoputer">все файлы</a><p>, которые вам понадобятся. Думаю, было бы здорово, если бы кто-то среди читателей из HTML5/JS/elm-разработчиков создал браузерную версию Пианопьютера, так он стал бы доступен более широкой аудитории.
+</p><p>
+Если говорить вообще, мне кажется, что компьютеры недостаточно используют именно для </p><i>исполнения</i><p> музыки. Я понимаю, что легче взять настоящую фортепианную клавиатуру или записать настоящий инструмент, но вы только посмотрите, чего можно добиться с помощью обычной чаши и 60 строк на Питоне!
+</p><p>
+Даже дешевый компьютер имеет достаточно элементов управления, чтобы стать полноценной музыкальной станцией: можно петь в микрофон, показывать жесты через веб-камеру, модулировать всякие штуки мышкой и управлять остальным с клавиатуры. Столько средств самовыражения, и для каждого есть библиотека на Питоне… Артистичные хакеры, никто не желает шагнуть в эту сторону?
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

@@ -1,0 +1,653 @@
+<html><body><div><div id="article-content" class="article">
+    <h1 class="title">Trying JSON in Django and PostgreSQL (and compare with MongoDB)</h1>
+    <p/><p><a href="http://www.lexev.org/en/2015/trying-json-combo-django-and-postgresql/"><img alt="Trying JSON in Django and PostgreSQL" src="https://img-fotki.yandex.ru/get/3706/85893628.c69/0_19430e_cafd0257_XL.png" title="Trying JSON in Django and PostgreSQL"/></a></p>
+<p>New <a href="https://docs.djangoproject.com/en/1.9/ref/contrib/postgres/fields/#jsonfield">JSONField</a> will be added in Django 1.9, it can be used with PostgreSQL &gt;= 9.4. Let's try to work with it and find out, in what situations it can be useful.</p>
+<p>Currently django 1.9 alpha is available, final version is scheduled on December 2015.
+Alpha can be installed with pip:</p>
+<pre><code>pip install --pre django
+</code></pre>
+<p>Now imagine that we have an e-commerce site, where we offer products of different types. For example, laptops and t-shirts. Obviously, such goods will have different attributes: t-shirts will have size, color and laptops - screen size, CPU frequency, hard drive and so on. One of the approaches to design such data in SQL is <a href="https://en.wikipedia.org/wiki/Entity%E2%80%93attribute%E2%80%93value_model">Entity–attribute–value model (EAV)</a>.</p>
+<p>But now we have JSON, so let's try to organise data using this type.</p>
+<p>Create simple model for products:</p>
+<pre><code>from django.db import models
+from django.contrib.postgres.fields import JSONField
+
+class Category(models.Model):
+    name = models.CharField(max_length=100)
+
+class Product(models.Model):
+    name = models.CharField(max_length=100)
+    category = models.ForeignKey(Category)
+    price = models.IntegerField()
+    attributes = JSONField()
+
+    def __str__(self):
+        return self.name
+</code></pre>
+<p>As we can see, there are several common fields for all products (name, category, price) plus specific to particular product attributes (as JSON field).</p>
+<p>Create objects:</p>
+<pre><code>tshirt = Category.objects.create(name='tshirts')
+notebook = Category.objects.create(name='notebook')
+
+# Tshirts
+Product.objects.create(name='Silk tshirt', category=tshirt, price=100, attributes={
+    'colors': ['red', 'black'],
+    'sizes': ['S', 'M'],
+    'model': 'polo',
+    'material': 'silk',
+})
+
+Product.objects.create(name='Bamboo tshirt', category=tshirt, price=120, attributes={
+    'colors': ['white', 'yellow'],
+    'sizes': ['M', 'L', 'XL'],
+    'model': 'poet',
+    'material': 'bamboo',
+})
+
+# Notebooks
+Product.objects.create(name='MacBook Pro', category=notebook, price=2000, attributes={
+    'brand': 'Apple',
+    'screen': 15.0,
+    'speed': 2200,
+    'hd': 256,
+})
+
+Product.objects.create(name='ATIV Book 9', category=notebook, price=1200, attributes={
+    'brand': 'Samsung',
+    'screen': 12.2,
+    'speed': 2400,
+    'hd': 128,
+})
+</code></pre>
+<h3>Queries</h3>
+<p>Let's see, what queries we can make.</p>
+<ol>
+<li>
+<p>Get t-shirts with both 'M' and 'L' sizes:</p>
+<pre><code>&gt;&gt;&gt; Product.objects.filter(category=tshirt, attributes__contains={'sizes': ['M', 'L']})
+[&lt;Product: Bamboo tshirt&gt;]
+</code></pre>
+</li>
+<li>
+<p>Get t-shirts with both 'M' and 'L' sizes, both white and yellow colors, with poetry on it (model=poet): </p>
+<pre><code>&gt;&gt;&gt; Product.objects.filter(category=tshirt,
+    attributes__contains={'sizes': ['M', 'L'], 'colors': ['white', 'yellow'],
+    'model': 'poet'})
+[&lt;Product: Bamboo tshirt&gt;]
+</code></pre>
+</li>
+<li>
+<p>Get laptops with CPU frequency 2400 and screen size 12.2</p>
+<pre><code>&gt;&gt;&gt; Product.objects.filter(category=notebook,
+    attributes__contains={'speed': 2400, 'screen': 12.2})
+[&lt;Product: ATIV Book 9&gt;]
+</code></pre>
+</li>
+<li>
+<p>Get t-shirts with red color, model polo and with size 'M' or 'L'</p>
+<pre><code>&gt;&gt;&gt; Product.objects.filter(category=tshirt,
+    attributes__contains={'colors': ['red'], 'model': 'polo'},
+    attributes__sizes__has_any_keys=['M', 'L'])
+[&lt;Product: Silk tshirt&gt;]
+</code></pre>
+</li>
+<li>
+<p>Get laptops with CPU greater that 2000 and screen larger that 13</p>
+<pre><code>&gt;&gt;&gt; Product.objects.filter(category=notebook, attributes__speed__gt=2000,
+    attributes__screen__gt=13)
+[&lt;Product: MacBook Pro&gt;]
+</code></pre>
+</li>
+<li>
+<p>Get laptops with CPU frequency equal to 2200 or 2400</p>
+<pre><code>&gt;&gt;&gt; Product.objects.filter(category=notebook, attributes__speed__in=(2200, 2400))
+[&lt;Product: ATIV Book 9&gt;, &lt;Product: MacBook Pro&gt;]
+</code></pre>
+<p>or like this:</p>
+<pre><code>&gt;&gt;&gt; from django.db.models import Q
+&gt;&gt;&gt; Product.objects.filter(category=notebook).filter(
+    Q(attributes__contains={'speed': 2200}) | Q(attributes__contains={'speed': 2400}))
+</code></pre>
+</li>
+</ol>
+<h3>Indexes</h3>
+<p>Let's find out, how effective can be our queries.</p>
+<p>PostgreSQL supports <a href="http://www.postgresql.org/docs/9.4/static/datatype-json.html#JSON-INDEXING">different indexes</a> for JSON types:</p>
+<ul>
+<li>
+<p>GIN</p>
+<p>this index in its turn can support different operators:</p>
+<ul>
+<li>jsonb_ops (default), supports operators <code>@&gt;, ?, ?&amp;, ?|</code></li>
+<li>jsonb_path_ops, supports only <code>@&gt;</code>, but works faster and requires less space</li>
+</ul>
+</li>
+<li>
+<p>btree</p>
+<p>can be useful in searching exact json document</p>
+</li>
+<li>
+<p>hash</p>
+<p>same as btree, can be useful in searching exact json document</p>
+</li>
+</ul>
+<h4>Сorrespondence of some Django operations and PostgreSQL operators</h4>
+<pre><code>Django        Postgres
+----------------------
+contains      @&gt;
+contained_by  &lt;@
+has_key       ?
+has_any_keys  ?|
+has_keys      ?&amp;
+</code></pre>
+<p>In our case the most interesting operator is <code>@&gt;</code>. Django will transform operation <code>contains</code> to it for json fields.</p>
+<p>If we simply add <code>db_index=True</code>, btree index will be created:</p>
+<pre><code>class Product(models.Model):
+    ...
+    attributes = JSONField(db_index=True)
+</code></pre>
+<p>For our queries GIN index will be more applicable. To create it we'll use <a href="https://docs.djangoproject.com/en/dev/ref/migration-operations/#django.db.migrations.operations.RunSQL">RunSQL</a> operation.</p>
+<p>First create empty migration. In current example app with products has name 'catalogue_simple'</p>
+<pre><code>python manage.py makemigrations --empty catalogue_simple
+</code></pre>
+<p>In created file (in my case it is 0002_auto_20150928_1610.py) add couple imports and commands to create and discard index:</p>
+<pre><code>from catalogue_simple.models import Product
+from psycopg2.extensions import AsIs
+
+class Migration(migrations.Migration):
+    # ...
+    operations = [
+        migrations.RunSQL(
+            [("CREATE INDEX catalogue_product_attrs_gin ON %s USING gin"
+                "(attributes jsonb_path_ops);", [AsIs(Product._meta.db_table)])],
+            [('DROP INDEX catalogue_product_attrs_gin;', None)],
+        )
+    ]
+</code></pre>
+<p>Here catalogue_product_attrs_gin - index name (we can choose any), attributes - name of JSON field, Product - product model. We are creating jsonb_path_ops index, as it will cover the most common operation in our queries - <code>contains</code>. Extension <code>AsIs</code> is used to not wrap <code>%s</code> param with single quotes.</p>
+<p>We don't need btree index, so don't add it:</p>
+<pre><code>class Product(models.Model):
+    ...
+    attributes = JSONField()
+</code></pre>
+<h4>Test data</h4>
+<p>I've generated 1 000 000 products of 4 different categoires, 250 000 in each. Every product category has its own attributes, from 4 to 7 keys. Some values are scalar (t-shirt material), some - lists (t-shirt sizes).</p>
+<h4>Queries and indexes</h4>
+<ol>
+<li>
+<p>Get t-shirts with both 'M' and 'L' sizes:</p>
+<pre><code>&gt;&gt;&gt; Product.objects.filter(category=tshirt, attributes__contains={'sizes': ['M', 'L']})
+</code></pre>
+<p>Corresponding SQL (enumeration of all field names is replaced with <code>*</code> for brevity):</p>
+<pre><code>SELECT * FROM "catalogue_simple_product" WHERE
+("catalogue_simple_product"."category_id" = 5
+    AND
+"catalogue_simple_product"."attributes" @&gt; '{"sizes": ["M", "L"]}');
+</code></pre>
+<p>Without GIN index on attributes query time is 292 ms, <a href="http://explain.depesz.com/s/xmWS">EXPLAIN ANALYSE</a>.</p>
+<p>Same query with GIN index - 250 ms, <a href="http://explain.depesz.com/s/cHk">EXPLAIN ANALYSE</a>.</p>
+<p>In this case we don't gain much performance (292 ms vs 250 ms), because result contains a lot of rows: 66412.
+It is called "low selectivity".
+Selectivity - ratio of filtered rows to the total rows. If this ratio tends to 1, we say "low selectivity", to 0 - "high selectivity".
+This metric helps us to estimate index effectiveness. With low selectivity index will not gain much performance.</p>
+</li>
+<li>
+<p>Get t-shirts with both 'M' and 'L' sizes, both white and yellow colors, with poetry on it (model=poet):</p>
+<pre><code>&gt;&gt;&gt; Product.objects.filter(category=tshirt,
+    attributes__contains={'sizes': ['M', 'L'], 'colors': ['white', 'yellow'],
+    'model': 'poet'})
+</code></pre>
+<p>Corresponding SQL:</p>
+<pre><code>SELECT * FROM "catalogue_simple_product" WHERE
+("catalogue_simple_product"."category_id" = 5
+    AND
+"catalogue_simple_product"."attributes" @&gt; '{
+    "colors": ["white", "yellow"],
+    "model": "poet",
+    "sizes": ["M", "L"]
+}');
+</code></pre>
+<p>Without GIN index - 240 ms, <a href="http://explain.depesz.com/s/8Zx5">EXPLAIN ANALYSE</a>.</p>
+<p>With GIN index - 49 ms, <a href="http://explain.depesz.com/s/qYN">EXPLAIN ANALYSE</a>.</p>
+<p>Query became faster: 240 ms vs 49 ms. Result contains 3737 rows, higher selectivity than in previous request.</p>
+</li>
+<li>
+<p>Get laptops with CPU frequency 2400 and screen size 12.2</p>
+<pre><code>&gt;&gt;&gt; Product.objects.filter(category=notebook,
+    attributes__contains={'speed': 2400, 'screen': 12.2})
+</code></pre>
+<p>Corresponding SQL:</p>
+<pre><code>SELECT * FROM "catalogue_simple_product" WHERE
+("catalogue_simple_product"."category_id" = 7
+    AND
+"catalogue_simple_product"."attributes" @&gt; '{"screen": 12.2, "speed": 2400}');
+</code></pre>
+<p>Without GIN index - 222 ms, <a href="http://explain.depesz.com/s/Ocgt">EXPLAIN ANALYSE</a>.</p>
+<p>With GIN index - 34 ms, <a href="http://explain.depesz.com/s/Ik8E">EXPLAIN ANALYSE</a>.</p>
+<p>222ms vs 34ms. Result contains 10389 rows.</p>
+</li>
+<li>
+<p>Get t-shirts with red color, model polo and with size 'M' or 'L'</p>
+<pre><code>&gt;&gt;&gt; Product.objects.filter(category=tshirt,
+    attributes__contains={'colors': ['red'], 'model': 'polo'},
+    attributes__sizes__has_any_keys=['M', 'L'])
+</code></pre>
+<p>Corresponding SQL:</p>
+<pre><code>SELECT * FROM "catalogue_simple_product" WHERE
+("catalogue_simple_product"."category_id" = 5
+    AND
+"catalogue_simple_product"."attributes" @&gt; '{"colors": ["red"], "model": "polo"}'
+    AND
+"catalogue_simple_product"."attributes" -&gt; 'sizes' ?| ARRAY['M', 'L']);
+</code></pre>
+<p>Without GIN index - 253 ms, <a href="http://explain.depesz.com/s/6SJ">EXPLAIN ANALYSE</a>.</p>
+<p>With GIN index - 78 ms, <a href="http://explain.depesz.com/s/Lgb">EXPLAIN ANALYSE</a>.</p>
+<p>253 ms vs 78 ms. Result contains 18428 rows. In this query <code>has_any_keys</code> <em>can't</em> use index, as we declared <em>jsonb_path_ops</em> index. But index <em>jsonb_ops</em> also will not work, because we are looking for array elements and not for first level keys.
+If such query is common and it has high selectivity, we can create index on particular JSON key:</p>
+<pre><code>CREATE INDEX gin_sizes ON catalogue_simple_product USING gin ((attributes -&gt; 'sizes'));
+</code></pre>
+<p>But in current example this don't make sense, as filter <code>"attributes" -&gt; 'sizes' ?| ARRAY['M', 'L']</code> has low selectivity:</p>
+<pre><code>&gt;&gt;&gt; Product.objects.filter(category=tshirt,
+    attributes__contains={'colors': ['red'], 'model': 'polo'},
+    attributes__sizes__has_any_keys=['M', 'L']).count()
+18428
+
+&gt;&gt;&gt; Product.objects.filter(category=tshirt,
+    attributes__contains={'colors': ['red'], 'model': 'polo'}).count()
+25162
+</code></pre>
+<p>Only ~25% of objects are filtered by sizes in this query.</p>
+</li>
+<li>
+<p>Get laptops with CPU greater that 2000 and screen larger that 13</p>
+<pre><code>&gt;&gt;&gt; Product.objects.filter(category=notebook, attributes__speed__gt=2000,
+    attributes__screen__gt=13)
+</code></pre>
+<p>Corresponding SQL:</p>
+<pre><code>SELECT * FROM "catalogue_simple_product" WHERE
+("catalogue_simple_product"."category_id" = 7
+    AND
+"catalogue_simple_product"."attributes" -&gt; 'screen' &gt; '13'
+    AND
+"catalogue_simple_product"."attributes" -&gt; 'speed' &gt; '2000')
+</code></pre>
+<p>GIN index will not help here. If such request is common, we can create btree index on needed JSON keys:</p>
+<pre><code>CREATE INDEX attrs_screen_speed ON catalogue_simple_product ((attributes -&gt; 'screen'), (attributes -&gt; 'speed'));
+</code></pre>
+<p>Result contains 10536 rows.</p>
+<p>Without btree index query time is 352 ms, <a href="http://explain.depesz.com/s/GWNM">EXPLAIN ANALYSE</a>.</p>
+<p>With btree index - 46 ms, <a href="http://explain.depesz.com/s/YQO">EXPLAIN ANALYSE</a>.</p>
+</li>
+<li>
+<p>Get laptops with CPU frequency equal to 2200 or 2400</p>
+<pre><code>&gt;&gt;&gt; Product.objects.filter(category=notebook, attributes__speed__in=(2200, 2400))
+</code></pre>
+<p>Corresponding SQL:</p>
+<pre><code>SELECT * FROM "catalogue_simple_product" WHERE
+("catalogue_simple_product"."category_id" = 7
+    AND
+"catalogue_simple_product"."attributes" -&gt; 'speed' IN ('2200', '2400'))
+</code></pre>
+<p>This query is <strong>not</strong> covered by GIN index. Query time ~ 389 ms, <a href="http://explain.depesz.com/s/6U9">EXPLAIN ANALYSE</a>.</p>
+<p>Let's try to rewrite this query to use existing GIN index</p>
+<pre><code>&gt;&gt;&gt; from django.db.models import Q
+&gt;&gt;&gt; Product.objects.filter(category=notebook).filter(Q(attributes__contains={'speed': 2200}) | Q(attributes__contains={'speed': 2400}))
+</code></pre>
+<p>SQL:</p>
+<pre><code>SELECT * FROM "catalogue_simple_product" WHERE
+("catalogue_simple_product"."category_id" = 7
+    AND
+("catalogue_simple_product"."attributes" @&gt; '{"speed": 2200}'
+        OR 
+"catalogue_simple_product"."attributes" @&gt; '{"speed": 2400}'));
+</code></pre>
+<p>Now GIN index can be used, query time ~ 337 ms <a href="http://explain.depesz.com/s/Sdq">EXPLAIN ANALYSE</a>.</p>
+<p>As we see, there is no much difference. But let's check the selectivity of this query.
+Result contains 124 995 rows from 250 000 possible for current category, we have very low selectivity.</p>
+<p>Create 100 laptops with CPU frequency 3200 and 100 laptops with 3500. There are no other laptops with such frequencies in database.</p>
+<p>No check the performance:</p>
+<p>Query doesn't use GIN index:</p>
+<pre><code>&gt;&gt;&gt; Product.objects.filter(category=notebook, attributes__speed__in=(3200, 3500))
+</code></pre>
+<p>we get the same time ~ 391 ms <a href="http://explain.depesz.com/s/ThI">EXPLAIN ANALYSE</a>.</p>
+<p>Query does use GIN index:</p>
+<pre><code>&gt;&gt;&gt; Product.objects.filter(category=notebook).filter(Q(attributes__contains={'speed': 3200}) | Q(attributes__contains={'speed': 3500}))
+</code></pre>
+<p>Now we have query time only 0.773 ms! <a href="http://explain.depesz.com/s/rqXN">EXPLAIN ANALYSE</a>.</p>
+</li>
+</ol>
+<h4>Resume of indexes</h4>
+<p>We can use single GIN index (jsonb_path_ops) to query by several attributes, and not just by one!</p>
+<p>Of course, it is not a silver bullet. We must always take into account, what data is we working with. And consequently choose right design.</p>
+<h3>NoSQL database (MongoDB)</h3>
+<p>Can we store same data and make similar queries in MongoDB (v3.0.6)?</p>
+<p>To use only one single index in queries by unknown fields in advance, we need to use different structure in MongoDB.</p>
+<p>Field attributes will be a list of embedded documents, that have name and value:</p>
+<pre><code>&gt; db.catalogue_simple.find().pretty()
+{
+    "_id" : ObjectId("560ab1970a0a88fe77d00f02"),
+    "category" : "tshirts",
+    "name" : "Silk tshirt",
+    "price" : 100,
+    "attributes" : [
+        {
+            "name" : "colors",
+            "value" : "red"
+        },
+        {
+            "name" : "colors",
+            "value" : "black"
+        },
+        {
+            "name" : "sizes",
+            "value" : "S"
+        },
+        {
+            "name" : "sizes",
+            "value" : "M"
+        },
+        {
+            "name" : "model",
+            "value" : "polo"
+        },
+        {
+            "name" : "material",
+            "value" : "silk"
+        }
+    ]
+}
+{
+    "_id" : ObjectId("560ab1dd0a0a88fe77d00f03"),
+    "category" : "tshirts",
+    "name" : "Bamboo tshirt",
+    "price" : 120,
+    "attributes" : [
+        {
+            "name" : "colors",
+            "value" : "white"
+        },
+        {
+            "name" : "colors",
+            "value" : "yellow"
+        },
+        {
+            "name" : "sizes",
+            "value" : "M"
+        },
+        {
+            "name" : "sizes",
+            "value" : "L"
+        },
+        {
+            "name" : "sizes",
+            "value" : "XL"
+        },
+        {
+            "name" : "model",
+            "value" : "poet"
+        },
+        {
+            "name" : "material",
+            "value" : "bamboo"
+        }
+    ]
+}
+{
+    "_id" : ObjectId("560ab2cb0a0a88fe77d00f04"),
+    "category" : "notebook",
+    "name" : "MacBook Pro",
+    "price" : 2000,
+    "attributes" : [
+        {
+            "name" : "brand",
+            "value" : "Apple"
+        },
+        {
+            "name" : "screen",
+            "value" : 15
+        },
+        {
+            "name" : "speed",
+            "value" : 2200
+        },
+        {
+            "name" : "hd",
+            "value" : 256
+        }
+    ]
+}
+{
+    "_id" : ObjectId("560ab2ec0a0a88fe77d00f05"),
+    "category" : "notebook",
+    "name" : "ATIV Book 9",
+    "price" : 1200,
+    "attributes" : [
+        {
+            "name" : "brand",
+            "value" : "Samsung"
+        },
+        {
+            "name" : "screen",
+            "value" : 12.2
+        },
+        {
+            "name" : "speed",
+            "value" : 2400
+        },
+        {
+            "name" : "hd",
+            "value" : 128
+        }
+    ]
+}
+</code></pre>
+<h3>Queries (MongoDB)</h3>
+<ol>
+<li>
+<p>Get t-shirts with both 'M' and 'L' sizes:</p>
+<pre><code>&gt; db.catalogue_simple.find({attributes: {$all: [
+    {"$elemMatch": {"name": "sizes", "value": "M"}},
+    {"$elemMatch": {"name": "sizes", "value": "L"}}
+]}, category: 'tshirts'})
+
+{"name" : "Bamboo tshirt", /* ... */}
+</code></pre>
+</li>
+<li>
+<p>Get t-shirts with both 'M' and 'L' sizes, both white and yellow colors, with poetry on it (model=poet):</p>
+<pre><code>&gt; db.catalogue_simple.find({attributes: {$all: [
+    {"$elemMatch": {"name": "sizes", "value": "M"}},
+    {"$elemMatch": {"name": "sizes", "value": "L"}},
+    {"$elemMatch": {"name": "colors", "value": "white"}},
+    {"$elemMatch": {"name": "colors", "value": "yellow"}},
+    {"$elemMatch": {"name": "model", "value": "poet"}}
+]}, category: 'tshirts'})
+
+{"name" : "Bamboo tshirt", /* ... */}
+</code></pre>
+</li>
+<li>
+<p>Get laptops with CPU frequency 2400 and screen size 12.2</p>
+<pre><code>&gt; db.catalogue_simple.find({attributes: {$all: [
+    {"$elemMatch": {"name": "speed", "value": 2400}},
+    {"$elemMatch": {"name": "screen", "value": 12.2}}
+]}, category: 'notebook'})
+
+{"name" : "ATIV Book 9", /* ... */}
+</code></pre>
+</li>
+<li>
+<p>Get t-shirts with red color, model polo and with size 'M' or 'L'</p>
+<pre><code>&gt; db.catalogue_simple.find({attributes: {$all: [
+    {"$elemMatch": {"name": "colors", "value": "red"}},
+    {"$elemMatch": {"name": "model", "value": "polo"}},
+    {"$elemMatch": {"name": "sizes", "value": {"$in": ["M", "L"]}}}
+]}, category: 'tshirts'})
+
+{"name" : "Silk tshirt", /* ... */}
+</code></pre>
+</li>
+<li>
+<p>Get laptops with CPU greater that 2000 and screen larger that 13</p>
+<pre><code>&gt; db.catalogue_simple.find({attributes: {$all: [
+    {"$elemMatch": {"name": "speed", "value": {"$gt": 2000}}},
+    {"$elemMatch": {"name": "screen", "value": {"$gt": 13}}}
+]}, category: 'notebook'})
+
+{"name" : "MacBook Pro", /* ... */}
+</code></pre>
+</li>
+<li>
+<p>Get laptops with CPU frequency equal to 2200 or 2400</p>
+<pre><code>&gt; db.catalogue_simple.find({attributes: {$all: [
+    {"$elemMatch": {"name": "speed", "value": {"$in": [2200, 2400]}}},
+]}, category: 'notebook'})
+
+{"name" : "MacBook Pro", /* ... */}, {"name" : "ATIV Book 9", /* ... */}
+</code></pre>
+</li>
+</ol>
+<h3>Indexes (MongoDB)</h3>
+<p>We can create <a href="http://docs.mongodb.org/manual/core/index-multikey/#index-arrays-with-embedded-documents">multikey index</a>:</p>
+<pre><code>&gt; db.catalogue_simple.ensureIndex({"attributes.name" : 1, "attributes.value" : 1})
+</code></pre>
+<p>For fairness, create index on category (django automatically creates it for ForeignKey fields)</p>
+<pre><code>&gt; db.catalogue_simple.ensureIndex({"category": 1})
+</code></pre>
+<p>Keep in mind, that MongoDB will use index only for first filter from $all operator. Although MongoDB docs tells about <a href="http://docs.mongodb.org/manual/core/index-intersection/">index intersection</a>, looks like it can't be used in our case.</p>
+<p>Illustrative example. Imagine, that in database there is only 1 product with size "XXXS" and a lot of products with size "M".</p>
+<p>We want products, that have both sizes "XXXS" and "M".</p>
+<p>Check out the query:</p>
+<pre><code>&gt; db.catalogue_simple.find({attributes: {$all: [
+    {"$elemMatch": {"name": "sizes", "value": "M"}},
+    {"$elemMatch": {"name": "sizes", "value": "XXXS"}},
+]}, category: 'tshirts'})
+</code></pre>
+<p>MongoDB will apply index only to "M" value. As a result, many documents will be scanned:</p>
+<pre><code>"nReturned" : 1,
+"executionTimeMillis" : 1902,
+"totalKeysExamined" : 249934,
+"totalDocsExamined" : 249934,
+</code></pre>
+<p>But if we place size "XXXS" to the first position:</p>
+<pre><code>&gt; db.catalogue_simple.find({attributes: {$all: [
+    {"$elemMatch": {"name": "sizes", "value": "XXXS"}},
+    {"$elemMatch": {"name": "sizes", "value": "M"}},
+]}, category: 'tshirts'})
+</code></pre>
+<p>only one document will be scanned:</p>
+<pre><code>"nReturned" : 1,
+"executionTimeMillis" : 0,
+"totalKeysExamined" : 1,
+"totalDocsExamined" : 1,
+</code></pre>
+<p>The moral is, put filter with highest selectivity to the first place. Unfortunately, we don't always have such information.</p>
+<h4>Test data (MongoDB)</h4>
+<p>Test data is exactly the same as in PostgreSQL (only structure is different): 4 categories, 250 000 products in each category, 1 000 000 in total.</p>
+<h4>Queries and indexes (MongoDB)</h4>
+<ol>
+<li>
+<p>Get t-shirts with both 'M' and 'L' sizes:</p>
+<pre><code>&gt; db.catalogue_simple.find({attributes: {$all: [
+    {"$elemMatch": {"name": "sizes", "value": "M"}},
+    {"$elemMatch": {"name": "sizes", "value": "L"}}
+]}, category: 'tshirts'})
+</code></pre>
+<p>Without multikey index on attributes query time is 706 ms, category index is used.</p>
+<p>Output of <code>.explain('executionStats')</code>:</p>
+<pre><code>"winningPlan" : {
+    // ...
+    "indexName" : "category_1",
+}
+"executionStats" : {
+    "nReturned" : 66412,
+    "executionTimeMillis" : 706,
+    "totalKeysExamined" : 250001,
+    "totalDocsExamined" : 250001,
+}
+</code></pre>
+<p>After creation of multikey index on attributes field nothing changes, as MongoDB optimizer decides, that category index is better (i suppose because of low selectivity of attributes query).</p>
+</li>
+<li>
+<p>Get t-shirts with both 'M' and 'L' sizes, both white and yellow colors, with poetry on it (model=poet):</p>
+<pre><code>&gt; db.catalogue_simple.find({attributes: {$all: [
+    {"$elemMatch": {"name": "sizes", "value": "M"}},
+    {"$elemMatch": {"name": "sizes", "value": "L"}},
+    {"$elemMatch": {"name": "colors", "value": "white"}},
+    {"$elemMatch": {"name": "colors", "value": "yellow"}},
+    {"$elemMatch": {"name": "model", "value": "poet"}},
+]}, category: 'tshirts'})
+</code></pre>
+<p>Behaviour is similar to first query.</p>
+<p>Behaviour can change, if we put higher selective filter to the first place. In test data color is more selective, that size. So, make it first:</p>
+<pre><code>&gt; db.catalogue_simple.find({attributes: {$all: [
+        {"$elemMatch": {"name": "colors", "value": "white"}},
+        {"$elemMatch": {"name": "sizes", "value": "M"}},
+        {"$elemMatch": {"name": "sizes", "value": "L"}},
+        {"$elemMatch": {"name": "colors", "value": "yellow"}},
+        {"$elemMatch": {"name": "model", "value": "poet"}},
+    ]}, category: 'tshirts'}).explain('executionStats')
+</code></pre>
+<p>Explain:</p>
+<pre><code>"winningPlan" : {
+    // ...
+    "indexName" : "attributes.name_1_attributes.value_1",
+}
+"executionStats" : {
+    "nReturned" : 3737,
+    "executionTimeMillis" : 658,
+    "totalKeysExamined" : 124902,
+    "totalDocsExamined" : 124902,
+}
+</code></pre>
+<p>Query time - 658 ms.</p>
+</li>
+<li>
+<p>Get laptops with CPU frequency 2400 and screen size 12.2</p>
+<p>Same as points 1 and 2.</p>
+</li>
+<li>
+<p>Get t-shirts with red color, model polo and with size 'M' or 'L'</p>
+<p>Same as points 1 and 2.</p>
+</li>
+<li>
+<p>Get laptops with CPU greater that 2000 and screen larger that 13</p>
+<pre><code>&gt; db.catalogue_simple.find({attributes: {$all: [
+    {"$elemMatch": {"name": "speed", "value": {"$gt": 2000}}},
+    {"$elemMatch": {"name": "screen", "value": {"$gt": 13}}}
+]}, category: 'notebook'}).explain('executionStats')
+</code></pre>
+<p>Remember, PostgreSQL can't use GIN index in such a query.
+But multikey index in current data structure can work.</p>
+<p>We have good selectivity for speed in this request:</p>
+<pre><code>"winningPlan" : {
+    // ...
+    "indexName" : "attributes.name_1_attributes.value_1",
+}
+"executionStats" : {
+    "nReturned" : 10536,
+    "executionTimeMillis" : 160,
+    "totalKeysExamined" : 62472,
+    "totalDocsExamined" : 62472,
+}
+</code></pre>
+</li>
+<li>
+<p>Get laptops with CPU frequency equal to 2200 or 2400</p>
+<p>Same as previous points.</p>
+</li>
+</ol>
+<h3>Resume</h3>
+<p>PostgreSQL 9.4 introduced new type jsonb. It can be used effectively in queries. And we can use single index to query on different json keys. Not all operations are available (for example greater than/less than, we need a separate index on particular key), but anyway this is incredibly useful for a wide range of tasks. And starting from Django 1.9 this functionality is available out of the box.</p>
+<p>MongoDB doesn't have analogue to <code>@&gt;</code> operator. We can adopt the structure of data to make similar queries, using one index. But it is less effective, than in PostgreSQL. Because index is applied only to one key. On the other hand MongoDB support higher range of operations when filtering on <em>any</em> <em>one</em> key, using single index.</p>
+<p>I really like JSON in PostgreSQL, it can be used in many tasks. And we have all advantages of SQL: joins and transactions, that are not presented in MongoDB. And now it is supported by Django ORM.</p>
+<h3>Useful links</h3>
+
+</div>
+
+
+
+
+
+
+</div></body></html>

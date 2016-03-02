@@ -1,0 +1,136 @@
+<html><body><div><div class="article_content">
+        <p><a class="reference external" href="https://pytest.org">Pytest</a> is an awesome testing package for Python and
+since long one of my favorite Python packages in general.  It makes writing
+test <a class="reference external" href="https://pytest.org/latest/getting-started.html#getstarted">really easy</a>
+and its reporting capabilities for test failures are extremely helpful.</p>
+<p>However, it currently (as of version 2.7) doesn’t help you very much with
+testing (asyncio) coroutines.  So a naïve approach for testing coroutines would be:</p>
+<div class="highlight"><pre><span class="c"># tests/test_coros.py</span>
+
+<span class="kn">import</span> <span class="nn">asyncio</span>
+
+<span class="k">def</span> <span class="nf">test_coro</span><span class="p">():</span>
+    <span class="n">loop</span> <span class="o">=</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">get_event_loop</span><span class="p">()</span>
+
+    <span class="nd">@asyncio.coroutine</span>
+    <span class="k">def</span> <span class="nf">do_test</span><span class="p">():</span>
+        <span class="k">yield from</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="mf">0.1</span><span class="p">,</span> <span class="n">loop</span><span class="o">=</span><span class="n">loop</span><span class="p">)</span>
+        <span class="k">assert</span> <span class="mi">0</span>  <span class="c"># onoes!</span>
+
+    <span class="n">loop</span><span class="o">.</span><span class="n">run_until_complete</span><span class="p">(</span><span class="n">do_test</span><span class="p">())</span>
+</pre></div>
+<p>This approach has several problems and a lot of overhead.  The only interesting
+lines are the ones containing the <tt class="docutils literal">yield from</tt> and <tt class="docutils literal">assert</tt> statements.</p>
+<p>It would be better if every test case had its own event loop instance that gets
+correctly closed no matter if the test passes or fails.</p>
+<p>We also cannot simply <tt class="docutils literal">yield</tt> within our test case because pytest would then
+think that our test case yields new test cases which is not the case here.  So
+we have to create a separate coroutine which contains our actual test and fire
+up the even loop in order to execute it.</p>
+<p>Our tests would look a lot cleaner and behave better if we could instead do
+something like this:</p>
+<div class="highlight"><pre><span class="c"># tests/test_coros.py</span>
+
+<span class="nd">@asyncio.coroutine</span>
+<span class="k">def</span> <span class="nf">test_coro</span><span class="p">(</span><span class="n">loop</span><span class="p">):</span>
+    <span class="k">yield from</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="mf">0.1</span><span class="p">,</span> <span class="n">loop</span><span class="o">=</span><span class="n">loop</span><span class="p">)</span>
+    <span class="k">assert</span> <span class="mi">0</span>
+</pre></div>
+<p>It turns out that thanks to pytests flexible plug-in system, it’s possible
+to implement the desired behavior.  Although,  most of the required hooks are not
+documented very well or at all which also makes it relatively hard to find out
+which hooks you have to implement and how.</p>
+<p>We create a <a class="reference external" href="https://pytest.org/latest/plugins.html#conftest-py-local-per-directory-plugins">local per-directory plug-in</a>
+since this is a little bit easier than creating a “real”, external plug-in.
+Pytest looks in every test-directory for a file called <tt class="docutils literal">conftest.py</tt> and
+applies the fixtures and hooks implemented there to all tests within that directory.</p>
+<p>So lets start by writing a fixture that creates a new event loop instance for
+each test case and properly close it when the test is done:</p>
+<div class="highlight"><pre><span class="c"># tests/conftest.py</span>
+
+<span class="kn">import</span> <span class="nn">asyncio</span>
+<span class="kn">import</span> <span class="nn">pytest</span>
+
+
+<span class="nd">@pytest.yield_fixture</span>
+<span class="k">def</span> <span class="nf">loop</span><span class="p">():</span>
+    <span class="c"># Set-up</span>
+    <span class="n">loop</span> <span class="o">=</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">new_event_loop</span><span class="p">()</span>
+    <span class="n">asyncio</span><span class="o">.</span><span class="n">set_event_loop</span><span class="p">(</span><span class="n">loop</span><span class="p">)</span>
+    <span class="k">yield</span> <span class="n">loop</span>
+
+    <span class="c"># Clean-up</span>
+    <span class="n">loop</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+
+
+<span class="c"># tests/test_coros.py</span>
+
+<span class="k">def</span> <span class="nf">test_coro</span><span class="p">(</span><span class="n">loop</span><span class="p">):</span>
+    <span class="nd">@asyncio.coroutine</span>
+    <span class="k">def</span> <span class="nf">do_test</span><span class="p">():</span>
+        <span class="k">yield from</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="mf">0.1</span><span class="p">,</span> <span class="n">loop</span><span class="o">=</span><span class="n">loop</span><span class="p">)</span>
+        <span class="k">assert</span> <span class="mi">0</span>  <span class="c"># onoes!</span>
+
+    <span class="n">loop</span><span class="o">.</span><span class="n">run_until_complete</span><span class="p">(</span><span class="n">do_test</span><span class="p">())</span>
+</pre></div>
+<p>Before each test, <a class="reference external" href="https://pytest.org/latest/yieldfixture.html">pytest executes</a> the <tt class="docutils literal">loop</tt> fixture until the
+first <tt class="docutils literal">yield</tt> statement.  What gets yielded is then passed to the <em>loop</em>
+argument of our test case.  When the test ends (successfully or not), pytest
+finishes the execution of the <tt class="docutils literal">loop</tt> fixture and thus closes the loop
+properly.  In the same way, you could write a fixture that creates a socket and
+closes it after each test (your socket fixture can depend on the loop fixture
+in the same way as our test does.  Nice, isn’t it?).</p>
+<p>But we are still not done yet.  Let’s teach pytest how to execute our test
+coroutines.  Therefore, we need to change how asyncio coroutines are collected
+(they should be collected like normal test functions, not like test generators)
+and how they get executed (via <tt class="docutils literal">loop.run_until_complete()</tt>):</p>
+<div class="highlight"><pre><span class="c"># tests/conftest.py</span>
+
+<span class="k">def</span> <span class="nf">pytest_pycollect_makeitem</span><span class="p">(</span><span class="n">collector</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">obj</span><span class="p">):</span>
+    <span class="sd">"""Collect asyncio coroutines as normal functions, not as generators."""</span>
+    <span class="k">if</span> <span class="n">collector</span><span class="o">.</span><span class="n">funcnamefilter</span><span class="p">(</span><span class="n">name</span><span class="p">)</span> <span class="ow">and</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">iscoroutinefunction</span><span class="p">(</span><span class="n">obj</span><span class="p">):</span>
+        <span class="c"># We return a list of test function objects.  Depending on the</span>
+        <span class="c"># fixtures, one test function can result in multiple test items</span>
+        <span class="c"># (i.e., when it is decorated with "pytest.mark.parametrize()".</span>
+        <span class="k">return</span> <span class="nb">list</span><span class="p">(</span><span class="n">collector</span><span class="o">.</span><span class="n">_genfunctions</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="n">obj</span><span class="p">))</span>
+    <span class="c"># else:</span>
+    <span class="c">#     We return None and pytest's default behavior gets applied to "obj"</span>
+
+
+<span class="k">def</span> <span class="nf">pytest_pyfunc_call</span><span class="p">(</span><span class="n">pyfuncitem</span><span class="p">):</span>
+    <span class="sd">"""If ``pyfuncitem.obj`` is an asyncio coroutinefunction, execute it via</span>
+<span class="sd">    the event loop instead of calling it directly."""</span>
+    <span class="n">testfunction</span> <span class="o">=</span> <span class="n">pyfuncitem</span><span class="o">.</span><span class="n">obj</span>
+
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">iscoroutinefunction</span><span class="p">(</span><span class="n">testfunction</span><span class="p">):</span>
+        <span class="c"># Return None if its not a coroutine.  Pytest will handle the</span>
+        <span class="c"># test item in the normal way.</span>
+        <span class="k">return</span>
+
+    <span class="c"># Extract required arguments from all available fixtures:</span>
+    <span class="n">funcargs</span> <span class="o">=</span> <span class="n">pyfuncitem</span><span class="o">.</span><span class="n">funcargs</span>  <span class="c"># dict with all fixtures</span>
+    <span class="n">argnames</span> <span class="o">=</span> <span class="n">pyfuncitem</span><span class="o">.</span><span class="n">_fixtureinfo</span><span class="o">.</span><span class="n">argnames</span>  <span class="c"># Args for this test</span>
+    <span class="n">testargs</span> <span class="o">=</span> <span class="p">{</span><span class="n">arg</span><span class="p">:</span> <span class="n">funcargs</span><span class="p">[</span><span class="n">arg</span><span class="p">]</span> <span class="k">for</span> <span class="n">arg</span> <span class="ow">in</span> <span class="n">argnames</span><span class="p">}</span>
+
+    <span class="c"># Create the generator object for this test (test will not yet execute!)</span>
+    <span class="n">coro</span> <span class="o">=</span> <span class="n">testfunction</span><span class="p">(</span><span class="o">**</span><span class="n">testargs</span><span class="p">)</span>
+
+    <span class="c"># Run the coro in the event loop and execute the test</span>
+    <span class="n">loop</span> <span class="o">=</span> <span class="n">testargs</span><span class="p">[</span><span class="s">'loop'</span><span class="p">]</span> <span class="k">if</span> <span class="n">loop</span> <span class="ow">in</span> <span class="n">testargs</span> <span class="k">else</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">get_event_loop</span><span class="p">()</span>
+    <span class="n">loop</span><span class="o">.</span><span class="n">run_until_complete</span><span class="p">(</span><span class="n">coro</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="bp">True</span>  <span class="c"># Signal pytest that we executed the test</span>
+</pre></div>
+<p>This plug-in should work with pytest 2.4 or newer.  I tested it with versions
+2.6 and 2.7.</p>
+<p>It seems like the pytest devs are currently trying to clean-up and refactor
+pytest’s plug-in system.  Maybe, a future release will even contain similar
+functionality to our plug-in.  It would be really nice if pytest supported
+testing coroutines out-of-the-box as they are becoming increasingly popular
+amongst various frameworks.</p>
+<p><strong>Update:</strong> There’s also <a class="reference external" href="https://github.com/Tinche/pytest-asyncio">pytest-asyncio</a> .  It was created after I posted
+the solution described above <a class="reference external" href="http://stackoverflow.com/questions/28283472/py-test-mixing-fixtures-and-asyncio-coroutines">to Stack Overflow</a>.</p>
+<small>Thanks to <em>ronny</em> and <em>hpk</em> for proof-reading this
+article.</small>
+    </div>
+    </div></body></html>

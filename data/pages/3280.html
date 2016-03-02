@@ -1,0 +1,545 @@
+<html><body><div><p>As anticipated, let's get into where it's all going wrong, especially
+for database-related code.</p>
+<div class="section" id="issue-one-async-as-magic-performance-fairy-dust">
+<h2>Issue One - Async as Magic Performance Fairy Dust</h2>
+<p>Many (but certainly not all) within both the node.js community as well
+as the Python community continue
+to claim that asynchronous programming styles are innately superior
+for concurrent performance in nearly all cases.   In particular, there's the
+notion that the context switching approaches of explicit async systems
+such as that of asyncio can be had virtually for free, and as the Python has a GIL,
+that all adds up in some unspecified/non-illustrated/apples-to-oranges way to establish that asyncio will
+totally, definitely be faster than using any kind of threaded approach, or at the
+very least, not any slower.  Therefore any web application should as quickly
+as possible be converted to use a front-to-back async approach for everything,
+from HTTP request to database calls, and performance enhancements will come for free.</p>
+<p>I will address this only in terms of database access.  For HTTP / "chat"
+server styles of communication, either listening as a server or making client calls, asyncio may very well
+be superior as it can allow lots more sleepy/arbitrarily slow connections to be tended
+towards in a simple way.  But for local database access, this is just not the case.</p>
+<div class="section" id="python-is-very-very-slow-compared-to-your-database">
+<h3>1. Python is Very <span class="strikeout">, Very</span> Slow compared to your database</h3>
+<p><strong>Update</strong> - redditor Riddlerforce found valid issues with this section,
+in that I was not testing over a network connection.   Results here
+are updated.  The conclusion is the same, but not as hyperbolically
+amusing as it was before.</p>
+<p>Let's first review asynchronous programming's
+<a class="reference external" href="http://blog.kgriffs.com/2012/09/18/demystifying-async-io.html">sweet spot</a>,
+the <a class="reference external" href="http://en.wikipedia.org/wiki/I/O_bound">I/O Bound</a> application:</p>
+<blockquote>
+I/O Bound refers to a
+condition in which the time it takes to complete a computation is
+determined principally by the period spent waiting for
+input/output operations to be completed.  This circumstance
+arises when the rate at which data is requested is slower than
+the rate it is consumed or, in other words, <strong>more time is spent
+requesting data than processing it.</strong></blockquote>
+<p>A great misconception I seem to encounter often is the notion that communication
+with the database takes up a majority of the time spent in a database-centric
+Python application.   This perhaps is a common wisdom in compiled languages
+such as C or maybe even Java, but generally not in Python.   Python is
+<strong>very</strong> slow, compared to such systems; and while Pypy is certainly
+a big help, the speed of Python is not nearly as fast as your database,
+when dealing in terms of standard CRUD-style applications
+(meaning: not running large OLAP-style queries, and of course assuming
+relatively low network latencies).
+As I worked up in my <a class="reference external" href="https://wiki.openstack.org/wiki/PyMySQL_evaluation">PyMySQL Evaluation</a>
+for Openstack, whether a database driver (DBAPI) is written in pure Python
+or in C will incur significant additional Python-level overhead.
+For just the DBAPI alone, this can be as much as an order of magnitude
+slower.   While network overhead will cause more balanced proportions
+between CPU and IO, just the CPU time spent by Python driver itself still takes
+up twice the time as the network IO, and that is without any additional database abstraction
+libraries, business logic, or presentation logic in place.</p>
+<p>This <a class="reference external" href="/files/2015/mysql_speed_test.py">script</a>, adapted from the
+Openstack entry, illustrates a pretty straightforward set of INSERT and SELECT statements,
+and virtually no Python code other than the barebones explicit calls into
+the DBAPI.</p>
+<p>MySQL-Python, a pure C DBAPI, runs it like the following over a network:</p>
+
+
+<div class="pygments_manni"><pre>DBAPI (cProfile):  &lt;module 'MySQLdb'&gt;
+     47503 function calls in 14.863 seconds
+DBAPI (straight time):  &lt;module 'MySQLdb'&gt;, total seconds 12.962214
+</pre></div>
+
+
+
+<p>With PyMySQL, a pure-Python DBAPI,and a network connection we're about 30%
+slower:</p>
+
+
+<div class="pygments_manni"><pre>DBAPI (cProfile):  &lt;module 'pymysql'&gt;
+     23807673 function calls in 21.269 seconds
+DBAPI (straight time):  &lt;module 'pymysql'&gt;, total seconds 17.699732
+</pre></div>
+
+
+
+<p>Running against a local database, PyMySQL is an order of magnitude slower
+than MySQLdb:</p>
+
+
+<div class="pygments_manni"><pre>DBAPI:  &lt;module 'pymysql'&gt;, total seconds 9.121727
+
+DBAPI:  &lt;module 'MySQLdb'&gt;, total seconds 1.025674
+</pre></div>
+
+
+
+<p>To highlight the actual proportion of these runs that's spent in IO,
+the following two <a class="reference external" href="http://www.vrplumber.com/programming/runsnakerun/">RunSnakeRun</a>
+displays illustrate how much time is actually for IO within the PyMySQL
+run, both for local database as well as over a network connection.
+The proportion is not as dramatic over a network connection, but in
+that case network calls still only take 1/3rd of the total time; the other
+2/3rds is spent in Python crunching the results.
+Keep in mind this is <strong>just the DBAPI alone</strong>;
+a real world application would have database abstraction layers, business
+and presentation logic surrounding these calls as well:</p>
+<div class="figure">
+<img alt="PyMySQL profile result" src="/files/2015/pymysql_runsnake.png"/>
+<p class="caption">Local connection - clearly not IO bound.</p>
+</div>
+<div class="figure">
+<img alt="PyMySQL profile result, over the network" src="/files/2015/pymysql_runsnake_network.png"/>
+<p class="caption">Network connection - not as dramatic, but still not IO bound
+(8.7 sec of socket time vs. 24 sec for the overall execute)</p>
+</div>
+<p>Let's be clear here, that when using Python, calls to your database, unless
+you're trying to make lots of complex analytical calls with enormous
+result sets that you would normally not be doing in a high performing
+application, or unless you have a very slow network, do not typically produce an
+IO bound effect.  When we talk to databases, we are almost always using some form of connection
+pooling, so the overhead of connecting is already mitigated to a large extent;
+the database itself can select and insert small numbers of rows very fast
+on a reasonable network.  The overhead of Python itself, just to marshal
+messages over the wire and produce result sets, gives the CPU plenty
+of work to do which removes any unique throughput advantages to be had
+with non-blocking IO.  With real-world activities based around database
+operations, the proportion spent in CPU only increases.</p>
+</div>
+<div class="section" id="asyncio-uses-appealing-but-relatively-inefficient-python-paradigms">
+<h3>2. AsyncIO uses appealing, but relatively inefficient Python paradigms</h3>
+<p>At the core of asyncio is that we are using the <tt class="docutils literal">@asyncio.coroutine</tt>
+decorator, which does some generator tricks in order to have your otherwise
+synchronous looking function defer to other coroutines.  Central to this
+is the <tt class="docutils literal">yield from</tt> technique, which causes the function to stop its
+execution at that point, while other things go on until the event loop
+comes back to that point.
+This is a great idea, and it can also be done using the more common <tt class="docutils literal">yield</tt>
+statement as well.   However, using <tt class="docutils literal">yield from</tt>, we are able to maintain
+at least the appearance of the presence of return values:</p>
+
+
+<div class="pygments_manni"><pre><span class="nd">@asyncio.coroutine</span>
+<span class="k">def</span> <span class="nf">some_coroutine</span><span class="p">():</span>
+    <span class="n">conn</span> <span class="o">=</span> <span class="k">yield from</span> <span class="n">db</span><span class="o">.</span><span class="n">connect</span><span class="p">()</span>
+    <span class="k">return</span> <span class="n">conn</span>
+</pre></div>
+
+
+
+<p>That syntax is fantastic, I like it a lot, but unfortunately, the mechanism
+of that <tt class="docutils literal">return conn</tt> statement is necessarily that it raises a <tt class="docutils literal">StopIteration</tt>
+exception.   This, combined with the fact that each <tt class="docutils literal">yield from</tt> call
+more or less adds up to the overhead of an individual function call separately.
+I <a class="reference external" href="https://twitter.com/zzzeek/status/563865362996133889">tweeted</a> a simple
+demonstration of this, which I include here in abbreviated form:</p>
+
+
+<div class="pygments_manni"><pre><span class="k">def</span> <span class="nf">return_with_normal</span><span class="p">():</span>
+    <span class="sd">"""One function calls another normal function, which returns a value."""</span>
+
+    <span class="k">def</span> <span class="nf">foo</span><span class="p">():</span>
+        <span class="k">return</span> <span class="mi">5</span>
+
+    <span class="k">def</span> <span class="nf">bar</span><span class="p">():</span>
+        <span class="n">f1</span> <span class="o">=</span> <span class="n">foo</span><span class="p">()</span>
+        <span class="k">return</span> <span class="n">f1</span>
+
+    <span class="k">return</span> <span class="n">bar</span>
+
+<span class="k">def</span> <span class="nf">return_with_generator</span><span class="p">():</span>
+    <span class="sd">"""One function calls another coroutine-like function,</span>
+<span class="sd">    which returns a value."""</span>
+
+    <span class="k">def</span> <span class="nf">decorate_to_return</span><span class="p">(</span><span class="n">fn</span><span class="p">):</span>
+        <span class="k">def</span> <span class="nf">decorate</span><span class="p">():</span>
+            <span class="n">it</span> <span class="o">=</span> <span class="n">fn</span><span class="p">()</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="n">x</span> <span class="o">=</span> <span class="nb">next</span><span class="p">(</span><span class="n">it</span><span class="p">)</span>
+            <span class="k">except</span> <span class="ne">StopIteration</span> <span class="k">as</span> <span class="n">y</span><span class="p">:</span>
+                <span class="k">return</span> <span class="n">y</span><span class="o">.</span><span class="n">args</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+        <span class="k">return</span> <span class="n">decorate</span>
+
+    <span class="nd">@decorate_to_return</span>
+    <span class="k">def</span> <span class="nf">foo</span><span class="p">():</span>
+        <span class="k">yield from</span> <span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+        <span class="k">return</span> <span class="mi">5</span>
+
+    <span class="k">def</span> <span class="nf">bar</span><span class="p">():</span>
+        <span class="n">f1</span> <span class="o">=</span> <span class="n">foo</span><span class="p">()</span>
+        <span class="k">return</span> <span class="n">f1</span>
+
+    <span class="k">return</span> <span class="n">bar</span>
+
+<span class="n">return_with_normal</span> <span class="o">=</span> <span class="n">return_with_normal</span><span class="p">()</span>
+<span class="n">return_with_generator</span> <span class="o">=</span> <span class="n">return_with_generator</span><span class="p">()</span>
+
+<span class="kn">import</span> <span class="nn">timeit</span>
+
+<span class="k">print</span><span class="p">(</span><span class="n">timeit</span><span class="o">.</span><span class="n">timeit</span><span class="p">(</span><span class="s">"return_with_generator()"</span><span class="p">,</span>
+    <span class="s">"from __main__ import return_with_generator"</span><span class="p">,</span> <span class="n">number</span><span class="o">=</span><span class="mi">10000000</span><span class="p">))</span>
+<span class="k">print</span><span class="p">(</span><span class="n">timeit</span><span class="o">.</span><span class="n">timeit</span><span class="p">(</span><span class="s">"return_with_normal()"</span><span class="p">,</span>
+    <span class="s">"from __main__ import return_with_normal"</span><span class="p">,</span> <span class="n">number</span><span class="o">=</span><span class="mi">10000000</span><span class="p">))</span>
+</pre></div>
+
+
+
+<p>The results we get are that the do-nothing <tt class="docutils literal">yield from</tt> + <tt class="docutils literal">StopIteration</tt>
+take about six times longer:</p>
+
+
+<div class="pygments_manni"><pre>yield from: 12.52761328802444
+normal: 2.110536064952612
+</pre></div>
+
+
+
+<p>To which many people said to me, "so what?  Your database call is much
+more of the time spent".  Never minding that we're not talking here about
+an approach to <em>optimize</em> existing code, but to <em>prevent making perfectly
+fine code more slow than it already is</em>.  The PyMySQL example
+should illustrate that Python overhead adds up very fast, even just within
+a pure Python driver, and in the overall profile dwarfs the time spent
+within the database itself.  However, this argument still may not be
+convincing enough.</p>
+<p>So, I will here <a class="reference external" href="https://bitbucket.org/zzzeek/bigdata/">present</a>
+a comprehensive test suite which illustrates
+traditional threads in Python against asyncio, as well as gevent style
+nonblocking IO.  We will use <a class="reference external" href="http://initd.org/psycopg/">psycopg2</a> which
+is currently the <strong>only production DBAPI that even supports async</strong>, in
+conjunction with <a class="reference external" href="https://github.com/aio-libs/aiopg">aiopg</a> which adapts
+psycopg2's async support to asyncio and <a class="reference external" href="https://bitbucket.org/dvarrazzo/psycogreen">psycogreen</a>
+which adapts it to gevent.</p>
+<p>The purpose of the test suite is to
+load a few million rows into a Postgresql database as fast
+as possible, while using the same general set of SQL instructions, such that
+we can see if in fact the GIL slows us down so much that asyncio blows
+right past us with ease.  The suite can use any number of connections simultaneously;
+at the highest I boosted it up to using 350 concurrent connections, which trust me,
+will not make your DBA happy <strong>at all</strong>.</p>
+<p>The results of several runs on different machines under different conditions
+are summarized at the bottom of the <a class="reference external" href="https://bitbucket.org/zzzeek/bigdata/">README</a>.
+The best performance I could get was running the Python code on one laptop
+interfacing to the Postgresql database on another, but in virtually every test
+I ran, whether I ran just 15 threads/coroutines on my Mac, or 350 (!) threads/coroutines
+on my Linux laptop, threaded code got the job done much faster than asyncio
+in every case (including the 350 threads case, to my surprise), and usually
+faster than gevent as well.  Below are the results from running
+120 threads/processes/connections on the Linux laptop networked to
+the Postgresql database on a Mac laptop:</p>
+
+
+<div class="pygments_manni"><pre>Python2.7.8 threads (22k r/sec, 22k r/sec)
+Python3.4.1 threads (10k r/sec, 21k r/sec)
+Python2.7.8 gevent (18k r/sec, 19k r/sec)
+Python3.4.1 asyncio (8k r/sec, 10k r/sec)
+</pre></div>
+
+
+
+<p>Above, we see asyncio significantly slower for the first part of the
+run (Python 3.4 seemed to have some issue here in both threaded and asyncio),
+and for the second part, fully twice as slow compared to both Python2.7 and
+Python3.4 interpreters using threads.   Even running 350 concurrent
+connections, which is way more than you'd usually ever want a single process
+to run, asyncio could hardly approach the efficiency of threads.  Even with
+the very fast and pure C-code psycopg2 driver, just the overhead of the
+aiopg library on top combined with the need for in-Python receipt of
+polling results with psycopg2's asynchronous library added more than enough
+Python overhead to slow the script right down.</p>
+<p>Remember, I wasn't even trying to prove that asyncio is significantly slower
+than threads; only that it <em>wasn't any faster</em>.  The results I got were more
+dramatic than I expected.   We see also that an extremely low-latency async approach,
+e.g. that of gevent, is also slower than threads, but not by much, which
+confirms first that async IO is definitely not faster in this scenario,
+but also because asyncio is so much slower than gevent,
+that it is in fact the in-Python overhead of asyncio's coroutines
+and other Python constructs that are likely adding up to very significant
+additional latency on top of the latency of less efficient IO-based context
+switching.</p>
+</div>
+</div>
+<div class="section" id="issue-two-async-as-making-coding-easier">
+<h2>Issue Two - Async as Making Coding Easier</h2>
+<p>This is the flip side to the "magic fairy dust" coin.  This argument
+expands upon the "threads are bad" rhetoric, and in its most
+extreme form goes that if a program at some level happens to spawn a thread, such as
+if you wrote a WSGI application and happen to run it under mod_wsgi using
+a threadpool, you are now doing "threaded programming", of the caliber that
+is just as difficult as if you were doing <a class="reference external" href="http://www.cs.cmu.edu/afs/cs/academic/class/15492-f07/www/pthreads.html#PITFALLS">POSIX threading exercises</a> throughout your code.   Despite the fact
+that a WSGI application should not have the slightest mention of anything
+to do with in-process shared and mutable state within in it,
+nope, you're doing threaded programming, threads are hard, and you should stop.</p>
+<p>The "threads are bad" argument has an interesting twist (ha!), which
+is that it is being used by explicit async advocates to argue against
+implicit async techniques.  Glyph's <a class="reference external" href="https://glyph.twistedmatrix.com/2014/02/unyielding.html">Unyielding</a>
+post makes exactly this point very well.  The premise goes
+that if you've accepted that threaded concurrency
+is a bad thing, then using the implicit style of async IO is just
+as bad, because at the end of the day, the code looks the same as threaded
+code, and because IO can happen anywhere, it's just as non-deterministic
+as using traditional threads.   I would happen to agree with this,
+that yes, the problems of concurrency in a gevent-like system are just
+as bad, if not worse, than a threaded system.   One reason is that
+concurrency problems in threaded Python are fairly "soft" because
+already the GIL, as much as we hate it, makes all kinds of normally
+disastrous operations, like appending to a list, safe.
+But with green threads, you can easily have hundreds of them without
+breaking a sweat and you can sometimes stumble across pretty
+<a class="reference external" href="https://github.com/PyMySQL/PyMySQL/issues/275">weird issues</a> that are normally
+not possible to encounter with traditional, GIL-protected threads.</p>
+<p>As an aside, it should be noted that Glyph takes a direct swipe at the "magic fairy dust" crowd:</p>
+<blockquote>
+<p>Unfortunately, “asynchronous” systems have often been evangelized by emphasizing a somewhat dubious optimization which allows for a higher level of I/O-bound concurrency than with preemptive threads, rather than the problems with threading as a programming model that I’ve explained above. By characterizing “asynchronousness” in this way, it makes sense to lump all 4 choices together.</p>
+<p>I’ve been guilty of this myself, especially in years past: saying that a system using Twisted is more efficient than one using an alternative approach using threads. In many cases that’s been true, but:</p>
+<blockquote>
+<ol class="arabic simple">
+<li>the situation is almost always more complicated than that, when it
+comes to performance,</li>
+<li>“context switching” is rarely a bottleneck in real-world programs, and</li>
+<li>it’s a bit of a distraction from the much bigger advantage of
+event-driven programming, which is simply that it’s easier to
+write programs at scale, in both senses (that is, programs
+containing lots of code as well as programs which have many
+concurrent users).</li>
+</ol>
+</blockquote>
+</blockquote>
+<p>People will quote Glyph's post when they want to
+talk about how you'll have fewer bugs in your program when you switch to
+asyncio, but continue to promise greater performance as well, for some
+reason choosing to ignore this part of this very well written post.</p>
+<p>Glyph makes a great, and very clear, argument for the twin points
+that both non-blocking IO should be used, and that it should be explicit.
+But the reasoning has nothing to do with non-blocking IO's original beginnings
+as a reasonable way to process data from a large number of sleepy and slow
+connections.   It instead has to do with the nature of the event loop and
+how an entirely new concurrency model, removing the need to expose OS-level
+context switching, is emergent.</p>
+<p>While we've come a long way from writing callbacks and can now again
+write code that looks very linear with approaches like asyncio, the approach
+should still require that the programmer explicitly specify all those
+function calls where IO is known to occur.  It begins with the following
+example:</p>
+
+
+<div class="pygments_manni"><pre><span class="k">def</span> <span class="nf">transfer</span><span class="p">(</span><span class="n">amount</span><span class="p">,</span> <span class="n">payer</span><span class="p">,</span> <span class="n">payee</span><span class="p">,</span> <span class="n">server</span><span class="p">):</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">payer</span><span class="o">.</span><span class="n">sufficient_funds_for_withdrawal</span><span class="p">(</span><span class="n">amount</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="n">InsufficientFunds</span><span class="p">()</span>
+    <span class="n">log</span><span class="p">(</span><span class="s">"{payer} has sufficient funds."</span><span class="p">,</span> <span class="n">payer</span><span class="o">=</span><span class="n">payer</span><span class="p">)</span>
+    <span class="n">payee</span><span class="o">.</span><span class="n">deposit</span><span class="p">(</span><span class="n">amount</span><span class="p">)</span>
+    <span class="n">log</span><span class="p">(</span><span class="s">"{payee} received payment"</span><span class="p">,</span> <span class="n">payee</span><span class="o">=</span><span class="n">payee</span><span class="p">)</span>
+    <span class="n">payer</span><span class="o">.</span><span class="n">withdraw</span><span class="p">(</span><span class="n">amount</span><span class="p">)</span>
+    <span class="n">log</span><span class="p">(</span><span class="s">"{payer} made payment"</span><span class="p">,</span> <span class="n">payer</span><span class="o">=</span><span class="n">payer</span><span class="p">)</span>
+    <span class="n">server</span><span class="o">.</span><span class="n">update_balances</span><span class="p">([</span><span class="n">payer</span><span class="p">,</span> <span class="n">payee</span><span class="p">])</span>
+</pre></div>
+
+
+
+<p>The concurrency mistake here in a threaded perspective is that if two
+threads both run <tt class="docutils literal">transfer()</tt> they both may withdraw from <tt class="docutils literal">payer</tt>
+such that <tt class="docutils literal">payer</tt> goes below <tt class="docutils literal">InsufficientFunds</tt>, without this condition
+being raised.</p>
+<p>The explcit async version is then:</p>
+
+
+<div class="pygments_manni"><pre><span class="nd">@coroutine</span>
+<span class="k">def</span> <span class="nf">transfer</span><span class="p">(</span><span class="n">amount</span><span class="p">,</span> <span class="n">payer</span><span class="p">,</span> <span class="n">payee</span><span class="p">,</span> <span class="n">server</span><span class="p">):</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">payer</span><span class="o">.</span><span class="n">sufficient_funds_for_withdrawal</span><span class="p">(</span><span class="n">amount</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="n">InsufficientFunds</span><span class="p">()</span>
+    <span class="n">log</span><span class="p">(</span><span class="s">"{payer} has sufficient funds."</span><span class="p">,</span> <span class="n">payer</span><span class="o">=</span><span class="n">payer</span><span class="p">)</span>
+    <span class="n">payee</span><span class="o">.</span><span class="n">deposit</span><span class="p">(</span><span class="n">amount</span><span class="p">)</span>
+    <span class="n">log</span><span class="p">(</span><span class="s">"{payee} received payment"</span><span class="p">,</span> <span class="n">payee</span><span class="o">=</span><span class="n">payee</span><span class="p">)</span>
+    <span class="n">payer</span><span class="o">.</span><span class="n">withdraw</span><span class="p">(</span><span class="n">amount</span><span class="p">)</span>
+    <span class="n">log</span><span class="p">(</span><span class="s">"{payer} made payment"</span><span class="p">,</span> <span class="n">payer</span><span class="o">=</span><span class="n">payer</span><span class="p">)</span>
+    <span class="k">yield from</span> <span class="n">server</span><span class="o">.</span><span class="n">update_balances</span><span class="p">([</span><span class="n">payer</span><span class="p">,</span> <span class="n">payee</span><span class="p">])</span>
+</pre></div>
+
+
+
+<p>Where now, within the scope of the process we're in, we know that we are only
+allowing anything else to happen at the bottom, when we call
+<tt class="docutils literal">yield from server.update_balances()</tt>.  There is no chance that any
+other concurrent calls to <tt class="docutils literal">payer.withdraw()</tt> can occur while we're in the
+function's body and have not yet reached the <tt class="docutils literal">server.update_balances()</tt>
+call.</p>
+<p>He then makes a clear point as to why even the implicit gevent-style async isn't
+sufficient.   Because with the above program, the fact that <tt class="docutils literal">payee.deposit()</tt>
+and <tt class="docutils literal">payer.withdraw()</tt> do <strong>not</strong> do a <tt class="docutils literal">yield from</tt>, we are assured
+that no IO might occur in future versions of these calls which would break
+into our scheduling and potentially run another <tt class="docutils literal">transfer()</tt> before ours is
+complete.</p>
+<p>(As an aside, I'm not actually sure, in the realm of "we had to type <tt class="docutils literal">yield from</tt> and
+that's how we stay aware of what's going on", why the <tt class="docutils literal">yield from</tt>
+needs to be a real, structural part of the program and not
+just, for example, a magic comment consumed by a gevent/eventlet-integrated
+linter that tests callstacks for IO and verifies that the corresponding
+source code has been annotated with special
+comments, as that would have the identical effect without impacting any
+libraries outside of that system and without incurring all the Python
+performance overhead of explicit async.  But that's a different topic.)</p>
+<p>Regardless of style of explicit coroutine, there's two flaws with this approach.</p>
+<p>One is that asyncio makes it so easy to type out <tt class="docutils literal">yield from</tt> that the
+idea that it prevents us from making mistakes loses a lot of
+its plausibility.  A commenter on Hacker News made this great
+<a class="reference external" href="https://news.ycombinator.com/item?id=8990850">point</a>
+about the notion of asynchronous code being easier to debug:</p>
+<blockquote>
+<p>It's basically, "I want context switches syntactically explicit in
+my code. If they aren't, reasoning about it is exponentially
+harder."</p>
+<p>And I think that's pretty clearly a strawman. Everything the
+author claims about threaded code is true of any re-entrant code,
+multi-threaded or not. If your function inadvertently calls a
+function which calls the original function recursively, you have
+the exact same problem.</p>
+<p>But, guess what, that just doesn't happen that often. Most code
+isn't re-entrant. Most state isn't shared.</p>
+<p>For code that is concurrent and does interact in interesting ways,
+you are going to have to reason about it carefully. Smearing
+"yield from" all over your code doesn't solve.</p>
+<p><strong>In practice, you'll end up with so many "yield from" lines in your
+code that you're right back to "well, I guess I could context
+switch just about anywhere", which is the problem you were trying
+to avoid in the first place.</strong></p>
+</blockquote>
+<p>In my benchmark code, one can see this last point is exactly true.  Here's a bit
+of the threaded version:</p>
+
+
+<div class="pygments_manni"><pre><span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
+    <span class="s">"select id from geo_record where fileid=</span><span class="si">%s</span><span class="s"> and logrecno=</span><span class="si">%s</span><span class="s">"</span><span class="p">,</span>
+    <span class="p">(</span><span class="n">item</span><span class="p">[</span><span class="s">'fileid'</span><span class="p">],</span> <span class="n">item</span><span class="p">[</span><span class="s">'logrecno'</span><span class="p">])</span>
+<span class="p">)</span>
+<span class="n">row</span> <span class="o">=</span> <span class="n">cursor</span><span class="o">.</span><span class="n">fetchone</span><span class="p">()</span>
+<span class="n">geo_record_id</span> <span class="o">=</span> <span class="n">row</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+
+<span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
+    <span class="s">"select d.id, d.index from dictionary_item as d "</span>
+    <span class="s">"join matrix as m on d.matrix_id=m.id where m.segment_id=</span><span class="si">%s</span><span class="s"> "</span>
+    <span class="s">"order by m.sortkey, d.index"</span><span class="p">,</span>
+    <span class="p">(</span><span class="n">item</span><span class="p">[</span><span class="s">'cifsn'</span><span class="p">],)</span>
+<span class="p">)</span>
+<span class="n">dictionary_ids</span> <span class="o">=</span> <span class="p">[</span>
+    <span class="n">row</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="k">for</span> <span class="n">row</span> <span class="ow">in</span> <span class="n">cursor</span>
+<span class="p">]</span>
+<span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">dictionary_ids</span><span class="p">)</span> <span class="o">==</span> <span class="nb">len</span><span class="p">(</span><span class="n">item</span><span class="p">[</span><span class="s">'items'</span><span class="p">])</span>
+
+<span class="k">for</span> <span class="n">dictionary_id</span><span class="p">,</span> <span class="n">element</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">dictionary_ids</span><span class="p">,</span> <span class="n">item</span><span class="p">[</span><span class="s">'items'</span><span class="p">]):</span>
+    <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
+        <span class="s">"insert into data_element "</span>
+        <span class="s">"(geo_record_id, dictionary_item_id, value) "</span>
+        <span class="s">"values (</span><span class="si">%s</span><span class="s">, </span><span class="si">%s</span><span class="s">, </span><span class="si">%s</span><span class="s">)"</span><span class="p">,</span>
+        <span class="p">(</span><span class="n">geo_record_id</span><span class="p">,</span> <span class="n">dictionary_id</span><span class="p">,</span> <span class="n">element</span><span class="p">)</span>
+    <span class="p">)</span>
+</pre></div>
+
+
+
+<p>Here's a bit of the asyncio version:</p>
+
+
+<div class="pygments_manni"><pre><span class="k">yield from</span> <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
+    <span class="s">"select id from geo_record where fileid=</span><span class="si">%s</span><span class="s"> and logrecno=</span><span class="si">%s</span><span class="s">"</span><span class="p">,</span>
+    <span class="p">(</span><span class="n">item</span><span class="p">[</span><span class="s">'fileid'</span><span class="p">],</span> <span class="n">item</span><span class="p">[</span><span class="s">'logrecno'</span><span class="p">])</span>
+<span class="p">)</span>
+<span class="n">row</span> <span class="o">=</span> <span class="k">yield from</span> <span class="n">cursor</span><span class="o">.</span><span class="n">fetchone</span><span class="p">()</span>
+<span class="n">geo_record_id</span> <span class="o">=</span> <span class="n">row</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+
+<span class="k">yield from</span> <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
+    <span class="s">"select d.id, d.index from dictionary_item as d "</span>
+    <span class="s">"join matrix as m on d.matrix_id=m.id where m.segment_id=</span><span class="si">%s</span><span class="s"> "</span>
+    <span class="s">"order by m.sortkey, d.index"</span><span class="p">,</span>
+    <span class="p">(</span><span class="n">item</span><span class="p">[</span><span class="s">'cifsn'</span><span class="p">],)</span>
+<span class="p">)</span>
+<span class="n">rows</span> <span class="o">=</span> <span class="k">yield from</span> <span class="n">cursor</span><span class="o">.</span><span class="n">fetchall</span><span class="p">()</span>
+<span class="n">dictionary_ids</span> <span class="o">=</span> <span class="p">[</span><span class="n">row</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="k">for</span> <span class="n">row</span> <span class="ow">in</span> <span class="n">rows</span><span class="p">]</span>
+
+<span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">dictionary_ids</span><span class="p">)</span> <span class="o">==</span> <span class="nb">len</span><span class="p">(</span><span class="n">item</span><span class="p">[</span><span class="s">'items'</span><span class="p">])</span>
+
+<span class="k">for</span> <span class="n">dictionary_id</span><span class="p">,</span> <span class="n">element</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">dictionary_ids</span><span class="p">,</span> <span class="n">item</span><span class="p">[</span><span class="s">'items'</span><span class="p">]):</span>
+    <span class="k">yield from</span> <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
+        <span class="s">"insert into data_element "</span>
+        <span class="s">"(geo_record_id, dictionary_item_id, value) "</span>
+        <span class="s">"values (</span><span class="si">%s</span><span class="s">, </span><span class="si">%s</span><span class="s">, </span><span class="si">%s</span><span class="s">)"</span><span class="p">,</span>
+        <span class="p">(</span><span class="n">geo_record_id</span><span class="p">,</span> <span class="n">dictionary_id</span><span class="p">,</span> <span class="n">element</span><span class="p">)</span>
+    <span class="p">)</span>
+</pre></div>
+
+
+
+<p>Notice how they look <strong>exactly the same</strong>?   The fact that <tt class="docutils literal">yield from</tt>
+is present is not in any way changing the code that I write, or the decisions
+that I make - this is because <a class="reference external" href="https://twitter.com/zzzeek/status/559172684060557313">in boring database code</a>,
+we basically need to do the queries that we need to do, in order.   I'm not going
+to try to weave an intelligent, thoughtful system of in-process concurrency into how I call
+into the database or not, or try to repurpose when I happen to need database
+data as a means of also locking out other parts of my program;
+if I need data I'm going to call for it.</p>
+<p>Whether or not that's compelling, it doesn't actually matter - using
+async or mutexes or whatever inside our program to control concurrency
+is in fact completely insufficient in any case.   Instead, there is of course something
+we <strong>absolutely must always do</strong> in real world boring database code in the name of concurrency,
+and that is:</p>
+<div class="section" id="database-code-handles-concurrency-through-acid-not-in-process-synchronization">
+<h3>Database Code Handles Concurrency through ACID, Not In-Process Synchronization</h3>
+<p>Whether or not we've managed to use threaded code or coroutines with implicit
+or explicit IO and find all the race conditions that would occur in our
+process, that matters not at all if the thing we're talking to is a relational
+database, especially in today's world where everything runs in clustered / horizontal /
+distributed ways - the handwringing of academic theorists regarding the
+non-deterministic nature of threads is just the tip of the iceberg; we need
+to deal with entirely distinct processes, and regardless of what's said,
+non-determinism is here to stay.</p>
+<p>For database code, you have exactly one technique
+to use in order to assure correct concurrency, and that is <strong>by using ACID-oriented
+constructs and techniques</strong>.  These unfortunately don't come magically
+or via any known silver bullet, though there are <a class="reference external" href="http://www.sqlalchemy.org">great tools</a>
+that are designed to help steer you in the right direction.</p>
+<p>All of the example <tt class="docutils literal">transfer()</tt> functions above are incorrect from a
+database perspective.  Here is the correct one:</p>
+
+
+<div class="pygments_manni"><pre><span class="k">def</span> <span class="nf">transfer</span><span class="p">(</span><span class="n">amount</span><span class="p">,</span> <span class="n">payer</span><span class="p">,</span> <span class="n">payee</span><span class="p">,</span> <span class="n">server</span><span class="p">):</span>
+    <span class="k">with</span> <span class="n">transaction</span><span class="o">.</span><span class="n">begin</span><span class="p">():</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">payer</span><span class="o">.</span><span class="n">sufficient_funds_for_withdrawal</span><span class="p">(</span><span class="n">amount</span><span class="p">,</span> <span class="n">lock</span><span class="o">=</span><span class="bp">True</span><span class="p">):</span>
+            <span class="k">raise</span> <span class="n">InsufficientFunds</span><span class="p">()</span>
+        <span class="n">log</span><span class="p">(</span><span class="s">"{payer} has sufficient funds."</span><span class="p">,</span> <span class="n">payer</span><span class="o">=</span><span class="n">payer</span><span class="p">)</span>
+        <span class="n">payee</span><span class="o">.</span><span class="n">deposit</span><span class="p">(</span><span class="n">amount</span><span class="p">)</span>
+        <span class="n">log</span><span class="p">(</span><span class="s">"{payee} received payment"</span><span class="p">,</span> <span class="n">payee</span><span class="o">=</span><span class="n">payee</span><span class="p">)</span>
+        <span class="n">payer</span><span class="o">.</span><span class="n">withdraw</span><span class="p">(</span><span class="n">amount</span><span class="p">)</span>
+        <span class="n">log</span><span class="p">(</span><span class="s">"{payer} made payment"</span><span class="p">,</span> <span class="n">payer</span><span class="o">=</span><span class="n">payer</span><span class="p">)</span>
+        <span class="n">server</span><span class="o">.</span><span class="n">update_balances</span><span class="p">([</span><span class="n">payer</span><span class="p">,</span> <span class="n">payee</span><span class="p">])</span>
+</pre></div>
+
+
+
+<p>See the difference?  Above, we use a transaction.   To call upon the SELECT of the payer
+funds and then modify them using autocommit would be totally wrong.
+We then must ensure that we retrieve this value using some appropriate
+system of locking, so that from the time that we read it, to the time that
+we write it, it is <strong>not possible</strong> to change the value based on a stale
+assumption.   We'd probably use a <tt class="docutils literal">SELECT .. FOR UPDATE</tt> to lock the row
+we intend to update.  Or, we might use "read committed" isolation in conjunction with a
+<a class="reference external" href="http://docs.sqlalchemy.org/en/rel_0_9/orm/versioning.html">version counter</a>
+for an optimistic approach, so that our function fails if a race condition
+occurs.    But in no way does the fact that we're using
+threads, greenlets, or whatever concurrency mechanism in our single process
+have any impact on what strategy we use here; our concurrency concerns involve
+the interaction of entirely separate processes.</p>
+</div>
+</div>
+</div></body></html>

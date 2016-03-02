@@ -1,0 +1,160 @@
+<html><body><div><p>Postcode validation is a requirement that comes up in a lot of my UK-based client projects. Parsing and linting UK postcodes is ripe with edge cases.</p>
+<p>Postcodes do change from time to time. Users can be unaware of their postcode changing or they could have submitted their postcode prior to it being decommissioned. Mail might be delivered to decommissioned postcodes and geographic boundary information can exist meaning they can still be useful.</p>
+<p>Network requests to validate postcodes can add a lot of overhead when you're batch processing. New postcodes aren't guaranteed to be in every 3rd-party database either so there is an error rate to take into account. Services where a flat number or building name and a postcode given by the user can be used to get their full address (saving time and spelling mistakes) often charge for querying their database so it's worth minimising calls to these services.</p>
+<p>Good is not the enemy of perfect and sometimes just knowing that a postcode fits the format of a UK postcode can be enough for certain postcode-related functionality. Linting a postcode before checking with a 3rd-party database can reduce the costs as well.</p>
+<p>There are a lot of regex snippets and libraries for parsing UK postcodes. I took a look at a couple of them to see if they could stand up to a database of 2.5 million current and past UK postcodes.</p>
+<div class="section" id="rob-cowie-s-postcode-library">
+<h2>Rob Cowie's Postcode library</h2>
+<p>The first I looked at was <a class="reference external" href="https://github.com/robcowie/postcode">postcode by Rob Cowie</a>. I quickly found that two digits in the outing code (the first 3-4 characters of a UK postcode) caused the library to raise a TypeError:</p>
+<div class="highlight"><pre>➫ pip install -e git+https://github.com/robcowie/postcode.git#egg<span class="o">=</span>postcode
+</pre></div>
+<div class="highlight"><pre><span class="o">&gt;&gt;&gt;</span> <span class="kn">from</span> <span class="nn">postcode</span> <span class="kn">import</span> <span class="n">uk</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">uk</span><span class="o">.</span><span class="n">validate</span><span class="p">(</span><span class="s">'s11 7ty'</span><span class="p">)</span>
+<span class="n">Traceback</span> <span class="p">(</span><span class="n">most</span> <span class="n">recent</span> <span class="n">call</span> <span class="n">last</span><span class="p">):</span>
+  <span class="n">File</span> <span class="s">"&lt;stdin&gt;"</span><span class="p">,</span> <span class="n">line</span> <span class="mi">1</span><span class="p">,</span> <span class="ow">in</span> <span class="o">&lt;</span><span class="n">module</span><span class="o">&gt;</span>
+  <span class="n">File</span> <span class="s">".../postcode/uk.py"</span><span class="p">,</span> <span class="n">line</span> <span class="mi">82</span><span class="p">,</span> <span class="ow">in</span> <span class="n">validate</span>
+    <span class="n">parts</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="n">parts</span><span class="p">[</span><span class="mi">0</span><span class="p">][</span><span class="mi">0</span><span class="p">]</span>
+<span class="ne">TypeError</span><span class="p">:</span> <span class="s">'tuple'</span> <span class="nb">object</span> <span class="n">does</span> <span class="ow">not</span> <span class="n">support</span> <span class="n">item</span> <span class="n">assignment</span>
+</pre></div>
+<p>I <a class="reference external" href="https://github.com/robcowie/postcode/issues/1">raised an issue</a> and began looking around for another library.</p>
+</div>
+<div class="section" id="simon-hayward-s-uk-postcode-parser">
+<h2>Simon Hayward's UK Postcode Parser</h2>
+<p>The next library I looked at was a fork of <a class="reference external" href="https://github.com/simonhayward/ukpostcodeparser">ukpostcodeparser</a> by Simon Hayward.</p>
+<div class="highlight"><pre>➫ pip install -e git+https://github.com/simonhayward/ukpostcodeparser.git#egg<span class="o">=</span>ukpostcodeparser
+</pre></div>
+<p>I downloaded a list of UK postcodes and ran all of them through the parser to see if it raised any exceptions:</p>
+<div class="highlight"><pre>➫ curl -O http://www.doogal.co.uk/files/postcodes.zip
+➫ unzip postcodes.zip
+</pre></div>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">ukpostcodeparser</span> <span class="kn">import</span> <span class="n">parse_uk_postcode</span>
+
+<span class="sd">"""</span>
+<span class="sd">The layout of postcodes.csv looks like the following:</span>
+
+<span class="sd">AB1 0AD,57.10056,-2.248342,385053,...</span>
+<span class="sd">AB1 0AE,57.084447,-2.255708,384600,...</span>
+<span class="sd">AB1 0AF,57.096659,-2.258103,384460,...</span>
+<span class="sd">"""</span>
+
+<span class="k">for</span> <span class="n">line</span> <span class="ow">in</span> <span class="nb">open</span><span class="p">(</span><span class="s">'postcodes.csv'</span><span class="p">):</span>
+    <span class="n">pieces</span> <span class="o">=</span> <span class="n">line</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s">','</span><span class="p">)</span>
+
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">pieces</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">1</span><span class="p">,</span> <span class="n">pieces</span>
+    <span class="k">except</span> <span class="ne">AssertionError</span><span class="p">:</span>
+        <span class="k">print</span> <span class="s">'line invalid'</span><span class="p">,</span> <span class="n">line</span>
+        <span class="k">continue</span>
+
+    <span class="c"># Remove the space between the outward and inward codes</span>
+    <span class="n">postcode</span> <span class="o">=</span> <span class="n">pieces</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s">' '</span><span class="p">,</span> <span class="s">''</span><span class="p">)</span>
+
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">_postcode</span> <span class="o">=</span> <span class="n">parse_uk_postcode</span><span class="p">(</span><span class="n">postcode</span><span class="p">)</span>
+    <span class="k">except</span> <span class="ne">Exception</span><span class="p">,</span> <span class="n">error</span><span class="p">:</span>
+        <span class="k">print</span> <span class="n">error</span><span class="p">,</span> <span class="n">postcode</span>
+        <span class="k">continue</span>
+
+    <span class="k">if</span> <span class="n">_postcode</span> <span class="ow">is</span> <span class="bp">None</span><span class="p">:</span>
+        <span class="k">print</span> <span class="s">'Invalid postcode'</span><span class="p">,</span> <span class="n">postcode</span>
+</pre></div>
+<p>The CSV file contained 2,545,662 postcodes and of them 7,085 came back as invalid.</p>
+<div class="highlight"><pre>➫ wc -l postcodes.csv
+<span class="m">2545662</span> postcodes.csv
+
+➫ python check.py &gt; results
+
+➫ wc -l results
+<span class="m">7085</span> results
+</pre></div>
+<p>I took a sampling of the invalid postcodes to see what they looked like:</p>
+<div class="highlight"><pre>➫ sort --random-sort results <span class="p">|</span> head
+Invalid postcode NPT6ZE
+Invalid postcode W1R5HD
+Invalid postcode NPT7HS
+Invalid postcode W1X8NJ
+Invalid postcode NPT8AD
+Invalid postcode NPT5LU
+Invalid postcode W1M0BN
+Invalid postcode W1R0DS
+Invalid postcode NPT1JW
+Invalid postcode NPT2TW
+</pre></div>
+<p>The <tt class="docutils literal">NPT</tt> outing code for Newport is no longer is use so I'm not so concerned with that one but <tt class="docutils literal">W1R</tt> covers part of central London. I experimented with a few combinations of postcodes and found that if a letter came after any digits in the outing code then the postcode would be seen as invalid by the library even though it is valid. For example: "Golden Square, London, W1R 3AD":</p>
+<div class="highlight"><pre><span class="o">&gt;&gt;&gt;</span> <span class="n">parse_uk_postcode</span><span class="p">(</span><span class="s">'w1r3ad'</span><span class="p">)</span>
+<span class="n">Traceback</span> <span class="p">(</span><span class="n">most</span> <span class="n">recent</span> <span class="n">call</span> <span class="n">last</span><span class="p">):</span>
+  <span class="n">File</span> <span class="s">"&lt;stdin&gt;"</span><span class="p">,</span> <span class="n">line</span> <span class="mi">1</span><span class="p">,</span> <span class="ow">in</span> <span class="o">&lt;</span><span class="n">module</span><span class="o">&gt;</span>
+  <span class="n">File</span> <span class="s">".../ukpostcodeparser/parser.py"</span><span class="p">,</span> <span class="n">line</span> <span class="mi">129</span><span class="p">,</span> <span class="ow">in</span> <span class="n">parse_uk_postcode</span>
+    <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s">'Invalid postcode'</span><span class="p">)</span>
+<span class="ne">ValueError</span><span class="p">:</span> <span class="n">Invalid</span> <span class="n">postcode</span>
+</pre></div>
+<p>But then I tried another postcode, this one for "216 Oxford Street, London, W1D 1LA" and it did work:</p>
+<div class="highlight"><pre><span class="o">&gt;&gt;&gt;</span> <span class="n">parse_uk_postcode</span><span class="p">(</span><span class="s">'W1D1LA'</span><span class="p">)</span>
+<span class="p">(</span><span class="s">'W1D'</span><span class="p">,</span> <span class="s">'1LA'</span><span class="p">)</span>
+</pre></div>
+<p>Before looking to patch the library I wanted to see if there were any other obvious solutions.</p>
+</div>
+<div class="section" id="googling-for-regexes">
+<h2>Googling for Regexes</h2>
+<p>I began googling for regexes which claimed to parse UK postcodes. I can across the following <a class="reference external" href="http://snipplr.com/view/7990/validate-uk-postcode/">regex</a> and ran it against the 2.5 million postcodes list.</p>
+<div class="highlight"><pre><span class="kn">import</span> <span class="nn">re</span>
+
+
+<span class="n">pattern</span> <span class="o">=</span> <span class="s">'^([A-PR-UWYZ]([0-9]{1,2}|([A-HK-Y][0-9]|[A-HK-Y][0-9]([0-9]|'</span> <span class="o">+</span> \
+          <span class="s">'[ABEHMNPRV-Y]))|[0-9][A-HJKS-UW])\ [0-9][ABD-HJLNP-UW-Z]{2}|'</span> <span class="o">+</span> \
+          <span class="s">'(GIR\ 0AA)|(SAN\ TA1)|(BFPO\ (C\/O\ )?[0-9]{1,4})|'</span> <span class="o">+</span> \
+          <span class="s">'((ASCN|BBND|[BFS]IQQ|PCRN|STHL|TDCU|TKCA)\ 1ZZ))$'</span>
+<span class="n">_POSTCODE_RE</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span><span class="n">pattern</span><span class="p">)</span>
+
+
+<span class="k">def</span> <span class="nf">is_postcode</span><span class="p">(</span><span class="n">postcode</span><span class="p">):</span>
+    <span class="n">postcode</span> <span class="o">=</span> <span class="n">postcode</span>
+    <span class="k">return</span> <span class="n">_POSTCODE_RE</span><span class="o">.</span><span class="n">match</span><span class="p">(</span><span class="n">postcode</span><span class="p">)</span> <span class="o">!=</span> <span class="bp">None</span>
+
+<span class="sd">"""</span>
+<span class="sd">The layout of postcodes.csv looks like the following</span>
+<span class="sd">AB1 0AD,57.10056,-2.248342,385053,...</span>
+<span class="sd">AB1 0AE,57.084447,-2.255708,384600,...</span>
+<span class="sd">AB1 0AF,57.096659,-2.258103,384460,...</span>
+
+<span class="sd">"""</span>
+
+<span class="k">for</span> <span class="n">line</span> <span class="ow">in</span> <span class="nb">open</span><span class="p">(</span><span class="s">'postcodes.csv'</span><span class="p">):</span>
+    <span class="n">pieces</span> <span class="o">=</span> <span class="n">line</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s">','</span><span class="p">)</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">pieces</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">1</span><span class="p">,</span> <span class="n">pieces</span>
+    <span class="k">except</span> <span class="ne">AssertionError</span><span class="p">:</span>
+        <span class="k">print</span> <span class="s">'line invalid'</span><span class="p">,</span> <span class="n">line</span>
+        <span class="k">continue</span>
+
+    <span class="c"># Make sure the postcode is in upper case</span>
+    <span class="n">postcode</span> <span class="o">=</span> <span class="n">pieces</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span>
+
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">is_postcode</span><span class="p">(</span><span class="n">postcode</span><span class="p">):</span>
+        <span class="k">print</span> <span class="s">'invalid postcode'</span><span class="p">,</span> <span class="n">postcode</span>
+</pre></div>
+<p>This failed against 8,614 postcodes. Here is a sampling of a few of them:</p>
+<div class="highlight"><pre>➫ sort --random-sort results <span class="p">|</span> head
+invalid postcode W1V 9PD
+invalid postcode W1Y 8HE
+invalid postcode W1Y 8DH
+invalid postcode W1P 7FW
+invalid postcode W1Y 1AR
+invalid postcode W1R 6JJ
+invalid postcode W1M 5AE
+invalid postcode W1R 1FH
+invalid postcode NPT 8ET
+invalid postcode W1R 0HD
+</pre></div>
+<p>Ignoring the old Newport postcodes W1R was still being caught. I could see that only certain <tt class="docutils literal"><span class="pre">W1[A-Z]</span></tt> outing codes were being caught out so I got a list of them together and found only 7 were being flagged up as invalid. I adjusted the regular expression to allow for M, N, P, R, V, X and Y after any digits in the outing code:</p>
+<div class="highlight"><pre><span class="n">pattern</span> <span class="o">=</span> <span class="s">'^([A-PR-UWYZ]([0-9]{1,2}|([A-HK-Y][0-9]|[A-HK-Y][0-9]([0-9]|'</span> <span class="o">+</span> \
+          <span class="s">'[ABEHMNPRV-Y]))|[0-9][A-HJKMNPRS-UVWXY])\ [0-9][ABD-HJLNP-UW-Z]{2}|'</span> <span class="o">+</span> \
+          <span class="s">'(GIR\ 0AA)|(SAN\ TA1)|(BFPO\ (C\/O\ )?[0-9]{1,4})|'</span> <span class="o">+</span> \
+          <span class="s">'((ASCN|BBND|[BFS]IQQ|PCRN|STHL|TDCU|TKCA)\ 1ZZ))$'</span>
+<span class="n">_POSTCODE_RE</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span><span class="n">pattern</span><span class="p">)</span>
+</pre></div>
+<p>I ran the script again and only the 2,418 depreciated Newport postcodes were seen as invalid.</p>
+<p>Seeing the pattern of the W1M, W1N, W1P, W1R, W1V, W1X and W1Y outing codes being the edge cases that tripped up Simon Hayward's library I created a <a class="reference external" href="https://github.com/simonhayward/ukpostcodeparser/pull/1">pull request</a>.</p>
+</div>
+
+  </div></body></html>

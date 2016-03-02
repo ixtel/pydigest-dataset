@@ -1,0 +1,113 @@
+<html><body><div><div class="postcontent">
+
+<p>One of the projects I’m currently working on is an augmented inbox service. The primary goal of the service is to allow user to use email in a more efficient manner and spend less time in their inbox.</p>
+<p>It helps user to achieve that by overlaying an inbox with all kind of important contextual information about the sender or recipient. This overlay consists of different insights, metrics and suggestions which are derived from the historical usage data and real-time information obtained from the social media profiles. You can think of with as <a href="https://rapportive.com/">Rapporitve</a> with contextual data.</p>
+<div class="imginline">
+<img class="inline" src="/images/2013-12-27-designing-a-server-side-application-for-secure-storage-of-access-tokens-and-other-secrets/extension_prototype.png"/>
+<span class="image-caption">Early prototype of the overlay served as a
+Chrome Extension.</span>
+</div>
+<p>Historical data is obtained by analyzing user’s inbox. Service works by connecting to the GMail’s IMAP servers using SASL XOAUTH2 mechanism<sup id="fnref:1"><a href="#fn:1" rel="footnote">1</a></sup>.</p>
+<p>To authenticate with the GMail IMAP servers, the service uses an access token which is obtained from the Google authorization servers using a user-specific refresh token and the OAuth 2.0 refresh token flow.</p>
+<p>Since the service needs to periodically fetch user’s emails, this means it needs to securely and safely persist the refresh token so it can be re-used later on.</p>
+<p>In this blog post I’m going to describe how I have approached and designed the server-side application architecture to provide a secure storage of refresh tokens.</p>
+<p>Keep in mind that you can use a similar approach to securely store other user’s secrets (different service keys, access tokens, credentials, ssh keys and so on).</p>
+<h3 id="background__motivation">Background &amp; Motivation</h3>
+<p>It doesn’t really matter what kind of application you are working on, you should always treat user’s privacy and security as a top priority. This is especially important if you are handling sensitive, private or secret data (like refresh tokens in this case).</p>
+<p>This means you should dedicate sufficient time and resources into designing, developing and reviewing your application and making sure it’s secure. Sadly a lot of people and organizations don’t recognize that (or they are simply ignorant). Because of that, incidents like a recent <a href="http://nakedsecurity.sophos.com/2013/11/04/anatomy-of-a-password-disaster-adobes-giant-sized-cryptographic-blunder/">Adobe breach</a> (Adobe encrypted passwords using 3DES in ECB mode, seriously!) and <a href="http://open.bufferapp.com/buffer-has-been-hacked-here-is-whats-going-on/">Buffer hack</a> are a lot more catastrophic than they would be if those companies would store credentials properly and in a secure manner.</p>
+<h3 id="application_design__security_principles">Application Design &amp; Security Principles</h3>
+<p>Here are some of the main security principles I have adhered to while designing and working on the application:</p>
+<ul>
+<li>Keep it simple.</li>
+<li>Don’t roll your own crypto, use well known, researched and tested principles, algorithms, methods and libraries.</li>
+<li>Use <a href="http://en.wikipedia.org/wiki/Layered_security">layered approach to security</a>.</li>
+<li>Design the services to adhere to the <a href="http://en.wikipedia.org/wiki/Principle_of_least_privilege">principle of least privilege</a>.</li>
+<li>To reduce the attack surface design simple and small services.</li>
+<li>Isolate different services and components.</li>
+</ul>
+<h3 id="quick_note_about_isolation">Quick Note About Isolation</h3>
+<p>As noted above, I have used isolation and layered approach to security. In this case, the service isolation consists of the following layers:</p>
+<ul>
+<li>Virtualization (Xen)</li>
+<li>Isolated private networks</li>
+<li>Software firewall</li>
+</ul>
+<h3 id="architecture_overview">Architecture Overview</h3>
+<p>This section contains a high-level application architecture overview and a short description of the important services and their roles.</p>
+<div class="imginline">
+<a class="fancybox" href="/images/2013-12-27-designing-a-server-side-application-for-secure-storage-of-access-tokens-and-other-secrets/arch_overview.png" rel="post">
+<img class="inline" src="/images/2013-12-27-designing-a-server-side-application-for-secure-storage-of-access-tokens-and-other-secrets/arch_overview_thumb.png"/>
+</a>
+<span class="image-caption">High level architecture overview.</span>
+</div>
+<p>Note: Dashed line indicates a TLS connection and a red container indicates an isolated private network.</p>
+<p><strong>Cassandra</strong></p>
+<p>Cassandra cluster is used for storing metrics, insights and other information and metrics about the email account.</p>
+<p><strong>PostgreSQL</strong></p>
+<p>PostgreSQL is used for storing account meta data. At the moment, this includes user &lt;-&gt; email account mappings and time zone information for each email account.</p>
+<p><strong>Web Application</strong></p>
+<p>Web Application is a simple Django application which is, at the moment, only responsible for two things:</p>
+<ol>
+<li>Performing an initial OAuth 2 token exchange and retrieving the refresh token from the Google authorization servers. This happens when the user first registers and connects their Gmail account.</li>
+<li>Logging the user in. This happens on subsequent requests after the user has already connected their account.</li>
+</ol>
+<p><strong>API Service</strong></p>
+<p><a href="http://www.tornadoweb.org/en/stable/">Tornado</a> service which exposes a public API for retrieving metrics and insights from the metrics database (Cassandra).</p>
+<p><strong>Workers</strong></p>
+<p>This service consists of <a href="http://www.celeryproject.org/">Celery</a> worker processes which run different jobs:</p>
+<ol>
+<li>Retrieval job - This job fetches email messages from the IMAP servers, parses them and stores email meta data<sup id="fnref:2"><a href="#fn:2" rel="footnote">2</a></sup> in the database.</li>
+<li>Aggregation jobs - Those jobs aggregate previously retrieved metrics for the following periods: daily, weekly and monthly.</li>
+<li>Processing Jobs - Those jobs process previously aggregated data and infer all kinds of insights from it.</li>
+</ol>
+<p>To be able to authenticate and fetch email messages from the IMAP servers, this service needs to have access to the access token for the email account in question.</p>
+<div class="imginline">
+<a href="https://developers.google.com/accounts/docs/OAuth2WebServer" target="_blank"><img class="inline" src="/images/2013-12-27-designing-a-server-side-application-for-secure-storage-of-access-tokens-and-other-secrets/oauth2_webflow.png"/></a>
+<span class="image-caption">OAuth2 web application flow. Source: https://developers.google.com/accounts/docs/OAuth2WebServer</span>
+</div>
+<p>The service obtains access token by hitting and asking the token storage get service for it (more on that bellow).</p>
+<p>As such, this service is also the only one which has access to the token storage get service and access tokens.</p>
+<p><strong>Token Storage Service</strong></p>
+<p>Token storage service actually consists of two separate services. First one is responsible solely for securely storing refresh tokens (“token storage set service”) and the second one (“token storage get service”) is responsible for retrieving refresh token from the database, decrypting it using the private key and using the decrypted refresh token to obtain access token from the Google authorization servers.</p>
+<p>To reduce the attack surface area, both services are designed to be small and simple. Both of them are simple Tornado services which expose an HTTP API with a single method to the consumers.</p>
+<p>On top of that, those services run in an isolated private network and only small set of services (two to be exact) have access to it. Web application has access to the set service and workers have access to the get service.</p>
+<p>Authentication to those services is handled using certificates. Certificate based authentication is not ideal because it adds a lot of overhead and basically requires you to manage and run your own certificate authority, but that’s a complex topic for a different post. For now it suffices to say that we have a simple process in place which works fine for a small number of certificates.</p>
+<p><strong>Token Storage SET Service</strong></p>
+<p>This service exposes a method for storing an encrypted refresh token in a local token database. Refresh tokens are encrypted using public-key / asymmetric cryptography (more on that bellow).</p>
+<p>Refresh token is encrypted using a public key on the web server which is responsible for performing an initial OAuth 2.0 exchange and retrieving the refresh token from Google authorization servers.</p>
+<div class="imginline">
+<a class="fancybox" href="/images/2013-12-27-designing-a-server-side-application-for-secure-storage-of-access-tokens-and-other-secrets/token_storage_set_service_flow.png" rel="post">
+<img class="inline" src="/images/2013-12-27-designing-a-server-side-application-for-secure-storage-of-access-tokens-and-other-secrets/token_storage_set_service_flow_thumb.png"/>
+</a>
+<span class="image-caption">Token storage SET service work-flow.</span>
+</div>
+<p><strong>Token Storage GET Service</strong></p>
+<p>This service exposes a single method for retrieving an access token for an email account. The service retrieves access token for an email account by first retrieving encrypted refresh token from a local token database, decrypting it using a private key and then using this decrypted refresh token to obtain a temporary access token from the Google authorization servers.</p>
+<p>As you can see above, this service needs to have access to the private key to be able to decrypt the refresh token. As such, this is the only service which has access to the private key and ability to decrypt the refresh token.</p>
+<div class="imginline">
+<a class="fancybox" href="/images/2013-12-27-designing-a-server-side-application-for-secure-storage-of-access-tokens-and-other-secrets/token_storage_get_service_flow.png" rel="post">
+<img class="inline" src="/images/2013-12-27-designing-a-server-side-application-for-secure-storage-of-access-tokens-and-other-secrets/token_storage_get_service_flow_thumb.png"/></a>
+<span class="image-caption">Token storage GET service work-flow.</span>
+</div>
+<h3 id="public_key_cryptography__keyczar">Public Key Cryptography &amp; Keyczar</h3>
+<p>As noted above, public-key cryptography is used to protect and securely store the refresh tokens. More, specifically <a href="http://en.wikipedia.org/wiki/RSA_(cryptosystem)">RSA algorithm</a> with a 4096 bit key is used.</p>
+<p>There are multiple ways to do public-key cryptography in Python (big chunk of the server side application is written in Python), some of the more popular choices include:</p>
+
+<p>Because of my previous experience and other benefits which are mentioned later on, I have decided to go with KeyCzar.</p>
+<p>KeyCzar is an open source cryptographic toolkit developed by Google with <a href="https://code.google.com/p/keyczar/wiki/CppTutorial">C++</a>, Java and <a href="https://code.google.com/p/keyczar/wiki/SamplePythonUsage">Python</a> bindings available. One of the main goals of KeyCzar is to make it easier for developers to use cryptography safely. Unlike other existing libraries mentioned above, it exposes a higher-level API with more sane default values which makes it harder for developer to use it in a wrong or a potentially harmful way.</p>
+<p>On top of that, it also includes a <a href="https://code.google.com/p/keyczar/wiki/KeyczarTool">command-line tool</a> which allows users to manage (create, rotate, revoke) key files.</p>
+<h3 id="key_storage_and_management">Key Storage and Management</h3>
+<p>Storage and management of the cryptographic keys is out of scope of this blog post, but it’s worth nothing that it’s also an important topic. All of the effort you have put into designing and making your application secure doesn’t matter if you don’t securely store cryptographic keys which are used to protect your secrets.</p>
+<p>If you are using Amazon EC2 and are hosted on Amazon cloud, you should have a look at <a href="http://aws.amazon.com/cloudhsm/">CloudHSM</a>. On the other hand, if you are self-hosted, you should have a look at <a href="https://www.yubico.com/products/yubihsm/">YubiHSM</a>, a secure and cost-effective alternative to other usually more expensive hardware based security modules.</p>
+<p>In the future, <a href="https://github.com/cloudkeep/barbican">Barbican</a> might also prove itself as a viable, lower security software based alternative.</p>
+<h3 id="conclusion">Conclusion</h3>
+<p>This time I have mostly focused on the high-level server-side application architecture, but in the future posts I plan to go into more details about the following topics:</p>
+<ul>
+<li>how we handle key management</li>
+<li>how we handle isolation via isolated private networks</li>
+<li>how we handle client side security in the chrome extension</li>
+</ul>
+<p>Note: If you think I have done something wrong or something can be further improved, don’t hesitate to <a href="/about.html#contact-info">contact me</a>.</p>
+
+</div>
+</div></body></html>

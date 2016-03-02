@@ -1,0 +1,258 @@
+<html><body><div><div class="content html_format"><p>
+      В </p><a href="http://habrahabr.ru/post/243427/">первой части</a><p> мы рассмотрели, что для формирования JSON Web Token необходимы: сериализаторы и представления.
+</p><p>
+Теперь мы создадим шаблоны и поработаем над сервисами для аутентификации и получения данных.
+
+</p><h4><b>Bower, менеджер пакетов для web-приложений</b></h4><p>
+Прежде чем перейдем к коду, давайте установим все необходимые зависимости. Для этого мы будем использовать Bower, он является идеальным инструментом для управления зависимостями web-приложений.
+</p><p>
+Предполагается что у вас уже установлен Node.js. Для установки bower просто выполните следующую команду:
+</p><pre><code class="bash">$ npm install -g bower
+</code></pre><p>
+Примечание: Возможно понадобятся права администратора.</p><p>
+Для того чтобы изменить каталог по умолчанию, в который bower будет устанавливать пакеты, в корне вашего проекта создайте файл с названием “.bowerrc ” и добавьте в него следующие строки:
+</p><pre><code class="javascript">{
+    "directory": "static/bower_components"
+}
+</code></pre><p>
+Мы указали каталог “static”, чтобы эти компоненты были доступны в Django.
+</p><a name="habracut"/><p>
+Выполните команду:
+</p><pre><code class="bash">$ bower init 
+</code></pre><p>
+и настройте предложенные параметры.</p><p>
+Теперь можно установить зависимости выполнив следующую команду:
+</p><pre><code class="bash">$ bower install --save angular angular-route bootstrap jquery
+</code></pre>
+
+<h4><b>Обработка шаблонов на стороне сервера</b></h4><p>
+Когда установлены необходимые компоненты можно перейти к коду.</p><p>
+Помните файл templates/index.html, который мы создали в первой части. Пришло время заполнить его.</p><p>
+Замените содержимое templates/index.html на следующее:
+</p><div class="spoiler"><b class="spoiler_title">Скрытый текст</b><div class="spoiler_text"><pre><code class="html">&lt;!DOCTYPE html&gt;
+&lt;html ng-app="application"&gt;
+  &lt;head&gt;
+    &lt;title&gt;django-angular-token-auth&lt;/title&gt;
+    &lt;base href="/" /&gt;
+    &lt;link rel="stylesheet" href="/static/bower_components/bootstrap/dist/css/bootstrap.css" /&gt;
+  &lt;/head&gt;
+
+  &lt;body&gt;
+    &lt;div class="container-fluid"&gt;
+      &lt;div class="ng-view row"&gt;&lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;script type="text/javascript" src="/static/bower_components/jquery/dist/jquery.js"&gt;&lt;/script&gt;
+    &lt;script type="text/javascript" src="/static/bower_components/bootstrap/dist/js/bootstrap.js"&gt;&lt;/script&gt;
+    &lt;script type="text/javascript" src="/static/bower_components/angular/angular.js"&gt;&lt;/script&gt;
+    &lt;script type="text/javascript" src="/static/bower_components/angular-route/angular-route.js"&gt;&lt;/script&gt;
+
+    &lt;script type="text/javascript" src="/static/javascripts/app.js"&gt;&lt;/script&gt;
+    &lt;script type="text/javascript" src="/static/javascripts/app.config.js"&gt;&lt;/script&gt;
+    &lt;script type="text/javascript" src="/static/javascripts/app.routes.js"&gt;&lt;/script&gt;
+  &lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+</div></div><p>
+Благодаря использованию bootstrap стилей, страница будет выглядеть довольно красиво.</p><p>
+Так же для AngularJS мы включили тег &lt;base/&gt; внутри тега &lt;head/&gt;. Он необходим, поскольку мы будем использовать HTML 5 маршрутизацию.
+
+</p><h4><b>Начало работы с AngularJS</b></h4><p>
+Давайте пойдем дальше, создадим файл /static/javascripts/app.js и добавим в него:
+</p><pre><code class="javascript">angular.module('application', [
+  'application.config',
+  'application.routes'
+]);
+
+angular.module('application.config', []);
+angular.module('application.routes', ['ngRoute']);
+</code></pre><p>
+Здесь создаются AngularJS модули, которые мы будем использовать для настройки конфигурации и маршрутизации.</p><p>
+Создайте файл /static/javascripts/app.config.js. И заполните его следующим содержимым:
+</p><pre><code class="javascript">angular.module('application.config')
+  .config(function ($httpProvider, $locationProvider) {
+    $locationProvider.html5Mode(true).hashPrefix('!');
+  });
+</code></pre><p>
+Здесь мы хотим включить режим HTML 5 маршрутизации. Он устраняет использование символа # в URL, который должен использоваться для других целей. Это так же объясняет почему мы включили &lt;base /&gt; в &lt;head /&gt;.</p><p>
+Примечание: Позже мы будем использовать $httpProvider, поэтому убедитесь, что он прописан в зависимостях.</p><p>
+Создайте файл /static/javascripts/app.routes.js и добавьте в него следующее:
+</p><pre><code class="javascript">angular.module('application.routes')
+  .config(function ($routeProvider) {
+    $routeProvider.when('/', {
+      controller: 'IndexController',
+      templateUrl: '/static/templates/static/index.html'
+    });
+  });
+</code></pre>
+
+<h4><b>Создание сервиса Auth</b></h4><p>
+Самое время начать реализацию Auth сервиса, который будет заниматься регистрацией, входом и выходом пользователей.</p><p>
+Начнем с создания файла /static/javascripts/auth/auth.module.js.</p><p>
+В этом файле настроим модули, которые мы будем использовать для аутентификации:
+</p><pre><code class="javascript">angular.module('application.auth', [
+  'application.auth.controllers',
+  'application.auth.interceptors',
+  'application.auth.services'
+]);
+
+angular.module('application.auth.controllers', []);
+angular.module('application.auth.interceptors', []);
+angular.module('application.auth.services', []);
+</code></pre><p>
+Вы наверное могли заметить, что автор большой поклонник модульной структуры при использовании AngularJS.</p><p>
+Мы просто создаем различные модули для контроллеров, перехватчиков, сервисов и добавляем их в модуль application.auth.</p><p>
+Не забудьте добавить auth.module.js в index.html
+</p><pre><code class="javascript">&lt;script type="text/javascript" src="/static/javascripts/auth/auth.module.js"&gt;&lt;/script&gt;
+</code></pre><p>
+После того, как добавили auth.module.js, откройте /static/javascripts/app.js и включите модуль application.auth в зависимости нашего приложения.</p><p>
+Теперь давайте создадим сервис Auth. Создайте файл /static/javascripts/auth/services/auth.service.js и включите в него следующее:
+</p><div class="spoiler"><b class="spoiler_title">Скрытый текст</b><div class="spoiler_text"><pre><code class="javascript">angular.module('application.auth.services').
+  service('Auth', function ($http, $location, $q, $window) {
+    var Auth = {
+      getToken: function () {
+        return $window.localStorage.getItem('token');
+      },
+
+      setToken: function (token) {
+        $window.localStorage.setItem('token', token);
+      },
+
+      deleteToken: function () {
+        $window.localStorage.removeItem('token');
+      }
+    };
+
+    return Auth;
+  });
+</code></pre>
+</div></div><p>
+Мы создали некоторые методы, которые будем использовать с Auth сервисом. Здесь мы используем только одну зависимость $window. Остальные будут использоваться в других методах: login(), logout(), и register(). Давайте создадим их.</p><p>
+Добавьте функцию login() в сервис Auth, как здесь:
+</p><div class="spoiler"><b class="spoiler_title">Скрытый текст</b><div class="spoiler_text"><pre><code class="javascript">login: function (username, password) {
+  var deferred = $q.defer();
+
+  $http.post('/api/v1/auth/login/', {
+    username: username, password: password
+  }).success(function (response, status, headers, config) {
+    if (response.token) {
+      Auth.setToken(response.token);
+    }
+
+    deferred.resolve(response, status, headers, config);
+  }).error(function (response, status, headers, config) {
+    deferred.reject(response, status, headers, config);
+  });
+
+  return deferred.promise;
+},
+</code></pre>
+</div></div><p>
+Здесь мы делаем простой AJAX запрос к одному из наших API, которое сделали в первой части. Если в ответе присутствует маркер, то он сохраняется, для последующих API вызовов.</p><p>
+Выход пользователя более простой. Из-за использования аутентификации на основе JWT, нам всего лишь нужно стереть маркер из хранилища. Добавьте функцию logout() в Auth сервис:
+</p><pre><code class="javascript">logout: function () {
+  Auth.deleteToken();
+  $window.location = '/';
+},
+</code></pre><p>
+Последний метод, который нужно добавить в Auth сервис это register(), он очень похож на login(). В нем мы делаем запрос к нашему API, для создания пользователя и затем вторым вызовом заходим в систему от имени этого пользователя.</p><p>
+Добавьте метод register() в Auth сервис:
+</p><div class="spoiler"><b class="spoiler_title">Скрытый текст</b><div class="spoiler_text"><pre><code class="javascript">register: function (user) {
+  var deferred = $q.defer();
+
+  $http.post('/api/v1/auth/register/', {
+    user: user
+  }).success(function (response, status, headers, config) {
+    Auth.login(user.username, user.password).
+      then(function (response, status, headers, config) {
+        $window.location = '/';
+      });
+
+    deferred.resolve(response, status, headers, config);
+  }).error(function (response, status, headers, config) {
+    deferred.reject(response, status, headers, config);
+  });
+
+  return deferred.promise;
+}
+</code></pre>
+</div></div><p>
+Сервис Auth готов, чтобы включить его в index.html:
+</p><pre><code class="javascript">&lt;script type="text/javascript" src="/static/javascripts/auth/services/auth.service.js"&gt;&lt;/script&gt;
+</code></pre><p>
+Теперь у нас есть возможность зарегистрироваться, войти и выйти из системы.</p><p>
+Сейчас нам нужно добавить перехватчик для того чтобы он добавлял наш маркер в каждый AJAX запрос.</p><p>
+Создайте /static/javascripts/auth/interceptors/auth.interceptor.js и вставьте в него следующее:
+</p><div class="spoiler"><b class="spoiler_title">Скрытый текст</b><div class="spoiler_text"><pre><code class="javascript">angular.module('application.auth.interceptors')
+  .service('AuthInterceptor', function ($injector, $location) {
+    var AuthInterceptor = {
+      request: function (config) {
+        var Auth = $injector.get('Auth');
+        var token = Auth.getToken();
+
+        if (token) {
+          config.headers['Authorization'] = 'JWT ' + token;
+        }
+        return config;
+      },
+
+      responseError: function (response) {
+        if (response.status === 403) {
+            $location.path('/login');
+        }
+        return response;
+      }
+    };
+    return AuthInterceptor;
+  });
+</code></pre>
+</div></div><p>
+Здесь мы сделали несколько вещей, давайте рассмотрим их.</p><p>
+В этом сервисе два основных метода: request и responseError. Метод request вызывается при каждом AJAX запросе, а метод responseError вызывается, когда AJAX запрос возвращает ошибку. </p><p>
+Ранее упоминалось, что мы добавляем маркер в каждый AJAX запрос. Это делается в методе request. Каждый раз, когда вызывается метод request, мы проверяем есть ли у нас маркер (метод Auth.getToken()) и если да то мы добавляем его в заголовок запроса. Если маркера нет, выполняется простой запрос.</p><p>
+Примечание: вы можете заметить, что здесь используется сервис $injector. Он необходим, потому что иногда из-за перехватчиков возникают циклические зависимости, которые в свою очередь вызывают ошибки. Использование $injector лучший способ получить сервис Auth, обойдя эту проблему.</p><p>
+В функции responseError мы проверяем ответ на наличие 403 ошибки. Эту ошибку бросает djangorestframework-jwt, когда нет маркера или когда его срок действия истек. В любом случае мы должны перенаправить пользователя на страницу входа в систему. Для этого не требуется обновление страницы.</p><p>
+Теперь, когда мы закончили с перехватчиком, нам нужно сделать две вещи: добавить его в index.html и app.config.js.</p><p>
+Откройте index.html и добавьте следующую строку:
+</p><pre><code class="javascript">&lt;script type="text/javascript" src="/static/javascripts/auth/interceptors/auth.interceptor.js"&gt;&lt;/script&gt;
+</code></pre><p>
+Теперь откройте app.config.js и там где мы включали HTML 5 режим добавьте следующую строку:
+</p><pre><code class="javascript">$httpProvider.interceptors.push('AuthInterceptor');
+</code></pre><p>
+Это добавит AuthInterceptor в список перехватчиков, которые используются сервисом $http. Каждый перехватчик вызывается при каждом запросе, поэтому их не должно быть слишком много.
+
+</p><h4><b>Сервис для получения пользователей</b> </h4><p>
+Последнее, что мы сделаем во второй части это сервис для получения пользователей.</p><p>
+Этот сервис очень прост. На самом деле он нужен только для проверки работоспособности нашего приложения.</p><p>
+Создайте файл /static/javascripts/auth/services.users.service.js и добавьте в него следующее:
+</p><pre><code class="javascript">angular.module('application.auth.services')
+  .service('Users', function ($http) {
+    var Users = {
+      all: function () {
+        return $http.get('/api/v1/users/');
+      }
+    };
+    return Users;
+  });
+</code></pre><p>
+Теперь добавьте его в Index.html под сервисом Auth:
+</p><pre><code class="javascript">&lt;script type="text/javascript" src="/static/javascripts/auth/services/users.service.js"&gt;&lt;/script&gt;
+</code></pre>
+
+<h4><b>Завершая вторую часть</b></h4><p>
+Во второй части мы рассмотрели сервисы и перехватчики, которые необходимы для построения системы аутентификации. Затронули механизм Django, который обрабатывает статические файлы. Осталось определить несколько контроллеров и шаблонов.</p><p>
+В третьей части мы поговорим о контроллерах и шаблонах. Это будет еще одна длинная статья.</p><p>
+Если вы заинтересованы в коде, можете проверить мой </p><a href="https://github.com/brwr/django-angular-token-auth">репозиторий</a><p> на Github.
+
+</p><div class="spoiler"><b class="spoiler_title">От переводчика</b><div class="spoiler_text"><ul>
+<li>Автор сильно переусердствовал с модульностью, в приложении практически нечего нет, а файлов и модулей уже...</li>
+<li>Третью часть переводить не вижу смысла, потому что тема использования JWT раскрыта.</li>
+<li>Так же считаю излишним выносить js в отдельный шаблон и потом его подключать. В оригинале автор использует для этого templates/javascripts.html.</li>
+<li>И еще, в оригинале автор использовал глобальный объект window (window.angular.module('application.auth.services')) хотя в репозитории уже лежит довольно красивый код.</li>
+</ul>
+</div></div>
+      <p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

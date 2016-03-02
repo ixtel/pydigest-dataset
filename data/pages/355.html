@@ -1,0 +1,239 @@
+<html><body><div><div class="stream-post-body">
+    
+<p>In a recent Django class one of my students posed the problem she was learning Django to tackle - she would be responsible for writing a web-based administrative interface to a database whose structure she wasn't allowed to modify. Can Django do that?</p>
+<p>Absolutely - and Django even comes with a management command to bootstrap working with a legacy database. Let's create a brand new project, use a popular sample database as our target, and using Django's multi-db support to store Django's built-in model data in a separate database.</p>
+<h2 id="installation-and-setup">
+   Installation and setup</h2>
+<p>For this project I'm using Django 1.3 since that's the version we targeted in the class. All code referenced in the tutorial will be checked into the <a href="https://github.com/simeonf/django-dualdb-sample">github project</a> and can be reviewed there. I'm using <em>virtualenv</em> and <em>pip</em> to manage installation of Django, my Python environment, and eventually my third party applications.</p>
+<pre class="prettyprint">
+$ mkdir dualdb-project
+$ cd dualdb-project
+$ mkvirtualenv django1.3
+(django1.3)$ pip install django==1.3
+...
+Successfully installed django
+Cleaning up...
+(django1.3)$ django-admin.py startproject dualdb
+(django1.3)$ ls dualdb
+(django1.3)$ ls -l dualdb/
+total 16
+-rw-rw-r-- 1 simeon simeon    0 Aug  1 15:20 __init__.py
+-rw-rw-r-- 1 simeon simeon  503 Aug  1 15:20 manage.py
+-rw-rw-r-- 1 simeon simeon 5031 Aug  1 15:20 settings.py
+-rw-rw-r-- 1 simeon simeon  565 Aug  1 15:20 urls.py</pre>
+<p>Now that I have a new Django project, I need a sample database to look at. The <a href="http://chinookdatabase.codeplex.com/">Chinook project</a> provides a sample reference database in various database formats - think a new version of the old Northwind reference database. I downloaded the Sqlite version for our project from the Chinook project website and dropped it in my new <em>dualdb</em> folder. I'm also going to create a "chinook" app to work in.</p>
+<pre class="prettyprint">
+(django1.3)$ cd dualdb/
+(django1.3)$ chmod u+x manage.py 
+(django1.3)$ ./manage.py startapp chinook
+(django1.3)$ ls -l chinook
+total 12
+-rw-rw-r-- 1 simeon simeon   0 Aug  1 15:45 __init__.py
+-rw-rw-r-- 1 simeon simeon  57 Aug  1 15:45 models.py
+-rw-rw-r-- 1 simeon simeon 383 Aug  1 15:45 tests.py
+-rw-rw-r-- 1 simeon simeon  26 Aug  1 15:45 views.py</pre>
+<h2 id="multi-database-setup">
+  Multi-database setup</h2>
+<p>We need two databases: one for django.contrib.auth models and any other custom models we may have and one which is a legacy database whose creation/alteration we won't be managing with Django.</p>
+<p>Django has <a href="https://docs.djangoproject.com/en/dev/topics/db/multi-db/">builtin support for multiple databases</a>. Basically we need to configure our settings to know about both our databases and then optionally build a database router that determines how data in particular apps and models ends up in a particular database.</p>
+<p>Let's start out editing our settings. I always add a new settings.py variable to calculate the absolute path of my project directory.</p>
+<pre class="prettyprint">
+import os
+DIR = os.path.abspath(os.path.dirname(__file__))</pre>
+<p>With my <em>DIR</em> variable in place I can edit my settings and add two database configurations to my <em>settings.py</em>.</p>
+<pre class="prettyprint">
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.sqlite3', 
+        'NAME': os.path.join(DIR, 'django.sqlite3'),
+        'USER': '',
+        'PASSWORD': '',
+        'HOST': '',
+        'PORT': '',
+    },
+    'chinookdb': { # this is our sample db, already created
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': os.path.join(DIR, 'Chinook_Sqlite.sqlite'),
+        'USER': '',
+        'PASSWORD': '',
+        'HOST': '',
+        'PORT': '',
+    }
+}</pre>
+<p>Using two database configurations will allow us to keep all the <em>django.contrib.auth</em> models in <em>default</em> and we're pointing the <em>chinookdb</em> configuration at the Chinook database we downloaded. Let's see what's in the Chinook database.</p>
+<h2 id="generating-models-with-inspectdb">
+  Generating models with inspectdb</h2>
+<p>Django comes with a <a href="https://docs.djangoproject.com/en/dev/howto/legacy-databases/#auto-generate-the-models">management command to automatically generate models</a> from from existing databases. The inspectdb command can look at a database and spit out Python code representing the models that would generate the current state of the database. This isn't a silver bullet - inspectdb only works with three database backends and has varying support for particular field types and for foreign keys. If you can use it, however, it will at least save you some typing even if the resulting code needs some hand-editing to really work.</p>
+<pre class="prettyprint">
+(django1.3)$ ./manage.py inspectdb --database=chinookdb &gt; chinook/models.py
+(django1.3)$ head chinook/models.py
+# The following is created by running:
+# $ python manage.py inspectdb --database=chinookdb &gt; chinook/models.py
+
+# This is an auto-generated Django model module.
+# You'll have to do the following manually to clean this up:
+#     * Rearrange models' order
+#     * Make sure each model has one field with primary_key=True
+# Feel free to rename the models, but don't rename db_table values or field names.
+#
+# Also note: You'll have to insert the output of 'django-admin.py sqlcustom [appname]'
+# into your database.
+
+from django.db import models
+
+class Album(models.Model):
+    albumid = models.IntegerField(primary_key=True, db_column=u'AlbumId') # Field name made lowercase.
+    title = models.TextField(db_column=u'Title') # Field name made lowercase. This field type is a guess.
+    artistid = models.IntegerField(db_column=u'ArtistId') # Field name made lowercase.
+    class Meta:
+        db_table = u'Album'
+
+class Artist(models.Model):
+    artistid = models.IntegerField(primary_key=True, db_column=u'ArtistId') # Field name made lowercase.
+    ...</pre>
+<p>The full generated code is available <a href="https://github.com/simeonf/django-dualdb-sample">on github</a> - but we can already see that while the output is useful it isn't perfect. The inspectdb command didn't figure out that the Album.artistid field should be a foreignkey relationship to the Artist table. The Album.title field has a comment "This field type is a guess" - and looking at the underlying database reveals an <em>nvchar(160)</em> column. This should properly be</p>
+<pre class="prettyprint">
+    title = models.CharField(max_length=160) </pre>
+<p>it will take a little work to improve the accuracy of the mapping between our generated models and the database tables. Let's go ahead and explore how we can control which database our models communicate with.</p>
+<h2 id="database-routers">
+  Database routers</h2>
+<p>Django provides control over multi-db setups in several ways. Many management commands like dbshell take a --database flag that allows you to supply the database configuration name. Queryset operations allow you to chain <em>using</em> onto a query to specify a database other than <em>default</em> and other queryset methods like <em>save</em> and <em>delete</em> also allow you to specify the database to operate on. The more general way, however, is to define a custom database router and add it to your <em>settings.py</em>.</p>
+<p>As described in the <a href="https://docs.djangoproject.com/en/dev/topics/db/multi-db/#automatic-database-routing">django docs</a> database routers are simply Pythnon classes that may implement four methods. The <em>db_for_read</em>/<em>db_for_write</em> methods are passed a model and should return a database configuration name to read or write from for that particular model. The <em>allow_relation</em> method takes two models and allows you to determine if a relation is allowed. Django does not support relationships across databases so if our router is customizing which databases a model lives in, it must also provide the logic to disallow relationships between models that live in different databases. The <em>allow_syncdb</em> method allows us to restrict the operation of the <em>syncdb</em> management command. I created the following router to meet our requirements:</p>
+<pre class="prettyprint">
+class ChinookRouter(object): 
+    def db_for_read(self, model, **hints):
+        "Point all operations on chinook models to 'chinookdb'"
+        if model._meta.app_label == 'chinook':
+            return 'chinookdb'
+        return 'default'
+
+    def db_for_write(self, model, **hints):
+        "Point all operations on chinook models to 'chinookdb'"
+        if model._meta.app_label == 'chinook':
+            return 'chinookdb'
+        return 'default'
+    
+    def allow_relation(self, obj1, obj2, **hints):
+        "Allow any relation if a both models in chinook app"
+        if obj1._meta.app_label == 'chinook' and obj2._meta.app_label == 'chinook':
+            return True
+        # Allow if neither is chinook app
+        elif 'chinook' not in [obj1._meta.app_label, obj2._meta.app_label]: 
+            return True
+        return False
+    
+    def allow_syncdb(self, db, model):
+        if db == 'chinookdb' or model._meta.app_label == "chinook":
+            return False # we're not using syncdb on our legacy database
+        else: # but all other models/databases are fine
+            return True</pre>
+<p>The comments explain each the logic of each of the methods: the read/write methods make sure the auto-generated <em>chinook</em> read and write from the <em>chinookdb</em> database while all the other models read and write to the <em>default</em> database. The <em>allow_relation</em> method prevents relationships across databases and the <em>allow_syncdb</em> method disallows the syncdb management command on models that live in our <em>chinookdb</em> database, ensuring that syncdb never affects the structure of our legacy database.</p>
+<p>To use our router we need to add it to our settings.py file.</p>
+<pre class="prettyprint">
+DATABASE_ROUTERS = ['chinook.router.ChinookRouter']</pre>
+<h2 id="adding-an-admin-and-exploring-the-models">
+  Adding an admin and exploring the models</h2>
+<p>Now that we have our models created and our router is used to connect models to a particular database, let's use the contrib admin app to browse our legacy database. We won't customize our admin yet so I'll just loop over the generated models and register each one with the admin model. I've already added the admin app to my installed apps in settings and uncommented the admin url and admin.autodiscover() lines in my urls.py. I added an admin.py file in my chinook application:</p>
+<pre class="prettyprint">
+from chinook import models as chinook_models
+from django.contrib import admin
+from django.db.models.base import ModelBase
+
+# Very hacky!
+for name, var in chinook_models.__dict__.items():
+    if type(var) is ModelBase:
+        admin.site.register(var)</pre>
+<p>and can now login to the admin and see each of my registered models.</p>
+<div class="figure">
+  <img alt="Admin Screenshot" src="/static/post/1242/admin.JPG"/>
+  <p class="caption">Admin Screenshot</p>
+</div>
+<p>Clicking on one of the Chinook models shows some limitations in the models - individual models don't have a <em>__unicode__</em> method and we haven't customized the ModelAdmin class for each model so the listing screen is uninformative</p>
+<div class="figure">
+  <img alt="Admin Screenshot" src="/static/post/1242/admin2.JPG"/>
+  <p class="caption">Admin Screenshot</p>
+</div>
+<p>and the individual admin screens have multiple errors: the primary key is editable, the ForeignKey wasn't recognized so it shows up as an IntegerField in the admin, and some field types that should be limited in size show up as textareas</p>
+<div class="figure">
+  <img alt="Admin Screenshot" src="/static/post/1242/admin3.JPG"/>
+  <p class="caption">Admin Screenshot</p>
+</div>
+<p>We can fix most of these problems by editing our models. Fixing the auto-generated models is mostly a matter of making the same changes to each model - changing <em>IntegerField</em> to <em>ForeignKey</em>, changing <em>TextField</em> to <em>CharField(max_length=160)</em> adding <em>__unicode__</em> methods to each model, etc. To make my models better I'll need to be able to interrogate my database about the structure of the tables like:</p>
+<pre class="prettyprint">
+(django1.3)$ ./manage.py dbshell --database=chinookdb
+SQLite version 3.7.9 2011-11-01 00:52:41
+Enter ".help" for instructions
+Enter SQL statements terminated with a ";"
+sqlite&gt; .schema Album
+CREATE TABLE [Album]
+(
+    [AlbumId] INTEGER  NOT NULL,
+    [Title] NVARCHAR(160)  NOT NULL,
+    [ArtistId] INTEGER  NOT NULL,
+    CONSTRAINT [PK_Album] PRIMARY KEY  ([AlbumId]),
+    FOREIGN KEY ([ArtistId]) REFERENCES [Artist] ([ArtistId]) 
+                ON DELETE NO ACTION ON UPDATE NO ACTION
+);
+CREATE INDEX [IFK_AlbumArtistId] ON [Album] ([ArtistId]);
+CREATE UNIQUE INDEX [IPK_Album] ON [Album]([AlbumId]);
+sqlite&gt; </pre>
+<p>By looking at the database directly I can see that <em>ArtistId</em> is supposed to be a ForeignKey and that <em>Title</em> is supposed to have a maximum of 160 characters. I'll go ahead and modify my <em>models.py</em> to more accurately reflect the database.</p>
+<h2 id="editing-the-models">
+  Editing the Models</h2>
+<p>I spent about 30 minutes tweaking my models and you can see the <a href="https://github.com/simeonf/django-dualdb-sample/commit/4316415b55d2fda09276edb565b72fdaf263a0d1">diff on github</a> - mostly I converted <em>TextField</em>s (looking up the field length in the database) to <em>CharField</em>s and cleaned up some field and class names to meet Django's conventions. I added <em>__unicode__</em> methods to the model classes to give them a string representation in the console and in the Django admin. I also changed the <em>IntegerField</em> to <em>ForeignKey</em> where the database had relationships between tables - and it was here that I ran into a problem.</p>
+<p>Our database has a table - <em>PlaylistTrack</em> that is merely a many-to-many relationship table. Complete records in PlaylistTrack consist of a foreignkey pointing to <em>Playlist</em> and a foreignkey pointing to <em>Track</em>. In Django models we can represent this with a ManyToMany field. Unlike most field types <em>ManyToMany</em> fields don't actually correspond to a database column, they tell Django to build an intermediary table to capture the connections between two models.</p>
+<pre class="prettyprint">
+class PlaylistTrack(models.Model):
+    playlist = models.ForeignKey("Playlist", db_column=u'PlaylistId')
+    track = models.ForeignKey("Track", db_column=u'TrackId')
+    class Meta:
+        db_table = u'PlaylistTrack'
+        unique_together = ('playlist', 'track')
+
+    def __unicode__(self):
+        return u"Playlist %s: %s" % (self.playlist, self.track)
+
+
+class Track(models.Model):
+    id = models.AutoField(primary_key=True, db_column=u'TrackId')
+    playlist = models.ManyToManyField(Playlist, through=PlaylistTrack)
+    ... snip ...</pre>
+<p>This <em>almost</em> works - but the Chinook database sensibly created a relationship table that has a multi-column primary key. The <em>PlaylistTrack</em> table has no single <em>id</em> column that serves as the primary key. However the Django ORM does not support multi-column keys and without a single primary key on the <em>PlaylistTrack</em> table the ORM has difficulty properly following the relationships between models.</p>
+<p>I used sql in the sqlite shell to create a new table <em>PlaylistTrack2</em> table just like <em>PlayListTrack</em> but with an additional <em>id</em> field that serves as a primary key. I copied all the records from the the original table to the new one, dropped the old table, and renamed <em>PlaylistTrack2</em> to <em>PlaylistTrack</em>.</p>
+<p>Obviously we've failed at our original mission - we've been forced to modify the structure of our database. This is the only change we've had to make, however, so we might be able to request this simple change to the database structure.</p>
+<p>Let's take a look at our models. The image below (<a href="/static/post/1242/models.png">larger version</a>) was created with the <em>graph_models</em> management command from the <em>django-extensions</em> app.</p>
+<div class="figure">
+  <img alt="Chinook Models" src="/static/post/1242/models-small.png"/>
+  <p class="caption">Chinook Models</p>
+</div>
+<p>The <em>graph_models</em> command also requires the pygraphviz library to generate the images. YMMV but the following worked for me on Ubuntu:</p>
+<pre class="prettyprint">
+sudo apt-get install libgraphviz-dev
+pip install pygraphviz
+python manage.py graph_models -a -g -o models.png</pre>
+<p>The image allows us to scan the graphical representation of our models and confirm that we've got the relationships set up right. We haven't done anything complicated yet with our admin (we should probably make liberal <a href="https://github.com/simeonf/django-dualdb-sample/blob/master/dualdb/chinook/admin.py">use of inlines</a>) but at this point have a Django project that left a legacy database (nearly) unchanged and used Django's multiple-database support to keep our administrative data out of our legacy database. As it exists, the admin is a useful tool to edit our data and a few hours of tinkering would allow us to quickly develop a fairly powerful CRUD interface to our database.</p>
+
+    <div id="stream-post-author">
+        <h2>About the Author</h2>
+        <div class="row-fluid">
+            
+            <div class="stream-post-author-title span10">
+                
+                <p class="public-profile-info"/><p>Simeon has been been a software developer for a decade and a half with expertise in many old and annoying technologies like Visual Basic, Delphi, Perl and PHP. In 2007 while working as the lead developer for a web design firm he discovered Python and liked it so much he quit his job to use it!</p>
+
+<p>Since then his career as a developer has been particularly focused on "big data" web applications but Python and Django have remained his favorite tools of choice.</p>
+
+<p>For the last two years Simeon has been an expert instructor for Marakana, creating and teaching Python, Django, and client side Javascript courses for developers at technology giants like Cisco, Intel, and Facebook. He can be found hanging out and organizing the Python Community in the Bay Area at <a href="http://baypiggies.net">Baypiggies</a> or <a href="http://sfpythonmeetup.com">SF Python Meetup</a> and you can follow him on twitter <a href="http://twitter.com/simeonfranklin">@simeonfranklin</a> or on <a href="http://simeonfranklin.com/">his blog at simeonfranklin.com</a></p>
+                    <p class="author-action"><a href="/expert/simeon-franklin">Learn More</a></p>
+            </div>
+        </div>
+    </div>
+
+
+</div>
+
+
+
+
+
+</div></body></html>

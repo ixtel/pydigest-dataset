@@ -1,0 +1,160 @@
+<html><body><div><div class="col-xs-12 single-content">
+                <p class="meta">
+                    
+                    <i class="fa fa-bookmark"/> 16 декабря 2015 г.
+                    <i class="link-spacer"/>
+                    
+                        <a href="/tag/django/">Django</a>
+                        
+                        <i class="link-spacer"/>
+                        
+                    
+                        <a href="/tag/linux/">Linux</a>
+                        
+                        <i class="link-spacer"/>
+                        
+                    
+                        <a href="/tag/python/">Python</a>
+                        
+                        <i class="link-spacer"/>
+                        
+                    
+                        <a href="/tag/search-engines/">Поисковые системы</a>
+                        
+                        <i class="link-spacer"/>
+                        
+                    
+                        <a href="/tag/ElasticSearch/"/>
+                        
+                    
+                    
+                </p>
+
+                <h1>Django. Знакомство с ElasticSearch</h1>
+                
+
+                <p>Понадобилось на одном из своих проектов установить <a href="https://en.wikipedia.org/wiki/Full_text_search">FTS</a> сервис. Я достаточно долгое время пользовался <a href="/tag/sphinxsearch/">SphinxSearch</a>, но решил поинтересоваться у общественности (<a href="https://plus.google.com/+MikhailAndreev-adw0rd/posts/Fv7PpzoBKbb">тут</a> и <a href="https://www.facebook.com/adw0rd/posts/10153751086558544">тут</a>) какой сейчас инструмент более популярен и отвечает следующим требованиям:</p>
+
+<p><img src="/media/uploads/logo-elastic.png" class="alignright"/></p>
+
+<ul>
+<li>Русская морфология и стемминг</li>
+<li>Фасетный поиск (аттрибуты)</li>
+<li>Удобное API для поиска и индексации</li>
+<li>Простота маштабирования</li>
+<li>Желательно иметь real-time индексы</li>
+<li>Желательно наличие админки для анализа и управления индексами</li>
+</ul>
+
+<p><a name="more"/></p>
+
+<p>Большинство коллег использует <a href="https://www.elastic.co/">ElasticSearch</a>, почитав про него несколько статей и посмотрев несколько видео с презентациями решил попробовать вторую версию, а именно <strong>ElasticSearch 2.1</strong>. Также вспомнил, что <a href="https://www.elastic.co/products/logstash">LogStash</a> стал частью <strong>elastic</strong>, а я на него давно уже гляжу в качестве замены <a href="/tag/sentry/">Sentry</a>.</p>
+
+<p>Если кратко, то ElasticSearch, как и Solr, представляет из себя некую оболочку вокруг Lucene. Но именно в этой оболечке все вкусности этого замечательного поискового движка: фасеты, HTTP-JSON API, multitenant (возможность кастомизации поискового индекса под разные группы пользователей), маштабирование, удобный дашборд.</p>
+
+<h2>Установка ElasticSearch 2.1</h2>
+
+<p>В пакетах <strong>Ubuntu 15.10</strong> лежит старая версия 1.6.2, указывать какой-либо ppa я не стал, решил для тестовового использования скачать просто архив с официального сайта:</p>
+
+<pre><pre><code>curl -L -O <noindex><a href="https://download.elasticsearch.org/elasticsearch/release/org/elasticsearch/distribution/tar/elasticsearch/2.1.0/elasticsearch-2.1.0.tar.gz" rel="nofollow">https://download.elasticsearch.org/elasticsearch/release/org/elasticsearch/distribution/tar/elasticsearch/2.1.0/elasticsearch-2.1.0.tar.gz</a></noindex>
+tar -xzf elasticsearch-2.1.0.tar.gz
+cd elasticsearch-2.1.0/
+</code></pre></pre>
+
+<p>Поставим сразу два полезных плагина:</p>
+
+<pre><pre><code># Anticipate Issues &amp; Scale Faster
+# <noindex><a href="https://www.elastic.co/products/marvel" rel="nofollow">https://www.elastic.co/products/marvel</a></noindex>
+./bin/plugin install elasticsearch/marvel/latest
+
+# Monitoring and Management of instances and clusters
+# <noindex><a href="https://github.com/royrusso/elasticsearch-HQ" rel="nofollow">https://github.com/royrusso/elasticsearch-HQ</a></noindex>
+./bin/plugin install royrusso/elasticsearch-HQ
+</code></pre></pre>
+
+<blockquote class="info">
+Если у вас Linux запущен из под VirtualBox, то надо указать в настройках <tt>conf/elasticsearch.yml</tt>:<br/><pre><code>network.host: 0.0.0.0
+discovery.zen.ping.unicast.hosts: ["10.0.2.2", "127.0.0.1", "[::1]"]</code></pre> где <tt>10.0.2.2</tt> адрес хостовой машины. Узнать его можно в настройках сети VirtualBox, либо посмотреть откуда идут соединения с гостевой машиной <tt>netstat -an| grep SOMEPORT</tt>.
+</blockquote>
+
+<p>Отключаем агента марвела в <tt>conf/elasticsearch.yml</tt>, т.к. он нам сейчас не нужен:</p>
+
+<pre><pre><code>marvel.agent.enabled: false
+</code></pre></pre>
+
+<p>Запускаем ElasticSearch и проверяем, что сервис запущен:</p>
+
+<pre><pre><code>./bin/elasticsearch
+
+# Должен вернуться JSON
+curl <noindex><a href="http://localhost:9200/" rel="nofollow">http://localhost:9200/</a></noindex>
+
+# Проверяем что работает веб-интерфейс Elastic HQ
+curl <noindex><a href="http://localhost:9200/_plugin/hq/" rel="nofollow">http://localhost:9200/_plugin/hq/</a></noindex>
+</code></pre></pre>
+
+<p>Если что-то не работает, смотрите STDOUT запущенного инстанса <tt>elasticsearch</tt>.</p>
+
+<h2>Использование под Django</h2>
+
+<p>Загуглив готовое решение для удобной индексации моделей в <strong>Django</strong>, наткнулся на 
+<a href="https://github.com/liberation/django-elasticsearch">django-elasticsearch</a>, поставим его:</p>
+
+<pre><pre><code>pip install elasticsearch
+pip install git+<noindex><a href="https://github.com/liberation/django_elasticsearch.git" rel="nofollow">https://github.com/liberation/django_elasticsearch.git</a></noindex>
+</code></pre></pre>
+
+<p>Дальше по документации в <tt>README.md</tt> меняем нашу модель:</p>
+
+<pre><pre><code>from django.db import models
+from django_elasticsearch.models import EsIndexable
+
+
+class Tag(EsIndexable, models.Model):
+    name = models.CharField(max_length=64)
+    [...]
+</code></pre></pre>
+
+<p>Укажем имя индекса в <tt>settings.py</tt>:</p>
+
+<pre><pre><code>ELASTICSEARCH_DEFAULT_INDEX = '&lt;project_name&gt;'
+</code></pre></pre>
+
+<p>Запускаем индекс:</p>
+
+<pre><pre><code>./manage.py shell
+ &gt;&gt;&gt; from products.models import Tag
+ &gt;&gt;&gt; Tag.es.create_index()
+ &gt;&gt;&gt; Tag.es.reindex_all()
+</code></pre></pre>
+
+<p>Удобно при этом смотреть в <strong>Elastic HQ</strong> и видеть как наполнился наш индекс.</p>
+
+<p>Дальше пробуем поискать:</p>
+
+<pre><pre><code>&gt;&gt;&gt; Tag.es.search('something')
+[{u'description': u'', u'name': u'Something', u'id': 1}, {u'description': u'', u'name': u'SomeThing2', u'id': 2}, ...]
+
+&gt;&gt;&gt; Tag.es.search('something').deserialize()
+[&lt;Tag: 1 Something&gt;, &lt;Tag: 2 SomeThing2&gt;]
+</code></pre></pre>
+
+<h2>Вешаемся на сигналы и меняем в реалтайме индекс</h2>
+
+<p>Для этого надо в <tt>settings.py</tt> указать: </p>
+
+<pre><pre><code>ELASTICSEARCH_AUTO_INDEX = True
+</code></pre></pre>
+
+<p>Теперь используя сигналы "post_syncdb", "post_save" и "post_delete" мы будем уведомлять поисковый механизм о новых изменениях в модели. Делать ничего не надо, любое изменение или удаление объекта в подключенной через миксин <strong>EsIndexable</strong> модели будет немедленно применено в ElasticSearch.</p>
+
+<h2>Что ещё почитать</h2>
+
+
+
+
+
+                
+
+            </div>
+        </div></body></html>

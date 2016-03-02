@@ -1,0 +1,458 @@
+<html><body><div><div class="content_body" data-subscribe="true" data-view="content#body"><p>REST APIs have become a common way to establish an interface between web <a href="https://www.toptal.com/back-end">back-ends</a> and <a href="https://www.toptal.com/front-end">front-ends</a>, and between different web services. The simplicity of this kind of interface, and the ubiquitous support of the HTTP and HTTPS protocols across different networks and frameworks, makes it an easy choice when considering interoperability issues.</p>
+
+<p><a href="http://bottlepy.org/docs/dev/index.html">Bottle</a> is a minimalist Python web framework. It is lightweight, fast, and easy to use, and is well-suited to building RESTful services. A <a href="http://mindref.blogspot.com.br/2012/09/python-fastest-web-framework.html">bare-bones comparison</a> made by <a href="https://www.blogger.com/profile/04890869628175359888">Andriy Kornatskyy</a> put it among the top three frameworks in terms of response time and throughput (requests per second). In my own tests on the virtual servers available from DigitalOcean, I found that the combination of the uWSGI server stack and Bottle could achieve as low as a 140μs overhead per request.</p>
+
+<p>In this article, I’ll provide a walkthrough of how to build a RESTful API service using Bottle.</p>
+
+<p><img src="//assets.toptal.io/uploads/blog/image/91871/toptal-blog-image-1450190826314-830cb5528c9d6c342a95f590e8e99be6.jpg" alt="Bottle: A Fast and Lightweight Python Web Framework"/></p>
+
+<h2 id="installation-and-configuration">Installation and Configuration</h2>
+
+<p>The Bottle framework achieves its impressive performance in part thanks to its light weight. In fact the entire library is distributed as a one-file module. This means that it does not hold your hand as much as other frameworks, but it is also more flexible and can be adapted to fit into many different tech stacks. Bottle is therefore best suited for projects where performance and customizability are at a premium, and where the time-saving advantages of more heavy-duty frameworks are less of a consideration.</p>
+
+<p>The flexibility of Bottle makes an in-depth description of setting up the platform a bit futile, since it may not reflect your own stack. However, a quick overview of the options, and where to learn more about how to set them up, is appropriate here:</p>
+
+<h3 id="installation">Installation</h3>
+
+<p>Installing Bottle is as easy as installing any other Python package. Your options are:</p>
+
+<ul>
+  <li>Install on your system using the system’s package manager. Debian Jessie (current stable) packages the version 0.12 as <em>python-bottle</em>.</li>
+  <li>Install on your system using the Python Package Index with <code>pip install bottle</code>.</li>
+  <li>Install on a virtual environment (recommended).</li>
+</ul>
+
+<p>To install Bottle on a virtual environment, you’ll need the <em>virtualenv</em> and <em>pip</em> tools. To install them, please refer to the <a href="https://virtualenv.pypa.io/en/latest/installation.html">virtualenv</a> and <a href="https://pip.pypa.io/en/stable/installing/">pip</a> documentation, though you probably have them on your system already.</p>
+
+<p>In Bash, create an environment with Python 3:</p>
+
+<pre><code class="language-bash">$ virtualenv -p `which python3` env
+</code></pre>
+
+<p>Suppressing the <code>-p `which python3`</code> parameter will lead to the installation of the default Python interpreter present on the system – usually Python 2.7. Python 2.7 is supported, but this tutorial assumes Python 3.4.</p>
+
+<p>Now activate the environment and install Bottle:</p>
+
+<pre><code class="language-bash">$ . env/bin/activate
+$ pip install bottle
+</code></pre>
+
+<p>That’s it. Bottle is installed and ready to use. If you’re not familiar with <em>virtualenv</em> or <em>pip</em>, their documentation is top notch. Take a look! They are well worth it.</p>
+
+<h3 id="server">Server</h3>
+
+<p>Bottle complies with Python’s standard <a href="http://wsgi.readthedocs.org/">Web Server Gateway Interface (WSGI)</a>, meaning it can be used with any WSGI-compliant server. This includes <a href="http://uwsgi-docs.readthedocs.org/en/latest/WSGIquickstart.html">uWSGI</a>, <a href="http://www.tornadoweb.org/en/stable/wsgi.html#running-wsgi-apps-on-tornado-servers">Tornado</a>, <a href="http://docs.gunicorn.org/en/stable/run.html">Gunicorn</a>, <a href="http://bottlepy.org/docs/0.12/deployment.html#apache-mod-wsgi">Apache</a>, <a href="http://docs.aws.amazon.com/elasticbeanstalk/latest/dg/create-deploy-python-django.html">Amazon Beanstalk</a>, <a href="http://bottlepy.org/docs/0.12/deployment.html#google-appengine">Google App Engine</a>, and others.</p>
+
+<p>The correct way to set it up varies slightly with each environment. Bottle exposes an object that conforms to the WSGI interface, and the server must be configured to interact with this object.</p>
+
+<p>To learn more about how to set up your server, refer to the server’s docs, and to Bottle’s docs, <a href="http://bottlepy.org/docs/0.12/deployment.html">here</a>.</p>
+
+<h3 id="database">Database</h3>
+
+<p>Bottle is database-agnostic and doesn’t care where the data is coming from. If you’d like to use a database in your app, the <a href="https://pypi.python.org/pypi">Python Package Index</a> has several interesting options, like <a href="http://www.sqlalchemy.org/">SQLAlchemy</a>, <a href="http://api.mongodb.org/python/current/">PyMongo</a>, <a href="http://mongoengine.org/">MongoEngine</a>, <a href="http://pythonhosted.org/CouchDB/">CouchDB</a> and <a href="http://docs.pythonboto.org/en/latest/dynamodb2_tut.html">Boto</a> for DynamoDB. You only need the appropriate adapter to get it working with the database of your choice.</p>
+
+<h2 id="bottle-framework-basics">Bottle Framework Basics</h2>
+
+<p>Now, let’s see how to make a basic app in Bottle. For code examples, I will assume Python &gt;= 3.4. However, most of what I’ll write here will work on Python 2.7 as well.</p>
+
+<p>A basic app in Bottle looks like this:</p>
+
+<pre><code class="language-python">import bottle
+
+app = application = bottle.default_app()
+
+if __name__ == '__main__':
+    bottle.run(host = '127.0.0.1', port = 8000)
+</code></pre>
+
+<p>When I say basic, I mean this program doesn’t even “Hello World” you. (When was the last time you accessed a REST interface that answered “Hello World?”) All HTTP requests to <code>127.0.0.1:8000</code> will recieve a 404 Not Found response status.</p>
+
+<h3 id="apps-in-bottle">Apps in Bottle</h3>
+
+<p>Bottle may have several instances of apps created, but for the sake of convenience the first instance is created for you; that’s the default app. Bottle keeps these instances in a stack internal to the module. Whenever you do something with Bottle (such as running the app or attaching a route) and don’t specify which app you’re talking about, it refers to the default app. In fact, the <code>app = application = bottle.default_app()</code> line doesn’t even need to exist in this basic app, but it is there so that we can easily invoke the default app with Gunicorn, uWSGI or some generic WSGI server.</p>
+
+<p>The possibility of multiple apps may seem confusing at first, but they add flexibility to Bottle. For different modules of your application, you might create specialized Bottle apps by instantiating other Bottle classes and setting them up with different configurations as needed. These different apps could be accessed by different URLs, through Bottle’s URL router. We won’t delve into that in this tutorial, but you are encouraged to take a took at Bottle’s documentation <a href="http://bottlepy.org/docs/0.12/tutorial.html#quickstart-hello-world">here</a> and <a href="http://bottlepy.org/docs/0.12/api.html#bottle.Bottle.mount">here</a>.</p>
+
+<h3 id="server-invocation">Server Invocation</h3>
+
+<p>The last line of the script runs Bottle using the indicated server. If no server is indicated, as is the case here, the default server is Python’s built-in WSGI reference server, which is only suitable for development purposes. A different server can be used like this:</p>
+
+<pre><code class="language-python">bottle.run(server='gunicorn', host = '127.0.0.1', port = 8000)
+</code></pre>
+
+<p>This is syntactic sugar that let’s you start the app by running this script. For example, if this file is named <code>main.py</code>, you can simply run <code>python main.py</code> to start the app. Bottle carries <a href="http://bottlepy.org/docs/dev/deployment.html#switching-the-server-backend">quite an extensive list of server adapters</a> that can be used this way.</p>
+
+<p>Some WSGI servers don’t have Bottle adapters. These can be started with the server’s own run commands. On uWSGI, for instance, all you’d have to do would be to call <code>uwsgi</code> like this:</p>
+
+<pre><code class="language-bash">$ uwsgi --http :8000 --wsgi-file main.py
+</code></pre>
+
+<h3 id="a-note-on-file-structure">A Note on File Structure</h3>
+
+<p>Bottle leaves your app’s file structure entirely up to you. I’ve found my file structure policies evolve from project to project, but tend to be based on an MVC philosophy.</p>
+
+<h2 id="building-your-rest-api">Building Your REST API</h2>
+
+<p>Of course, nobody needs a server that only returns 404 for every requested URI. I’ve promised you we’d build a REST API, so let’s do it.</p>
+
+<p>Suppose you’d like to <a href="https://www.toptal.com/api-developers/5-golden-rules-for-designing-a-great-web-api">build an interface</a> that manipulates a set of names. In a real app you would probably use a database for this, but for this example we will just use the in-memory <code>set</code> data structure.</p>
+
+<p>The skeleton of our API might look like this. You can place this code anywhere in the project, but my recommendation would be a separate API file, such as <code>api/names.py</code>.</p>
+
+<pre><code class="language-python">from bottle import request, response
+from bottle import post, get, put, delete
+
+_names = set()                    # the set of names
+
+@post('/names')
+def creation_handler():
+    '''Handles name creation'''
+    pass
+
+@get('/names')
+def listing_handler():
+    '''Handles name listing'''
+    pass
+
+@put('/names/&lt;name&gt;')
+def update_handler(name):
+    '''Handles name updates'''
+    pass
+
+@delete('/names/&lt;name&gt;')
+def delete_handler(name):
+    '''Handles name deletions'''
+    pass
+</code></pre>
+
+<h3 id="routing">Routing</h3>
+
+<p>As we can see, routing in Bottle is done using decorators. The imported decorators <code>post</code>, <code>get</code>, <code>put</code>, and <code>delete</code> register handlers for these four actions. Understanding how these work can be broken down as follows:</p>
+
+<ul>
+  <li>All of the above decorators are a shortcut to the <code>default_app</code> routing decorators. For example, the <code>@get()</code> decorator applies <code>bottle.default_app().get()</code> to the handler.</li>
+  <li>The routing methods on <code>default_app</code> are all shortcuts for <code>route()</code>. So <code>default_app().get('/')</code> is equivalent to <code>default_app().route(method='GET', '/')</code>.</li>
+</ul>
+
+<p>So <code>@get('/')</code> is the same as <code>@route(method='GET', '/')</code>, which is the same as <code>@bottle.default_app().route(method='GET', '/')</code>, and these can be used interchangeably.</p>
+
+<p>One helpful thing about the <code>@route</code> decorator is that if you’d like, for example, to use the same handler to deal with both object updates and deletes, you could just pass a list of methods it handles like this:</p>
+
+<pre><code class="language-python">@route('/names/&lt;name&gt;', method=['PUT', 'DELETE'])
+def update_delete_handler(name):
+    '''Handles name updates and deletions'''
+    pass
+</code></pre>
+
+<p>Alright then, let’s implement some of these handlers.</p>
+
+<p><img src="//assets.toptal.io/uploads/blog/image/91872/toptal-blog-image-1450190847241-2c2e1a79099c8447de499a36b428e51e.jpg" alt="Concoct your perfect REST API with Bottle Framework."/></p>
+
+<p class="pop_out_box is-full_width is-big">RESTful APIs are a staple of modern web development. Serve your API clients a potent concoction with a Bottle back-end.</p>
+
+
+
+<h2 id="post-resource-creation">POST: Resource Creation</h2>
+
+<p>Our POST handler might look like this:</p>
+
+<pre><code class="language-python">import re, json
+
+namepattern = re.compile(r'^[a-zA-Z\d]{1,64}$')
+
+@post('/names')
+def creation_handler():
+    '''Handles name creation'''
+
+    try:
+        # parse input data
+        try:
+            data = request.json()
+        except:
+            raise ValueError
+
+        if data is None:
+            raise ValueError
+
+        # extract and validate name
+        try:
+            if namepattern.match(data['name']) is None:
+                raise ValueError
+            name = data['name']
+        except (TypeError, KeyError):
+            raise ValueError
+
+        # check for existence
+        if name in _names:
+            raise KeyError
+
+    except ValueError:
+        # if bad request data, return 400 Bad Request
+        response.status = 400
+        return
+    
+    except KeyError:
+        # if name already exists, return 409 Conflict
+        response.status = 409
+        return
+
+    # add name
+    _names.add(name)
+    
+    # return 200 Success
+    response.headers['Content-Type'] = 'application/json'
+    return json.dumps({'name': name})
+</code></pre>
+
+<p>Well, that’s quite a lot. Let’s review these steps part by part.</p>
+
+<p><strong><em>Body Parsing</em></strong></p>
+
+<p>This API requires the user to POST a JSON string at the body with an attribute named “name”.</p>
+
+<p>The <code>request</code> object imported earlier from <code>bottle</code> always points to the current request and holds all of the request’s data. Its <code>body</code> attribute contains a byte stream of the request body, which can be accessed by any function that is able to read a stream object (like reading a file).</p>
+
+<p>The <code>request.json()</code> method checks the headers of the request for the “application/json” content type and parses the body if it’s correct. If Bottle detects a malformed body (e.g.: empty or with wrong content type), this method returns <code>None</code> and thus we raise a <code>ValueError</code>. If malformed JSON content is detected by the JSON parser; it raises an exception that we catch and reraise, again as a <code>ValueError</code>.</p>
+
+<p><strong><em>Object Parsing and Validation</em></strong></p>
+
+<p>If there are no errors, we have converted the request’s body into a Python object referenced by the <code>data</code> variable. If we’ve received a dictionary with a “name” key, we’ll be able to access it via <code>data['name']</code>. If we received a dictionary without this key, trying to access it will lead us to a <code>KeyError</code> exception. If we’ve received anything other than a dictionary, we’ll get a <code>TypeError</code> exception. If any of these errors occur, once again, we reraise it as a <code>ValueError</code>, indicating a bad input.</p>
+
+<p>To check if the name key has the right format, we should test it against a regex mask, such as the <code>namepattern</code> mask we created here. If the key <code>name</code> isn’t a string, <code>namepattern.match()</code> will raise a <code>TypeError</code>, and if it doesn’t match it will return <code>None</code>.</p>
+
+<p>With the mask in this example, a name must be an ASCII alphanumeric with no blanks from 1 to 64 characters. This is a simple validation and it doesn’t test for an object with garbage data, for example. More complex and complete validation may be achieved through the use of tools such as <a href="http://formencode.readthedocs.org/en/latest/">FormEncode</a>.</p>
+
+<p><strong><em>Testing for Existence</em></strong></p>
+
+<p>The last test before fulfilling the request is whether the given name already exists in the set. In a more structured app, that test should probably be done by a dedicated module and signaled to our API through a specialized exception, but since we’re manipulating a set directly, we have to do it here.</p>
+
+<p>We signal the existence of the name by raising a <code>KeyError</code>.</p>
+
+<p><strong><em>Error Responses</em></strong></p>
+
+<p>Just as the request object holds all the request data, the response object does the same for the response data. There are two ways of setting the response status:</p>
+
+<pre><code class="language-python">response.status = 400
+</code></pre>
+
+<p>and:</p>
+
+<pre><code class="language-python">response.status = '400 Bad Request'
+</code></pre>
+
+<p>For our example, we opted for the simpler form, but the second form may be used to specify the error’s text description. Internally, Bottle will split the second string and set the numeric code appropriately.</p>
+
+<p><strong><em>Success Response</em></strong></p>
+
+<p>If all the steps are successful, we fulfill the request by adding the name to the set <code>_names</code>, setting the <code>Content-Type</code> response header, and returning the response. Any string returned by the function will be treated as the response body of a <code>200 Success</code> response, so we simply generate one with <code>json.dumps</code>.</p>
+
+<h2 id="get-resource-listing">GET: Resource Listing</h2>
+
+<p>Moving on from name creation, we’ll implement the name listing handler:</p>
+
+<pre><code class="language-python">@get('/names')
+def listing_handler():
+    '''Handles name listing'''
+
+    response.headers['Content-Type'] = 'application/json'
+    response.headers['Cache-Control'] = 'no-cache'
+    return json.dumps({'names': list(_names)})
+</code></pre>
+
+<p>Listing the names was much easier, wasn’t it?  Compared to name creation there isn’t much to do here. Simply set some response headers and return a JSON representation of all names, and we’re done.</p>
+
+<h2 id="put-resource-update">PUT: Resource Update</h2>
+
+<p>Now, lets see how to implement the update method. It’s not very different from the create method, but we use this example to introduce URI parameters.</p>
+
+<pre><code class="language-python">@put('/names/&lt;oldname&gt;')
+def update_handler(name):
+    '''Handles name updates'''
+
+    try:
+        # parse input data
+        try:
+            data = json.load(utf8reader(request.body))
+        except:
+            raise ValueError
+
+        # extract and validate new name
+        try:
+            if namepattern.match(data['name']) is None:
+                raise ValueError
+            newname = data['name']
+        except (TypeError, KeyError):
+            raise ValueError
+
+        # check if updated name exists
+        if oldname not in _names:
+            raise KeyError(404)
+
+        # check if new name exists
+        if name in _names:
+            raise KeyError(409)
+
+    except ValueError:
+        response.status = 400
+        return
+    except KeyError as e:
+        response.status = e.args[0]
+        return
+
+    # add new name and remove old name
+    _names.remove(oldname)
+    _names.add(newname)
+
+    # return 200 Success
+    response.headers['Content-Type'] = 'application/json'
+    return json.dumps({'name': newname})
+</code></pre>
+
+<p>The body schema for the update action is the same as for the creation action, but now we also have a new <code>oldname</code> parameter in the URI, as defined by the route <code>@put('/names/&lt;oldname&gt;')</code>.</p>
+
+<p><strong><em>URI Parameters</em></strong></p>
+
+<p>As you can see, Bottle’s notation for URI parameters is very straightforward. You can build URIs with as many parameters as you’d like. Bottle automatically extracts them from the URI and passes them to the request handler:</p>
+
+<pre><code class="language-python">@get('/&lt;param1&gt;/&lt;param2&gt;')
+def handler(param1, param2):
+    pass
+</code></pre>
+
+<p>Using cascading route decorators, you may build URIs with optional parameters:</p>
+
+<pre><code class="language-python">@get('/&lt;param1&gt;')
+@get('/&lt;param1&gt;/&lt;param2&gt;')
+def handler(param1, param2 = None)
+    pass
+</code></pre>
+
+<p>Also, Bottle allows for the following routing filters in URIs:</p>
+
+
+
+<blockquote>
+  <p>Matches only parameters that may be converted to <code>int</code>, and passes the converted value to the handler:</p>
+
+  <pre><code class="language-python">@get('/&lt;param:int&gt;')
+def handler(param):
+    pass
+</code></pre>
+</blockquote>
+
+
+
+<blockquote>
+  <p>The same as <code>int</code>, but with floating point values:</p>
+
+  <pre><code class="language-python">@get('/&lt;param:float&gt;')
+def handler(param):
+    pass
+</code></pre>
+</blockquote>
+
+
+
+<blockquote>
+  <p>Matches only parameters which match the given regular expression:</p>
+
+  <pre><code class="language-python">@get('/&lt;param:re:^[a-z]+$&gt;')
+def handler(param):
+    pass
+</code></pre>
+</blockquote>
+
+
+
+<blockquote>
+  <p>Matches subsegments of the URI path in a flexible way:</p>
+
+  <pre><code class="language-python">@get('/&lt;param:path&gt;/id&gt;')
+def handler(param):
+    pass
+</code></pre>
+
+  <p>Matches:</p>
+
+  <ul>
+    <li><code>/x/id</code>, passing <code>x</code> as <code>param</code>.</li>
+    <li><code>/x/y/id</code>, passing <code>x/y</code> as <code>param</code>.</li>
+  </ul>
+</blockquote>
+
+<h2 id="delete-resource-deletion">DELETE: Resource Deletion</h2>
+
+<p>Like the GET method, the DELETE method brings us little news. Just note that returning <code>None</code> without setting a status returns a response with an empty body and a 200 status code.</p>
+
+<pre><code class="language-python">@delete('/names/&lt;name&gt;')
+def delete_handler(name):
+    '''Handles name updates'''
+
+    try:
+        # Check if name exists
+        if name not in _names:
+            raise KeyError
+    except KeyError:
+        response.status = 404
+        return
+
+    # Remove name
+    _names.remove(name)
+    return
+</code></pre>
+
+<h2 id="final-step-activating-the-api">Final Step: Activating the API</h2>
+
+<p>Supposing we’ve saved our names API as <code>api/names.py</code> , we can now enable these routes in the main application file <code>main.py</code>.</p>
+
+<pre><code class="language-python">import bottle
+from api import names
+
+app = application = bottle.default_app()
+
+if __name__ == '__main__':
+    bottle.run(host = '127.0.0.1', port = 8000)
+</code></pre>
+
+<p>Notice we’ve only imported the <code>names</code> module. Since we’ve decorated all the methods with their URIs attached to the default app, there is no need to do any further setup. Our methods are already in place, ready to be accessed.</p>
+
+<p><img src="//assets.toptal.io/uploads/blog/image/91873/toptal-blog-image-1450190876615-23d73325c2cca4ec8dc77f0af8e0d1a3.jpg" alt="Nothing makes a front-end happy like a well-made REST API. Works like a charm!"/></p>
+
+<h2 id="bonus-cross-origin-resource-sharing-cors">Bonus: Cross Origin Resource Sharing (CORS)</h2>
+
+<p>One common reason to build a REST API is to communicate with a JavaScript front-end through AJAX. For some applications, these requests should be allowed to come from any domain, not just your API’s home domain. By default, most browsers disallow this behavior, so let me show you how to set up <a href="https://en.wikipedia.org/wiki/Cross-origin_resource_sharing">cross-origin resource sharing (CORS)</a> in Bottle to allow this:</p>
+
+<pre><code class="language-python">from bottle import hook, route, response
+
+_allow_origin = '*'
+_allow_methods = 'PUT, GET, POST, DELETE, OPTIONS'
+_allow_headers = 'Authorization, Origin, Accept, Content-Type, X-Requested-With'
+
+@hook('after_request')
+def enable_cors():
+    '''Add headers to enable CORS'''
+
+    response.headers['Access-Control-Allow-Origin'] = _allow_origin
+    response.headers['Access-Control-Allow-Methods'] = _allow_methods
+    response.headers['Access-Control-Allow-Headers'] = _allow_headers
+
+@route('/', method = 'OPTIONS')
+@route('/&lt;path:path&gt;', method = 'OPTIONS')
+def options_handler(path = None):
+    return
+</code></pre>
+
+<p>The <code>hook</code> decorator allows us to call a function before or after each request. In our case, to enable CORS we must set the <code>Access-Control-Allow-Origin</code>, <code>-Allow-Methods</code> and <code>-Allow-Headers</code> headers for each of our responses. These indicate to the requester that we will serve the indicated requests.</p>
+
+<p>Also, the client may make an OPTIONS HTTP request to the server to see if it may really make requests with other methods. With this sample catch-all example, we respond to all OPTIONS requests with a 200 status code and empty body.</p>
+
+<p>To enable this, just save it and import it from the main module.</p>
+
+<h2 id="wrap-up">Wrap Up</h2>
+
+<p>That’s all there is to it!</p>
+
+<p>With this tutorial, I’ve tried to cover the basic steps to create a REST API for a Python app with the Bottle web framework.</p>
+
+<p>You can deepen your knowledge about this small but powerful framework by visiting its <a href="http://bottlepy.org/docs/stable/tutorial.html">tutorial</a> and <a href="http://bottlepy.org/docs/stable/api.html">API reference docs</a>.</p>
+<div class="blog_author_big_banner is-active" data-ga-action="ClickedOnHireTheAuthor_bottom" data-ga-label="building-a-rest-api-with-bottle-framework" data-view="content#bottom_banner"><h2>About the author</h2><div class="skill_talent for-blog_post"><div class="skill_talent-main"><a class="link skill_talent-name" href="/resume/leandro-pereira-de-lima-e-silva">Leandro Lima, Brazil</a><div class="clearfix"><p class="skill_talent-member_since">member since August 17, 2015</p></div><div class="skill_talent-description"><p>Leandro has 12 years of experience with IT and has been working with Python since 2013. Graduated from university with a degree in Electrical Engineering, he has excellent analytical skills and a passion for building efficient and cost-effective systems. </p><a class="link" href="/resume/leandro-pereira-de-lima-e-silva">[click to continue...]</a></div></div></div></div><p class="template" data-role="subscribe_template" data-template="{&quot;html&quot;:&quot;\u003cdiv class=\&quot;embeddable_form-wrapper\&quot; data-view=\&quot;blog_subscribe#form\&quot;\u003e\u003cform action=\&quot;/blog/subscription\&quot; class=\&quot;embeddable_form for-post\&quot; data-entity=\&quot;blog_subscription\&quot; data-remote=\&quot;\&quot; data-view=\&quot;form#form\&quot; method=\&quot;post\&quot;\u003e\u003cdiv class=\&quot;embeddable_form-step is-email_form is-current\&quot; data-role=\&quot;step\&quot;\u003e\u003cdiv class=\&quot;embeddable_form-row is-label\&quot;\u003e\u003cdiv class=\&quot;embeddable_form-label_title\&quot;\u003eLike what you\u0026#39;re reading?\u003c/div\u003e\u003cdiv class=\&quot;embeddable_form-label\&quot;\u003eGet the latest updates first.\u003c/div\u003e\u003c/div\u003e\u003cdiv class=\&quot;embeddable_form-row form-field is-email_field\&quot;\u003e\u003cinput autocomplete=\&quot;off\&quot; class=\&quot;input is-medium\&quot; data-role=\&quot;email\&quot; name=\&quot;blog_subscription[email]\&quot; placeholder=\&quot;Enter your email address...\&quot; type=\&quot;text\&quot; /\u003e\u003cinput name=\&quot;blog_subscription[vertical]\&quot; type=\&quot;hidden\&quot; value=\&quot;developers\&quot; /\u003e\u003cinput name=\&quot;from_widget\&quot; type=\&quot;hidden\&quot; value=\&quot;true\&quot; /\u003e\u003c/div\u003e\u003cdiv class=\&quot;embeddable_form-row is-submit\&quot;\u003e\u003cinput class=\&quot;button is-green_candy is-default is-full_width\&quot; data-loader-text=\&quot;Subscribing...\&quot; data-role=\&quot;submit\&quot; type=\&quot;submit\&quot; value=\&quot;Get Exclusive Updates\&quot; /\u003e\u003c/div\u003e\u003cdiv class=\&quot;embeddable_form-row is-privacy\&quot;\u003e\u003cdiv class=\&quot;embeddable_form-privacy\&quot;\u003e\u003cdiv class=\&quot;embeddable_form-privacy_icon\&quot;\u003e\u003c/div\u003e\u003cdiv class=\&quot;embeddable_form-privacy_text\&quot;\u003eNo spam. Just great engineering and design posts.\u003c/div\u003e\u003c/div\u003e\u003c/div\u003e\u003c/div\u003e\u003cdiv class=\&quot;embeddable_form-step is-confirmation\&quot; data-role=\&quot;step\&quot;\u003e\u003cdiv class=\&quot;embeddable_form-row is-label is-success\&quot;\u003e\u003cdiv class=\&quot;embeddable_form-label_title\&quot;\u003eLike what you\u0026#39;re reading?\u003c/div\u003e\u003cdiv class=\&quot;embeddable_form-label\&quot;\u003eGet the latest updates first.\u003c/div\u003e\u003c/div\u003e\u003cdiv class=\&quot;embeddable_form-row is-success\&quot;\u003e\u003cdiv class=\&quot;embeddable_form-label is-header\&quot;\u003eThank you for subscribing!\u003c/div\u003e\u003cdiv class=\&quot;embeddable_form-label\&quot;\u003eYou can edit your subscription preferences \u003ca href='#' data-role='preferences_link'\u003ehere\u003c/a\u003e.\u003c/div\u003e\u003c/div\u003e\u003cdiv class=\&quot;embeddable_form-row is-success\&quot;\u003e\u003cdiv class=\&quot;embeddable_form-done\&quot;\u003e\u003cul class=\&quot;blog_follow_us\&quot;\u003e\u003cul class=\&quot;social_share\&quot;\u003e\u003cli class=\&quot;social_share-item is-facebook\&quot;\u003e\u003cdiv class=\&quot;fb-like\&quot; data-href=\&quot;https://www.toptal.com/blog\&quot; data-layout=\&quot;button_count\&quot; data-send=\&quot;false\&quot; data-show-faces=\&quot;false\&quot; data-width=\&quot;450\&quot;\u003e\u003c/div\u003e\u003c/li\u003e\u003cli class=\&quot;social_share-item is-twitter_follow\&quot;\u003e\u003ca class=\&quot;twitter-follow-button\&quot; data-show-count=\&quot;true\&quot; href=\&quot;https://twitter.com/toptalllc\&quot;\u003eFollow @toptalllc\u003c/a\u003e\u003c/li\u003e\u003cli class=\&quot;social_share-item is-google_plus_follow\&quot;\u003e\u003cdiv class=\&quot;g-follow\&quot; data-annotation=\&quot;bubble\&quot; data-height=\&quot;20\&quot; data-href=\&quot;https://plus.google.com/109028009576318848424\&quot; data-rel=\&quot;publisher\&quot;\u003e\u003c/div\u003e\u003c/li\u003e\u003c/ul\u003e\u003c/ul\u003e\u003c/div\u003e\u003c/div\u003e\u003c/div\u003e\u003c/form\u003e\u003c/div\u003e&quot;}"/></div></div></body></html>

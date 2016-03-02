@@ -1,0 +1,39 @@
+<html><body><div><body id="readabilityBody">
+<nav>
+
+</nav>
+<h2>Understanding gunicorn's async worker concurrency model</h2>
+<p class="byline">Published on April 21, 2014 by <a href="/">Matt Cottingham</a>.</p>
+
+
+<p>Recently I decided to investigate the internals of our chosen application server, gunicorn, to better understand the async worker model. In particular, I wanted to understand how requests were concurrently processed, and any performance tradeoffs this entailed. These are some notes I made along the way.</p>
+<h3>What is gunicorn?</h3>
+<p>First, let's cover some fundamentals of gunicorn's design. Gunicorn is a <a href="http://en.wikipedia.org/wiki/Web_Server_Gateway_Interface">WSGI</a> HTTP server. WSGI is a standard (PEP 333) which specifies how Python applications interface with a web server.</p>
+<p>Gunicorn uses a pre-fork worker model, meaning that one master process forks to create child process(es) which handle the actual HTTP requests.</p>
+<p>Where this gets more complex is that gunicorn can use <a href="http://docs.gunicorn.org/en/latest/design.html">different types of worker processes</a>, depending on how it is configured. Two types of worker processes are <em>sync</em> and <em>async</em> (there is a third, tornado, which I won't cover here).</p>
+<p><em>Sync</em> workers handle one HTTP request at a time. These are suitable if, for instance, the work your application does is likely CPU-bound (apart from the actual socket I/O).</p>
+<p><em>Async</em> workers can handle multiple requests concurrently (but not in parallel). In effect, a worker can yield mid-request to handle another request, then resume handling the prior request at a later point. This is useful when, for instance, your application makes an external service call (i.e. is I/O bound) since it can handle another incoming request without waiting for the external service call to complete.</p>
+<p>In our application, almost all requests make external service calls, so async workers are the most appropriate worker type.</p>
+<h3>Coroutines and concurrent request handling</h3>
+<p>We'll now look at how these async workers achieve non-blocking request processing. For simplicity, let's assume the only type of async worker available is gevent.</p>
+<p>To understand these async workers, we must understand the libraries and programming model they are built upon.</p>
+<p><em>Coroutines</em> may switch their flow of control to another coroutine and resume execution at the same point later. The following pseudocode (adapted from the gevent tutorial) shows two coroutines, worker_a and worker_b yielding execution to each other.</p>
+
+<p>There is an <a href="http://www.chiark.greenend.org.uk/~sgtatham/coroutines.html">excellent description of coroutines here</a> which would be a good thing to read at this point.</p>
+<p>An important aspect here is that coroutines are <em>cooperatively scheduled</em>, that is, there is no scheduler deciding which coroutine should run. In terms of concurrent data, this makes local reasoning substantially easier.</p>
+<p><a href="http://greenlet.readthedocs.org/en/latest/#introduction">Greenlet</a> is a library implementing coroutines in Python.</p>
+<p>As a side note, greenlets are compatible with Python threads. It's perfectly possible to have multiple threads, each with its own greenlets, but these are isolated. Switching will not work across threads.</p>
+<h3>Building on greenlet</h3>
+<p>Now that we understand coroutines, let's look at how greenlet provides the foundation for async workers.</p>
+<p>Greenlet provides a method of switching context between cooperating functions. This is very useful in an I/O bound context. This brings us to <a href="http://sdiehl.github.io/gevent-tutorial/">gevent</a>, a coroutine-based networking library built on greenlet.</p>
+<p>Here's an example:</p>
+
+<p>This is from <a href="http://sdiehl.github.io/gevent-tutorial/">gevent For the Working Python Developer</a> which I recommend (MIT License).</p>
+<p>So in essence, when something is waiting for I/O, gevent makes it easy to be doing other work. This obviously has big advantages for concurrent networking code, as well as anything else that is I/O bound where the caller can be safely suspended and resumed later.</p>
+<p>Gevent will patch standard library functions so that they can be used asynchronously. It's worth noting that, while we haven't experienced any problems with our actual application code, <a href="http://code.mixpanel.com/2010/10/29/gevent-the-good-the-bad-the-ugly">monkey patching is not always problem free</a>.</p>
+<h3>Concurrency, not parallelism</h3>
+<p>I noted earlier that requests are handled concurrently by async workers. However, the unit of parallel work is still the OS process, so to utilise multiple CPU cores, multiple worker processes are required. This isn't necessarily a problem, but it's worth being precise about the modes of work available because it impacts how they are scaled.</p>
+<p>Finally, you might find this <a href="http://blip.tv/pycon-us-videos-2009-2010-2011/pycon-2011-an-outsider-s-look-at-co-routines-4899200">talk on coroutines from PyCon</a> useful.</p>
+
+</body>
+</div></body></html>

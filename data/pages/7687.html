@@ -1,0 +1,85 @@
+<html><body><div><div class="content html_format"><p>
+      Как и многие любители путешествовать, я нахожу координаты достопримечательностей городов на сайте </p><a href="http://autotravel.ru/index.php">autotravel.ru</a><p> (далее — сайт). Под свои нужды написал небольшую утилиту для скачивания файлов с достопримечательностями для последующей заливки в навигатор. Программа предельно простая, но работает именно так, как мне было нужно. Кроме того реализовано простейшее средство экономии времени загрузки и траффика — кэширование.
+</p><p>
+Программа, которую я назвал AtTrackDownloader, написана на Python 3 с использованием Beautiful Soup — библиотеки для синтаксического разбора файлов HTML. Для графического интерфейса используется PyQt — просто потому, что я знаком с Qt.
+</p><a name="habracut"/><p>
+Ядром программы является класс autotravel. Полностью расписывать его методы смысла не имеет (тем более в конце дам ссылку на git репозитарий). Распишу основную логику.
+
+</p><pre><code class="python">def __load_towns_page(self, letter):
+    url = AutoTravelHttp + '/towns.php'
+    params = {'l' : letter.encode('cp1251')}
+    req = urllib2.Request(url, urllib.parse.urlencode(params).encode('cp1251'))
+    response = urllib2.urlopen(req)
+    return response.read().decode('utf-8')
+</code></pre><p>
+Метод __load_towns_page загружает содержимое страницы сайта для городов, начинающихся на букву letter. Точнее так было несколько месяцев назад, а какое-то время назад они поменяли адреса страниц и вместо буквы там указывается 'a' + номер_буквы. Например: А — 'a01', Б — 'a02', ..., Я — 'a30'.
+</p><p>
+Соответственно, для загрузки городов на все буквы это метод вызывается в цикле из метода __load_all_towns. Полученный текст веб-страницы передается в метод __load_towns_from_url:
+
+</p><pre><code class="python">def __load_towns_from_url(self, html_src):
+    for line in html_src.splitlines():
+        soup = BeautifulSoup(line, 'html.parser')
+        area = soup.find('font', {'class' : 'travell0'})
+        town= soup.find('a', {'class', 'travell5'})
+        
+        if town == None:
+            town = soup.find('a', {'class', 'travell5c'})
+            
+        if town == None:
+            continue
+            
+        town_name = town.get_text().strip()
+        area_name = area.get_text().strip()[1:-1]
+        town_href = town.get('href')
+        yield {'area' : area_name, 'town' : town_name, 'href' : town_href}
+</code></pre><p>
+В этом методе идет вся основная работа по парсингу городов. Разобранные города заносятся в список словарей с ключами 'area' — область или страна, 'town' — название города, 'href' — коротка ссылка на город (относительно сайта).
+</p><p>
+Таким образом происходит загрузка всех городов с сайта в память. Это занимает секунд 10 на моем компьютере. Естественно, это — плохо, поэтому возникла идея кэша загруженных городов. Python позволяет сериализовать список одной строкой, в отличие от других известных мне языков, что здорово. Метод сохранения городов в файл кэша выглядит следующим образом:
+
+</p><pre><code class="python">def __save_to_cache(self, data):
+    with open('attd.cache', 'wb') as f:
+        pickle.dump(data, f)
+</code></pre><p>
+Загрузка из кэша выполняется в конструкторе класса:
+
+</p><pre><code class="python">def __init__(self):
+    try:
+        with open('attd.cache', 'rb') as f:
+            self.__all_towns = pickle.load(f)
+    except FileNotFoundError:
+        self.__all_towns = list(self.__load_all_towns())
+        self.__save_to_cache(self.__all_towns)
+</code></pre><p>
+В итоге получаем десятисекундную задержку только при первом запуске.
+</p><p>
+Получение ссылок на файлы треков реализовано в методе get_towns_track_links, который принимает адрес страницы с городом:
+
+</p><pre><code class="python">def get_towns_track_links(self, href):
+    req = urllib2.Request(href)
+    response = urllib2.urlopen(req)
+    soup = BeautifulSoup(response.read().decode('utf-8'), 'html.parser')
+    
+    r = {}
+    for link in soup.findAll('a', {'class' : 'travell5m'}):
+        if link.get_text() == 'GPX':
+            r['gpx'] = AutoTravelHttp + link.get('href')
+        elif link.get_text() == 'KML':
+            r['kml'] = AutoTravelHttp + link.get('href')
+        elif link.get_text() == 'WPT':
+            r['wpt'] = AutoTravelHttp + link.get('href')
+
+    return r
+</code></pre><p>
+Поскольку, теоретически (и раньше такие случаи были) на страницы города может не быть какого-то формата трека, то доступные типы треков и ссылки на них заносятся в словарь. Потом это используется для фильтра файлов в диалоге сохранения файлов.
+</p><p>
+Описывать создание интерфейса не вижу смысла — там все еще проще, кому интересно могут пройти в репозитарий. А для тех, кому не интересно, привожу скриншот:
+
+</p><img src="https://habrastorage.org/getpro/habr/post_images/947/705/5c0/9477055c0fa8272b423ab85bb21212b0.png" alt="image"/>
+<p>
+Полные исходные коды находятся на </p><a href="https://github.com/leremin/AtTrackDownloader">Github</a><p>.
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

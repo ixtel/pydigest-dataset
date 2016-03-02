@@ -1,0 +1,132 @@
+<html><body><div><div class="content html_format">
+      <img align="left" src="https://habrastorage.org/getpro/habr/post_images/941/0dd/4ec/9410dd4ec53040079acd57990baaabfd.jpg" alt="image"/><p>
+Однажды, в процессе поиска инструмента для автоматизации GUI тестирования, мне попался интересный питоновский пакет </p><a href="http://pywinauto.github.io/">pywinauto</a><p>. И хотя он поддерживает только нативные контролы и частично Windows Forms, для наших задач он вполне подошёл.</p><p>
+История pywinauto берёт своё начало где-то в районе 1998 года, когда Mark McMahon написал для своих нужд GUI Automation утилиту на языке C (на это потребовалось года два), а затем, уже в 2005-м, переписал её на Python за три месяца. Мощь питона проявила себя во всей красе: интерфейс pywinauto получился простым и выразительным. Инструмент активно развивался с 2006 по 2010. В годы затишья, в 2011-2012 добрый человек </p><a href="https://github.com/moden-py">moden-py</a><p> написал GUI helper для просмотра иерархии окон и генерации pywinauto кода под названием </p><a href="https://github.com/pywinauto/SWAPY">SWAPY</a><p> (</p><a href="https://github.com/pywinauto/SWAPY/releases">бинарники здесь</a><p>).</p><p>
+Тем временем мир менялся. Наша команда перешла на 64-битные бинарники, и клон pywinauto заработал на 64-битном Python. В основной ветке проект не развивался четыре года и порядком устарел. В 2015 году с согласия Марка удалось вдохнуть в проект новую жизнь. Теперь pywinauto официально </p><a href="https://github.com/pywinauto/pywinauto">живёт на гитхабе</a><p>, а во многом благодаря камраду </p><a href="https://github.com/airelil">airelil</a><p> модульные тесты </p><a href="https://ci.appveyor.com/project/vasily-v-ryabov/pywinauto">бегают на CI сервере AppVeyor</a><p>.
+</p><a name="habracut"/><p>
+На данный момент мы выпустили 3 новых релиза линейки 0.5.x (последний — 0.5.2). Главные улучшения по сравнению с 0.4.2:
+
+</p><ul>
+<li> Поддержка 64-битных приложений и x64 питона (правда, нужен 32-битный Python для 32-битных бинарников).</li>
+<li> Поддержка Python 3.</li>
+<li> Решены проблемы с PyPI пакетом.</li>
+<li> Удалось подружить pywinauto c py2exe и ему подобными.</li>
+<li> Улучшена поддержка ряда контролов, особенно тулбара, tree view и list view.</li>
+<li> Можно включить запись большинства действий в лог через <code>pywinauto.actionlogger.enable()</code>.</li>
+<li> Ещё целый ряд мелких улучшений и баг фиксов.</li>
+</ul>
+<p>
+Последние четыре года наша команда успешно использует pywinauto для тестирования внутреннего софта, включающего сложные графические custom контролы. Для них есть собственные wrapper'ы, использующие метод HwndWrapper.SendMessage и класс RemoteMemoryBlock (тоже, кстати, улучшенный по ходу дела). Но это тема для отдельного разбора, т.к. открытых примеров custom контролов для pywinauto я не встречал.
+</p><p>
+Пока рассмотрим некоторые возможности pywinauto на конкретном примере.
+
+</p><h3>Пример автоматизации install / uninstall</h3><p>
+Часто встречается задача автоматизировать установку/удаление софта на 100500 тестовых машинах. Покажем, как это можно сделать на примере 7zip (пример демонстрационный!). Предполагается, что 64-битный installer заранее скачан с </p><a href="http://www.7-zip.org">www.7-zip.org</a><p> и лежит, например, в одной папке с нашими скриптами. На тестовых машинах User Account Control (UAC) отключен до нулевого уровня (обычно это изолированная подсеть, что не вредит безопасности).
+
+</p><h3>Установка</h3><p>
+Так выглядит установочный скрипт </p><a href="https://gist.github.com/vasily-v-ryabov/7a04717af4584cbb840f">install_7zip.py</a><p> (по ссылке — обновляемая версия):
+
+</p><pre><code class="python">from __future__ import print_function # for py2/py3 compaibility
+import sys, os
+
+# assume the installer is placed in the same folder as the script
+os.chdir(os.path.join(os.getcwd(), os.path.dirname(sys.argv[0])))
+import pywinauto
+
+app = pywinauto.Application().Start(r'msiexec.exe /i 7z920-x64.msi')
+
+Wizard = app['7-Zip 9.20 (x64 edition) Setup']
+Wizard.NextButton.Click()
+
+Wizard['I &amp;accept the terms in the License Agreement'].Wait('enabled').CheckByClick()
+Wizard.NextButton.Click()
+
+Wizard['Custom Setup'].Wait('enabled')
+Wizard.NextButton.Click()
+
+Wizard.Install.Click()
+
+Wizard.Finish.Wait('enabled', timeout=30)
+Wizard.Finish.Click()
+Wizard.WaitNot('visible')
+
+if os.path.exists(r"C:\Program Files\7-Zip\7zFM.exe"):
+    print('OK')
+else:
+    print('FAIL')
+</code></pre>
+<p>
+С установкой все довольно просто, но есть пара неочевидных моментов. Чтобы включить check box для согласия с лицензией, мы используем метод CheckByClick(), появившийся в pywinauto 0.5.0, потому что многие чек боксы обрабатывают не сообщение WM_CHECK, а реагируют только на настоящий клик.
+</p><p>
+Длинное ожидание самого процесса установки обеспечивает метод Wait() с явным параметром timeout=30 (в секундах). То есть сам объект </p><code>Wizard.Finish</code><p> — это лишь описание кнопки, и оно не связано с реальной кнопкой, пока не вызван метод Wait() либо любой другой метод. Строго говоря, вызов </p><code>Wizard.Finish.Click()</code><p> эквивалентен более длинному вызову </p><code>Wizard.Finish.WrapperObject().Click()</code><p> (обычно он происходит неявно) и почти эквивалентен </p><code>Wizard.Finish.Wait('enabled').Click()</code><p>. Можно было написать в одну строчку, но иногда стоит подчеркнуть важность метода Wait().
+
+</p><h3>Удаление</h3><p>
+Скрипт для удаления </p><a href="https://gist.github.com/vasily-v-ryabov/e5f927908d424bad422b">uninstall_7zip.py</a><p> устроен несколько сложнее, потому что приходится лезть в панель управления, в раздел «удаление программ». При желании, используя explorer.exe, можно автоматизировать и другие задачи.
+
+</p><pre><code class="python">from __future__ import print_function
+import pywinauto
+
+pywinauto.Application().Start(r'explorer.exe')
+explorer = pywinauto.Application().Connect(path='explorer.exe')
+
+# Go to "Control Panel -&gt; Programs and Features"
+NewWindow = explorer.Window_(top_level_only=True, active_only=True, class_name='CabinetWClass')
+try:
+    NewWindow.AddressBandRoot.ClickInput()
+    NewWindow.TypeKeys(r'Control Panel\Programs\Programs and Features{ENTER}', with_spaces=True, set_foreground=False)
+    ProgramsAndFeatures = explorer.Window_(top_level_only=True, active_only=True, title='Programs and Features', class_name='CabinetWClass')
+
+    # wait while list of programs is loading
+    explorer.WaitCPUUsageLower(threshold=5)
+
+    item_7z = ProgramsAndFeatures.FolderView.GetItem('7-Zip 9.20 (x64 edition)')
+    item_7z.EnsureVisible()
+    item_7z.ClickInput(button='right', where='icon')
+    explorer.PopupMenu.MenuItem('Uninstall').Click()
+
+    Confirmation = explorer.Window_(title='Programs and Features', class_name='#32770', active_only=True)
+    if Confirmation.Exists():
+        Confirmation.Yes.ClickInput()
+        Confirmation.WaitNot('visible')
+
+    WindowsInstaller = explorer.Window_(title='Windows Installer', class_name='#32770', active_only=True)
+    if WindowsInstaller.Exists():
+        WindowsInstaller.WaitNot('visible', timeout=20)
+
+    SevenZipInstaller = explorer.Window_(title='7-Zip 9.20 (x64 edition)', class_name='#32770', active_only=True)
+    if SevenZipInstaller.Exists():
+        SevenZipInstaller.WaitNot('visible', timeout=20)
+
+    if '7-Zip 9.20 (x64 edition)' not in ProgramsAndFeatures.FolderView.Texts():
+        print('OK')
+finally:
+    NewWindow.Close()
+</code></pre>
+<p>
+Здесь есть несколько ключевых моментов.
+</p><p>
+При запуске explorer.exe кратковременно создаётся запускающий процесс (launcher), который проверяет, что explorer.exe (worker) уже запущен. Такая связка «launcher-&gt;worker» иногда встречается. Поэтому отдельно подсоединяемся к рабочему процессу explorer.exe методом connect().
+</p><p>
+После клика на адресную строку (</p><code>AddressBandRoot</code><p>) появляется так называемый in-place edit box (только на время ввода). При вызове метода </p><code>TypeKeys()</code><p> обязательно указываем параметр </p><code>set_foreground=False</code><p> (появился в 0.5.0), иначе in-place edit box исчезнет с радаров. Для всех in-place контролов рекомендуется ставить этот параметр в False.
+</p><p>
+Далее, список программ инициализируется долго, однако сам ListView контрол доступен и простой вызов </p><code>ProgramsAndFeatures.FolderView.Wait('enabled')</code><p> не гарантирует, что он уже инициализирован полностью. Ленивая (lazy) инициализация идёт в отдельном потоке, поэтому необходимо отслеживать активность CPU всего процесса explorer.exe. Для этого в pywinauto 0.5.2 реализовано два метода: </p><code>CPUUsage()</code><p>, возвращающий загрузку CPU в процентах, и </p><code>WaitCPUUsageLower()</code><p>, ждущий, пока загрузка CPU не упадёт ниже порога (2.5% по умолчанию). Идею реализации этих методов подсказала статья камрада JOHN_16: </p><a href="http://john16blog.blogspot.ru/2014/11/cpu-pywinauto.html">«Отслеживаем завершение процессом загрузки CPU»</a><p>.
+</p><p>
+Кстати, вызов </p><code>item_7z.EnsureVisible()</code><p> волшебным образом прокручивает список так, чтобы искомый item стал виден. Никакой специальной работы со скролл баром не нужно.
+</p><p>
+Несколько вызовов Wait и WaitNot означают, что нужно подождать открытия или закрытия определенного окна относительно долго (дольше, чем по умолчанию). Впрочем, некоторые вызовы WaitNot вставлены просто для контроля. Это хорошая практика.
+
+</p><h3>«Ведь жизнь, она и проще, и сложнее...»</h3><p>
+Конечно, это был всего лишь пример. В случае с 7zip всё решается гораздо проще. Запускаем cmd.exe as Administrator и выполняем простую строку (работает при любом уровне UAC):
+</p><pre><code>    wmic product where name="7-Zip 9.20 (x64 edition)" call uninstall
+</code></pre><p>
+Разумеется, зоопарк инсталляторов не ограничивается .msi пакетами, а спектр задач автоматизации очень широк.
+
+</p><h3>О чем чаще всего спрашивают</h3><p>
+Если раньше главный вопрос был про Python 3 и 64 бита, то сейчас на повестке дня стоит поддержка WPF и ряда других не нативных приложений, поддерживающих UI Automation API. Наработки в этом направлении есть. Любую помощь в адаптации различных back-end'ов под интерфейс pywinauto мы приветствуем.
+
+      
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

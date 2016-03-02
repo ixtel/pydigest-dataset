@@ -1,0 +1,197 @@
+<html><body><div><div class="entry-content">
+		<p>As a data scientist, the emphasis of the day-to-day job is often more on the R&amp;D side rather than engineering. In the process of going from prototypes to production though, some of the early quick-and-dirty decisions turn out to be sub-optimal and require a decent amount of effort to be re-engineered. This usually slows down innovation, and generally speaking your project as a whole.</p>
+<p>This post will discuss some experience in building data pipelines, e.g. extraction, cleaning, integration, pre-processing of data, in general all the steps that are necessary to prepare your data for your data-driven product. In particular, the focus in on <em>data plumbing</em>, and how a workflow manager like Luigi can come to the rescue, without getting in your way. With a minimal effort, the transition from prototype to production can be smoother.</p>
+<p>You can find the code for the examples as <a href="https://gist.github.com/bonzanini/40774bf9348d35d9ea4f">GitHub Gist</a>.</p>
+<h2>Early Days of a Prototype</h2>
+<p>In the early days of a prototype, the data pipeline often looks like this:</p>
+<pre>$ python get_some_data.py
+$ python clean_some_data.py
+$ python join_other_data.py
+$ python do_stuff_with_data.py</pre>
+<p>This is quite common when the data project is in its exploratory stage: you know that you’ll need some pre-processing, you think it’s going to be a quick hack, so you don’t bother with some engineering best practices, then the number of scripts grows and your data pipeline will come back and bite you.</p>
+<p>This approach has the only advantage of being quick and hacky. On the downside, it’s tedious: every time you want to re-run the pipeline, you need to manually call the bunch of scripts in sequence. Moreover, if you’re sharing this prototype with a colleague, there is even more room for misinterpretation (“why can’t I do stuff with data?”… “did you clean it first?”, etc.)</p>
+<p>The obvious hacky solution seems to be: let’s put everything in one script. After some quick refactoring, the <tt>do_everything.py</tt> script can look like this:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+if __name__ == '__main__':
+    get_some_data()
+    clean_some_data()
+    join_other_data()
+    do_stuff_with_data()
+</pre>
+<p>This is fairly simple to run:</p>
+<pre>$ python do_everything.py</pre>
+<p>(Note: you could also put everything in a bash script, which calls the indiviaul bunch of scripts in sequence, but the shortcomings will be more or less the same)</p>
+<h2>Boilerplate Code</h2>
+<p>When moving towards a production-ready pipeline, there are a few more aspects to consider besides the run-everything code. In particular, error handling should be taken into account:</p>
+<pre class="brush: python; title: ; notranslate" title=""> 
+try:
+    get_some_data()
+except GetSomeDataError as e:
+    # handle this
+</pre>
+<p>But if we chain all the individual tasks together, we end up with a Christmas tree of try/except:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+try:
+    get_some_data()
+    try:
+        clean_some_data()
+        try:
+            # you see where this is going...
+        except EvenMoreErrors:
+            # ...
+    except CleanSomeDataError as e:
+        # handle CleanSomeDataError
+except GetSomeDataError as e:
+    # handle GetSomeDataError
+</pre>
+<p>Another important aspect to consider is how to resume a pipeline. For example, if the first few tasks are completed, but then an error occurs half-way through, how do we re-run the pipeline without re-executing the initial successful steps?</p>
+<pre class="brush: python; title: ; notranslate" title="">
+# check if the task was already successful
+if not i_got_the_data_already():
+    # if not, run it
+    try:
+        get_some_date()
+    except GetSomeDataError as e:
+        # handle the error
+</pre>
+<h2>Moving to Luigi</h2>
+<p><a href="https://github.com/spotify/luigi">Luigi</a> is a Python tool for workflow management. It has been developed at Spotify, to help building complex data pipelines of batch jobs. To install Luigi:</p>
+<pre>$ pip install luigi</pre>
+<p>Some of the useful features of Luigi include:</p>
+<ul>
+<li>Dependency management</li>
+<li>Checkpoints / Failure recovery</li>
+<li>CLI integration / parameterisation</li>
+<li>Dependency Graph visualisation</li>
+</ul>
+<p>There are two core concepts to understand how we can apply Luigi to our own data pipeline: Tasks and Targets. A task is a unit of work, designed by extending the class <tt>luigi.Task</tt> and overriding some basic methods. The output of a task is a target, which can be a file on the local filesystem, a file on Amazon’s S3, some piece of data in a database etc.</p>
+<p>Dependencies are defined in terms of inputs and outputs, i.e. if TaskB depends on TaskA, it means that the output of TaskA will be the input of TaskB.</p>
+<p>Let’s look at a couple of template tasks:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+# Filename: run_luigi.py
+import luigi
+
+class PrintNumbers(luigi.Task):
+
+    def requires(self):
+        return []
+
+    def output(self):
+        return luigi.LocalTarget("numbers_up_to_10.txt")
+
+    def run(self):
+        with self.output().open('w') as f:
+            for i in range(1, 11):
+                f.write("{}\n".format(i))
+
+class SquaredNumbers(luigi.Task):
+
+    def requires(self):
+        return [PrintNumbers()]
+
+    def output(self):
+        return luigi.LocalTarget("squares.txt")
+
+    def run(self):
+        with self.input()[0].open() as fin, self.output().open('w') as fout:
+            for line in fin:
+                n = int(line.strip())
+                out = n * n
+                fout.write("{}:{}\n".format(n, out))
+                
+if __name__ == '__main__':
+    luigi.run()
+
+</pre>
+<p>This code showcases two tasks: <tt>PrintNumbers</tt>, that writes the number from 1 to 10 into a file called <tt>numbers_up_to_10.txt</tt>, one number per line, and <tt>SquaredNumbers</tt>, that reads the such file and outputs a list of pairs number-square into <tt>squares.txt</tt>, also one pair per line.</p>
+<p>To run the tasks:</p>
+<pre>$ python run_luigi.py SquaredNumbers --local-scheduler</pre>
+<p>Luigi will take care of checking the dependencies between tasks, see that the input of <tt>SquaredNumbers</tt> is not there, so it will run the <tt>PrintNumbers</tt> task first, then carry on with the execution.</p>
+<p>The first argument we’re passing to Luigi is the name of the last task in the pipeline we want to run. The second argument simply tells Luigi to use a local scheduler (more on this later).</p>
+<p>You could also use the <tt>luigi</tt> command:</p>
+<pre>$ luigi -m run_luigi.py SquaredNumbers --local-scheduler</pre>
+<h2>Anatomy of a Task</h2>
+<p>To create a Luigi task we simply need to create a class whose parent is <tt>luigi.Task</tt>, and override some methods. In particular:</p>
+<ul>
+<li><tt>requires()</tt> should return the list of dependencies for the given task — in other words a list of tasks</li>
+<li><tt>output()</tt> should return the target for the task (e.g. a LocalTarget, a S3Target, etc.)</li>
+<li><tt>run()</tt> should contain the logic to execute</li>
+</ul>
+<p>Luigi will check the return values of <tt>requires()</tt> and <tt>output()</tt> and build the dependency graph accordingly.</p>
+<h2>Passing Parameters</h2>
+<p>Hard-coding filenames and config values is generally speaking an anti-pattern. Once you’ve understood the structure and the dynamics of your task, you should look into parameterising all the configuration aspects so that you can dynamically call the same script with different arguments. </p>
+<p>The class <tt>luigi.Parameter()</tt> is the place to look into. Each Luigi task can have a number of parameters. Let’s say for example that we want to modify the previous example to support a custom number. As the parameter we’re using with the <tt>range()</tt> function is an integer, we can use <tt>luigi.IntParameter</tt> rather than the default parameter class. This is how the modified tasks can look like:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+class PrintNumbers(luigi.Task):
+    n = luigi.IntParameter()
+
+    def requires(self):
+        return []
+
+    def output(self):
+        return luigi.LocalTarget("numbers_up_to_{}.txt".format(self.n))
+
+    def run(self):
+        with self.output().open('w') as f:
+            for i in range(1, self.n+1):
+                f.write("{}\n".format(i))
+
+class SquaredNumbers(luigi.Task):
+    n = luigi.IntParameter()
+
+    def requires(self):
+        return [PrintNumbers(n=self.n)]
+
+    def output(self):
+        return luigi.LocalTarget("squares_up_to_{}.txt".format(self.n))
+
+    def run(self):
+        with self.input()[0].open() as fin, self.output().open('w') as fout:
+            for line in fin:
+                n = int(line.strip())
+                out = n * n
+                fout.write("{}:{}\n".format(n, out))
+</pre>
+<p>To call the <tt>SquaredNumbers</tt> tasks up to, say, 20:</p>
+<pre>$ python run_luigi.py SquaredNumbers --local-scheduler --n 20</pre>
+<p>Parameters can also have default values, e.g.</p>
+<pre class="brush: python; title: ; notranslate" title="">
+n = luigi.IntParameter(default=10)
+</pre>
+<p>so in this way, if you don’t specify the <tt>--n</tt> argument, it will default to 10.</p>
+<p><a href="https://gist.github.com/bonzanini/40774bf9348d35d9ea4f">Sample code as GitHub Gist</a></p>
+<h2>Local vs Global Scheduler</h2>
+<p>So far, we’ve used the <tt>--local-scheduler</tt> option to run Luigi tasks with a local scheduler. This is useful for development, but in a production environment we should make use of the centralised scheduler (see the docs on the <a href="http://luigi.readthedocs.org/en/latest/central_scheduler.html">scheduler</a>).</p>
+<p>This has a few advantages: </p>
+<ul>
+<li>avoid running two instances of the same task simultaneously</li>
+<li>nice web-based visualisation</li>
+</ul>
+<p>You can run the Luigi scheduler daemon in the foreground with:</p>
+<pre>$ luigid</pre>
+<p>or in the background with:</p>
+<pre>$ luigid --background</pre>
+<p>It will default to port 8082, so you can point your browser to <a href="http://localhost:8082">http://localhost:8082</a> to access the visualisation.</p>
+<p>With the global Luigi scheduler running, we can re-run the code without the option for the local scheduler:</p>
+<pre>$ python run_luigi.py SquaredNumbers --n [BIG_NUMBER]</pre>
+<p>As the sample code will run in milliseconds, if you want to have a chance to switch to the browser and see the dependency graph while the tasks are still running, you should probably use a big number like 10,000,000 or more for the <tt>--n</tt> option.</p>
+<p>This is a cropped screenshot of the dependency graph:</p>
+<p><a href="https://marcobonzanini.files.wordpress.com/2015/10/dependency-graph-screenshot.png"><img src="https://marcobonzanini.files.wordpress.com/2015/10/dependency-graph-screenshot.png?w=300&amp;h=86" alt="dependency-graph-screenshot" class="alignnone size-medium wp-image-197"/></a></p>
+<h2>Summary</h2>
+<p>We have described the definition of data pipelines using Luigi, a workflow manager written in Python. Luigi provides a nice abstraction to define your data pipeline in terms of tasks and targets, and it will take care of the dependencies for you.</p>
+<p>In terms of code re-use, and with the mindset of going from prototype to production, I’ve found very helpful to define the business logic of the tasks in separate <a href="http://marcobonzanini.com/2015/07/01/how-to-develop-and-distribute-python-packages/">Python packages</a> (i.e. with a setup.py file). In this way, from your Luigi script you can simply <tt>import your_package</tt> and call it from there.</p>
+<p>A task can produce multiple files as output, but if that’s your case, you should probably verify if the task can be broken down into smaller units (i.e. multiple tasks). Do all these outputs logically belong together? Do you have dependencies between them? If you can’t break the task down, I’ve found it simpler/useful just to define the <tt>output()</tt> as a log file with the names and the timestamps of all the individual files created by the task itself. The log file name can be formatted as <tt>TaskName_timestamp_param1value_param2value_etc</tt>.</p>
+<p>Using a workflow manager like Luigi is in general helpful because it handles dependencies, it reduces the amount of boilerplate code that is necessary for parameters and error checking, it manages failure recovery and overall it forces us to follow a clear pattern when developing the data pipeline.</p>
+<p>It’s also important to consider its limitations:</p>
+<ul>
+<li>It was built for batch jobs, it’s probably not useful for near real-time processing</li>
+<li>It doesn’t trigger the execution for you, you still need to run the data pipeline (e.g. via a cronjob)</li>
+</ul>
+<p><a>@MarcoBonzanini</a></p>
+<div id="jp-post-flair" class="sharedaddy sd-like-enabled sd-sharing-enabled"><div class="sharedaddy sd-block sd-like jetpack-likes-widget-wrapper jetpack-likes-widget-unloaded" id="like-post-wrapper-82018920-196-56d5c8f2a6341" data-src="//widgets.wp.com/likes/#blog_id=82018920&amp;post_id=196&amp;origin=marcobonzanini.wordpress.com&amp;obj_id=82018920-196-56d5c8f2a6341" data-name="like-post-frame-82018920-196-56d5c8f2a6341"><h3 class="sd-title">Like this:</h3><p class="likes-widget-placeholder post-likes-widget-placeholder"><span class="button"><span>Like</span></span> <span class="loading">Loading...</span></p><span class="sd-text-color"/><a class="sd-link-color"/></div>
+<p id="jp-relatedposts" class="jp-relatedposts">
+	<h3 class="jp-relatedposts-headline"><em>Related</em></h3>
+</p></div>	</div>
+
+	
+</div></body></html>

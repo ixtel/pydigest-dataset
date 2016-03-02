@@ -1,0 +1,468 @@
+<html><body><div><div class="content"><p><img src="https://www.python.org/static/community_logos/python-logo-master-v3-TM.png" alt="Python Logo"/></p>
+
+<p>Python 3.5 introduced the new keywords, <code class="prettyprint">async</code> and <code class="prettyprint">await</code> to Python. This change solidifies a strong commitment towards writing asynchronous programs in Python. Before in Python 3.4, we needed to use parts of the standard library (using the decorator <code class="prettyprint">asyncio.coroutine</code>). So, what does this all mean? In this tutorial, we are going to try and answer that question, by covering the following topics:</p>
+
+<ul>
+<li>Learn what the asynchronous programming is.</li>
+<li>Make a practical application using <code class="prettyprint">asyncio</code>, Python 3's library for asynchronous programming
+
+<ul>
+<li>Firstly, we are going to download an image with just one HTTP request, and see how long that takes using the <code class="prettyprint">time</code> command.</li>
+<li>Then, we are going to use <code class="prettyprint">asyncio</code> coroutines to make multiple requests for the same image, using the <code class="prettyprint">Range</code> header, so that we get get back the bytes, and in the end, put all the bytes together.</li>
+</ul>
+</li>
+</ul>
+
+<h1>Prerequisites</h1>
+
+<p><img src="https://nitrous-community.s3.amazonaws.com/images/0027_01.png" alt="Python Container"/></p>
+
+<p>For this, we will need the very latest version of Python 3 on Nitrous. In order to do this, we will need a python container, as well as <code class="prettyprint">pyenv</code>(if you don't know how to use <code class="prettyprint">pyenv</code> please read <a href="https://community.nitrous.io/tutorials/setting-up-pyenv-on-nitrous">this article</a>). Once we have <code class="prettyprint">pyenv</code> installed, we can go ahead and install python 3.5 in the following way:</p>
+
+<pre><code class="prettyprint shell">pyenv install 3.5.0
+</code></pre>
+
+<p>Once we have installed python 3.5.0 with the above command, we need to <code class="prettyprint">rehash</code> our shims (which updates the links to the different executables that are managed by <code class="prettyprint">pyenv</code> like <code class="prettyprint">python</code> and <code class="prettyprint">python3</code>) like so:</p>
+
+<pre><code class="prettyprint shell">pyenv rehash
+</code></pre>
+
+<p>We can then set out global python interpreter to Python 3.5.0, so that the <code class="prettyprint">python</code> command points to 3.5.0:</p>
+
+<pre><code class="prettyprint shell">pyenv global 3.5.0
+</code></pre>
+
+<p>Now, if we invoke <code class="prettyprint">python</code> in our terminal, we will see that we have Python 3.5.0 running.</p>
+
+<p><img src="https://nitrous-community.s3.amazonaws.com/images/0027_02.png" alt="Running 3.5.0"/></p>
+
+<hr/>
+
+<h1>What is Asynchronous Programming?</h1>
+
+<p>Most network applications (i.e. applications that make network requests like HTTP requests) are not CPU bound, but rather IO bound. This means that most of the time, the program is waiting for information to come from an external source (network, serial device, etc). This is an inefficient way to the computer's time, because while we wait for a response from the server, we could be doing something more CPU intensive.</p>
+
+<p><img src="https://nitrous-community.s3.amazonaws.com/images/0027_03.png" alt="Enter picture about soda here"/></p>
+
+<p>A good analogy for this is pouring soda into an empty glass. Once you start pouring, you will see that the foam is rising to the top, and so you wait until the foam settles to pour more soda into the glass, otherwise the glass will overflow.</p>
+
+<p>Now imagine, you had three glasses to fill. If you pour into a glass one at a time, its going to take a long time for you to fill all three glasses since you have to wait for the foam to settle in each glass before proceeding to the next one.</p>
+
+<p>However, say you were pouring soda into glass 1, and you see that the foam has reached the top of the glass, and so you start pouring in glass 2 until the foam for glass 2 starts rising again, so you start pouring in glass 3 until the foam reaches the top. In the mean time, the foam in glass 1 has already settled, so you can go back to pouring soda in glass 1 once again, and repeat the process until all three glasses have been filled.</p>
+
+<p><img src="https://nitrous-community.s3.amazonaws.com/images/0027_04.png" alt="Pouring Async"/></p>
+
+<p>When pouring soda, we utilize the time we are <em>waiting</em> to do something else, in this case we fill up more glasses. In a nutshell, this is what asynchronous programming in python 3 is all about, making use of <em>waiting</em> time, to do something useful.</p>
+
+<h1>Using <code class="prettyprint">asyncio</code> in Python 3</h1>
+
+<p>We've talked about what asynchronous programing is so far, but now lets write some code. In this example, we are going to take advantage of <code class="prettyprint">requests</code>, a popular python library for making HTTP requests (synchronously) and <code class="prettyprint">aiohttp</code>, which will allow us to make requests asynchronously.</p>
+
+<p>We can install them easily by the following command:</p>
+
+<pre><code class="prettyprint shell">pip install requests aiohttp
+</code></pre>
+
+<p>Don't worry if you get an error when installing <code class="prettyprint">aiohttp</code> that raises an <code class="prettyprint">AssertionError</code>. If you're interested as to why this problem is raised, check out this <a href="https://github.com/KeepSafe/aiohttp/issues/467">github issue</a>.</p>
+
+<p>In this section we are going to be making two versions of a program that practically does the same thing, they both download an image, and save it to disk.</p>
+
+<h2>The Synchronous Version</h2>
+
+<pre><code class="prettyprint python"># encoding=utf-8
+# norm.py
+
+# Importing requests the module here
+# that we pip installed earlier
+import requests
+
+# Equivalent to a main function
+# in C, Java or Go
+if __name__ == '__main__':
+
+    # Making a HTTP GET request
+    resp = requests.get("http://files.vladstudio.com/joy/where_tahrs_live/wall/vladstudio_where_tahrs_live_2880x1800_signed.jpg")
+
+    # Checking the response to see if everything is OK,
+    # this is what the 200 code signifies
+    if resp.status_code == 200:
+
+        # We can access the headers of a Response
+        # object as well. In this case
+        # we just print out the
+        # Content-Length to
+        # see how big the
+        # response was
+        print(resp.headers["Content-Length"])
+
+        # We use a context manager here, by using
+        # the `with` statement. We use it
+        # to open a file called, and
+        # write bytes to it, 'wb'.
+        with open("test_normal.jpg", "wb") as f:
+
+            # We write out the binary contents
+            # of the response to the file.
+            f.write(resp.content)
+</code></pre>
+
+<p>The above script is called <code class="prettyprint">norm.py</code>, because we are making a normal HTTP request here (don't worry, we'll get to the asynchronous version soon). We first import the <code class="prettyprint">requests</code> library, so that we can use it our script.</p>
+
+<p>Now we get to the main part of our program. We send a GET request to our URL, using the <code class="prettyprint">requests.get</code> method. This returns us a <code class="prettyprint">Response</code> object.</p>
+
+<p>We then check the <code class="prettyprint">Response</code> to see that if it has a <code class="prettyprint">status_code</code> of 200; 200 means "OK" and is the standard response for a successful HTTP request.</p>
+
+<p>We then print out the <code class="prettyprint">Content-Length</code> response header. This is just to see how long (in bytes) the file actually was.</p>
+
+<p>Finally, we write to a file called <code class="prettyprint">"test_normal.jpg"</code>. To do this we use a context manager (because there is a <code class="prettyprint">with</code> statement involved). We use the <code class="prettyprint">open</code> function to open the file. The first argument is the name of the file we want to open, and the second argument specifies the mode. <code class="prettyprint">w</code> is because we want to write to it, and <code class="prettyprint">b</code> is because we want to write <em>bytes</em> to it.</p>
+
+<blockquote>
+<p><strong>open</strong> <em>(file, mode='r', buffering=-1, encoding=None, errors=None, newline=None, closefd=True, opener=None)</em></p>
+
+<p>Open <em>file</em> and return a corresponding file object. If the file cannot be opened, an <code class="prettyprint">OSError</code> is raised.</p>
+
+<p><a href="https://docs.python.org/3/library/functions.html#open"><em>— Python 3.5 Documentation</em></a></p>
+</blockquote>
+
+<p>We can see how long this takes, using the <code class="prettyprint">time</code> command:</p>
+
+<p><img src="https://nitrous-community.s3.amazonaws.com/images/0027_07.png" alt="Running norm.py"/></p>
+
+<h2>The Asynchronous Version</h2>
+
+<p>Our asynchronous program will do the same thing as our normal (or synchronous) program; it has to make requests for an image, download that image and save it to disk.</p>
+
+<p>However, in order to make our asynchronous program faster than our normal program, we need to use a HTTP trick. This is how our program is going to work:</p>
+
+<ol>
+<li>Make a <code class="prettyprint">HEAD</code> request to the URL for the image.</li>
+<li>Get the value of the <code class="prettyprint">Content-Length</code> header.</li>
+<li>Make multiple <code class="prettyprint">GET</code> requests to the URL using the <code class="prettyprint">Range</code> header to specify the range of bytes that we want.</li>
+<li>Put all the responses together, and write all the bytes to file.</li>
+</ol>
+
+<p>This is a lot more complicated than our normal program, so we are going to go over the program one step at a time.</p>
+
+<p>Lets start off by defining our <code class="prettyprint">download</code> function that will take in two arguments, <code class="prettyprint">url</code> which is the URL we want to download the image from and <code class="prettyprint">parts</code>, which is the number of parallel requests we want to make to the server:</p>
+
+<pre><code class="prettyprint python"># All asynchronous functions will need to have
+# the async key word prepended to the
+# function definition. We also set
+# parts with a default value of
+# 16.
+async def download(url, parts=16):
+  pass
+</code></pre>
+
+<p>Now, lets get to writing the first part of the program, which is to make the <code class="prettyprint">HEAD</code> request.</p>
+
+<pre><code class="prettyprint python"># encoding=utf-8
+# para_async.py
+
+# Importing the library we need to
+# make our HTTP requests
+# asynchronously
+import asyncio
+
+# All asynchronous functions will need to have
+# the async key word prepended to the
+# function definition. We also set
+# parts with a default value of
+# 16.
+async def download(url, parts=16):
+    # Using an asynchronous context manager here
+    # to make the HEAD request asynchronously.
+    # What to do before and after invoking
+    # the function is determined by the
+    # __aenter__ and __aexit__ methods
+    # of that given class, which in
+    # this case is ClientSession
+    # object is returned by the
+    # aiohttp.head method. In
+    # this example, context
+    # manager invokes the
+    # .close() method.
+    async with aiohttp.head(url) as resp:
+        # We can get the total number of bytes that
+        # the response will give us by checking
+        # the "Content-Length" header.
+        size = int(resp.headers["Conent-Length"])
+</code></pre>
+
+<p>So, what are we doing here? We are making <code class="prettyprint">download</code> a <em>coroutine</em> by appending the <code class="prettyprint">async</code> keyword before the function definition. This is new in Python 3.5, before you would've seen something like the following:</p>
+
+<pre><code class="prettyprint python">@asyncio.coroutine
+def download(url, parts=16):
+  pass
+</code></pre>
+
+<p>The above syntax is still valid in Python 3.5, but <code class="prettyprint">async def</code> is the preferred way to create a coroutine, but there are nuances to the definition of what exactly a coroutine is Python:</p>
+
+<pre><code class="prettyprint python">&gt;&gt;&gt; import asyncio
+&gt;&gt;&gt; from para_async import download
+&gt;&gt;&gt; type(download)
+&lt;class 'function'&gt;
+&gt;&gt;&gt; asyncio.iscoroutine(download)
+False
+&gt;&gt;&gt; asyncio.iscoroutinefunction(download)
+True
+&gt;&gt;&gt; coro = download("http://www.nitrous.io", 16)
+&gt;&gt;&gt; asyncio.iscoroutine(coro)
+True
+&gt;&gt;&gt; type(coro)
+&lt;class 'coroutine'&gt;
+</code></pre>
+
+<p>From the above, we can see that <code class="prettyprint">download</code> is <em>coroutine function</em>. However, once we invoke it with arguments, we get back a <code class="prettyprint">coroutine</code>. So, a function only becomes a coroutine <em>after</em> you invoke it with the required arguments.</p>
+
+<p>We then get the size of the total file using <code class="prettyprint">resp.headers</code>, the dictionary that contains all the headers of the <code class="prettyprint">ClientSession</code> object. We then convert the value of <code class="prettyprint">resp.headers["Content-Length"]</code> to an <code class="prettyprint">int</code>, so that we can do arithmetic with it. We then store this to the variable <code class="prettyprint">size</code>, which is the number of bytes in total.</p>
+
+<p>Now that we've gotten how many bytes we want in total, we have to send out multiple GET requests to download the image.</p>
+
+<pre><code class="prettyprint python"># This function takes in the parameters required in order
+# to make a HTTP GET request with the correct range
+# u is the URL that we want to make a request to
+# i is the position of the content we get back
+# start is the beginning of the range
+# end is the end of the range.
+async def get_partial_content(u, i, start, end):
+    # We are going to print off what is getting called
+    # when the program is being executed.
+    print(i, start, end)
+
+    # We use a context manager here again since we
+    # are making an asynchronous web request
+    # So, using this will automatically
+    # close off the connection when we
+    # are done with it.
+    async with aiohttp.get(
+            # We specify u as the first argument to our GET request
+            # And, we aslo pass in a dictionary for the headers
+            # key word argument
+            u, headers={
+                # In this case, we add the "Range" header.
+                # We take away 1 from end, we dont want
+                # to download the same information
+                # twice. Also, if we say
+                # bytes=12- for "Range",
+                # it will get the data
+                # from the 12th byte
+                # till the end.
+                "Range": "bytes={}-{}".format(start, end - 1 if end else "")}) as _resp:
+        # Finally, we return the position of the content
+        # as well as the content itself (in bytes) using
+        # _resp.read(), which is a coroutine
+        # so, weneed to append the await
+        # keyword before it, so
+        # that python can do
+        # something else
+        # while content
+        # is being sent
+        # over the
+        # wire.
+        return i, await _resp.read()
+</code></pre>
+
+<p>A few points to note here. Firstly, printing out <code class="prettyprint">i, start, end</code> is for our convenience only, so that we can <em>see</em> our program execute asynchronously. Secondly, we are using a specific HTTP header here,  <code class="prettyprint">Range</code> to specify which bytes of the request we want, which is an inclusive range and this is why we make sure to subtract 1 from <code class="prettyprint">end</code> when we format the string.</p>
+
+<p>In this example, we are introduced to the <code class="prettyprint">await</code> keyword, which is one of the fundamental building blocks of asynchronous programs in Python. The <code class="prettyprint">await</code> keyword tells the python interpreter that the succeeding expression is going to take some time to evaluate, so it can do something else.</p>
+
+<p>Now that we have an asynchronous function that will make GET requests for partial content, we need to start using it with the correct arguments.</p>
+
+<pre><code class="prettyprint python"># Create a list of the different ranges that we want. The range
+# function in python 3 returns a generator and not a list
+# We specify the start of the range as 0 and the end as
+# size, and we split it into the number of parts we
+# want using integer division (//).
+ranges = list(range(0, size, size // parts))
+
+# This will take a lot more explaining than
+# code comments can handle, so please
+# read on :)
+res, _ = await asyncio.wait(
+    [get_partial_content(url, i, start, end) for i, (start, end) in
+     enumerate(itertools.zip_longest(ranges, ranges[1:], fillvalue=""))])
+</code></pre>
+
+<p>The problem we are trying to solve is to give every coroutine (<code class="prettyprint">get_partial_content</code>) an equal amount of work to do. We do this by first first creating the <code class="prettyprint">ranges</code> variable which houses all the different ranges that we want. So say the total size of the content was 500 bytes, and we want to break it down into 16 parts. We can use <code class="prettyprint">range</code> and <code class="prettyprint">itertools.zip_longest</code> to generate a list of ranges:</p>
+
+<pre><code class="prettyprint python">&gt;&gt;&gt; size = 500
+&gt;&gt;&gt; parts = 16
+&gt;&gt;&gt; ranges = list(range(0, size, size // parts))
+&gt;&gt;&gt; ranges
+[0, 31, 62, 93, 124, 155, 186, 217, 248, 279, 310, 341, 372, 403, 434, 465, 496]
+&gt;&gt;&gt; from itertools import zip_longest
+&gt;&gt;&gt; list(zip_longest(ranges, ranges[1:], fillvalue=""))
+[(0, 31), (31, 62), (62, 93), (93, 124), (124, 155), (155, 186), (186, 217), (217, 248), (248, 279), (279, 310), (310, 341), (341, 372), (372, 403), (403, 434), (434, 465), (465, 496), (496, '')]
+</code></pre>
+
+<p>We can then use <code class="prettyprint">enumerate</code> to number these tuples:</p>
+
+<pre><code class="prettyprint python">&gt;&gt;&gt; range_tuples = list(zip_longest(ranges, ranges[1:], fillvalue=""))
+&gt;&gt;&gt; list(enumerate(range_tuples))
+[(0, (0, 31)), (1, (31, 62)), (2, (62, 93)), (3, (93, 124)), (4, (124, 155)), (5, (155, 186)), (6, (186, 217)), (7, (217, 248)), (8, (248, 279)), (9, (279, 310)), (10, (310, 341)), (11, (341, 372)), (12, (372, 403)), (13, (403, 434)), (14, (434, 465)), (15, (465, 496)), (16, (496, ''))]
+</code></pre>
+
+<p>We can then unpack these tuples in a <code class="prettyprint">for</code> loop:</p>
+
+<pre><code class="prettyprint python">&gt;&gt;&gt; for i, (start, end) in enumerate(range_tuples):
+...     print("{:3} : {:3}-{:3}".format(i, start, end))
+...     
+  0 :   0- 31
+  1 :  31- 62
+  2 :  62- 93
+  3 :  93-124
+  4 : 124-155
+  5 : 155-186
+  6 : 186-217
+  7 : 217-248
+  8 : 248-279
+  9 : 279-310
+ 10 : 310-341
+ 11 : 341-372
+ 12 : 372-403
+ 13 : 403-434
+ 14 : 434-465
+ 15 : 465-496
+ 16 : 496- 
+</code></pre>
+
+<p>Like this, we generate a list of coroutines that we pass into <code class="prettyprint">asynio.wait</code>, which waits for all the coroutines in a given list to complete.</p>
+
+<blockquote>
+<p><em>coroutine</em> asyncio.<strong>wait</strong>(<em>futures, *, loop=None, timeout=None, return<em>when=ALL</em>COMPLETED</em>)</p>
+
+<p>Wait for the Futures and coroutine objects given by the sequence futures to complete. Coroutines will be wrapped in Tasks. Returns two sets of Future: (done, pending).</p>
+
+<p><a href="https://docs.python.org/3/library/asyncio-task.html#asyncio.wait"><em>— Python 3.5 Documentation</em></a></p>
+</blockquote>
+
+<p>The <code class="prettyprint">asyncio.wait</code> does a lot of things, so lets try to understand it one step at a time. Firstly, it wraps all our coroutines into tasks, that gives a handy <code class="prettyprint">.result()</code> (because the <code class="prettyprint">Task</code> class is a subclass of the <code class="prettyprint">Future</code> class which has this convenience method) method to get the result of a given coroutine after it has completed execution (this will become useful later on). In this case, the <code class="prettyprint">.result()</code> method would return the position (<code class="prettyprint">i</code>) and the content of the response in bytes (from <code class="prettyprint">_res.read()</code> inside of our <code class="prettyprint">get_partial_content</code> coroutine function). Thus, the <code class="prettyprint">res</code> variable would contain a list of tasks, that are all complete and so we ignore the second part of what is returned by the <code class="prettyprint">asyncio.wait</code> function which gives us the tasks that are still pending.</p>
+
+<p>Once <code class="prettyprint">await asyncio.wait</code> has executed, we need to sort everything returned with regards to position:</p>
+
+<pre><code class="prettyprint python">sorted_result = sorted(task.result() for task in res)
+</code></pre>
+
+<p>Remember how we returned tuples of <code class="prettyprint">(position number, bytes)</code> in the <code class="prettyprint">get_partial_content</code> coroutine function? Well that is going to pay off now, since the <code class="prettyprint">sorted</code> function will easily sort this according to the value of the first item in the tuple.</p>
+
+<p>Finally, we join all the data together from our different requests to one large binary string and we return it as the result of the <code class="prettyprint">download</code> function:</p>
+
+<pre><code class="prettyprint python">return b"".join(data for _, data in sorted_result)
+</code></pre>
+
+<p><code class="prettyprint">sorted_result</code> is in the form <code class="prettyprint">(position number, bytes)</code> and so when unpacking, we don't care about the position number, so we assign it to <code class="prettyprint">_</code>.</p>
+
+<p>Now that we've got our <code class="prettyprint">download</code> function ready, we can now try running it. To run any coroutine function, we need to first get an event loop:</p>
+
+<pre><code class="prettyprint python">loop = asyncio.get_event_loop()
+</code></pre>
+
+<p>This gives us a <code class="prettyprint">BaseEventLoop</code> object, that has a <code class="prettyprint">run_until_complete</code> method that takes in a coroutine and runs it till completion i.e. the coroutine <em>returns</em> a result.</p>
+
+<blockquote>
+<p>BaseEventLoop.<strong>run<em>until</em>complete</strong>(<em>future</em>)</p>
+
+<pre><code class="prettyprint">Run until the `Future` is done.
+
+If the argument is a _coroutine object_, it is wrapped by `ensure_future()`.
+
+Return the Future’s result, or raise its exception.
+</code></pre>
+
+<p><a href="https://docs.python.org/3/library/asyncio-eventloop.html#asyncio.BaseEventLoop.run_until_complete"><em>— Python 3.5 Documentation</em></a></p>
+</blockquote>
+
+<p>Now, we just need to pass a coroutine to the event loops <code class="prettyprint">run_until_complete</code> method:</p>
+
+<pre><code class="prettyprint python">bs = loop.run_until_complete(download(image_url, 16))
+</code></pre>
+
+<p>Remember that a <em>coroutine</em> is basically a <em>coroutine function</em> that has been invoked.</p>
+
+<p>In this case, the <code class="prettyprint">download(image_url, 16)</code> coroutine will return a large binary string, that we will then need to write to a file:</p>
+
+<pre><code class="prettyprint python">with open("test_para_async.jpeg", "wb") as fi:
+        fi.write(bs)
+</code></pre>
+
+<p>So, putting everything together now:</p>
+
+<pre><code class="prettyprint python"># encoding=utf-8
+# para_async.py
+import asyncio
+import itertools
+
+import aiohttp
+
+
+async def download(url, parts):
+    async def get_partial_content(u, i, start, end):
+        print(i, start, end)
+        async with aiohttp.get(
+                u, headers={"Range": "bytes={}-{}".format(start, end - 1 if end else "")}) as _resp:
+            return i, await _resp.read()
+
+    async with aiohttp.head(url) as resp:
+        size = int(resp.headers["Content-Length"])
+
+    ranges = list(range(0, size, size // parts))
+
+    res, _ = await asyncio.wait(
+        [get_partial_content(url, i, start, end) for i, (start, end) in
+         enumerate(itertools.zip_longest(ranges, ranges[1:], fillvalue=""))])
+
+    sorted_result = sorted(task.result() for task in res)
+    return b"".join(data for _, data in sorted_result)
+
+
+if __name__ == '__main__':
+    image_url = "http://files.vladstudio.com/joy/where_tahrs_live/wall/vladstudio_where_tahrs_live_2880x1800_signed.jpg"
+    loop = asyncio.get_event_loop()
+    bs = loop.run_until_complete(download(image_url, 16))
+
+    with open("test_para_async.jpeg", "wb") as fi:
+        fi.write(bs)
+</code></pre>
+
+<p>We can now go ahead and run this:</p>
+
+<p><img src="https://nitrous-community.s3.amazonaws.com/images/0027_06.png" alt="Running Async"/></p>
+
+<p>We can see that the coroutines are executed out of order, and this means that the requests were made in parallel. If for some reason, we saw that everything was printed out in order of position, we'd have something to worry about.</p>
+
+<p>We can also see that our asynchronous script performed much better than our synchronous one, it only took about 1/3 of the time, but lets have a side by side comparison.</p>
+
+<p>We can get rid of the print function call inside of our <code class="prettyprint">get_patial_content</code> coroutine function, and just print out the length of the bytes in total, to have a side by side comparison, by commenting out the <code class="prettyprint">print</code> function right after the <code class="prettyprint">get_partial_content</code> function declaration and adding a <code class="prettyprint">print</code> function showing the length of <code class="prettyprint">bs</code>.</p>
+
+<pre><code class="prettyprint python"># encoding=utf-8
+import asyncio
+import itertools
+
+import aiohttp
+
+
+async def download(url, parts):
+    async def get_partial_content(u, i, start, end):
+#         print(i, start, end)
+    (...)
+
+if __name__ == '__main__':
+    (...)
+    with open("test_para_async.jpeg", "wb") as fi:
+        print(len(bs))
+        fi.write(bs)
+</code></pre>
+
+<p><img src="https://nitrous-community.s3.amazonaws.com/images/0027_05.png" alt="Final Version"/></p>
+
+<p>We can see that they both write the same number of bytes, but <code class="prettyprint">para_async.py</code> performs much better than <code class="prettyprint">norm.py</code>, and <code class="prettyprint">para_async.py</code> is a lot more CPU intensive.</p>
+
+<h1>Conclusion</h1>
+
+<p>We've learned a lot in this tutorial, and we've tackled a very new topic in the python world that a lot of people find confusing. To learn more, I'd suggest reading up more on Python generators (David Beazley, one of the Python Community's most celebrated figures gave a 3 hour long talk on them an the video can be found on <a href="https://www.youtube.com/watch?v=D1twn9kLmYg">youtube</a>) as well as the documentation on <a href="https://docs.python.org/3/library/asyncio.html">asyncio</a> and <a href="https://docs.python.org/3/library/asyncio-task.html#coroutines">coroutines</a> (which are based on generators).</p>
+
+<p>If you have any trouble understanding the HTTP headers that we talked about, then I'd suggest taking a look at the HTTP specification, <a href="http://www.w3.org/Protocols/rfc2616/rfc2616.txt">rfc2616</a>. If you don't like reading large spec files, then the books <a href="http://www.amazon.com/The-Tangled-Web-Securing-Applications/dp/1593273886">"Tangled Web"</a> and <a href="http://chimera.labs.oreilly.com/books/1230000000545">"High Performance Browser Networking"</a> have good detailed chapters on HTTP.</p>
+
+<p>— Quazi Nafiul Islam (@gamesbrainiac on Twitter)</p>
+</div></div></body></html>

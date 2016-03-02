@@ -1,0 +1,113 @@
+<html><body><div><div itemprop="articleBody" class="article-body"><p>Last week I wrote about using <a href="http://rustyrazorblade.com/2015/05/on-the-bleeding-edge-pyspark-dataframes-and-cassandra/">PySpark with Cassandra</a>, showing how we can take tables out of Cassandra and easily apply arbitrary filters using DataFrames.  This is great if you want to do exploratory work or operate on large datasets.  What if you're interested in ingesting lots of data and getting near real time feedback into your application?  Enter Spark Streaming.</p>
+<p>Spark streaming is the process of ingesting and operating on data in microbatches, which are generated repeatedly on a fixed window of time.  You can visualize it like this:</p>
+<p><img alt="spark streaming" src="https://spark.apache.org/docs/0.9.1/img/streaming-flow.png"/></p>
+<p>To store both our raw and aggregated data I'll be using Cassandra.  It's the right fit for application that require high availability.  </p>
+<p><strong>Why would you use it?</strong></p>
+<p>If you want semi-real time analysis of your data that is not millisecond sensitive.  If you need the fastest possible response time to an incoming stream of information, (high frequency trading is a good example), you'll likely be more interested in <a href="https://storm.apache.org/">Apache Storm</a>.  Most of the stuff I've worked on doesn't require absolute minimum latency so we're OK to use microbatches.  A nice part about using Spark for streaming is that you get to use all the other great tooling in the Spark ecosystem like batching and machine learning.</p>
+<p><strong>Requirements</strong></p>
+<p>I'll assume you have Kafka set up already, and it's running on localhost, as well as Spark Standalone.  We need to use at least Spark 1.3 since previous versions do not support streaming with Python.  To set up Kafka, follow the <a href="https://kafka.apache.org/08/quickstart.html">quickstart</a>. Follow <a href="http://rustyrazorblade.com/2015/05/on-the-bleeding-edge-pyspark-dataframes-and-cassandra/">my previous post</a> to set up spark standalone.  Come back when you're up and running.  I'm using Cassandra to store all my aggregated data, so if you're going to run the code I've provided, you'll need that as well.  I've got Kafka set up to create topics automatically for convenience, if you don't set that up you'll want to create a topic called "pageviews".</p>
+<p><strong>Let's get our hands dirty.</strong></p>
+<p>We're going to be examing the spark streaming job that's part of my project <a href="https://github.com/rustyrazorblade/killranalytics">KillrAnalytics</a>.  To keep a reference to this post I've created a tag in the repo called <a href="https://github.com/rustyrazorblade/killranalytics/tree/intro_streaming_python2">intro_streaming_python</a>.  </p>
+<p>We'll need a way to push sample data into our Kafka topic, cleverly named <a href="https://github.com/rustyrazorblade/killranalytics/blob/intro_streaming_python2/bin/fill_kafka.py">fill_kafka.py</a>.  We're going to JSON encode some very trivial data, for now hardcoded to a specific site.  In the future this app will handle many sites (similar to Google Analytics) but for now we'll only do 1 since we're just learning.</p>
+<p>Let's first import everything we need.  This means the pyspark streaming module, <code>pyspark.streaming</code>, and if you're saving to Cassandra, the <code>pyspark_cassandra.streaming</code> module.  Since we're decoding JSON we'll also need Python's JSON module.</p>
+<div class="highlight"><pre><span class="kn">import</span> <span class="nn">pyspark_cassandra</span>
+<span class="kn">import</span> <span class="nn">pyspark_cassandra.streaming</span>
+
+<span class="kn">from</span> <span class="nn">pyspark_cassandra</span> <span class="kn">import</span> <span class="n">CassandraSparkContext</span>
+
+<span class="kn">from</span> <span class="nn">pyspark.sql</span> <span class="kn">import</span> <span class="n">SQLContext</span>
+<span class="kn">from</span> <span class="nn">pyspark</span> <span class="kn">import</span> <span class="n">SparkContext</span><span class="p">,</span> <span class="n">SparkConf</span>
+<span class="kn">from</span> <span class="nn">pyspark.streaming</span> <span class="kn">import</span> <span class="n">StreamingContext</span>
+<span class="kn">from</span> <span class="nn">pyspark.streaming.kafka</span> <span class="kn">import</span> <span class="n">KafkaUtils</span>
+<span class="kn">from</span> <span class="nn">uuid</span> <span class="kn">import</span> <span class="n">uuid1</span>
+
+<span class="kn">import</span> <span class="nn">json</span>
+</pre></div>
+
+
+<p>Next we create a SparkConf, a streaming context, and our Kafka Stream.  When we create the stream we need to pass our zookeeper address, a name, and the topic we're going to consume from.</p>
+<div class="highlight"><pre><span class="c"># set up our contexts</span>
+<span class="n">sc</span> <span class="o">=</span> <span class="n">CassandraSparkContext</span><span class="p">(</span><span class="n">conf</span><span class="o">=</span><span class="n">conf</span><span class="p">)</span>
+<span class="n">sql</span> <span class="o">=</span> <span class="n">SQLContext</span><span class="p">(</span><span class="n">sc</span><span class="p">)</span>
+<span class="n">stream</span> <span class="o">=</span> <span class="n">StreamingContext</span><span class="p">(</span><span class="n">sc</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span> <span class="c"># 1 second window</span>
+
+<span class="n">kafka_stream</span> <span class="o">=</span> <span class="n">KafkaUtils</span><span class="o">.</span><span class="n">createStream</span><span class="p">(</span><span class="n">stream</span><span class="p">,</span> \
+                                       <span class="s">"localhost:2181"</span><span class="p">,</span> \
+                                       <span class="s">"raw-event-streaming-consumer"</span><span class="p">,</span>
+                                        <span class="p">{</span><span class="s">"pageviews"</span><span class="p">:</span><span class="mi">1</span><span class="p">})</span>
+</pre></div>
+
+
+<p>The operations that we do on the <code>kafka_stream</code> will look to us like we're just performing transformations on a single RDD, but it's doing much more than that.  We don't have to worry about explicitly doing some while loop and managing failures &amp; retries, Spark does that for us.  We can treat <code>kafka_stream</code> like a regular RDD (mostly).  Here's what the incoming data looks like:</p>
+<div class="highlight"><pre><span class="p">(</span><span class="bp">None</span><span class="p">,</span> <span class="s">u'{"site_id": "02559c4f-ec20-4579-b2ca-72922a90d0df", "page": "/something.css"}'</span><span class="p">)</span>
+</pre></div>
+
+
+<p>Let's extract the data out of the 2 item tuple and decode it into something we can work with - a Python dictionary.</p>
+<div class="highlight"><pre><span class="n">parsed</span> <span class="o">=</span> <span class="n">kafka_stream</span><span class="o">.</span><span class="n">map</span><span class="p">(</span><span class="k">lambda</span> <span class="p">(</span><span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">):</span> <span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">v</span><span class="p">))</span>
+</pre></div>
+
+
+<p>Next we're going to aggregate the pageviews to a given site.  To keep the complexity to a minimum we're not yet going to split the data out by page.  </p>
+<p>The first thing we'll do is map site_id to 1, then count the number of 1s (via reduceByKey).  We'll then turn the whole thing into a friendly dictionary with <code>site_id</code> and a page view count.</p>
+<div class="highlight"><pre><span class="n">summed</span> <span class="o">=</span> <span class="n">parsed</span><span class="o">.</span><span class="n">map</span><span class="p">(</span><span class="k">lambda</span> <span class="n">event</span><span class="p">:</span> <span class="p">(</span><span class="n">event</span><span class="p">[</span><span class="s">'site_id'</span><span class="p">],</span> <span class="mi">1</span><span class="p">))</span><span class="o">.</span>\
+                <span class="n">reduceByKey</span><span class="p">(</span><span class="k">lambda</span> <span class="n">x</span><span class="p">,</span><span class="n">y</span><span class="p">:</span> <span class="n">x</span> <span class="o">+</span> <span class="n">y</span><span class="p">)</span><span class="o">.</span>\
+                <span class="nb">map</span><span class="p">(</span><span class="k">lambda</span> <span class="n">x</span><span class="p">:</span> <span class="p">{</span><span class="s">"site_id"</span><span class="p">:</span> <span class="n">x</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="s">"ts"</span><span class="p">:</span> <span class="nb">str</span><span class="p">(</span><span class="n">uuid1</span><span class="p">()),</span> <span class="s">"pageviews"</span><span class="p">:</span> <span class="n">x</span><span class="p">[</span><span class="mi">1</span><span class="p">]})</span>
+</pre></div>
+
+
+<p>Let's save the results to Cassandra.  What I love about this is if your RDD of dictionaries matches your Cassandra table structure you can just issue the following command:</p>
+<div class="highlight"><pre><span class="n">summed</span><span class="o">.</span><span class="n">saveToCassandra</span><span class="p">(</span><span class="s">"killranalytics"</span><span class="p">,</span> <span class="s">"real_time_data"</span><span class="p">)</span>
+</pre></div>
+
+
+<p>We can now tell Spark we want to start the stream.</p>
+<div class="highlight"><pre><span class="n">stream</span><span class="o">.</span><span class="n">start</span><span class="p">()</span>
+<span class="n">stream</span><span class="o">.</span><span class="n">awaitTermination</span><span class="p">()</span>
+</pre></div>
+
+
+<p><strong>Submit your streaming job</strong></p>
+<p>Time to start up our script that pushes fake data into our Kafka topic:</p>
+
+
+
+<p>To make testing easier, I've set up a little bash script called sub which I use to execute my job.  As of this writing I wasn't able to get the <code>--packages</code> option to work correctly so I'll continue to use this:</p>
+<div class="highlight"><pre><span class="nv">VERSION</span><span class="o">=</span>0.1.4
+
+spark-submit --packages org.apache.spark:spark-streaming-kafka_2.10:1.3.1 <span class="se">\</span>
+    --jars /Users/jhaddad/dev/pyspark-cassandra/target/pyspark_cassandra-<span class="si">${</span><span class="nv">VERSION</span><span class="si">}</span>.jar  <span class="se">\</span>
+    --driver-class-path /Users/jhaddad/dev/pyspark-cassandra/target/pyspark_cassandra-<span class="si">${</span><span class="nv">VERSION</span><span class="si">}</span>.jar <span class="se">\</span>
+    --py-files  /Users/jhaddad/dev/pyspark-cassandra/target/pyspark_cassandra-<span class="si">${</span><span class="nv">VERSION</span><span class="si">}</span>-py2.7.egg <span class="se">\</span>
+    --conf spark.cassandra.connection.host<span class="o">=</span>127.0.0.1 <span class="se">\</span>
+    --master spark://127.0.0.1:7077 <span class="se">\</span>
+    <span class="nv">$1</span>
+</pre></div>
+
+
+<p>To submit my job I do the following:</p>
+<div class="highlight"><pre>./sub killranalytics/spark/raw_event_stream_processing.py
+</pre></div>
+
+
+<p>You can watch the output of the Spark streaming job to make sure everything runs ok.  Assuming it does, you can check your table in Cassandra to see the aggregated information.  Open a CQL shell:</p>
+
+
+
+<p>And check your table:</p>
+<div class="highlight"><pre><span class="n">cqlsh</span><span class="o">:</span><span class="n">killranalytics</span><span class="o">&gt;</span> <span class="n">select</span> <span class="o">*</span> <span class="n">from</span> <span class="n">real_time_data</span> <span class="o">;</span>
+
+ <span class="n">site_id</span>                              <span class="o">|</span> <span class="n">ts</span>                                   <span class="o">|</span> <span class="n">pageviews</span>
+<span class="o">--------------------------------------+--------------------------------------+-----------</span>
+ <span class="mi">02559</span><span class="n">c4f</span><span class="o">-</span><span class="n">ec20</span><span class="o">-</span><span class="mi">4579</span><span class="o">-</span><span class="n">b2ca</span><span class="o">-</span><span class="mi">72922</span><span class="n">a90d0df</span> <span class="o">|</span> <span class="n">e7c6d647</span><span class="o">-</span><span class="n">f4ed</span><span class="o">-</span><span class="mi">11</span><span class="n">e4</span><span class="o">-</span><span class="n">a75d</span><span class="o">-</span><span class="mi">74</span><span class="n">d4358a0878</span> <span class="o">|</span>     <span class="mi">3</span>
+ <span class="mi">02559</span><span class="n">c4f</span><span class="o">-</span><span class="n">ec20</span><span class="o">-</span><span class="mi">4579</span><span class="o">-</span><span class="n">b2ca</span><span class="o">-</span><span class="mi">72922</span><span class="n">a90d0df</span> <span class="o">|</span> <span class="mi">3122</span><span class="n">f007</span><span class="o">-</span><span class="n">f4ee</span><span class="o">-</span><span class="mi">11</span><span class="n">e4</span><span class="o">-</span><span class="mi">99</span><span class="n">e4</span><span class="o">-</span><span class="mi">74</span><span class="n">d4358a0878</span> <span class="o">|</span>     <span class="mi">5</span>
+ <span class="mi">02559</span><span class="n">c4f</span><span class="o">-</span><span class="n">ec20</span><span class="o">-</span><span class="mi">4579</span><span class="o">-</span><span class="n">b2ca</span><span class="o">-</span><span class="mi">72922</span><span class="n">a90d0df</span> <span class="o">|</span> <span class="mi">31</span><span class="n">b3c8c2</span><span class="o">-</span><span class="n">f4ee</span><span class="o">-</span><span class="mi">11</span><span class="n">e4</span><span class="o">-</span><span class="mi">86</span><span class="n">c7</span><span class="o">-</span><span class="mi">74</span><span class="n">d4358a0878</span> <span class="o">|</span>     <span class="mi">5</span>
+ <span class="o">....</span>
+</pre></div>
+
+
+<p>I ran this job for a little while, so I've truncated the results.</p>
+<p>To see the code in it's entirety you can reference <a href="https://github.com/rustyrazorblade/killranalytics/blob/intro_streaming_python2/killranalytics/spark/raw_event_stream_processing.py">the Spark streaming job</a>.</p>
+<p><strong>What's next</strong></p>
+<p>At this point you should be able to create simple Spark streaming jobs, aggregating and processing data as it comes into the system.  It's possible to do quite a bit with Spark Streaming, I'll be coming back to this topic in several follow up posts.</p></div>
+	</div></body></html>

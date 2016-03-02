@@ -1,0 +1,220 @@
+<html><body><div><div id="article_text">
+    <p>I came across a thread on Hacker News this morning where a blogger wanted to move their site away from <a class="reference external" href="https://www.digitalocean.com/?refcode=074ce6598105">Digital Ocean</a> and was looking into alternatives. <a class="reference external" href="https://news.ycombinator.com/item?id=8542312">justinsb commented</a> in the thread:</p>
+<blockquote>
+"If it's static, then run it from S3. It'll be cheaper, and there are no servers to secure."</blockquote>
+<p>I've been blogging since 2001 and I've used a number of different platforms and hosting options. For the past few years I've been using a small droplet (1 GB of memory, 1 CPU, 30GB of SSD Disk capacity and 2TB of bandwidth a month) on Digital Ocean that has always been more than enough for all the different sites I host on it. The droplet costs $10 a month which is cheap enough that I never felt motivated to try and lower that cost.</p>
+<p>But, without using something like <a class="reference external" href="https://www.cloudflare.com/">Cloudflare's CDN service</a> all requests to this blog in particular would have to travel all the way from where each of my readers are to the data centre in Amsterdam that this blog is hosted in.</p>
+<p>If the site contents are uploaded to Amazon S3 then I could use Amazon CloudFront to globally distribute this site to 50+ servers around the world. Then readers would automagically connect to their closest server and theoretically download the content quicker.</p>
+<div class="section" id="hosting-costs-tl-dr-1-28-month">
+<h2>Hosting costs (tl;dr: $1.28 / month)</h2>
+<p>I'm going to use the site structure and traffic profile for an imaginative blog for my calculations:</p>
+<ol class="arabic simple">
+<li>1MB of content (HTML, CSS and JPEGs) served from the site itself.</li>
+<li>1,000 daily visitors.</li>
+<li>75% of those visitors are from the <a class="reference external" href="http://en.wikipedia.org/wiki/Contiguous_United_States">contiguous United States</a>.</li>
+<li>The second biggest country of origin of readers after the US is only 10% of the US' readership size (basically the rest of the readership is widely distributed around the world).</li>
+</ol>
+<p>With those numbers I ran a <a class="reference external" href="http://calculator.s3.amazonaws.com/index.html">pricing calculator</a> for Amazon S3.</p>
+<p>1,000 people a day, 30K a month, 1.5 pages per person, 150KB downloaded by each reader: 153,600 bytes * 30,000 = 4.3 GB / month in downloaded content.</p>
+<p>With an over-estimated 0.005GB of storage, 200 PUT/COPY/POST/LIST requests, 120,000 GET and other requests, 4.3GB of data transfer out and 1GB of data transfer in would cost (assuming I wasn't using the free tier) $0.05 per month on Amazon's <cite>US-East / US Standard (Virginia)</cite> servers.</p>
+<p>But that would only host content from servers in Virginia. In order to serve content closer to where readers' various locations I would need to use Cloudfront on top of S3. As of this writing <a class="reference external" href="http://aws.amazon.com/cloudfront/details/#Detailed_Description">Amazon says</a> they have 20 serving locations in the US, 15 in Europe, 11 in Asia, 2 in Australia and 2 in South America.</p>
+<p><a class="reference external" href="http://aws.amazon.com/cloudfront/pricing/">Pricing</a> is based on the number of terabytes transferred and the first cut off point is at 10TB.</p>
+<p>The world has been carved up into seven regions and each has it's own distinct pricing:</p>
+<p>First 10 TB / month:</p>
+<blockquote>
+<ul class="simple">
+<li>$0.120 United States</li>
+<li>$0.120 Europe</li>
+<li>$0.190 Hong Kong, Philippines, S. Korea, Singapore &amp; Taiwan</li>
+<li>$0.190 Japan</li>
+<li>$0.250 South America</li>
+<li>$0.190 Australia</li>
+<li>$0.170 India</li>
+</ul>
+</blockquote>
+<p>So the moment someone requests a page from Australia and they're served by a server in Australia you'll be billed $0.190 for that month. With 1,000 readers a day it's likely you'll serve content from all of Amazon's regions so the minimum each month is likely to be $1.23.</p>
+</div>
+<div class="section" id="setup-s3-and-cloudfront">
+<h2>Setup S3 and Cloudfront</h2>
+<p>To start, I created an S3 bucket called <cite>static-blog-test</cite> in <a class="reference external" href="http://aws.amazon.com/console/">Amazon's AWS console</a>, enabled 'Static Website Hosting' and set the Index Document to 'index.html'.</p>
+<p>I then created a CloudFront distribution, set the origin domain name to <cite>static-blog-test.s3.amazonaws.com</cite>, chose the "Use All Edge Locations (Best Performance)" price class, added <cite>static-blog-test.marksblogg.com</cite> to the alternate domain names and set the default root object to 'index.html'.</p>
+<p>Cloudfront then assigned <cite>d3bj15xywd5c9c.cloudfront.net</cite> to the distribution. I added a CNAME to my marksblogg.com zone file pointing <cite>static-blog-test</cite> to <cite>d3bj15xywd5c9c.cloudfront.net</cite> and made sure the DNS setting was resolvable from where I am:</p>
+<div class="highlight"><pre><span class="nv">$ </span>dig -t CNAME static-blog-test.marksblogg.com <span class="p">|</span> grep -A1 <span class="s1">'ANSWER SECTION'</span>
+<span class="p">;;</span> ANSWER SECTION:
+static-blog-test.marksblogg.com. <span class="m">5</span> IN   CNAME   d3bj15xywd5c9c.cloudfront.net.
+</pre></div>
+<p>Just as a note, if you edit anything in the Cloudfront console, go back to the Cloudfront distributions list page and see if your distribution's status is "In Progress" or "Deployed". I found deployments can take a few minutes so make sure they're done before you start questioning why something isn't working.</p>
+</div>
+<div class="section" id="creating-content">
+<h2>Creating content</h2>
+<p>I tend to use <a class="reference external" href="https://github.com/getpelican/pelican">pelican</a> and <a class="reference external" href="https://github.com/s3tools/s3cmd">S3cmd</a> for most static blogs I make. Both projects are written in Python and are actively-maintained.</p>
+<p>First, I'll install pelican and generate a small blog:</p>
+<div class="highlight"><pre><span class="nv">$ </span>pip install pelican
+<span class="nv">$ </span>pelican-quickstart
+Welcome to pelican-quickstart v3.4.0.
+
+This script will <span class="nb">help </span>you create a new Pelican-based website.
+
+Please answer the following questions so this script can generate the files
+needed by Pelican.
+
+
+&gt; Where <span class="k">do</span> you want to create your new web site? <span class="o">[</span>.<span class="o">]</span> .
+&gt; What will be the title of this web site? Static Blog
+&gt; Who will be the author of this web site? Mark Litwintschik
+&gt; What will be the default language of this web site? <span class="o">[</span>en<span class="o">]</span>
+&gt; Do you want to specify a URL prefix? e.g., http://example.com   <span class="o">(</span>Y/n<span class="o">)</span> n
+&gt; Do you want to <span class="nb">enable </span>article pagination? <span class="o">(</span>Y/n<span class="o">)</span> n
+&gt; Do you want to generate a Fabfile/Makefile to automate generation and publishing? <span class="o">(</span>Y/n<span class="o">)</span> Y
+&gt; Do you want an auto-reload <span class="p">&amp;</span> simpleHTTP script to assist with theme and site development? <span class="o">(</span>Y/n<span class="o">)</span> Y
+&gt; Do you want to upload your website using FTP? <span class="o">(</span>y/N<span class="o">)</span> N
+&gt; Do you want to upload your website using SSH? <span class="o">(</span>y/N<span class="o">)</span> N
+&gt; Do you want to upload your website using Dropbox? <span class="o">(</span>y/N<span class="o">)</span> N
+&gt; Do you want to upload your website using S3? <span class="o">(</span>y/N<span class="o">)</span> y
+&gt; What is the name of your S3 bucket? <span class="o">[</span>my_s3_bucket<span class="o">]</span> static-blog-test
+&gt; Do you want to upload your website using Rackspace Cloud Files? <span class="o">(</span>y/N<span class="o">)</span> N
+&gt; Do you want to upload your website using GitHub Pages? <span class="o">(</span>y/N<span class="o">)</span> N
+Done. Your new project is available at /home/mark/static_blog
+</pre></div>
+<p>When I filled in the above questionnaire I forgot to add in a URL prefix so I had to add it in afterword, here are the two files that setting sits in and the setting I used:</p>
+<div class="highlight"><pre><span class="nv">$ </span>grep SITEURL <span class="o">{</span>pelicanconf,publishconf<span class="o">}</span>.py
+pelicanconf.py:SITEURL <span class="o">=</span> <span class="s1">'http://static-blog-test.marksblogg.com'</span>
+publishconf.py:SITEURL <span class="o">=</span> <span class="s1">'http://static-blog-test.marksblogg.com'</span>
+</pre></div>
+<p>I then created a small blog post and saved it to <cite>content/hello-world.rst</cite>:</p>
+<div class="highlight"><pre>$ cat content/hello-world.rst
+<span class="nc">:title:</span> <span class="nf">Hello, World.</span>
+<span class="nc">:date:</span> <span class="nf">2014-11-01 12:19</span>
+<span class="nc">:slug:</span> <span class="nf">hello-world</span>
+<span class="nc">:summary:</span> <span class="nf">This article is greeting the world.</span>
+
+Hello, World.
+</pre></div>
+</div>
+<div class="section" id="deploying-to-amazon-s3">
+<h2>Deploying to Amazon S3</h2>
+<p><a class="reference external" href="https://github.com/s3tools/s3cmd">S3cmd</a> has been distributed via <cite>apt-get install s3cmd</cite> for years now but I was worried that it might be an older version being distributed. I assumed that if I installed via <cite>pip install s3cmd</cite> that I would get a newer version. I assumed wrong:</p>
+<div class="highlight"><pre><span class="nv">$ </span>apt-cache show s3cmd
+Package: s3cmd
+...
+Version: 1.1.0~beta3-2
+...
+</pre></div>
+<div class="highlight"><pre><span class="nv">$ </span>pip freeze <span class="p">|</span> grep s3cmd
+<span class="nv">s3cmd</span><span class="o">==</span>1.0.1
+</pre></div>
+<p>It turns out <cite>1.1.0~beta3-2</cite> was released in <a class="reference external" href="https://github.com/s3tools/s3cmd/releases/tag/v1.1.0-beta3">January 2012</a> while <cite>1.0.1</cite> was released in <a class="reference external" href="https://github.com/s3tools/s3cmd/releases/tag/v1.0.1">June 2011</a>.</p>
+<p>I didn't want to run the beta version as I know the stable version 1.0.1 hasn't caused me any issues in the past so I stuck with installing S3cmd via pip.</p>
+<p>It would be worth a seeing what has changed since January 2012 as their <a class="reference external" href="https://github.com/s3tools/s3cmd/graphs/contributors">contribution graph</a> on github looks like they've been pretty active since then.</p>
+<p>With S3cmd installed I configured it:</p>
+<div class="highlight"><pre><span class="nv">$ </span>s3cmd --configure
+
+Enter new values or accept defaults in brackets with Enter.
+Refer to user manual <span class="k">for</span> detailed description of all options.
+
+Access key and Secret key are your identifiers <span class="k">for</span> Amazon S3
+Access Key:
+...
+Use HTTPS protocol <span class="o">[</span>No<span class="o">]</span>: Yes
+
+New settings:
+  ...
+
+Test access with supplied credentials? <span class="o">[</span>Y/n<span class="o">]</span> Y
+Please wait...
+Success. Your access key and secret key worked fine :-<span class="o">)</span>
+
+Now verifying that encryption works...
+Not configured. Never mind.
+
+Save settings? <span class="o">[</span>y/N<span class="o">]</span> y
+Configuration saved to <span class="s1">'/home/mark/.s3cfg'</span>
+</pre></div>
+</div>
+<div class="section" id="generate-and-publish">
+<h2>Generate and publish</h2>
+<p>From what other blog posts have suggested there is only one command needed to generate the blog and upload it's files to Amazon S3 but when I ran the command it would generate the blog content but not upload it:</p>
+<div class="highlight"><pre><span class="nv">$ </span>make s3_upload
+pelican /home/mark/static_blog/content -o /home/mark/static_blog/output -s /home/mark/static_blog/publishconf.py
+Done: Processed <span class="m">1</span> article<span class="o">(</span>s<span class="o">)</span>, <span class="m">0</span> draft<span class="o">(</span>s<span class="o">)</span> and <span class="m">0</span> page<span class="o">(</span>s<span class="o">)</span> in 0.07 seconds.
+
+<span class="nv">$ </span>s3cmd ls s3://static-blog-test
+<span class="err">$</span>
+</pre></div>
+<p>So I manually ran S3cmd and synced the files with my S3 bucket:</p>
+<div class="highlight"><pre><span class="nv">$ </span>s3cmd sync output/ s3://static-blog-test <span class="se">\</span>
+  --acl-public --delete-removed --guess-mime-type
+output/archives.html -&gt; s3://static-blog-test/archives.html  <span class="o">[</span><span class="m">1</span> of 37<span class="o">]</span>
+ <span class="m">2718</span> of <span class="m">2718</span>   100% in    0s     3.16 kB/s  <span class="k">done</span>
+...
+Done. Uploaded <span class="m">62069</span> bytes in 31.4 seconds, 1974.73 B/s
+</pre></div>
+<p>I could then see my content in my bucket:</p>
+<div class="highlight"><pre><span class="nv">$ </span>s3cmd ls s3://static-blog-test
+                       DIR   s3://static-blog-test/author/
+                       DIR   s3://static-blog-test/category/
+                       DIR   s3://static-blog-test/feeds/
+                       DIR   s3://static-blog-test/theme/
+2014-11-01 10:33      <span class="m">2718</span>   s3://static-blog-test/archives.html
+2014-11-01 10:33      <span class="m">2730</span>   s3://static-blog-test/authors.html
+2014-11-01 10:33      <span class="m">2595</span>   s3://static-blog-test/categories.html
+2014-11-01 10:33      <span class="m">3385</span>   s3://static-blog-test/hello-world.html
+2014-11-01 10:33      <span class="m">3278</span>   s3://static-blog-test/index.html
+2014-11-01 10:33      <span class="m">2603</span>   s3://static-blog-test/tags.html
+</pre></div>
+</div>
+<div class="section" id="make-sure-the-content-serves-reliably">
+<h2>Make sure the content serves reliably</h2>
+<p>It's all well and good to see the content serve once or twice reliably but it's better to simulate traffic at busier times. If 1,000 readers visit each day then it's fair to assume you could see around 40 visitors at the busiest of times.</p>
+<p>I sanity checked that the first blog post was serving:</p>
+<div class="highlight"><pre><span class="nv">$ </span>curl --silent http://static-blog-test.marksblogg.com/hello-world.html <span class="p">|</span> head -n5
+&lt;!DOCTYPE html&gt;
+&lt;html <span class="nv">lang</span><span class="o">=</span><span class="s2">"en"</span>&gt;
+&lt;head&gt;
+        &lt;meta <span class="nv">charset</span><span class="o">=</span><span class="s2">"utf-8"</span> /&gt;
+        &lt;title&gt;Hello, World.&lt;/title&gt;
+</pre></div>
+<p>Then I installed <a class="reference external" href="http://httpd.apache.org/docs/2.2/programs/ab.html">ab</a> to see if anything other than HTTP 200 responses would occur with a small traffic simulation.</p>
+<div class="highlight"><pre><span class="nv">$ </span>sudo apt-get install apache2-utils
+</pre></div>
+<p>When I ran the simulation I saw 1,000 requests completed in 1.764 seconds with 0 failures.</p>
+<div class="highlight"><pre><span class="nv">$ </span>ab -n <span class="m">1000</span> -c <span class="m">40</span> http://static-blog-test.marksblogg.com/hello-world.html
+...
+Benchmarking static-blog-test.marksblogg.com <span class="o">(</span>be patient<span class="o">)</span>
+...
+Finished <span class="m">1000</span> requests
+...
+Concurrency Level:      40
+Time taken <span class="k">for</span> tests:   1.764 seconds
+Complete requests:      1000
+Failed requests:        0
+Total transferred:      <span class="m">3943140</span> bytes
+HTML transferred:       <span class="m">3385000</span> bytes
+Requests per second:    566.84 <span class="o">[</span><span class="c">#/sec] (mean)</span>
+Time per request:       70.566 <span class="o">[</span>ms<span class="o">]</span> <span class="o">(</span>mean<span class="o">)</span>
+Time per request:       1.764 <span class="o">[</span>ms<span class="o">]</span> <span class="o">(</span>mean, across all concurrent requests<span class="o">)</span>
+Transfer rate:          2182.76 <span class="o">[</span>Kbytes/sec<span class="o">]</span> received
+...
+</pre></div>
+</div>
+<div class="section" id="versioning-and-rollbacks">
+<h2>Versioning and rollbacks</h2>
+<p>One thing missing from this exercise is rollback functionality. If there were an case where I needed to rollback I would have to have stored each deployment as it's own commit in git, checkout a known good deployment commit and redeploy before investigating what had caused the previous deployment to fail.</p>
+<p>This would be only one way of handling versioning and rollbacks and I'm sure there are more elaborate and flexible ways of accomplishing these tasks.</p>
+</div>
+<div class="section" id="why-isn-t-this-blog-on-s3">
+<h2>Why isn't this blog on S3?</h2>
+<p>This blog is hosted on a small droplet on Digital Ocean that has never been fully utilised. I use the droplet for more than just hosting static content (such as running Django-based sites, periodic cron jobs, SSH tunnelling, etc...). I like the idea of not having a server to maintain but my server needs to be maintained for other projects anyway so I wouldn't be lowering my workload by much.</p>
+<p>Google Analytics site speed measurements tell me most pages on this blog load in or under a second on average around the world.</p>
+<p>If I was just hosting static content on my Digital Ocean droplet it would make sense to move as one month on Digital Ocean's cheapest droplet of $5 would buy almost four months of Amazon S3 and Cloudfront hosting.</p>
+</div>
+
+  </div>
+
+   <div id="support_text"><p>
+    Thank you for taking the time to read this post. If you're considering using </p><a href="https://www.digitalocean.com/?refcode=074ce6598105">Digital Ocean</a><p>, the hosting provider this blog is hosted on, please consider using </p><a href="https://www.digitalocean.com/?refcode=074ce6598105">this link to sign up</a><p>.
+  </p></div>
+
+
+  
+</div></body></html>

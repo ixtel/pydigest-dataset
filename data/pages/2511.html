@@ -1,0 +1,91 @@
+<html><body><div><div class="post-text" itemprop="text">
+
+<p>INTRO: It is well known that the accuracy of <code>time.sleep</code> is OS and computation load dependent. The accuracy in Windows is very poor.</p>
+
+<p>Similarly to <a href="http://stackoverflow.com/questions/17499837/python-time-sleep-vs-busy-wait-accuracy">/questions/17499837</a> a method can implement a busy wait using the <code>time.clock</code> method as an alternative to <code>time.sleep</code>. Such an approach creates unnecessary load affecting other modules in the system. That is not desirable while doing simulations.</p>
+
+<p>To reduce the amount of time spent in busy wait and not relying on the <code>time.sleep</code>, a class employs the method <code>select.select</code> and exploits the timeout attribute. See code below:</p>
+
+<pre><code>from sys import platform as _platform
+import time, select, socket
+
+class HighResolutionTimeStamp():
+    __init = time.clock()
+    __base = time.time()
+
+    def __init__(self):
+        self.__fd = socket.socket()
+        self.dtts = time.clock if _platform == 'win32' else time.time
+
+    def __del__(self):
+        self.__fd.close()
+
+    def get_high_resolution_dt(self):
+        return HighResolutionTimeStamp.__base + self.dtts() if _platform == 'win32' else time.time()
+
+    def busy_wait(self, wait_time):
+        currentTime = self.dtts()
+        while (self.dtts() &lt;= currentTime + wait_time):
+            pass
+
+    def sleep(self, wait_time):
+        currentTime = self.dtts()
+        while (self.dtts() &lt; (currentTime + wait_time - 0.001)):
+            select.select([self.__fd], [], [], 0.001)
+        while (self.dtts() &lt; currentTime + wait_time):
+            select.select([self.__fd], [], [], 0.0)
+
+if __name__ == '__main__':
+    st = 1.0/80.0
+    it = 10
+    ts = 1
+
+    time.sleep(ts)
+    hrdr = HighResolutionTimeStamp()
+    total = hrdr.get_high_resolution_dt()
+    for i in range(it):
+        hrdr.busy_wait(st)
+    print 'Ellapsed:', hrdr.get_high_resolution_dt() - total
+
+    time.sleep(ts)
+    total = hrdr.get_high_resolution_dt()
+    for i in range(it):
+        hrdr.sleep(st)
+    print 'Ellapsed:', hrdr.get_high_resolution_dt() - total
+
+    time.sleep(ts)
+    total = hrdr.get_high_resolution_dt()
+    for i in range(it):
+        time.sleep(st)
+    print 'Ellapsed:', hrdr.get_high_resolution_dt() - total
+</code></pre>
+
+<p>ENVIRONMENT: I'm using PortablePython2.7.6.1    </p>
+
+<p>PROBLEM: When the code is executed at the PyScripter or in the command line with PyScripter open in the background, the script above performs very accurate. Once the PyScripter is closed, the method sleep becomes inaccurate. I'm aware that the timeout for <code>select.select</code> should be inaccurate as <code>time.sleep</code> but in all cases, not as described above.</p>
+
+<p>RESULTS:</p>
+
+<p>Without PyScripter running in the background</p>
+
+<pre><code>C:\..\PortablePython2.7.6.1\App\python.exe highresolutiondt.py
+
+Busy wait. Ellapsed: 0.125249385834
+
+Sleep. Ellapsed: 0.15624165535
+
+Time.sleep. Ellapsed: 0.156844139099
+</code></pre>
+
+<p>With PyScripter running in the background</p>
+
+<pre><code>C:\..\PortablePython2.7.6.1\App\python.exe highresolutiondt.py
+
+Busy wait. Ellapsed: 0.125702142715
+
+Sleep. Ellapsed: 0.125874519348
+
+Time.sleep. Ellapsed: 0.120799064636
+</code></pre>
+    </div>
+    </div></body></html>

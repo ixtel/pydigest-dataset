@@ -1,0 +1,314 @@
+<html><body><div><article class="post-content" itemprop="ArticleBody">
+    <p>In this post I’m going to write simple chat roulette application using websockets. 
+App will consist of very basic user interface with some HTML + JavaScript. When I say “basic”
+I really mean it, it’s going to be just input box and vanilla JS creating websocket connection.
+On the backend side app will have websocket server managing realtime communication between clients.</p>
+
+<p>Websockets are one of the coolest technologies in recent years. They are getting popular mostly because
+they allow two-way communication between server and browser. In traditional HTTP application client
+sends requests and server issues response after which their exchange is terminated. This model is 
+totally okay for most web apps, but it is inefficient for applications that require realtime communication.
+<a href="https://tools.ietf.org/html/rfc6455#section-1.7">RFC 6455</a> is probably most detailed introduction to
+websockets specs.</p>
+
+<p>If you’d like to write websocket applications in Python there are couple of choices. If you’re 
+Django user there <a href="http://channels.readthedocs.org/en/latest/">are Channels</a>, for Flask there is <a href="https://flask-socketio.readthedocs.org/en/latest/">flask-SocketIO</a>.
+Both solutions are trying to extend existing web frameworks to allow for usage of websockets. 
+<a href="http://www.tornadoweb.org/en/stable/">Python Tornado</a> on the other hand is a whole web framework built
+for realtime asynchronous applications using websockets.</p>
+
+<p>One of the most mature implementations of websockets is <a href="http://autobahn.ws/python/index.html">Autobahn-Python</a>. 
+Autobahn websockets implementation supports both Twisted and Asyncio. I’m going to use <a href="https://twistedmatrix.com/trac/">Twisted</a>
+implementation. Why do I think Autobahn + Twisted is worth writing about?</p>
+
+<ul>
+  <li>Twisted is oldest and most stable asynchronous solution for Python, it is still actively developed
+(e.g. just recently most components finally gained Python 3 support) and still grows quite quickly (e.g.
+there is work on adding <a href="https://twistedmatrix.com/trac/ticket/7460">HTTP2 support to Twisted</a>)</li>
+  <li>Twisted is built with asynchronous model at the core, this is absolutely crucial for websocket applications that need
+to deal with long-living persistent connection from client</li>
+</ul>
+
+<h2 id="hello-websocket">Hello websocket</h2>
+
+<p>Before we actually start with development of server side websockets we’ll need to 
+set up something that is going to serve index.html file with client side JavaScript + HTML
+handling user interaction with your websocket server.</p>
+
+<p>Serving static file with Twisted is trivial and looks like this.</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="kn">import</span> <span class="nn">sys</span>
+<span class="kn">from</span> <span class="nn">twisted.web.static</span> <span class="kn">import</span> <span class="n">File</span>
+<span class="kn">from</span> <span class="nn">twisted.python</span> <span class="kn">import</span> <span class="n">log</span>
+<span class="kn">from</span> <span class="nn">twisted.web.server</span> <span class="kn">import</span> <span class="n">Site</span>
+<span class="kn">from</span> <span class="nn">twisted.internet</span> <span class="kn">import</span> <span class="n">reactor</span>
+
+<span class="n">log</span><span class="o">.</span><span class="n">startLogging</span><span class="p">(</span><span class="n">sys</span><span class="o">.</span><span class="n">stdout</span><span class="p">)</span>
+<span class="n">root</span> <span class="o">=</span> <span class="n">File</span><span class="p">(</span><span class="s">"."</span><span class="p">)</span>
+<span class="n">site</span> <span class="o">=</span> <span class="n">Site</span><span class="p">(</span><span class="n">root</span><span class="p">)</span>
+<span class="n">reactor</span><span class="o">.</span><span class="n">listenTCP</span><span class="p">(</span><span class="mi">8080</span><span class="p">,</span> <span class="n">site</span><span class="p">)</span>
+<span class="n">reactor</span><span class="o">.</span><span class="n">run</span><span class="p">()</span></code></pre></div>
+
+<p>Save this as server.py and create index.html file in same directory. Index.html can be blank for now,
+we will write HTML in a moment.</p>
+
+<p>Now let’s actually add some websockets to the mix.</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="kn">import</span> <span class="nn">sys</span>
+<span class="kn">from</span> <span class="nn">twisted.web.static</span> <span class="kn">import</span> <span class="n">File</span>
+<span class="kn">from</span> <span class="nn">twisted.python</span> <span class="kn">import</span> <span class="n">log</span>
+<span class="kn">from</span> <span class="nn">twisted.web.server</span> <span class="kn">import</span> <span class="n">Site</span>
+<span class="kn">from</span> <span class="nn">twisted.internet</span> <span class="kn">import</span> <span class="n">reactor</span>
+
+<span class="kn">from</span> <span class="nn">autobahn.twisted.websocket</span> <span class="kn">import</span> <span class="n">WebSocketServerFactory</span><span class="p">,</span> \
+    <span class="n">WebSocketServerProtocol</span>
+
+<span class="kn">from</span> <span class="nn">autobahn.twisted.resource</span> <span class="kn">import</span> <span class="n">WebSocketResource</span>
+
+
+<span class="k">class</span> <span class="nc">SomeServerProtocol</span><span class="p">(</span><span class="n">WebSocketServerProtocol</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">onConnect</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">request</span><span class="p">):</span>
+        <span class="k">print</span><span class="p">(</span><span class="s">"some request connected {}"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">request</span><span class="p">))</span>
+
+    <span class="k">def</span> <span class="nf">onMessage</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">payload</span><span class="p">,</span> <span class="n">isBinary</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">sendMessage</span><span class="p">(</span><span class="s">"message received"</span><span class="p">)</span>
+
+
+<span class="k">if</span> <span class="n">__name__</span> <span class="o">==</span> <span class="s">"__main__"</span><span class="p">:</span>
+    <span class="n">log</span><span class="o">.</span><span class="n">startLogging</span><span class="p">(</span><span class="n">sys</span><span class="o">.</span><span class="n">stdout</span><span class="p">)</span>
+
+    <span class="c"># static file server seving index.html as root</span>
+    <span class="n">root</span> <span class="o">=</span> <span class="n">File</span><span class="p">(</span><span class="s">"."</span><span class="p">)</span>
+
+    <span class="n">factory</span> <span class="o">=</span> <span class="n">WebSocketServerFactory</span><span class="p">(</span><span class="s">u"ws://127.0.0.1:8080"</span><span class="p">)</span>
+    <span class="n">factory</span><span class="o">.</span><span class="n">protocol</span> <span class="o">=</span> <span class="n">SomeServerProtocol</span>
+    <span class="n">resource</span> <span class="o">=</span> <span class="n">WebSocketResource</span><span class="p">(</span><span class="n">factory</span><span class="p">)</span>
+    <span class="c"># websockets resource on "/ws" path</span>
+    <span class="n">root</span><span class="o">.</span><span class="n">putChild</span><span class="p">(</span><span class="s">u"ws"</span><span class="p">,</span> <span class="n">resource</span><span class="p">)</span>
+
+    <span class="n">site</span> <span class="o">=</span> <span class="n">Site</span><span class="p">(</span><span class="n">root</span><span class="p">)</span>
+    <span class="n">reactor</span><span class="o">.</span><span class="n">listenTCP</span><span class="p">(</span><span class="mi">8080</span><span class="p">,</span> <span class="n">site</span><span class="p">)</span>
+    <span class="n">reactor</span><span class="o">.</span><span class="n">run</span><span class="p">()</span></code></pre></div>
+
+<p>Above code adds simple websockets protocol that is just responding to every
+message with pretty stupid message: “message received”. It’s no big deal, but 
+it’s pretty nice because at this point you actually have working websockets
+server. There is no client side websockets code yet, but you can test your server
+with some command line websockets clients or browser extension, e.g. with 
+<a href="https://chrome.google.com/webstore/detail/simple-websocket-client/pfdhoblngboilpfeibdedpjgfnlcodoo?hl=en">“Simple WebSocket Client” Chrome extension</a>. 
+Just run your server.py and ping ws://localhost:8080/ws from Chrome extension.</p>
+
+<h2 id="add-client-side-javascript">Add client side JavaScript</h2>
+
+<p>Now that we have working websockets server we can create our client. We need
+two things: input box where user can write some strings that are going
+to be transmitted to server; and JavaScript code creating websockets connection
+and sending data to our websockets server after some UI event occurs.</p>
+
+<p>Mozilla Developer Network has some good <a href="https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_client_applications">docs about this topic</a>, I’m going to use
+vanilla JS, but you can just as well use jQuery or even some specialized 
+library for websockets (e.g Socket-IO).</p>
+
+<p>Below is our index html. Our JS code
+does following things. First it creates websocket instance and defines
+some event listener that will tell browser what to do when websocket message
+is received. When websocket message is received browser should simply update
+“output” node with text content of message. We then fetch input box, add event
+listener to “submit” event. When “submit” event happens
+browser should use our websocket and send message via this socket.
+Sending data is just a matter of making mySocket.send call on WebSocket object.</p>
+
+<div class="highlight"><pre><code class="language-html" data-lang="html"><span class="cp">&lt;!DOCTYPE html&gt;</span>
+<span class="nt">&lt;html&gt;</span>
+<span class="nt">&lt;head&gt;</span>
+<span class="nt">&lt;script </span><span class="na">type=</span><span class="s">"text/javascript"</span><span class="nt">&gt;</span>
+    <span class="c1">// use vanilla JS because why not</span>
+    <span class="nb">window</span><span class="p">.</span><span class="nx">addEventListener</span><span class="p">(</span><span class="s2">"load"</span><span class="p">,</span> <span class="kd">function</span><span class="p">()</span> <span class="p">{</span>
+        
+        <span class="c1">// create websocket instance</span>
+        <span class="kd">var</span> <span class="nx">mySocket</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">WebSocket</span><span class="p">(</span><span class="s2">"ws://localhost:8080/ws"</span><span class="p">);</span>
+        
+        <span class="c1">// add event listener reacting when message is received</span>
+        <span class="nx">mySocket</span><span class="p">.</span><span class="nx">onmessage</span> <span class="o">=</span> <span class="kd">function</span> <span class="p">(</span><span class="nx">event</span><span class="p">)</span> <span class="p">{</span>
+            <span class="kd">var</span> <span class="nx">output</span> <span class="o">=</span> <span class="nb">document</span><span class="p">.</span><span class="nx">getElementById</span><span class="p">(</span><span class="s2">"output"</span><span class="p">);</span>
+            <span class="c1">// put text into our output div</span>
+            <span class="nx">output</span><span class="p">.</span><span class="nx">textContent</span> <span class="o">=</span> <span class="nx">event</span><span class="p">.</span><span class="nx">data</span><span class="p">;</span>
+        <span class="p">};</span>
+        <span class="kd">var</span> <span class="nx">form</span> <span class="o">=</span> <span class="nb">document</span><span class="p">.</span><span class="nx">getElementsByClassName</span><span class="p">(</span><span class="s2">"foo"</span><span class="p">);</span>
+        <span class="kd">var</span> <span class="nx">input</span> <span class="o">=</span> <span class="nb">document</span><span class="p">.</span><span class="nx">getElementById</span><span class="p">(</span><span class="s2">"input"</span><span class="p">);</span>
+        <span class="nx">form</span><span class="p">[</span><span class="mi">0</span><span class="p">].</span><span class="nx">addEventListener</span><span class="p">(</span><span class="s2">"submit"</span><span class="p">,</span> <span class="kd">function</span> <span class="p">(</span><span class="nx">e</span><span class="p">)</span> <span class="p">{</span>
+            <span class="c1">// on forms submission send input to our server</span>
+            <span class="nx">input_text</span> <span class="o">=</span> <span class="nx">input</span><span class="p">.</span><span class="nx">value</span><span class="p">;</span>
+            <span class="nx">mySocket</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="nx">input_text</span><span class="p">);</span>
+            <span class="nx">e</span><span class="p">.</span><span class="nx">preventDefault</span><span class="p">()</span>
+        <span class="p">})</span>
+    <span class="p">});</span>
+<span class="nt">&lt;/script&gt;</span>
+<span class="nt">&lt;style&gt;</span>
+    <span class="c">/* just some super basic css to make things bit more readable */</span>
+    <span class="nt">div</span> <span class="p">{</span>
+        <span class="k">margin</span><span class="o">:</span> <span class="m">10em</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="nt">form</span> <span class="p">{</span>
+        <span class="k">margin</span><span class="o">:</span> <span class="m">10em</span><span class="p">;</span>
+    <span class="p">}</span>
+<span class="nt">&lt;/style&gt;</span>
+<span class="nt">&lt;/head&gt;</span>
+<span class="nt">&lt;body&gt;</span>
+    <span class="nt">&lt;form</span> <span class="na">class=</span><span class="s">"foo"</span><span class="nt">&gt;</span>
+        <span class="nt">&lt;input</span> <span class="na">id=</span><span class="s">"input"</span><span class="nt">&gt;&lt;/input&gt;</span>
+        <span class="nt">&lt;input</span> <span class="na">type=</span><span class="s">"submit"</span><span class="nt">&gt;&lt;/input&gt;</span>
+    <span class="nt">&lt;/form&gt;</span>
+    <span class="nt">&lt;div</span> <span class="na">id=</span><span class="s">"output"</span><span class="nt">&gt;&lt;/div&gt;</span>
+<span class="nt">&lt;/body&gt;</span>
+<span class="nt">&lt;/html&gt;</span></code></pre></div>
+
+<p>At this point we have simple websockets server and client that talk to each other. 
+Their communication is not very complex. Server just
+echoes back message from client. At this point we can start adding some cool features.</p>
+
+<h2 id="register-and-unregister-clients">Register and unregister clients</h2>
+
+<p>Now that we have basic skeleton of websockets project we can start adding some real functionality.
+First thing we need to do is register and unregister clients starting conversations with our server.
+To accomplish this we will need to add some factory to our protocol. In Twisted protocols are created
+per connection, and they allow you to define event listeners for your application. In case of websockets
+this means that your protocol can define event handlers for common scenarios: message being sent, connection being
+made, connection lost etc. Factories on the other hand manufacture protocols. They are common to 
+multiple protocols, they define how protocols should interact with each other.</p>
+
+<p>In case of our chat roullette all this means that aside from writing protocol we just need to write 
+factory that will define how websocket clients will interact with each other. Of course we also
+need to define protocols to specify how are we going to handle typical websockets events.</p>
+
+<p>Let’s start with protocol. Our base class will look like this, no real code for now just 
+docstring and basic structure of our object.</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="k">class</span> <span class="nc">SomeServerProtocol</span><span class="p">(</span><span class="n">WebSocketServerProtocol</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">onOpen</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="sd">"""</span>
+<span class="sd">        Connection from client is opened. Fires after opening</span>
+<span class="sd">        websockets handshake has been completed and we can send</span>
+<span class="sd">        and receive messages.</span>
+
+<span class="sd">        Register client in factory, so that it is able to track it.</span>
+<span class="sd">        Try to find conversation partner for this client.</span>
+<span class="sd">        """</span>
+        <span class="k">pass</span>
+
+    <span class="k">def</span> <span class="nf">connectionLost</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">reason</span><span class="p">):</span>
+        <span class="sd">"""</span>
+<span class="sd">        Client lost connection, either disconnected or some error.</span>
+<span class="sd">        Remove client from list of tracked connections.</span>
+<span class="sd">        """</span>
+        <span class="k">pass</span>
+
+    <span class="k">def</span> <span class="nf">onMessage</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">payload</span><span class="p">,</span> <span class="n">isBinary</span><span class="p">):</span>
+        <span class="sd">"""</span>
+<span class="sd">        Message sent from client, communicate this message to its conversation partner,</span>
+<span class="sd">        """</span>
+        <span class="k">pass</span></code></pre></div>
+
+<p>Implementation of our protocol would look like this:</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="k">class</span> <span class="nc">SomeServerProtocol</span><span class="p">(</span><span class="n">WebSocketServerProtocol</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">onOpen</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">factory</span><span class="o">.</span><span class="n">register</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">factory</span><span class="o">.</span><span class="n">findPartner</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">connectionLost</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">reason</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">factory</span><span class="o">.</span><span class="n">unregister</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">onMessage</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">payload</span><span class="p">,</span> <span class="n">isBinary</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">factory</span><span class="o">.</span><span class="n">communicate</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">payload</span><span class="p">,</span> <span class="n">isBinary</span><span class="p">)</span></code></pre></div>
+
+<p>Now that we have our protocol we need to define common functionalities per protocol and
+add a way to manage interactions between protocols. Our base protocol factory could look like this.</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="k">class</span> <span class="nc">ChatRouletteFactory</span><span class="p">(</span><span class="n">WebSocketServerFactory</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">register</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">client</span><span class="p">):</span>
+        <span class="sd">"""</span>
+<span class="sd">        Add client to list of managed connections.</span>
+<span class="sd">        """</span>
+        <span class="k">pass</span>
+
+    <span class="k">def</span> <span class="nf">unregister</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">client</span><span class="p">):</span>
+        <span class="sd">"""</span>
+<span class="sd">        Remove client from list of managed connections.</span>
+<span class="sd">        """</span>
+        <span class="k">pass</span>
+
+    <span class="k">def</span> <span class="nf">findPartner</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">client</span><span class="p">):</span>
+        <span class="sd">"""</span>
+<span class="sd">        Find chat partner for a client. Check if there any of tracked clients</span>
+<span class="sd">        is idle. If there is no idle client just exit quietly. If there is</span>
+<span class="sd">        available partner assign him/her to our client.</span>
+<span class="sd">        """</span>
+        <span class="k">pass</span>
+
+    <span class="k">def</span> <span class="nf">communicate</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">client</span><span class="p">,</span> <span class="n">payload</span><span class="p">,</span> <span class="n">isBinary</span><span class="p">):</span>
+        <span class="sd">"""</span>
+<span class="sd">        Broker message from client to its partner.</span>
+<span class="sd">        """</span>
+        <span class="k">pass</span></code></pre></div>
+
+<p>and implementation of this could look like this:</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="k">class</span> <span class="nc">ChatRouletteFactory</span><span class="p">(</span><span class="n">WebSocketServerFactory</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">(</span><span class="n">ChatRouletteFactory</span><span class="p">,</span> <span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="n">__init__</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">clients</span> <span class="o">=</span> <span class="p">{}</span>
+
+    <span class="k">def</span> <span class="nf">register</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">client</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">clients</span><span class="p">[</span><span class="n">client</span><span class="o">.</span><span class="n">peer</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span><span class="s">"object"</span><span class="p">:</span> <span class="n">client</span><span class="p">,</span> <span class="s">"partner"</span><span class="p">:</span> <span class="bp">None</span><span class="p">}</span>
+
+    <span class="k">def</span> <span class="nf">unregister</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">client</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">clients</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="n">client</span><span class="o">.</span><span class="n">peer</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">findPartner</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">client</span><span class="p">):</span>
+        <span class="n">available_partners</span> <span class="o">=</span> <span class="p">[</span><span class="n">c</span> <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">clients</span> <span class="k">if</span> <span class="n">c</span> <span class="o">!=</span> <span class="n">client</span><span class="o">.</span><span class="n">peer</span> 
+                              <span class="ow">and</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">clients</span><span class="p">[</span><span class="n">c</span><span class="p">][</span><span class="s">"partner"</span><span class="p">]]</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">available_partners</span><span class="p">:</span>
+            <span class="k">print</span><span class="p">(</span><span class="s">"no partners for {} check in a moment"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">client</span><span class="o">.</span><span class="n">peer</span><span class="p">))</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">partner_key</span> <span class="o">=</span> <span class="n">random</span><span class="o">.</span><span class="n">choice</span><span class="p">(</span><span class="n">available_partners</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">clients</span><span class="p">[</span><span class="n">partner_key</span><span class="p">][</span><span class="s">"partner"</span><span class="p">]</span> <span class="o">=</span> <span class="n">client</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">clients</span><span class="p">[</span><span class="n">client</span><span class="o">.</span><span class="n">peer</span><span class="p">][</span><span class="s">"partner"</span><span class="p">]</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">clients</span><span class="p">[</span><span class="n">partner_key</span><span class="p">][</span><span class="s">"object"</span><span class="p">]</span>
+
+    <span class="k">def</span> <span class="nf">communicate</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">client</span><span class="p">,</span> <span class="n">payload</span><span class="p">,</span> <span class="n">isBinary</span><span class="p">):</span>
+        <span class="n">c</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">clients</span><span class="p">[</span><span class="n">client</span><span class="o">.</span><span class="n">peer</span><span class="p">]</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">c</span><span class="p">[</span><span class="s">"partner"</span><span class="p">]:</span>
+            <span class="n">c</span><span class="p">[</span><span class="s">"object"</span><span class="p">]</span><span class="o">.</span><span class="n">sendMessage</span><span class="p">(</span><span class="s">"Sorry you dont have partner yet, check back in a minute"</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">c</span><span class="p">[</span><span class="s">"partner"</span><span class="p">]</span><span class="o">.</span><span class="n">sendMessage</span><span class="p">(</span><span class="n">payload</span><span class="p">)</span></code></pre></div>
+
+<p>Now that we have everything defined you only need to tie it together, create instances of objects
+and start your program:</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="k">if</span> <span class="n">__name__</span> <span class="o">==</span> <span class="s">"__main__"</span><span class="p">:</span>
+    <span class="n">log</span><span class="o">.</span><span class="n">startLogging</span><span class="p">(</span><span class="n">sys</span><span class="o">.</span><span class="n">stdout</span><span class="p">)</span>
+
+    <span class="c"># static file server seving index.html as root</span>
+    <span class="n">root</span> <span class="o">=</span> <span class="n">File</span><span class="p">(</span><span class="s">"."</span><span class="p">)</span>
+
+    <span class="n">factory</span> <span class="o">=</span> <span class="n">ChatRouletteFactory</span><span class="p">(</span><span class="s">u"ws://127.0.0.1:8080"</span><span class="p">,</span> <span class="n">debug</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+    <span class="n">factory</span><span class="o">.</span><span class="n">protocol</span> <span class="o">=</span> <span class="n">SomeServerProtocol</span>
+    <span class="n">resource</span> <span class="o">=</span> <span class="n">WebSocketResource</span><span class="p">(</span><span class="n">factory</span><span class="p">)</span>
+    <span class="c"># websockets resource on "/ws" path</span>
+    <span class="n">root</span><span class="o">.</span><span class="n">putChild</span><span class="p">(</span><span class="s">u"ws"</span><span class="p">,</span> <span class="n">resource</span><span class="p">)</span>
+
+    <span class="n">site</span> <span class="o">=</span> <span class="n">Site</span><span class="p">(</span><span class="n">root</span><span class="p">)</span>
+    <span class="n">reactor</span><span class="o">.</span><span class="n">listenTCP</span><span class="p">(</span><span class="mi">8080</span><span class="p">,</span> <span class="n">site</span><span class="p">)</span>
+    <span class="n">reactor</span><span class="o">.</span><span class="n">run</span><span class="p">()</span></code></pre></div>
+
+<p>You can find full Python source code <a href="http://pastebin.com/YJJzreFF">here</a>, HTML with JS 
+is <a href="http://pastebin.com/twP1Ksv4">here</a>.</p>
+
+<p>With the above code you should be able to talk to yourself via your Chat server. Just open
+couple of browser tabs and start writing in each input box. There is probably lots of things
+that could be improved, but I just wanted to create very basic demo that could get people started. 
+If you do find some bugs or mistakes feel free to ping me.</p>
+
+  </article>
+
+</div></body></html>

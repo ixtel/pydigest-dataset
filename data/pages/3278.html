@@ -1,0 +1,403 @@
+<html><body><div><div class="entry-content">
+			<p>In parts <a href="/2014/10/16/django_auth_tutorial/">one</a>, <a href="/2014/10/19/django_auth_tutorial_2/">two</a>, and <a href="/2014/10/19/django_auth_testing_tutorial_3/">three</a>, we set up the model and trivial website, and in <a href="/2014/12/29/django_auth_tutorial_4/">four</a> and <a href="/2015/01/26/django_auth_tutorial_5/">five</a>, a login page with remember-me functionality. In this post, we’re going to upgrade it further, with a basic client-side (JavaScript) check to prevent logins from ever reaching the server when the username or password have an obviously-incorrect length. These min-max values will originate in the model code, and will be passed to the template by the view.</p>
+<p><i><code><b>[TOC: <a href="/2014/10/16/django_auth_tutorial/">one</a>, <a href="/2014/10/19/django_auth_tutorial_2/">two</a>, <a href="/2014/10/19/django_auth_testing_tutorial_3/">three</a>, <a href="/2014/12/29/django_auth_tutorial_4/">four</a>, <a href="/2015/01/26/django_auth_tutorial_5/">five</a>, <a href="/2015/02/12/django_auth_tutorial_6/">six</a>, <a href="/2015/02/13/django_auth_tutorial_7/">seven</a>, eight, nine, ten]</b></code></i></p>
+<p><i><b>Two warnings:</b>
+<ul>
+<li>As stated at the top of part one, I am unable to test these JavaScript features with Selenium, due to limitations in my server; it’s command-line only–non-GUI.</li>
+<li>The <a href="#view">server-side length checks</a> are “succeeding” but crashing–that is, they only crash when the lengths are incorrect. While this is a critical problem, it only applies when the client-side JavaScript is disabled. Here is a <a href="http://stackoverflow.com/questions/28681563/django-form-is-properly-catching-bad-user-pass-length-but-is-crashing-with-type">Stack Overflow question</a> documenting the problem. A solution would be greatly appreciated.</li>
+</ul>
+</i></p><p/>
+<p>This post is the first to contain a substantial amount of JavaScript. It is therefore time to <a href="/2015/02/10/nginxstaticdir/">create a public static web server directory</a>, into which the JavaScript will be placed.
+</p><ul>
+<li>The Nginx config file for this project is <code>/etc/nginx/sites-available/django_auth_lifecycle</code></li>
+<li>The paths to the Django-root and Virtualenv directories:
+<ul>
+<li><code>/home/myname/django_auth_lifecycle/djauth_root/</code></li>
+<li><code>/home/myname/django_auth_lifecycle/djauth_venv/</code></li>
+</ul>
+</li>
+</ul>
+<h2>Update the models</h2>
+<p>Were going to add four configuration variables that will be used by both the Django code and in the templates, that define the minimum and maximum lengths for both the username and password. Although the model itself will remain the same, <code>models.py</code> is an appropriate place to have these configuration variables.</p>
+<p>Replace the contents of<br/>
+    <code>/home/myname/django_auth_lifecycle/djauth_root/auth_lifecycle/models.py</code><br/>
+with</p>
+<pre class="brush: python; title: ; notranslate" title="">"""
+Defines a single extra user-profile field for the user-authentication
+lifecycle demo project, and defines the absolute minimum and maximum
+allowable username and password lengths.
+
+The extra field: Birth year, which must be between &lt;link to MIN_BIRTH_YEAR&gt;
+and &lt;link to MAX_BIRTH_YEAR&gt;, inclusive.
+"""
+from datetime                   import datetime
+from django.contrib.auth.models import User
+from django.core.exceptions     import ValidationError
+from django.db                  import models
+
+USERNAME_MIN_LEN = 5
+"""
+The database allows one-character usernames. We're going to forbid
+anything less than five characters.
+"""
+USERNAME_MAX_LEN = User._meta.get_field('username').max_length
+"""
+The maximum allowable username length, as determined by the database
+column. Equal to
+    `User._meta.get_field('username').max_length`
+"""
+PASSWORD_MIN_LEN = 5
+"""
+The password is stored in the database, not as plain text, but as it's
+generated hash. Length is therefore not enforced by the database at all.
+We're going to minimally protect users against themselves and impose an
+five character minimum. (For real, I'd make this eight. When testing, I
+make the password equal to the username, so it's temporarily shorter.)
+"""
+PASSWORD_MAX_LEN = 4096
+"""
+Imposing a maximum password length is not recommended:
+- http://stackoverflow.com/questions/98768/should-i-impose-a-maximum-length-on-passwords
+
+However, Django prevents an attack vector by forbidding excessively-long
+passwords (See "Issue: denial-of-service via large passwords"):
+- https://www.djangoproject.com/weblog/2013/sep/15/security/
+"""
+
+OLDEST_EVER_AGE     = 127  #:Equal to `127`
+YOUNGEST_ALLOWED_IN_SYSTEM_AGE = 13   #:Equal to `13`
+MAX_BIRTH_YEAR      = datetime.now().year - YOUNGEST_ALLOWED_IN_SYSTEM_AGE
+"""Most recent allowed birth year for (youngest) users."""
+MIN_BIRTH_YEAR      = datetime.now().year - OLDEST_EVER_AGE
+"""Most distant allowed birth year for (oldest) users."""
+
+def _validate_birth_year(birth_year_str):
+    """Validator for &lt;link to UserProfile.birth_year&gt;, ensuring the
+        selected year is between &lt;link to OLDEST_EVER_AGE&gt; and
+        &lt;link to MAX_BIRTH_YEAR&gt;, inclusive.
+        Raises:
+            ValidationError: When the selected year is invalid.
+
+        - https://docs.djangoproject.com/en/1.7/ref/validators/
+
+        I am a recovered Hungarian Notation junkie (I come from Java). I
+        stopped using it long before I started with Python. In this
+        particular function, however, because of the necessary cast, it's
+        appropriate.
+    """
+    birth_year_int = -1
+    try:
+        birth_year_int = int(str(birth_year_str).strip())
+    except TypeError:
+        raise ValidationError(u'"{0}" is not an integer'.format(birth_year_str))
+
+    if  not (MIN_BIRTH_YEAR &lt;= birth_year_int &lt;= MAX_BIRTH_YEAR):
+        message = (u'{0} is an invalid birth year.'
+                   u'Must be between {1} and {2}, inclusive')
+        raise ValidationError(message.format(
+            birth_year_str, MIN_BIRTH_YEAR, MAX_BIRTH_YEAR))
+    #It's all good.
+
+class UserProfile(models.Model):
+    """Extra information about a user: Birth year.
+
+    ---NOTES---
+
+    Useful related SQL:
+    - `select id from auth_user where username &lt;&gt; 'admin';`
+    - `select * from auth_lifecycle_userprofile where user_id=(x,x,...);`
+    """
+    # This line is required. Links UserProfile to a User model instance.
+    user = models.OneToOneField(User, related_name="profile")
+
+    # The additional attributes we wish to include.
+    birth_year = models.IntegerField(
+        blank=True,
+        verbose_name="Year you were born",
+        validators=[_validate_birth_year])
+
+    # Override the __str__() method to return out something meaningful
+    def __str__(self):
+        return self.user.username</pre>
+<p><a name="view"/></p>
+<h2>Update the view</h2>
+<p>The login view created in the previous chapter now needs to be updated so it pass those configuration variables to the template. These variables will be used by the client-side JavaScript. (An alternative to passing extra context to the template is via <code>urls.py</code>, as demonstrated in the next chapter.)</p>
+<p>However, since we have no control over our users’ machines–and therefore cannot know if JavaScript is even enabled–it is also necessary to do this check on the server. The default form used by this view, <code>django.contrib.auth.forms.<a href="https://docs.djangoproject.com/en/1.7/_modules/django/contrib/auth/forms/#AuthenticationForm">AuthenticationForm</a></code>, needs to be updated with our min/max lengths. Here are the original fields:</p>
+<pre class="brush: python; title: ; notranslate" title="">username = forms.CharField(max_length=254)
+password = forms.CharField(label=_("Password"), widget=forms.PasswordInput)</pre>
+<p>Replace the contents of<br/>
+    <code>/home/myname/django_auth_lifecycle/djauth_root/auth_lifecycle/registration/view_login.py</code><br/>
+with:</p>
+<pre class="brush: python; title: ; notranslate" title="">from auth_lifecycle.models     import PASSWORD_MIN_LEN, PASSWORD_MAX_LEN
+from auth_lifecycle.models     import USERNAME_MIN_LEN, USERNAME_MAX_LEN
+from django                    import forms    #NOT django.contrib.auth.forms
+from django.contrib.auth.forms import AuthenticationForm
+from django.contrib.auth.views import login
+#from django.core.exceptions    import ValidationError
+from django.utils.translation  import ugettext, ugettext_lazy as _
+
+def login_maybe_remember(request, *args, **kwargs):
+    """
+    Login with remember-me functionality and length checking. If the
+    remember-me checkbox is checked, the session is remembered for
+    SESSION_COOKIE_AGE seconds. If unchecked, the session expires at
+    browser close.
+
+    - https://docs.djangoproject.com/en/1.7/ref/settings/#std:setting-SESSION_COOKIE_AGE
+    - https://docs.djangoproject.com/en/1.7/topics/http/sessions/#django.contrib.sessions.backends.base.SessionBase.set_expiry
+    - https://docs.djangoproject.com/en/1.7/topics/http/sessions/#django.contrib.sessions.backends.base.SessionBase.get_expire_at_browser_close
+    """
+    if request.method == 'POST' and not request.POST.get('remember', None):
+        #This is a login attempt and the checkbox is not checked.
+        request.session.set_expiry(0)
+
+    context = {}
+    context["USERNAME_MIN_LEN"] = USERNAME_MIN_LEN
+    context["USERNAME_MAX_LEN"] = USERNAME_MAX_LEN
+    context["PASSWORD_MIN_LEN"] = PASSWORD_MIN_LEN
+    context["PASSWORD_MAX_LEN"] = PASSWORD_MAX_LEN
+    kwargs["extra_context"] = context
+
+    print("authentication_form=" + str(kwargs["authentication_form"]));
+
+    return login(request, *args, **kwargs)
+
+def get_min_max_incl_err_msg(min_int, max_int):
+    """A basic error message for inclusive string length."""
+    "Must be between " + str(min_int) + " and " + str(max_int) + " characters, inclusive."
+
+username_min_max_len_err_msg = get_min_max_incl_err_msg(USERNAME_MIN_LEN, USERNAME_MAX_LEN)
+pwd_min_max_len_err_msg = get_min_max_incl_err_msg(PASSWORD_MIN_LEN, PASSWORD_MAX_LEN)
+
+class AuthenticationFormEnforceLength(AuthenticationForm):
+    """
+    An `AuthenticationForm` that enforces min/max lengths.
+    - https://docs.djangoproject.com/en/1.7/_modules/django/contrib/auth/forms/#AuthenticationForm
+
+    Pass this into the login form via the `authentication_form` parameter.
+    - https://docs.djangoproject.com/en/1.7/topics/auth/default/#django.contrib.auth.views.login
+    Which is done in `registration/urls.py`.
+    """
+    username = forms.CharField(min_length=USERNAME_MIN_LEN,
+                               max_length=USERNAME_MAX_LEN,
+                               error_messages={
+                                   'min_length': username_min_max_len_err_msg,
+                                   'max_length': username_min_max_len_err_msg })
+    password = forms.CharField(label=_("Password"), widget=forms.PasswordInput,
+                                    min_length=PASSWORD_MIN_LEN,
+                                    max_length=PASSWORD_MAX_LEN,
+                                    error_messages={
+                                        'min_length': pwd_min_max_len_err_msg,
+                                        'max_length': pwd_min_max_len_err_msg })
+#    def clean(self):
+#        raise ValidationError("Yikes")</pre>
+<p>(A reminder of the second warning at the top of this chapter…)</p>
+<p>The bounds in this form object cause <code>maxlength</code> attributes to be placed directly onto the html form elements:</p>
+<pre class="brush: xml; title: ; notranslate" title="">&lt;input id="id_username" maxlength="30" name="username" type="text" /&gt;&lt;/p&gt;
+&lt;input id="id_password" maxlength="4096" name="password" type="password" /&gt;&lt;/p&gt;</pre>
+<p>While this now makes the maximum portion of our JavaScript checks redundant, we’re going to leave them in anyway.</p>
+<h2>Update the template</h2>
+<p>Now to use these variables in the template.</p>
+<p>Replace the contents of<br/>
+    <code>/home/myname/django_auth_lifecycle/djauth_root/auth_lifecycle/templates/registration/login.html</code><br/>
+with</p>
+<pre class="brush: xml; title: ; notranslate" title="">{% load i18n %}       {# For the "trans" tag #}
+{% load staticfiles %}{# References the static directory.             #}
+&lt;!DOCTYPE html&gt;       {# Use with "{% static 'color_ajax_like.js' %}" #}
+&lt;html lang="en"&gt;
+&lt;HTML&gt;&lt;HEAD&gt;
+    &lt;TITLE&gt;Login&lt;/TITLE&gt;
+    &lt;!-- The following line makes this page pleasant to view on any device. --&gt;
+    &lt;meta name="viewport" content="width=device-width" /&gt;
+&lt;/HEAD&gt;
+
+&lt;BODY&gt;
+
+&lt;H1&gt;Login&lt;/H1&gt;
+
+&lt;form method="post" id="loginForm" action="{% url 'login' %}"&gt;
+{% csrf_token %}
+{{ form.as_p }}
+
+   &lt;label&gt;&lt;input name="remember" type="checkbox"&gt;{% trans "Remember me" %}&lt;/label&gt;
+
+   &lt;input type="submit" value="login" /&gt;
+   &lt;input type="hidden" name="next" value="{% url 'main_page' %}" /&gt;
+&lt;/form&gt;
+
+&lt;P&gt;{% trans "...I forgot my password..., ...Create a new account..." %}&lt;/P&gt;
+
+&lt;p&gt;&lt;i&gt;&lt;a href="{% url 'main_page' %}"&gt;View the main page without logging in.&lt;/a&gt;&lt;/i&gt;&lt;/p&gt;
+
+&lt;script language="JavaScript"&gt;
+   /*
+      Before our JavaScript can be imported, the following variables need
+      to be set from some Django variables. While these values could be
+      hard-coded here, into the JavaScript, this allows the configuration
+      to be centrally located.
+
+      These four values come from auth_lifecycle.models and are required
+      by validate_login_user_pass.js.
+    */
+   var minUserLen = {{ USERNAME_MIN_LEN }}; //USERNAME_MIN_LEN
+   var maxUserLen = {{ USERNAME_MAX_LEN }}; //USERNAME_MAX_LEN
+   var minPassLen = {{ PASSWORD_MIN_LEN }}; //PASSWORD_MIN_LEN
+   var maxPassLen = {{ PASSWORD_MAX_LEN }}; //PASSWORD_MAX_LEN
+
+   document.getElementById("id_username").focus();
+&lt;/script&gt;
+&lt;script src="http://code.jquery.com/jquery-1.11.1.min.js"&gt;&lt;/script&gt;
+&lt;script src="http://ajax.aspnetcdn.com/ajax/jquery.validate/1.13.0/jquery.validate.min.js"&gt;&lt;/script&gt;
+&lt;script type='text/javascript' src="{% static 'js/validate_login_user_pass.js' %}"&gt;&lt;/script&gt;
+
+&lt;/BODY&gt;&lt;/HTML&gt;</pre>
+<h2>JavaScript validation code</h2>
+<p>We’ll be using the <a href="http://jqueryvalidation.org/">JQuery Validation Plugin</a>. Here is <a href="/2014/10/28/login_jquery_validation/">a separate post about the plugin</a>, where I demonstrate a basic use–the concepts of which are used here.</p>
+<p>Save the following as<br/>
+     <code>/home/myname/django_auth_lifecycle/djauth_root/static/js/validate_login_user_pass.js</code><br/>
+(create the <code>"js"</code> sub-directory).</p>
+<pre class="brush: jscript; title: ; notranslate" title="">//Configuration...START
+   //The following variables are required to exist before this file is
+   //loaded: minUserLen, maxUserLen, minPassLen, maxPassLen
+   //
+   //In addition, the id of the login &lt;form&gt; must be "loginForm"
+
+   var usernameMsg = "Username must be between " + minUserLen + " and " +
+                     maxUserLen + " characters, inclusive.";
+   var passwordMsg = "Password must be between " + minPassLen + " and " +
+                     maxPassLen + " characters, inclusive.";
+   jQuery.validator.setDefaults({
+      success: "valid",
+      //Avoids form submit. Comment when in production...START
+      // debug: true,
+      // submitHandler: function() {
+      //    alert("Success! The form was pretend-submitted!");
+      // }
+      //Avoids form submit. Comment when in production...END
+   });
+//Configuration...END
+var validateLoginForm = function()  {
+   // validate signup form on keyup and submit
+   var config = {
+      rules: {
+         username: {
+            required: true,
+            minlength: minUserLen,
+            maxlength: maxUserLen
+         },
+         password: {
+            required: true,
+            minlength: minPassLen,
+            maxlength: maxPassLen
+         },
+      },
+      messages: {
+         username: {
+            required: "Username required",
+            minlength: usernameMsg,
+            maxlength: usernameMsg
+         },
+         password: {
+            required: "Password required",
+            minlength: passwordMsg,
+            maxlength: passwordMsg
+         }
+      }
+   };
+   $("#loginForm").validate(config);
+}
+$(document).ready(validateLoginForm);</pre>
+<p><a name="tests"/></p>
+<h2>Tests: Not much to do</h2>
+<p>Webtest directly accesses the WSGI application server, and therefore cannot test client-side JavaScript. The only thing we’re going to look for is that the variables actually made it into the template, and are being assigned to JavaScript variables as required by the above code.</p>
+<p>First, we need a new simple utility testing function. Add this import statement to the top of<br/>
+     <code>/home/myname/django_auth_lifecycle/djauth_root/auth_lifecycle/test__utilities.py</code></p>
+<pre class="brush: python; title: ; notranslate" title="">import re</pre>
+<p>and this function at the bottom:</p>
+<pre class="brush: python; title: ; notranslate" title="">def assert_pattern_in_string(test_instance, pattern, to_search):
+    """
+    Asserts that a pattern is found somewhere in a string. This calls
+
+        `test_instance.assertIsNotNone(re.search(pattern, to_search))`
+
+    A failure results in the full pattern and to-search strings being
+    printed.
+    """
+    match = re.search(pattern, to_search)
+    test_instance.assertIsNotNone(match,
+        "pattern=" + pattern + ", to_search=" + to_search)</pre>
+<p>Now to create the test-proper. Save the following as<br/>
+     <code>/home/myname/django_auth_lifecycle/djauth_root/auth_lifecycle/registration/test_login_user_pass_len_vars.py</code></p>
+<pre class="brush: python; title: ; notranslate" title="">"""
+Tests to confirm that the username and password min/max length variables
+are correctly passed through from the view, and assigned as expected.
+django-webtest cannot test client-side JavaScript, because it only runs
+through the WSGI application server.
+- http://stackoverflow.com/a/12552319/2736496
+- http://webtest.readthedocs.org/en/latest/#what-this-does
+
+DEPENDS ON TEST:     test__utilities.py
+DEPENDED ON BY TEST: None
+
+To run the tests in this file:
+    1. source /home/myname/django_files/django_auth_lifecycle/djauth_venv/bin/activate
+    2. cd /home/myname/django_files/django_auth_lifecycle/djauth_root/
+    3. python -Wall manage.py test auth_lifecycle.registration.test_login_user_pass_len_vars
+
+See the top of &lt;link to .test__utilities&gt; for more information.
+"""
+from auth_lifecycle.test__utilities         import assert_pattern_in_string
+from django.test              import TestCase
+from auth_lifecycle.models    import USERNAME_MIN_LEN, USERNAME_MAX_LEN
+from auth_lifecycle.models    import PASSWORD_MIN_LEN, PASSWORD_MAX_LEN
+from django.core.urlresolvers import reverse
+
+class UserPassLenVarsTestCase(TestCase):
+    """
+    Tests to confirm that the username and password min/max length
+    variables are correctly passed through from the view, and assigned as
+    expected.
+    """
+
+    def test_all_config_vars_passed(self):
+        """
+        Tests to confirm that the username and password min/max length
+        variables are correctly passed through from the view, and assigned
+        as expected.
+        """
+        self.client.logout() #Don't really have to, but why not?
+
+        content_str = str(self.client.get(reverse('login')).content)
+
+        assert_pattern_in_string(self,
+            r"\bminUserLen += +" + str(USERNAME_MIN_LEN) + ";", content_str)
+        assert_pattern_in_string(self,
+            r"\bmaxUserLen += +" + str(USERNAME_MAX_LEN) + ";", content_str)
+        assert_pattern_in_string(self,
+            r"\bminPassLen += +" + str(PASSWORD_MIN_LEN) + ";", content_str)
+        assert_pattern_in_string(self,
+            r"\bmaxPassLen += +" + str(PASSWORD_MAX_LEN) + ";", content_str)</pre>
+<p>Output:</p>
+<pre>/home/myname/django_auth_lifecycle/djauth_venv/lib/python3.4/imp.py:32: PendingDeprecationWarning: the imp module is deprecated in favour of importlib; see the module's documentation for alternative uses
+  PendingDeprecationWarning)
+Creating test database for alias 'default'...
+.
+----------------------------------------------------------------------
+Ran 1 test in 0.039s
+
+OK
+Destroying test database for alias 'default'...</pre>
+<p>Our tests passed.<a name="try"/></p>
+<h1>Give it a try!</h1>
+<p>Follow <a href="/2014/10/19/django_auth_testing_tutorial_3/#try">these steps</a> to start your server, and try to login with no username and/or password, or one that is too short.</p>
+<p>—</p>
+<p>In the next post, we’ll complete our login page functionality with a forgot-my-password link. After that, it’s onto the change your password form, and finally, creating and deleting an account.</p>
+<p><i><code><b>[TOC: <a href="/2014/10/16/django_auth_tutorial/">one</a>, <a href="/2014/10/19/django_auth_tutorial_2/">two</a>, <a href="/2014/10/19/django_auth_testing_tutorial_3/">three</a>, <a href="/2014/12/29/django_auth_tutorial_4/">four</a>, <a href="/2015/01/26/django_auth_tutorial_5/">five</a>, <a href="/2015/02/12/django_auth_tutorial_6/">six</a>, <a href="/2015/02/13/django_auth_tutorial_7/">seven</a>, eight, nine, ten]</b></code></i></p>
+<h1><i>…to be continued…</i></h1>
+<p><i>(cue <a href="http://www.dramabutton.com/">cliffhanger segue music</a>)</i></p>
+		<div id="jp-post-flair" class="sharedaddy sd-like-enabled sd-sharing-enabled"><div class="sharedaddy sd-block sd-like jetpack-likes-widget-wrapper jetpack-likes-widget-unloaded" id="like-post-wrapper-64273369-1301-56d5b32655c2b" data-src="//widgets.wp.com/likes/#blog_id=64273369&amp;post_id=1301&amp;origin=aliteralmind.wordpress.com&amp;obj_id=64273369-1301-56d5b32655c2b" data-name="like-post-frame-64273369-1301-56d5b32655c2b"><h3 class="sd-title">Like this:</h3><p class="likes-widget-placeholder post-likes-widget-placeholder"><span class="button"><span>Like</span></span> <span class="loading">Loading...</span></p><span class="sd-text-color"/><a class="sd-link-color"/></div>
+<p id="jp-relatedposts" class="jp-relatedposts">
+	<h3 class="jp-relatedposts-headline"><em>Related</em></h3>
+</p></div>					</div>
+		
+		</div></body></html>

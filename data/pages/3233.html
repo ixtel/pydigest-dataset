@@ -1,0 +1,285 @@
+<html><body><div><article>
+                <p>This is, what I guess could be, part II in my <em>I'm-unhappy-with-the-tutorials-that-currently-exist-0n-the-subject-so-I'm-writting-my-own </em>series of posts. Last time: <a href="http://chriskiehl.com/article/parallelism-in-one-line/">multiprocessing.</a> This time: partially applied functions.</p>
+
+<hr/>
+<p>Partial function application is a fancy sounding name for a simple concept: pre-filling a couple of arguments before they're called in a function. The mechanics of this are a little hairy-er, and the academic explanations a little stuffier, but at its core, that's pretty much it. If your function takes <code>x</code> and <code>y</code>, fill in the <code>x</code> beforehand and then call it later with just the <code>y</code>. </p>
+
+<p>How does it work? Let's start where every other tutorial on the subject starts. A strange math example: </p>
+
+<pre>
+<code>
+import functools 
+
+def adder(x, y): 
+  return x + y 
+
+# it adds! 
+assert adder(1, 1) == 2
+assert adder(5, 5) == 10
+assert adder(6, 2) == 8
+
+# pre fill y with the value 5  
+add_five = functools.partial(adder, y=5)
+
+#now it adds 5!
+# x=1, y=5 
+assert add_five(1) == 6
+# x=5, y=5
+assert add_five(5) == 10
+# x=2, y=5
+assert add_five(2) == 7
+</code></pre>
+
+<p>Why start here? Because this is the primary example variant you'll find on Google if you search for "functools partial." You take some math-y thing, and then you make a new math-y thing that does what the old math-y thing did, but in an odd and not always useful way. This example bugged me when I was first learning. So, that's why we begin here. </p>
+
+<p>Now, to be fair, this example style is not totally 100% terrible. It does do a good job of showing <em>what</em> <code>partial</code> does -- prefilling arguments -- however, the problem is that that's where the tutorials end. They don't convey w<em>hy</em> you'd want to do it or where it can be applied. And until you wrap your head around functions as a composition tool, it's hard to walk away from the <code>add_fiver</code> style example feeling like <code>partial</code> is anything other than pointless (at least it was for me (I've also been known to be dense at times)) </p>
+
+<p>So that is why I'd like to try something different. Because others have so thoroughly covered the mechanics of <code>partial</code>, I'm going to skip the implementation details entirely, and instead focus on where this stuff is useful. This will be done through a series of case study type exercises where we refactor incrementally toward partial functions. Further, since we're glossing over implementation entirely, I'll stick with "pre-filling" as a <span>heuristic for partial application, and how it can be used as tool to introduce new structures and domain specific constructs into your code. </span></p>
+
+<h2><b>Case One</b></h2>
+
+<h3><strong>Refactoring to Domain Specific expressions</strong></h3>
+
+<p>I tend to do a lot of grep-y search related tasks in Python. Everything from tracking down a url in an html blob, finding a <a href="http://chriskiehl.com/article/the-great-white-space-debate/">specific for loop</a>, or just hunting down patterns in a log file. This type of activity, due to how it tends to slowly spiral out of control, breeds a lot of cruft in my code. </p>
+
+<p>The biggest offender in all of this is the Regular Expression. <span>Without constant vigilance, </span>given enough time, and enough "Oh, could you also find..." style requests,  they'll quickly bloat into an unmaintainable mess. For instance: </p>
+
+<p><strong>Example: </strong></p>
+
+<pre>
+<code>
+for text in lines:
+  if re.search(‘[a-zA-Z]\=’, text):
+     some_action(text)
+  elif re.search(‘[a-zA-Z]\s\=’, text):
+     some_other_action(text)
+  else:
+     some_default_action()
+
+</code></pre>
+
+<p>The method names have been changed, but this is actually something I’d written. It seemed fine when I was quickly banging it out. However, upon revisiting it some weeks later, I had no idea what those regexs were supposed to be doing or what the intent of each one was. So, it was time to refactor. The obvious first move would be to pull out the offending bits and perform a little "decompose conditional" action to replace our regex actions with well named functions. </p>
+
+<p><strong>Refactoring to Names Methods: </strong></p>
+
+<pre>
+<code>
+def is_grouped_together(text):
+  return re.search("[a-zA-Z]\s\=", text)
+
+def is_spaced_apart(text):
+  return re.search(“[a-zA-Z]\s\=”, text) 
+
+def and_so_on(text):
+  return re.search(“pattern_188364625", text)
+
+... 
+
+for text in lines:
+  if is_grouped_together(text):
+    some_action(text)
+  elif is_spaced_apart(text):
+    some_other_action(text)
+  else:
+    some_default_action()
+</code></pre>
+
+<p>That looks pretty good to my eye. In fact, if this was the only thing going on in the module I'd say it's A-OK. However, this was one section in a much, much larger search routine So, by the time I finished this refactoring, these little one-off functions had popped up all over the place. It became a challenge in itself just to navigate the code. Further, while this refactoring feels fine with just one or two helper functions, once you have several dozen of them floating around, it doesn't look quite as pretty. </p>
+
+<p>The problem is that at its core, all those little functions are doing is providing a human readable name for my regexes, but in a fairly verbose, module cluttering way. All of the actual work is being done by the re.search method. What I really want is a domain specific version of that! And luckily, partial lets us do just that. </p>
+
+<p><strong>Refactoring with partial </strong></p>
+
+<pre>
+<code>
+
+def my_search_method():
+  is_spaced_apart = partial(re.search, '[a-zA-Z]\s\=')
+  is_grouped_together = partial(re.search, '[a-zA-Z]\=')
+  ...
+  
+  for text in lines:
+    if is_grouped_together(text):
+      some_action(text)
+    elif is_spaced_apart(text):
+      some_other_action(text)
+    else:
+      some_default_action()
+
+</code></pre>
+
+<p>For my money, that is awesomely descriptive and readable. We used partial to 'pre-fill' the <code>re.search</code> method with our <span>regex, </span>and in turn got back a descriptive control structure specific to our domain (<span>in this case: </span>finding curly braces). Further, because their definition is so compact, and these two methods were specific to the search function, I moved them into the local scope so they're not cluttering my module's namespace. </p>
+
+<h2> </h2>
+
+<h2><strong>Case Two</strong></h2>
+
+<h3><strong>Faux Object Hierarchies with Partial </strong></h3>
+
+<p>One of the really neat things about partial function application is that you can use it to create simple faux class hierarchies, but without the boilerplate that comes with explicit subclassing. This becomes really useful when you have an object that requires a lot parameters in order to customize it's behavior. </p>
+
+<p><strong>Ugly Code</strong></p>
+
+<pre>
+<code>
+
+def do_complicated_thing(request, slug):
+  if not request.is_ajax() or not request.method == 'POST':
+    return HttpResponse(json.dumps({'error': 'Invalid Request'}, content_type="application/json", status=400)
+
+  if not _has_required_params(request):
+    return HttpResponse(
+      json.dumps({'error': 'Missing required param(s): {0}'.format(_get_missing(request)),
+        content_type="application/json", 
+        status=400)
+      )
+  try:
+    _object = Object.objects.get(slug=slug)
+  except Object.DoesNotExist:
+    return HttpResponse(json.dumps({'error': 'No Object matching x found'}, content_type="application/json", status=400)
+  else:
+    result = do_a_bunch_of_stuff(_object)
+    if result: 
+      HttpResponse(json.dumps({'success': 'successfully did thing!'}, content_type="application/json", status=200)   
+    else: 
+      return HttpResponse(json.dumps({'error': 'Bugger!'}, content_type="application/json", status=400)      
+
+</code></pre>
+
+<p>This was my first pass at some ajax handling code that's used in the admin section of this blog. While it's not super-duper terrible, there are some things I really dislike. As always, at the top of the list is boilerplate. To begin with, <code>content_type</code> receives the same giant <span><code>"application/json"</code> </span>string in each instantiation of <code>HttpResponse</code>. Further, we have to wrap up all of the actual response data in json.dumps() which adds even more clutter. Finally, a much smaller offender, but with the exception of one, all status codes are repeated. All in all, the greatest offence to me is that while a lot of <em>stuff</em> is happening in this dense little section of code, very little of it is relevant to the actual <em>intent</em> of the code. What's there only hides the flow of execution. </p>
+
+<p>So, with those complaints, I again set out to refactor. I want a structure in the code that lets me represent my current task in a way that's specific to the context of what's happening. In short, I want HttpResponse to reflect what is actually happening in the flow. I want it to describe <em>Json</em> responses. </p>
+
+<p>Step One! </p>
+
+<p><strong>Partial Application without Partial:  </strong></p>
+
+<pre>
+<code>
+JsonResponse = lambda content, *args, **kwargs: HttpResponse(
+  json.dumps(content),
+  content_type="application/json",
+  *args, **kwargs
+)
+</code></pre>
+
+<p>This one is a little different, as we're not using functools.partial to do the partial application. The reason is that the implementation of partial prevents me from wrapping the <code>content</code> parameter in <code>json.dumps()</code>. However! The idea remains exactly the same. We're simply pre-filling in the arguments now so that we don't have to call them later. </p>
+
+<p><strong>Refactoring</strong></p>
+
+<pre>
+<code>
+
+def do_complicated_thing(request, slug):
+  if not request.is_ajax() or not request.method == 'POST':
+    return JsonResponse({'error': 'Invalid Request'}, status=400)
+
+  if not _has_required_params(request):
+    return JsonResponse({'error': 'Missing required param(s): {0}'.format(_get_missing(request)), status=400)
+  try:
+    _object = Object.objects.get(slug=slug)
+  except Object.DoesNotExist:
+    return JsonResponse({'error': 'No Object matching x found'}, status=400)
+  else:
+    result = do_a_bunch_of_stuff(_object)
+    if result: 
+      JsonResponse({'success': 'successfully did thing!'}, status=200)   
+    else: 
+      return JsonResponse({'error': 'Bugger!'}, status=400)     
+</code></pre>
+
+<p>Much cleaner! We've replaced all the calls to HttpResponse with our newly created JsonResponse. Not only do we now have a nice descriptive calling format for our responses, thanks to pre-filling <code>json.dumps()</code> we can also now pass a dictionary as a parameter directly making the interface much cleaner. This is pretty good, but for fun let's go one further. This is where we get into creating small class-like hierarchies, purely through functional composition! Let's codify some of the possible response types that could be generated. </p>
+
+<pre>
+<code>
+JsonResponse = lambda content, *args, **kwargs: HttpResponse(
+  json.dumps(content),
+  content_type="application/json",
+  *args, **kwargs
+)
+
+JsonOKResponse         = functools.partial(JsonResponse, status=200)
+JsonCreatedResponse    = functools.partial(JsonResponse, status=201)
+JsonBadRequestResponse = functools.partial(JsonResponse, status=400)
+JsonNotAllowedResponse = functools.partial(JsonResponse, status=405)
+
+</code>
+</pre>
+
+<p>Notice that these partials are built off of the first one we made. It's a partial application of a partially applied function! So our faux hierarchy looks something like this: </p>
+
+<pre>
+<code>
+HttpResponse 
+   | 
+   |-- JsonResponse 
+           | 
+           | - JsonBadRequestResponse 
+           | - JsonOKResponse
+           | - JsonCreatedResponse
+           | - JsonOKResponse
+
+</code></pre>
+
+<p><strong>Final Refactoring</strong></p>
+
+<pre>
+<code>
+
+def do_complicated_thing(request, slug):
+  if not request.is_ajax() or not request.method == 'POST':
+    return JsonBadRequestResponse({'error': 'Invalid Request'})
+
+  if not _has_required_params(request):
+    return JsonBadRequestResponse({'error': 'Missing required param(s): {0}'.format(_get_missing(request)))
+  try:
+    _object = Object.objects.get(slug=slug)
+  except Object.DoesNotExist:
+    return JsonBadRequestResponse({'error': 'No Object matching x found'})
+  else:
+    result = do_a_bunch_of_stuff(_object)
+    if result: 
+      JsonOKResponse({'success': 'successfully did thing!'})   
+    else: 
+      return JsonBadRequestResponse({'error': 'Bugger!'})    
+
+</code></pre>
+
+<p>There ya go. A simple set of descriptive tools all built up by composing a base object through partial application.</p>
+
+<hr/>
+<p>By now I image that you've gotten the basic gist of all this, so here's one final example where I've found partial function application to provide a nice, concise, domain specific vocabulary in my code.</p>
+
+<p><strong>Django emails: </strong></p>
+
+<pre>
+<code>
+def _send_email(to, subject, body):
+  send_mail(
+    subject,
+    body,
+    settings.EMAIL_HOST_USER,
+  )
+
+
+email_admin      = partial(_send_email, to="admin@example.com")
+email_general_it = partial(_send_email, to="it@example.com")
+email_marketing  = partial(_send_email, to="marketing@example.com")
+email_sales      = partial(_send_email, to="sales@example.com")
+
+...
+
+if thing_is_broken():
+  # the 'to' field is already filled in! Hooray!
+  email_admin(subject="It's brokened!", body='Fix it!')
+
+
+if sales_people(): 
+  email_sales(subject="sales stuff", body="business, business, business!")  
+</code></pre>
+
+<p>Tada! It's simple, but when you're using these things over and over, factoring away the boiler plate of even something as simple as a send field can make a large readability difference. </p>
+
+<p>So there ya have it. Partial Function Application. Fancy name. Simple idea.  </p>
+            </article>
+        </div></body></html>

@@ -1,0 +1,89 @@
+<html><body><div><div id="content">
+	
+<p>
+	Недавно поступила задача, необходимо организовать просмотр камер с видеорегистратора, вот только одна проблема, это всеми любимый activex регистратор, чтобы просмотреть камеры которого, необходим Internet Explorer, тут же другая проблема, в организации, которой я взялся помочь, на всех компьютерах используют Linux.
+</p>
+<p>
+Кто хоть раз вникал в проблему воспроизведения видео с камер подобного видеорегистратора, поймет в чем тут загвоздка.
+</p>
+<p>
+Облазил весь интернет, нигде ничего дельного не сказано.
+</p>
+<p>
+Первым делом нашел подходящий клиент для регистратора, подошел ASee+ под IOS и включил Wireshark:
+</p>
+<img src="/static/media/uploads/images/camera_view/wireshark2.png"/>
+
+<p>
+Вижу пакет с авторизацией, то что нужно, беру содержимое пакета и сохраняю в файл.
+Чтобы не носиться с несколькими файлами, вынес этот файл внутрь программы, да и менять данные внутри этого пакета удобнее, например для того чтобы выбрать другую камеру на этом регистраторе.
+</p>
+<p>
+Задумка такова:<br/>
+— Подключаемся на порт<br/>
+— Если происходит ошибка, выводим сообщение<br/>
+— Шлем перехваченный пакет с авторизацией<br/>
+— Принимаем поток<br/>
+— Перенаправляем поток в mplayer<br/>
+</p>
+<a href="/static/media/uploads/scripts/view_camera.py">Исходный код</a>
+<pre class="brush: python;">
+#! /usr/bin/python
+
+import socket
+import sys
+import subprocess
+
+login = "admin"
+passwd = "admin"
+host = "111.222.222.111"
+port = 6060
+if len(sys.argv) &gt; 1:
+    cameraid = chr(int(sys.argv[1]))
+else:
+    print "Usage:\n%s camid" % sys.argv[0]
+    sys.exit()
+
+auth = '\x00\x00\x00H\x00\x00\x00\x00(\x00\x04\x00\x05\x00\x00\x00)\x008\x00%s\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00%s\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00%s\x00\x00' % (login.ljust(8, "\x00"), passwd.ljust(8, "\x00"), cameraid)
+player_cmd = "mplayer -nocache -fps 3 -demuxer h264es -"
+notify_cmd = "notify-send -t 1000"
+
+class Camviewer(object):
+    def __init__(self, auth=auth, host=host, port=port):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.settimeout(3)
+        self.connect(host, port)
+        self.send_msg(auth)
+        self.player_proc = subprocess.Popen(player_cmd.split(" "), stdin=subprocess.PIPE)
+        self.play()
+
+    def connect(self, host, port):
+        try:
+            self.sock.connect((host, port))
+        except (socket.error, socket.timeout) as e:
+            self.notify("Error", e.args[-1])
+            sys.exit()
+
+    def notify(self, header, body):
+        subprocess.call(notify_cmd.split(" ") + [header, body])
+
+    def send_msg(self, msg):
+        self.sock.send(msg)
+
+    def recive_msg(self, bcount=1500):
+        return self.sock.recv(bcount)
+
+    def play(self):
+        while 1:
+            buf = self.recive_msg()
+            if len(buf) == 0:
+                break
+            self.player_proc.stdin.write(buf)
+
+if __name__ == "__main__":
+    Camviewer()
+</pre>
+</div>
+
+
+			</div></body></html>

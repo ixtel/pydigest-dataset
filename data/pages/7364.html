@@ -1,0 +1,271 @@
+<html><body><div><div class="content html_format">
+      <a href="http://habrahabr.ru/company/itinvest/blog/270215/"><img src="https://habrastorage.org/files/ad3/461/7df/ad34617df75b47a19bce3b3fcd7866df.jpg"/></a>
+<p>
+В предыдущих статьях мы говорили о том, что такое событийно-ориентированная система бэктестинга, разобрали </p><a href="http://habrahabr.ru/company/itinvest/blog/263097/">иерархию классов</a><p>, необходимую для ее функционирования, обсудили то, как подобные системы </p><a href="http://habrahabr.ru/company/itinvest/blog/264141/">используют рыночные данные</a><p>, а также </p><a href="http://habrahabr.ru/company/itinvest/blog/266623/">осуществляют</a><p> отслеживание позиций и генерацию приказов на покупку. Кроме того, мы описали </p><a href="http://habrahabr.ru/company/itinvest/blog/268929/">процесс</a><p> оценки производительности тестируемых стратегий.
+</p><p>
+В сегодняшнем материале будет рассмотрен процесс создания обработчика API брокерской системы для перехода к реальной торговле.
+
+</p><b>Примечание</b><p>: </p><i>В качестве примера автор использует API зарубежной компании Interactive Brokers, отсюда названия обсуждаемых модулей (IBExecutionHandler и т.п.). У ITinvest есть собственный <a href="http://www.itinvest.ru/software/smartcom/">API-интерфейс SmartCOM</a>, который может быть использован при создания систем, подобных описываемой.</i><a name="habracut"/>
+<p>
+Идея заключается в создании класса IBexecutionHandler, который будет получать экземпляры OrderEvent из очереди событий, а затем отправлять их на биржу с через API-интерфейс брокерской системы с помощью специальной Python-библиотеки для работы с ним </p><a href="https://github.com/blampe/IbPy">IBPy</a><p>. Этот класс также будет обрабатывать сообщения “Server Response”, отправляемые через API. Затем будут создаваться соответствующие экземпляры FillEvent, попадающие в очередь событий.
+</p><p>
+Этот класс в процессе реализации может стать довольно сложным, если всерьез заняться оптимизацией работы системы и разработать более сложную систему обработки ошибок. Однако в нашем случае для образовательных целей реализация сохранена относительно простой. 
+
+</p><h4>Реализация на Python</h4><p>
+Как обычно, в самом начале необходимо создать Python-файл и импортировать все необходимые библиотеки. Файл будет называться ib_execution.py и «живет» в той же директории, что и остальные файлы событийно-ориентированного бэктестера.
+</p><p>
+Импортируем библиотеки, необходимые для обработки даты и времени, IbPy-объекты и объекты, которые обрабатываются IBExecutionHandler
+
+</p><pre><code class="python"># ib_execution.py
+
+import datetime
+import time
+
+from ib.ext.Contract import Contract
+from ib.ext.Order import Order
+from ib.opt import ibConnection, message
+
+from event import FillEvent, OrderEvent
+from execution import ExecutionHandler
+</code></pre><p>
+Затем нужно определить класс </p><code>IBExecutionHandler</code><p>. Конструктор </p><code>__init__ </code><p>требует знания очереди событий. Кроме того, требуется спецификация </p><code>order_routing</code><p> (значение по умолчанию “SMART”). В случае необходимости описания каких-либо требований, относящихся к конкретной биржей, это также можно сделать здесь. В качестве валюты по умолчанию установлены американские доллары.
+</p><p>
+Внутри метода создадим словарь </p><code>fill_dict</code><p>, который позднее будет использоваться для генерирования экземпляров </p><code>FillEvent</code><p>. Также создадим объект </p><code>tws_conn</code><p>, в котором будет храниться информация для подключения к брокерскому API. Кроме того, нужно создать начальный </p><code>order_id</code><p>, который будет использован для отслеживания последующих id приказов во избежание их дублирования. В заключение, регистрируем обработчики сообщений (их мы определим ниже):
+
+</p><pre><code class="python"># ib_execution.py
+
+class IBExecutionHandler(ExecutionHandler):
+    """
+    Получает информацию о приказе через API брокерской торговой системы для ведения счета при живой торговле.
+    """
+
+    def __init__(self, events, 
+                 order_routing="SMART", 
+                 currency="USD"):
+        """
+        Инициализация экземпляра IBExecutionHandler.
+        """
+        self.events = events
+        self.order_routing = order_routing
+        self.currency = currency
+        self.fill_dict = {}
+
+        self.tws_conn = self.create_tws_connection()
+        self.order_id = self.create_initial_order_id()
+        self.register_handlers()
+</code></pre><p>
+Брокерский API-интерфейс из примера использует систему оповещения о событиях, которая позволяет нашему классу отвечать на конкретные сообщения определенным образом — это похоже на работу самого событийно-ориентированного бэктестера. Для краткости мы не включаем код обработки ошибок, кроме вывода в термнал через метод error_method.
+</p><p>
+Метод _reply_handler используется для определения того, нужно ли создавать экземпляр </p><code>FillEvent</code><p>. Метод спрашивает, был ли получено сообщение “openOrder”, и проверяет, есть ли для этого orderId соответствующая пометка в </p><code>fill_dict</code><p>. Если нет, то она создается.
+</p><p>
+Если обнаружено сообщение “orderStatus”, в котором говорится о том, что конкретный приказ был исполнен, то вызывается </p><code>create_fill</code><p> для создания события </p><code>FillEvent</code><p>. Кроме того, в целях отладки и логирования это сообщение выводится на экран:
+
+</p><pre><code class="python"># ib_execution.py
+    
+    def _error_handler(self, msg):
+        """
+        Отвечает за «ловлю» сообщений об ошибках.
+        """
+        # В нашей версии нет обработки ошибок
+        print "Server Error: %s" % msg
+
+    def _reply_handler(self, msg):
+        """
+       Отвечает за обработку ответов сервера
+        """
+        # Обработка информации о конкретном приказе orderId 
+        if msg.typeName == "openOrder" and \
+            msg.orderId == self.order_id and \
+            not self.fill_dict.has_key(msg.orderId):
+            self.create_fill_dict_entry(msg)
+        # Обработка исполненных приказов
+        if msg.typeName == "orderStatus" and \
+            msg.status == "Filled" and \
+            self.fill_dict[msg.orderId]["filled"] == False:
+            self.create_fill(msg)      
+        print "Server Response: %s, %s\n" % (msg.typeName, msg)
+</code></pre><p>
+Затем создается метод </p><code>create_tws_connection</code><p> — он нужен для подключения к брокерскому API-интерфейсу с помощью объекта ibConnection. По умолчанию он использует порт 7496 и clientId равный 10. После создания объекта, вызывается метод connect для непосредственного подключения:
+
+</p><pre><code class="python"># ib_execution.py
+    
+    def create_tws_connection(self):
+        """
+        Подключение к брокерской системе через порт 7496 с clientId 10. Этот clientId выбран нами и необходимо как-то разделять Id для потоков данных о исполненных приказах и рыночных данных, если последний где-либо используется.
+        """
+        tws_conn = ibConnection()
+        tws_conn.connect()
+        return tws_conn
+</code></pre><p>
+Для отслеживания отдельных приказов используется метод create</p><code>_initial_order_id</code><p>. В нашем примере этот id равняется 1, но в более продуманной системе можно было бы запрашивать через API брокерской системы последний доступный ID и использовать его.
+
+</p><pre><code class="python"># ib_execution.py
+    
+    def create_initial_order_id(self):
+        """
+        Создатет начальный order ID, использующийся для отслеживания отправленных приказов. 
+        """
+        # Здесь можно использовать довольно сложную    #логику, но мы просто установим значение в 1.
+      
+        return 1
+</code></pre><p>
+Следующий метод </p><code>register_handlers</code><p> просто регистрирует ошибки и методы обработки ответов сервера:
+
+</p><pre><code class="python"># ib_execution.py
+    
+    def register_handlers(self):
+        """
+        Регистрация ошибок и методов обработки ответов сервера.
+        ""
+        self.tws_conn.register(self._error_handler, 'Error')
+
+        self.tws_conn.registerAll(self._reply_handler)
+</code></pre><p>
+Далее необходимо создать экземпляр Contract и связать его с экземпляром Order, который будет отправляться в API брокерской системы. Метод create_contract генерирует первый компонент этой пары. Ему нужен символ тикера, тип финансового инструмента (акция, фьючерс и т.п.), биржа и валюта. Он возвращает экземпляр Contract:
+
+</p><pre><code class="python"># ib_execution.py
+    
+    def create_contract(self, symbol, sec_type, exch, prim_exch, curr):
+        """
+        Создание объекта Contract, который определяет, что будет покупаться, на какой бирже и за какую валюту.
+
+        symbol - Символ тикера контракта
+        sec_type - Тип финансового инструмента ('STK' значит акция)
+        exch - Биржа, на которой будет осуществляться сделка
+        prim_exch - Основная биржа, на которой сделку совершить предпочтительнее
+        curr - Валюта сделки
+        """
+        contract = Contract()
+        contract.m_symbol = symbol
+        contract.m_secType = sec_type
+        contract.m_exchange = exch
+        contract.m_primaryExch = prim_exch
+        contract.m_currency = curr
+        return contract
+</code></pre><p>
+Следующий метод </p><code>create_order</code><p> отвечает за создания второго элемента пары — экземпляра Order. Ему нужен тип приказа (марет или лимит), количество акций для сделки и действие (покупка или продажа). Он возвращает экземпляр Order:
+
+</p><pre><code class="python"># ib_execution.py
+    
+    def create_order(self, order_type, quantity, action):
+        """
+        Создается объект Order (типа Market/Limit) для осуществления сделки long/short.
+
+        order_type - 'MKT', 'LMT' для приказов Market или Limit 
+        quantity – Количество акций, которые надо купить или продать
+        action - 'BUY' или 'SELL'
+        """
+        order = Order()
+        order.m_orderType = order_type
+        order.m_totalQuantity = quantity
+        order.m_action = action
+        return order
+</code></pre><p>
+Чтобы избежать дублирования экземпляров </p><code>FillEvent</code><p> для конкретных ID приказов, мы используем словарь </p><code>fill_dict</code><p>, в котором хранятся ключи конкретных идентификаторов приказов. Когда генерируется сообщение об исполнении приказа, значение ключа filled для конкретного ID устанавливается в True. Если последующее сообщение ServerResponse от брокерской системы говорит о том, что приказ был исполнен (и это дублирующее сообщение), то новое событие fill не создается.
+
+</p><pre><code class="python"># ib_execution.py
+    
+    def create_fill_dict_entry(self, msg):
+        """
+        Создает пометку в словаре Fill Dictionary, где перечислены orderID. Это нужно для реализации событийно-ориентированного поведения системы обработки сообщений сервера.
+"""
+        self.fill_dict[msg.orderId] = {
+            "symbol": msg.contract.m_symbol,
+            "exchange": msg.contract.m_exchange,
+            "direction": msg.order.m_action,
+            "filled": False
+        }
+</code></pre><p>
+Еще один метод </p><code>create_fill</code><p> создает события </p><code>FillEvent</code><p> и помещает их в очередь:
+
+</p><pre><code class="python"># ib_execution.py
+    
+    def create_fill(self, msg):
+        """
+        Создается FillEvent, который после исполнения ордера помещается в очередь событий 
+
+        """
+        fd = self.fill_dict[msg.orderId]
+
+        # Подготовка данных об исполнении
+        symbol = fd["symbol"]
+        exchange = fd["exchange"]
+        filled = msg.filled
+        direction = fd["direction"]
+        fill_cost = msg.avgFillPrice
+
+        # Создание объекта FillEvent
+        fill = FillEvent(
+            datetime.datetime.utcnow(), symbol, 
+            exchange, filled, direction, fill_cost
+        )
+
+        # Убеждаемся, что из-за многочисленных сообщений не возникли лишние события
+        self.fill_dict[msg.orderId]["filled"] = True
+
+        # Помещаем событие fill в очередь
+        self.events.put(fill_event)
+</code></pre><p>
+После реализации всех описанных выше методов остается только переопределить метод </p><code>execute_order</code><p> из абстрактного базового класса </p><code>ExecutionHandler</code><p>. В частности, этот метод отвечает за выставление приказов с помощью API брокерской системы.
+</p><p>
+Прежде всего, нужно проверить, что полученное методом событие — это действительно </p><code>OrderEvent</code><p>, а затем подготовить для него объекты Contract и Order с соответствующими параметрами. После их создания вызывается метод </p><code>placeOrder</code><p> из IbPy для соответствующего </p><code>order_id</code><p>.
+</p><p>
+Кроме того, крайне важно вызвать метод </p><code>time.sleep (1)</code><p>, чтобы убедиться в том, что приказ действительно прошел в брокерскую систему. Удаление этого параметра может приводить к неконсистентному взаимодействию с API.
+</p><p>
+И, наконец, следует инкрементно увеличить величину ID ордера, чтобы не дублировать приказы:
+
+</p><pre><code class="python"># ib_execution.py
+    
+    def execute_order(self, event):
+        """
+        Создание необходимы объектов приказов для отправки в брокерскую систему через API.
+
+        После этого запрашиваются результаты для генерации соответствующих событий fill, которые помещаются в очередь.
+
+        Параметры:
+        event – Содержит объект Event с информацией о приказе.
+        """
+        if event.type == 'ORDER':
+            # Подготовка параметров финансового инструмента
+            asset = event.symbol
+            asset_type = "STK"
+            order_type = event.order_type
+            quantity = event.quantity
+            direction = event.direction
+
+            # Создание контракта в брокерской системе с помощью прошедшего события Order 
+           
+            ib_contract = self.create_contract(
+                asset, asset_type, self.order_routing,
+                self.order_routing, self.currency
+            )
+
+            # Создание приказа в системе брокера с помощью события Order 
+ib_order = self.create_order(
+                order_type, quantity, direction
+            )
+
+            # Использование подключения для отправки приказа 
+            self.tws_conn.placeOrder(
+                self.order_id, ib_contract, ib_order
+            )
+
+            # ПРИМЕЧАНИЕ: Следующая строка очень важна
+            # Она позволяет убедиться в том, что приказ прошел!
+            time.sleep(1)
+
+            # Инкрементно увеличиваем ID приказа для текущей сессии
+            self.order_id += 1
+</code></pre><p>
+Этот класс формирует обработчик взаимодействия с брокерской системой и может быть использован для работы в режиме симулятора, что подходит исключительно для тестирования на исторических данных. Для того, чтобы использовать систему в ситуации реальной торговли, необходимо создать обработчик реального потока данных с биржи для замена потока исторических данных. Об этом мы поговорим в будущих статьях.
+</p><p>
+Как можно заметить, в ходе разработки бэктестера и модулей для реальной торговли мы где только возможно прибегали к повторному использованию кода — это позволят свести число ошибок к минимуму и убедиться в том, что поведение разных частей системы будет похожим, если не идентичным, как для торговли в режиме онлайн, так и в процессе бэктестинга.</p><hr/>
+<i>На сегодня все, спасибо за внимание! Мы будем рады ответить на ваши вопросы и комментарии. Не забывайте подписываться на <a href="http://habrahabr.ru/company/itinvest/blog/">наш блог</a>!</i>
+
+<h5>Все материалы цикла:</h5>
+
+      <p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

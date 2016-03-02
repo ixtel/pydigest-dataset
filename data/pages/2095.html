@@ -1,0 +1,150 @@
+<html><body><div><div class="post-body entry-content" id="post-body-8257567256532210771" itemprop="description articleBody"><p>
+Just a bit of background: pytest (</p><a href="http://pytest.org/">http://pytest.org</a><p>) is one of the main Python testing frameworks, and it provides many new ways on how to write tests (compared with xUnit based frameworks), so, the idea here is exploring a bit on making use of one of its ideas: fixtures.
+</p><p>
+Personally, I think fixtures are a pretty good idea, but seeing some real-world code with it has led me to believe it's often abused...
+</p><p>
+So, below I'll try to list what I think are the PROs and CONs of fixtures and give some examples to back up those points...
+
+</p><b>PROs: </b>
+<b><br/></b>
+<ul>
+<li><b>It's a good way to provide setup/tear down for tests with little boilerplate code.</b></li>
+</ul>
+<p>
+The example below (which is based on pytest-qt: </p><a href="https://github.com/nicoddemus/pytest-qt">https://github.com/nicoddemus/pytest-qt</a><p>) shows a nice example where fixtures are used to setup the QApplication and provide an API to deal with testing Qt.
+
+</p><pre>  <code>
+from PyQt4 import QtGui
+from PyQt4.QtGui import QPushButton
+import pytest
+
+@pytest.yield_fixture(scope='session')
+def qapp():
+    app = QtGui.QApplication.instance()
+    if app is None:
+        app = QtGui.QApplication([])
+        yield app
+        app.exit()
+    else:
+        yield app
+
+class QtBot(object):
+
+    def click(self, widget):
+        widget.click()
+        
+@pytest.yield_fixture
+def qtbot(qapp, request):
+    result = QtBot()
+    yield result
+    qapp.closeAllWindows()
+
+def test_button_clicked(qtbot):
+    button = QPushButton()
+    clicked = [False]
+    def on_clicked():
+        clicked[0] = True
+
+    button.clicked.connect(on_clicked)
+    qtbot.click(button)
+    assert clicked[0]</code></pre>
+
+
+<ul>
+<li><b>autouse is especially useful for providing global setup/tear down affecting tests without doing any change on existing tests.</b></li>
+</ul>
+<p>
+The example below shows a fixture which verifies that after each test all files are closed (it's added by default to all tests by using autouse=True to make sure no test has such a leak).
+
+</p><pre>  <code>
+import os
+import psutil
+import pytest
+
+@pytest.fixture(autouse=True)
+def check_no_files_open(request):
+    process = psutil.Process(os.getpid())
+    open_files = set(tup[0] for tup in process.open_files())
+
+    def check():
+        assert set(tup[0] for tup in process.open_files()) == open_files
+
+    request.addfinalizer(check)
+
+def test_create_array(tmpdir): # tmpdir is also a nice fixture which creates a temporary dir for us and gives an easy to use API.
+    stream = open(os.path.join(str(tmpdir.mkdir("sub")), 'test.txt'), 'w')
+    test_create_array.stream = stream  # Example to keep handle open to make test fail</code></pre>
+
+<p>
+Now, on to the </p><b>CONs</b><p> of fixtures...
+
+</p><ul>
+<li><b>Fixtures can make the code less explicit and harder to follow.</b></li>
+</ul>
+<p>
+<b><br/></b></p>
+<pre>  <code>
+--- my_window.py file:
+
+from PyQt4.QtCore import QSize
+from PyQt4 import QtGui
+
+class MyWindow(QtGui.QWidget):
+    def sizeHint(self, *args, **kwargs):
+        return QSize(200, 200)
+
+--- conftest.py file:
+
+import pytest
+@pytest.fixture()
+def window(qtbot):
+    return MyWindow()
+
+--- test_window.py file:
+
+def test_window_size_hint(window):
+    size_hint = window.sizeHint()
+    assert size_hint.width() == 200</code></pre>
+
+<p>
+Note that this example uses the qtbot shown in the first example (and that's a good thing), but the bad case is that if we had fixtures coming from many cases, it's hard to know what the window fixture does... in this case, it'd be more straightforward to simply have a test which imports MyWindow and does </p><b>window = MyWindow()</b><p> instead of using that fixture... Note that if a custom teardown was needed for the window, it could make sense to create a fixture with a finalizer to do a proper teardown, but in this example, it's clearly too much for too little...
+</p><p>
+Besides, by just looking at the test, what's this window we're dealing with? Where's it defined? So, if you really want to use fixtures like that, at the very least add some documentation on the type you're expecting to receive in the fixture!
+
+</p><ul>
+<li><b>It's usually easy to overuse fixtures when a simple function call would do...</b></li>
+</ul>
+<p>
+The example below shows a Comparator being created where no special setup/teardown is needed and we're just using a stateless object...
+
+</p><pre>  <code>
+import pytest
+
+class Comparator(object):
+
+    def assert_almost_equal(self, o1, o2):
+        assert abs(o1 - o2) &lt; 0.0001
+
+
+@pytest.fixture()
+def comparator():
+    return Comparator()
+
+def test_numbers(comparator):
+    comparator.assert_almost_equal(0.00001, 0.00002)</code></pre>
+<p>
+I believe in this case it'd just make much more sense creating a simple 'def assert_almost_equal' function which was imported and used as needed instead of having a fixture to provide this kind of function...
+</p><p>
+Or, if the Comparator object was indeed needed, the code below would make it clearer what the comparator is, while having it as a parameter in a test makes it much more harder to know what exactly are you getting (mostly because it's pretty hard to reason about parameter types in Python).
+
+</p><pre>  <code>
+def test_numbers():
+    comparator = Comparator()
+    comparator.assert_almost_equal(0.00001, 0.00002)</code></pre>
+  <p>
+That's it, I think this sums up my current experience in dealing with fixtures -- I think it's a nice mechanism, but has to be used with care because it can be abused and make your code harder to follow!
+</p><p>
+Now, I'm curious about other points of view too :)
+</p><p/>
+</div>
+</div></body></html>

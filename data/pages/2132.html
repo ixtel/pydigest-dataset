@@ -1,0 +1,180 @@
+<html><body><div><div class="entry-content">
+		<p>Traditionally it’s been a problem that researchers did not have enough spatial data to answer useful questions or build compelling visualizations. Today, however, the problem is often that we have too much data. Too many scattered points on a map can overwhelm a viewer looking for a simple narrative. Furthermore, rendering a javascript web map (like <a href="http://leafletjs.com/">Leaflet</a>) with millions of data points on a mobile device can swamp the processor and be unresponsive.</p>
+<p><span id="more-97"/></p>
+<h2>The data set</h2>
+<p>How can we reduce the size of a data set down to a smaller set of spatially representative points? Consider a spatial data set with 1,759 lat-long coordinates (available <a href="http://geoffboeing.com/wp-content/uploads/2014/08/summer-travel-gps-full.csv">here</a>). This manageable data set is not too large to map, but it can serve as a useful object for this tutorial. In fact, even though it’s not a huge amount of data, rendering this many features all at once can really slow down a javascript web map on a mobile device.</p>
+<p>I have discussed this data in a <a title="Visualizing Summer Travels" href="http://geoffboeing.com/2014/08/visualizing-summer-travels/">series of posts</a> and reverse-geocoded the coordinates to <a href="http://geoffboeing.com/2014/08/reverse-geocode-a-set-of-lat-long-coordinates-to-city-country/">add city and country</a> data. Here is a simple Python <a title="Visualizing Summer Travels Part 5: Python + Matplotlib" href="http://geoffboeing.com/2014/08/visualizing-summer-travels-part-5-python-matplotlib/">matplotlib</a> scatter plot of all the coordinates in the full data set:</p>
+<p><a href="http://i0.wp.com/geoffboeing.com/wp-content/uploads/2014/08/scatter-full-set.png"><img class="alignnone wp-image-269 size-full" src="http://i0.wp.com/geoffboeing.com/wp-content/uploads/2014/08/scatter-full-set.png?resize=608%2C393" alt="annotated scatter plot of the full data set" data-recalc-dims="1"/></a></p>
+<p>At this scale, only a few dozen of the 1,759 data points are really visible. Even zoomed in very close, several locations have hundreds of data points stacked directly on top of each other due to the duration of time spent at one location. Unless we are interested in time dynamics, we simply do not need all of these spatially redundant points – they just bloat the data set’s size.</p>
+<h2>How much data do we need?</h2>
+<p>Look at the tight cluster of points representing Barcelona around the coordinate pair (41.37, 2.15). I stayed at the same place for a month and my GPS coordinates were recorded every 15 minutes, so I ended up with hundreds of rows in my data set corresponding to the coordinates of my apartment.</p>
+<p>This high number of observations is useful for representing the duration of time spent at certain locations. However, it grows less useful if the objective is to represent merely <em>where</em> one has been. In that case only a single data point is needed for each geographical location to demonstrate that it has been visited. This reduced-size data set would also be far easier to map with an on-the-fly rendering technology such as javascript.</p>
+<h2>Clustering algorithms: k-means and DBSCAN</h2>
+<p>We will first use Python and <a href="http://docs.scipy.org/doc/scipy/reference/cluster.vq.html">scipy’s k-means</a> clustering algorithm to reduce the full data set of GPS coordinates to a smaller but (approximately) spatially representative set of 100 points. This will result in a non-ideal solution for reasons I’ll get into shortly. So, I’ll follow k-means up by clustering the data with <a href="http://scikit-learn.org/stable/modules/generated/sklearn.cluster.DBSCAN.html">scikit-learn’s DBSCAN</a> algorithm, which provides a much better solution.</p>
+<p>All of my k-means code is available in <a href="http://nbviewer.ipython.org/github/gboeing/2014-summer-travels/blob/master/clustering-scipy-kmeans.ipynb">this IPython notebook</a> and all the DBSCAN code in <a href="http://nbviewer.ipython.org/github/gboeing/2014-summer-travels/blob/master/clustering-scikitlearn.ipynb">this IPython notebook</a>. First I’ll demonstrate k-means and its limitations.  To begin, I import the necessary modules and load the full data set:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+import pandas as pd, numpy as np, matplotlib.pyplot as plt
+from scipy.cluster.vq import kmeans, kmeans2, whiten
+
+df = pd.read_csv('summer-travel-gps-full.csv')
+df.head()
+</pre>
+<pre>         lat       lon              date          city         country
+0  51.481292 -0.451011  05/14/2014 09:07  West Drayton  United Kingdom
+1  51.474005 -0.450999  05/14/2014 09:22      Hounslow  United Kingdom
+2  51.478199 -0.446081  05/14/2014 10:51      Hounslow  United Kingdom
+3  51.478199 -0.446081  05/14/2014 11:24      Hounslow  United Kingdom
+4  51.474146 -0.451562  05/14/2014 11:38      Hounslow  United Kingdom
+</pre>
+<p>Next, I’ll convert the lat and long columns into a two-dimensional numpy array, called <em>coordinates</em>, and then specify several variables for the clustering process. The k-means algorithm groups <em>N</em> observations (i.e., rows in the array of coordinates) into <em>k</em> clusters. I said earlier that I wanted to reduce the data set down to 100 points, so I’ll set <em>k</em>=100. I’ll also tell the routine to perform 50 iterations by setting <em>i</em>=50.</p>
+<p>Lastly, I will normalize the coordinate data with the <em>whiten</em> function. According to the <a href="http://docs.scipy.org/doc/scipy/reference/generated/scipy.cluster.vq.whiten.html#scipy.cluster.vq.whiten">scipy documentation</a>: “Each feature is divided by its standard deviation across all observations to give it unit variance.” At the end, you can compare the results of running k-means on both whitened and un-whitened data sets. The whitened data yields results that are more spatially representative of the original, full data set.</p>
+<pre class="brush: python; title: ; notranslate" title="">
+coordinates = df.as_matrix(columns=['lon', 'lat'])
+N = len(coordinates)
+k = 100
+i = 50
+w = whiten(coordinates)
+</pre>
+<p>Ok, time to cluster. I’m going to use the <a href="http://docs.scipy.org/doc/scipy-0.14.0/reference/generated/scipy.cluster.vq.kmeans2.html">kmeans2</a> function because it returns both an array of cluster centroids as well as an array of centroid IDs that each observation in the data set is closest to. Then I plot the cluster centroids against the original data set:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+cluster_centroids, closest_centroids = kmeans2(w, k, iter=i)
+plt.figure(figsize=(10, 6), dpi=100)
+plt.scatter(cluster_centroids[:,0], cluster_centroids[:,1], c='r', s=100)
+plt.scatter(w[:,0], w[:,1], c='k', alpha=.3, s=10)
+plt.show()
+</pre>
+<p><a href="http://i0.wp.com/geoffboeing.com/wp-content/uploads/2014/08/kmeans-bad-clusters.png"><img class="alignnone size-full wp-image-217" src="http://i0.wp.com/geoffboeing.com/wp-content/uploads/2014/08/kmeans-bad-clusters.png?resize=589%2C368" alt="kmeans-bad-clusters" srcset="http://i0.wp.com/geoffboeing.com/wp-content/uploads/2014/08/kmeans-bad-clusters.png?resize=300%2C187 300w, http://i0.wp.com/geoffboeing.com/wp-content/uploads/2014/08/kmeans-bad-clusters.png?w=589 589w" sizes="(max-width: 589px) 100vw, 589px" data-recalc-dims="1"/></a></p>
+<p>Yikes. These clusters don’t resemble the spatial distribution of the original data set at all. How are <em>these</em> the centroids of clusters of that original set of coordinates? What happened?</p>
+<p>The kmeans2 function uses a random distribution of points from the entire coordinate space as its initial condition. Since the data is not evenly distributed, kmeans2 converges to this nearly random-looking result. In fact, only 17 of the initial random 100 centroids have any of the data points inside their clusters. I need to tell the kmeans2 function to initialize with a random distribution of actual points from the data set:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+cluster_centroids, closest_centroids = kmeans2(w, k, iter=i, minit='points')
+plt.figure(figsize=(10, 6), dpi=100)
+plt.scatter(cluster_centroids[:,0], cluster_centroids[:,1], c='r', alpha=.7, s=150)
+plt.scatter(w[:,0], w[:,1], c='k', alpha=.3, s=10)
+plt.show()
+</pre>
+<p><a href="http://i2.wp.com/geoffboeing.com/wp-content/uploads/2014/08/whitened-scatter.png"><img class="alignnone size-full wp-image-138" src="http://i2.wp.com/geoffboeing.com/wp-content/uploads/2014/08/whitened-scatter.png?resize=604%2C368" alt="whitened-scatter" data-recalc-dims="1"/></a></p>
+<h2>Results from k-means</h2>
+<p>Better, but not great. In the preceding plot you see the 100 cluster centroids, in red, generally approximating the spatial distribution of the 1,759 points of the normalized full data set, in gray/black (due to us setting the opacity alpha value to 0.3, each of these points’ grayscale darkness is dependent on how many points are stacked on top of each other at that spot).</p>
+<p>Several locations have pretty spotty clusters and locations where I spent a lot of time – such as Barcelona – are still over-represented because they were selected multiple times by the initial random selection to seed the k-means algorithm. Thus, more rows near a given location in the data set means a higher probability of having more rows selected randomly for that location.</p>
+<p>We’ll come back to these problems with k-means shortly. Now, let’s check to see if the numbers add up:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+print 'k =', k
+print 'N =', N
+print len(cluster_centroids)
+print len(closest_centroids)
+print len(np.unique(closest_centroids))
+</pre>
+<pre>k = 100
+N = 1759
+100
+1759
+100
+</pre>
+<p>The number of closest_centroids should be the same as <em>N</em>. The number of cluster_centroids and the number of unique elements in closest_centroids should be the same as <em>k</em>. Everything looks correct, algorithmically.</p>
+<p>Next, I’ll add a new column to the original full data set, called closest_centroid. For each set of coordinates in the original data set, I’ll add the closest centroid ID from the kmeans2 clustering to this new column. Then, I’ll reduce the data set so there is only one row for each value of closest_centroid.</p>
+<pre class="brush: python; title: ; notranslate" title="">
+rs = pd.DataFrame(df)
+rs['closest_centroid'] = closest_centroids
+rs.drop_duplicates(subset=['closest_centroid'], take_last=False, inplace=True)
+rs.head()
+</pre>
+<pre>          lat       lon              date          city         country    closest_centroid
+0   51.481292 -0.451011  05/14/2014 09:07  West Drayton  United Kingdom                  22
+7   38.781775 -9.137544  05/14/2014 15:11        Lisbon        Portugal                  28
+11  38.742987 -9.147780  05/14/2014 16:11        Lisbon        Portugal                  63
+12  38.712816 -9.139833  05/14/2014 16:25        Lisbon        Portugal                  48
+13  38.711050 -9.139739  05/14/2014 16:40        Lisbon        Portugal                   9 
+</pre>
+<p>This dataframe has 100 rows. Each row contains a single data point (from the original data set) that belongs to each of the 100 clusters that were formed. Let’s plot the final (not whitened, like I did earlier) reduced set of coordinate points vs the original full set:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+plt.figure(figsize=(10, 6), dpi=100)
+rs_scatter = plt.scatter(rs['lon'], rs['lat'], c='r', alpha=.7, s=150)
+df_scatter = plt.scatter(df['lon'], df['lat'], c='k', alpha=.3, s=5)
+plt.title('Full data set vs k-means reduced set')
+plt.legend((df_scatter, rs_scatter), ('Full set', 'Reduced set'), loc='upper left')
+plt.xlabel('Longitude')
+plt.ylabel('Latitude')
+plt.show()
+</pre>
+<p><a href="http://i1.wp.com/geoffboeing.com/wp-content/uploads/2014/08/kmeans-reduced-scatter.png"><img class="alignnone size-full wp-image-139" src="http://i1.wp.com/geoffboeing.com/wp-content/uploads/2014/08/kmeans-reduced-scatter.png?resize=608%2C393" alt="kmeans-reduced-scatter" data-recalc-dims="1"/></a></p>
+<h2>Final k-means result: less than ideal</h2>
+<p>Our final result with k-means is only so-so. On one hand, the reduced data set does more-or-less approximate the spatial distribution of the full data set. On the other hand, there are gaps. Places I spent a lot of time are still heavily represented in the data set instead of being just a couple of representative points. Even worse, many locations from the full data set are not part of any cluster, and thus are lost from the reduced data set. Why?</p>
+<p>The answer is that k-means is not an ideal algorithm for lat-long spatial data. It minimizes variance, not geodetic distance – there is substantial distortion at latitudes far from the equator, like those of this data set. The algorithm still works, but its results are not great and there isn’t much that can be done to improve them. Increasing the number of clusters still leaves patchy gaps throughout the reduced data set.</p>
+<h2>Better spatial data clustering with DBSCAN</h2>
+<p>Let’s cluster the data again, this time using an algorithm that works better with arbitrary distances: scikit-learn’s implementation of the <a href="http://scikit-learn.org/stable/modules/generated/sklearn.cluster.DBSCAN.html">DBSCAN</a> algorithm. DBSCAN clusters a spatial data set based on two parameters: a physical distance from each point, and a minimum cluster size. This works much better for spatial lat-long data. I begin again by importing necessary modules and loading up the full data set:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+import pandas as pd, numpy as np, matplotlib.pyplot as plt
+from sklearn.cluster import DBSCAN
+from geopy.distance import great_circle
+df = pd.read_csv('summer-travel-gps-full.csv')
+coordinates = df.as_matrix(columns=['lon', 'lat'])
+</pre>
+<p>Next I compute DBSCAN: eps is the physical distance from each point that forms its ε-neighborhood and min_samples is the min cluster size (everything else gets classified as noise). I’ll set min_samples to 1 so that every data point gets assigned to either a cluster or forms its own cluster of 1. Nothing will be classified as noise.</p>
+<pre class="brush: python; title: ; notranslate" title="">
+db = DBSCAN(eps=.01, min_samples=1).fit(coordinates)
+labels = db.labels_
+num_clusters = len(set(labels)) - (1 if -1 in labels else 0)
+clusters = pd.Series([coordinates[labels == i] for i in xrange(num_clusters)])
+print('Number of clusters: %d' % num_clusters)
+</pre>
+<pre>Number of clusters: 158</pre>
+<p>Ok, now I’ve got 158 clusters. Unlike k-means, DBSCAN doesn’t require you to specify the number of clusters in advance – it determines them automatically. I want to grab the coordinates of one point from each cluster that was formed. I could just take the first point in each cluster, but it would be more spatially-representative if I take the point nearest the cluster’s centroid. This simple function returns the coordinates of the centroid of an array of points:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+def getCentroid(points):
+    n = points.shape[0]
+    sum_lon = np.sum(points[:, 1])
+    sum_lat = np.sum(points[:, 0])
+    return (sum_lon/n, sum_lat/n)
+</pre>
+<h2>Finding the nearest point in the data set</h2>
+<p>Now I need a function that takes a set of points and returns the point in it that is nearest to some other reference point. In this case, that other reference point will be the centroid I calculated in the previous function.</p>
+<p>First I calculate the great circle distance between the reference point and each point in the set, using <a href="http://geopy.readthedocs.org/en/1.1.0/#module-geopy.distance">geopy’s great circle</a> function. Then I return the coordinates of the point that was the smallest distance from the reference:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+def getNearestPoint(set_of_points, point_of_reference):
+    closest_point = None
+    closest_dist = None
+    for point in set_of_points:
+        point = (point[1], point[0])
+        dist = great_circle(point_of_reference, point).meters
+        if (closest_dist is None) or (dist &lt; closest_dist):
+            closest_point = point
+            closest_dist = dist
+    return closest_point
+</pre>
+<p>We’re ready to use the two functions to reduce the clusters into individual, representative points. First create two lists to hold the latitudes and longitudes. Then iterate through the series of clusters. If there are only one or two points in the cluster, I can just take the first point – it doesn’t make sense to calculate the centroid in these cases.</p>
+<p>However if there are three or more points in the cluster, I’ll find the point in the cluster that is closest to its centroid using the two functions I just defined. Then I add each point’s coordinates to the lat and lon lists. Once I’ve cycled through every cluster, save the final reduced set of points to a new pandas dataframe:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+lon = []
+lat = []
+for i, cluster in clusters.iteritems():
+    if len(cluster) &lt; 3:
+        representative_point = (cluster[0][1], cluster[0][0])
+    else:
+        representative_point = getNearestPoint(cluster, getCentroid(cluster))
+    lon.append(representative_point[0])
+    lat.append(representative_point[1])
+rs = pd.DataFrame({'lon':lon, 'lat':lat})
+</pre>
+<h2>Final result from DBSCAN</h2>
+<p>Next I’ll plot the final reduced set of data points against the original full set. Remember, the reduced set dataframe contains the coordinates of the point nearest the centroid of each cluster that was formed by DBSCAN.</p>
+<pre class="brush: python; title: ; notranslate" title="">
+plt.figure(figsize=(10, 6), dpi=100)
+rs_scatter = plt.scatter(rs['lon'], rs['lat'], c='g', alpha=.4, s=150)
+df_scatter = plt.scatter(df['lon'], df['lat'], c='k', alpha=.5, s=5)
+plt.title('Full data set vs DBSCAN reduced set')
+plt.legend((df_scatter, rs_scatter), ('Full set', 'Reduced set'), loc='upper left')
+plt.xlabel('Longitude')
+plt.ylabel('Latitude')
+plt.show()
+</pre>
+<p><a href="http://i0.wp.com/geoffboeing.com/wp-content/uploads/2014/08/dbscan-scatter.png"><img class="alignnone size-full wp-image-135" src="http://i0.wp.com/geoffboeing.com/wp-content/uploads/2014/08/dbscan-scatter.png?resize=608%2C393" alt="dbscan scatter plot of travel data" data-recalc-dims="1"/></a></p>
+<p>Looks good! This DBSCAN scatter plot is much better than the one using the k-means data set and it reduces the data by over 90%, from 1,759 points to 158 points. There are no real gaps in the reduced data set and heavily-trafficked spots (like Barcelona) are no longer drastically over-represented.</p>
+<h2>Visualizing the cluster-reduced data set</h2>
+<p>This interactive CartoDB map shows both the full and reduced data sets as separate layers, along with informational pop-ups when you hover over a point. You can turn each layer on or off and zoom in to see how well the reduced set of points represents the full data set:</p>
+<p/>
+<p>Now I can save the <a href="http://geoffboeing.com/wp-content/uploads/2014/08/summer-travel-gps-dbscan.csv">final reduced data set</a> to CSV and use it in other applications that need a low-overhead spatial data set to render a visualization quickly and responsively. Like this <a href="http://geoffboeing.com/2014/08/visualizing-summer-travels-part-3-leaflet/">Leaflet map</a> of my trip to Europe, which visualizes the final, reduced data set.</p>
+	</div>
+
+	
+	</div></body></html>

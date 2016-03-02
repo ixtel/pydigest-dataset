@@ -1,0 +1,97 @@
+<html><body><div><div class="post-text" itemprop="text">
+<p>I ran the example code below in Python 3.4.2, with numpy version 1.9.1 and matplotlib version 1.4.2, on a Macbook Pro with 4 physical CPUs (i.e., as opposed to "virtual" CPUs, which the Mac hardware architecture also makes available for some use cases):</p>
+
+<pre><code>import numpy as np
+import matplotlib.mlab as mlab
+import time
+import multiprocessing
+
+# This value should be set much larger than nprocs, defined later below
+size = 500
+
+Y = np.arange(size)
+X = np.arange(size)
+x, y = np.meshgrid(X, Y)
+u = x * np.sin(5) + y * np.cos(5)
+v = x * np.cos(5) + y * np.sin(5)
+test = x + y
+
+tic = time.clock()
+
+test_d = mlab.griddata(
+    x.flatten(), y.flatten(), test.flatten(), x+u, y+v, interp='linear')
+
+toc = time.clock()
+
+print('Single Processor Time={0}'.format(toc-tic))
+
+# Put interpolation points into a single array so that we can slice it easily
+xi = x + u
+yi = y + v
+# My example test machine has 4 physical CPUs
+nprocs = 4
+jump = int(size/nprocs)
+
+# Enclose the griddata function in a wrapper which will communicate its
+# output result back to the calling process via a Queue
+def wrapper(x, y, z, xi, yi, q):
+    test_w = mlab.griddata(x, y, z, xi, yi, interp='linear')
+    q.put(test_w)
+
+# Measure the elapsed time for multiprocessing separately
+ticm = time.clock()
+
+queue, process = [], []
+for n in range(nprocs):
+    queue.append(multiprocessing.Queue())
+    # Handle the possibility that size is not evenly divisible by nprocs
+    if n == (nprocs-1):
+        finalidx = size
+    else:
+        finalidx = (n + 1) * jump
+    # Define the arguments, dividing the interpolation variables into
+    # nprocs roughly evenly sized slices
+    argtuple = (x.flatten(), y.flatten(), test.flatten(),
+                xi[:,(n*jump):finalidx], yi[:,(n*jump):finalidx], queue[-1])
+    # Create the processes, and launch them
+    process.append(multiprocessing.Process(target=wrapper, args=argtuple))
+    process[-1].start()
+
+# Initialize an array to hold the return value, and make sure that it is
+# null-valued but of the appropriate size
+test_m = np.asarray([[] for s in range(size)])
+# Read the individual results back from the queues and concatenate them
+# into the return array
+for q, p in zip(queue, process):
+    test_m = np.concatenate((test_m, q.get()), axis=1)
+    p.join()
+
+tocm = time.clock()
+
+print('Multiprocessing Time={0}'.format(tocm-ticm))
+
+# Check that the result of both methods is actually the same; should raise
+# an AssertionError exception if assertion is not True
+assert np.all(test_d == test_m)
+</code></pre>
+
+<p>and I got the following result:</p>
+
+<pre><code>/Library/Frameworks/Python.framework/Versions/3.4/lib/python3.4/site-packages/matplotlib/tri/triangulation.py:110: FutureWarning: comparison to `None` will result in an elementwise object comparison in the future.self._neighbors)
+Single Processor Time=8.495998
+Multiprocessing Time=2.249938
+</code></pre>
+
+<p>I'm not really sure what is causing the "future warning" from triangulation.py (evidently my version of matplotlib did not like something about the input values that were originally provided for the question), but regardless, the multiprocessing <s>does appear to achieve the desired speedup of 8.50/2.25 = 3.8</s>, (<em>edit: see comments</em>) which is roughly in the neighborhood of about 4X that we would expect for a machine with 4 CPUs.  And the assertion statement at the end also executes successfully, proving that the two methods get the same answer, so in spite of the slightly weird warning message, I believe that the code above is a valid solution.</p>
+
+<hr/>
+
+<p>EDIT: A commenter has pointed out that both my solution, as well as the code snippet posted by the original author, are likely using the wrong method, <code>time.clock()</code>, for measuring execution time; he suggests using <code>time.time()</code> instead.  I think I'm also coming around to his point of view.  (Digging into the Python documentation a bit further, I'm still not convinced that even this solution is 100% correct, as newer versions of Python appear to have deprecated <code>time.clock()</code> in favor of <a href="https://docs.python.org/3.4/library/time.html#time.perf_counter" rel="nofollow"><code>time.perf_counter()</code></a> and <a href="https://docs.python.org/3.4/library/time.html#time.process_time" rel="nofollow"><code>time.process_time()</code></a>.  But regardless, I do agree that whether or not <code>time.time()</code> is absolutely the most correct way of taking this measurement, it's still probably more correct than what I had been using before, <code>time.clock()</code>.)</p>
+
+<p>Assuming the commenter's point is correct, then it means the approximately 4X speedup that I thought I had measured is in fact wrong.</p>
+
+<p>However, that does not mean that the underlying code itself wasn't correctly parallelized; rather, it just means that parallelization didn't actually help in this case; splitting up the data and running on multiple processors didn't improve anything.  Why would this be?  Other users have <a href="http://stackoverflow.com/questions/6941459/is-it-possible-to-know-which-scipy-numpy-functions-run-on-multiple-cores">pointed out</a> that, at least in numpy/scipy, some functions run on multiple cores, and some do not, and it can be a seriously challenging research project for an end-user to try to figure out which ones are which.</p>
+
+<p>Based on the results of this experiment, if my solution correctly achieves parallelization within Python, but no further speedup is observed, then I would suggest the simplest likely explanation is that matplotlib is probably also parallelizing some of its functions "under the hood", so to speak, in compiled C++ libraries, just like numpy/scipy already do.  Assuming that's the case, then the correct answer to this question would be that nothing further can be done: further parallelizing in Python will do no good if the underlying C++ libraries are already silently running on multiple cores to begin with.</p>
+    </div>
+    </div></body></html>

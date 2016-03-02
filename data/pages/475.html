@@ -1,0 +1,117 @@
+<html><body><div><div class="post_body"><p>This weekend I decided to take a short vacation from my <a href="http://flaskbook.com/">book writing effort</a> and spend time on a project I wanted to work on for a long time. The result of this effort is a brand new Flask extension that I think is pretty cool.</p>
+<p>I'm happy to introduce <a href="https://github.com/miguelgrinberg/Flask-SocketIO">Flask-SocketIO</a>, a very easy to use extension that enables WebSocket communications in Flask applications.</p>
+<h2>What is WebSocket?</h2>
+<p><a href="http://en.wikipedia.org/wiki/WebSocket">WebSocket</a> is a new communication protocol introduced with HTML5, mainly to be implemented by web clients and servers, though it can also be implemented outside of the web.</p>
+<p>Unlike HTTP connections, a WebSocket connection is a permanent, bi-directional communication channel between a client and the server, where either one can initiate an exchange. Once established, the connection remains available until one of the parties disconnects from it.</p>
+<p>WebSocket connections are useful for games or web sites that need to display live information with very low latency. Before this protocol existed there were other much less efficient approaches to achieve the same result such as <a href="http://en.wikipedia.org/wiki/Comet_(programming)">Comet</a>.</p>
+<p>The following web browsers support the WebSocket protocol:</p>
+<ul>
+<li>Chrome 14</li>
+<li>Safari 6</li>
+<li>Firefox 6</li>
+<li>Internet Explorer 10</li>
+</ul>
+<h2>What is SocketIO?</h2>
+<p><a href="http://socket.io/">SocketIO</a> is a cross-browser Javascript library that abstracts the client application from the actual transport protocol. For modern browsers the WebSocket protocol is used, but for older browsers that don't have WebSocket SocketIO emulates the connection using one of the older solutions, the best one available for each given client.</p>
+<p>The important fact is that in all cases the application uses the same interface, the different transport mechanisms are abstracted behind a common API, so using SocketIO you can be pretty much sure that any browser out there will be able to connect to your application, and that for every browser the most efficient method available will be used.</p>
+<h2>What about Flask-Sockets?</h2>
+<p>A while ago Kenneth Reitz published <a href="https://github.com/kennethreitz/flask-sockets">Flask-Sockets</a>, another extension for Flask that makes the use of WebSocket accessible to Flask applications.</p>
+<p>The main difference between Flask-Sockets and Flask-SocketIO is that the former wraps the native WebSocket protocol (through the use of the gevent-websocket project), so it can only be used by the most modern browsers that have native support. Flask-SocketIO transparently downgrades itself for older browsers.</p>
+<p>Another difference is that Flask-SocketIO implements the message passing protocol exposed by the SocketIO Javascript library. Flask-Sockets just implements the communication channel, what is sent on it is entirely up to the application.</p>
+<p>Flask-SocketIO also creates an environment for event handlers that is close to that of regular view functions, including the creation of application and request contexts. There are some important exceptions to this explained in the documentation, however.</p>
+<h2>A Flask-SocketIO Server</h2>
+<p>Installation of Flask-SocketIO is very simple:</p>
+<pre><code>$ pip install flask-socketio
+</code></pre>
+<p>Note that Flask-SocketIO depends on gevent, so at this time it can only run on Python 2.x. Support for Python 3 is coming for gevent, so the situation is likely to improve in the near future. (<strong>Update</strong>: Flask-SocketIO version 1.0 is fully compatible with Python 2.7 and 3.3+, see bottom of the article for more information).</p>
+<p>Below is an example Flask application that implements Flask-SocketIO:</p>
+<pre><code>from flask import Flask, render_template
+from flask.ext.socketio import SocketIO, emit
+
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'secret!'
+socketio = SocketIO(app)
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@socketio.on('my event', namespace='/test')
+def test_message(message):
+    emit('my response', {'data': message['data']})
+
+@socketio.on('my broadcast event', namespace='/test')
+def test_message(message):
+    emit('my response', {'data': message['data']}, broadcast=True)
+
+@socketio.on('connect', namespace='/test')
+def test_connect():
+    emit('my response', {'data': 'Connected'})
+
+@socketio.on('disconnect', namespace='/test')
+def test_disconnect():
+    print('Client disconnected')
+
+if __name__ == '__main__':
+    socketio.run(app)
+</code></pre>
+<p>The extension is initialized in the usual way, but to simplify the start up of the server a custom <code>run()</code> method is provided by the extension. This method starts gevent, the only supported web server. Using gunicorn with a gevent worker should also work. The <code>run()</code> method takes optional <code>host</code> and <code>port</code> arguments, but by default it will listen on <code>localhost:5000</code> like Flask's development web server.</p>
+<p>The only traditional route in this application is <code>/</code>, which serves <code>index.html</code>, a web document that contains the client implementation of this example.</p>
+<p>To receive WebSocket messages from the client the application defines event handlers using the <code>socketio.on</code> decorator.</p>
+<p>The first argument to the decorator is the event name. Event names <code>'connect'</code>, <code>'disconnect'</code>, <code>'message'</code> and <code>'json'</code> are special events generated by SocketIO. Any other event names are considered custom events. </p>
+<p>The <code>'connect'</code> and <code>'disconnect'</code> events are self-explanatory. The <code>'message'</code> event delivers a payload of type string, and the <code>'json'</code> and custom events deliver a JSON payload, in the form of a Python dictionary.</p>
+<p>Events can be defined inside a namespace by adding the <code>namespace</code> optional argument to the <code>socketio.on</code> decorator. Namespaces allow a client to open multiple connections to the server that are multiplexed on a single socket. When a namespace is not specified the events are attached to the default global namespace.</p>
+<p>To send events a Flask server can use the <code>send()</code> and <code>emit()</code> functions provided by Flask-SocketIO. The <code>send()</code> function sends a standard message of string or JSON type to the client. The <code>emit()</code> function sends a message under a custom event name.</p>
+<p>Messages are sent to the connected client by default, but when including the <code>broadcast=True</code> optional argument all clients connected to the namespace receive the message.</p>
+<h2>A SocketIO Client</h2>
+<p>Ready to try your hand at some Javascript? The <code>index.html</code> page used by the example server contains a little client application that uses jQuery and SocketIO. The relevant code is shown below:</p>
+<pre><code>$(document).ready(function(){
+    var socket = io.connect('http://' + document.domain + ':' + location.port + '/test');
+    socket.on('my response', function(msg) {
+        $('#log').append('&lt;p&gt;Received: ' + msg.data + '&lt;/p&gt;');
+    });
+    $('form#emit').submit(function(event) {
+        socket.emit('my event', {data: $('#emit_data').val()});
+        return false;
+    });
+    $('form#broadcast').submit(function(event) {
+        socket.emit('my broadcast event', {data: $('#broadcast_data').val()});
+        return false;
+    });
+});
+</code></pre>
+<p>The <code>socket</code> variable is initialized with a SocketIO connection to the server. Note how the namespace <code>/test</code> is specified in the connection URL. To connect without using a namespace it is sufficient to call <code>io.connect()</code> without any arguments.</p>
+<p>The <code>socket.on()</code> syntax is used in the client side to define an event handler. In this example a custom event with name <code>'my response'</code> is handled by adding the <code>data</code> attribute of the message payload to the contents of a page element with id <code>log</code>. This element is defined in the HTML portion of the page.</p>
+<p>The next two blocks override the behavior of two form submit buttons so that instead of submitting a form over HTTP they trigger the execution of a callback function.</p>
+<p>For the form with id <code>emit</code> the submit handler emits a message to the server with name <code>'my event'</code> that includes a JSON payload with a <code>data</code> attribute set to the value of the text field in that form.</p>
+<p>The second form, with id <code>broadcast</code> does the same thing, but sends the data under a different event name called <code>'my broadcast event'</code>.</p>
+<p>If you now go back to the server code you can review the handlers for these two custom events. For <code>'my event'</code> the server just echoes the payload back to the client in a message sent under event name <code>'my response'</code>, which is handled by showing the payload in the page. The event named <code>'my broadcast event'</code> does something similar, but instead of echoing back to the client alone it broadcasts the message to all connected clients, also under the <code>'my response'</code> event.</p>
+<p>You can view the complete HTML document in the <a href="https://github.com/miguelgrinberg/Flask-SocketIO/blob/master/example/templates/index.html">GitHub repository</a>.</p>
+<h2>Running the Example</h2>
+<p>To run this example you first need to download the code from GitHub. For this you have two options:</p>
+
+<p>The example application is in the <code>example</code> directory, so <code>cd</code> to it to begin.</p>
+<p>To keep your global Python interpreter clean it is a good idea to make a virtual environment:</p>
+<pre><code>$ virtualenv venv
+$ . venv/bin/activate
+</code></pre>
+<p>Then you need to install the dependencies:</p>
+<pre><code>(venv) $ pip install -r requirements.txt
+</code></pre>
+<p>Finally you can run the application:</p>
+<pre><code>(venv) $ python app.py
+</code></pre>
+<p>Now open your web browser and navigate to <code>http://localhost:5000</code> and you will get a page with two forms as shown in the following screenshot:</p>
+<p/><center><img src="/static/images/flask-socketio.png"/></center>
+<p>Any text you submit from any of the two text fields will be sent to the server over the SocketIO connection, and the server will echo it back to the client, which will append the message to the "Receive" part of the page, where you can already see the message sent by the <code>'connect'</code> event handler from the server.</p>
+<p>Things get much more interesting if you connect a second browser to the application. In my case I'm testing this with Firefox and Chrome, but any two browsers that you run on your machine will do. If you prefer to access the server from multiple machines you can do that too, but you first need to change the start up command to <code>socketio.run(app, host='0.0.0.0')</code> so that the server listens on the public network interface.</p>
+<p>With two or more clients when you submit a text from the form on the left only the client that submitted the message gets the echoed response. If you submit from the form on the right the server broadcasts the message to all connected clients, so all get the reply.</p>
+<p>If a client disconnects (for example if you close the browser window) the server will detect it a few seconds later and send a disconnect event to the application. The console will print a message to that effect.</p>
+<h2>Final Words</h2>
+<p>For a more complete description of this extension please read the <a href="http://flask-socketio.readthedocs.org/en/latest/">documentation</a>. If you want to make improvements to it feel free to fork it and then submit a pull request.</p>
+<p>I hope you make cool applications with this extension. I can tell you that I had a lot of fun implementing this extension.</p>
+<p>If you make something with it feel free to post links in the comments below.</p>
+<p>UPDATE: Flask-SocketIO version 0.3 adds support for <em>rooms</em>. This enables targeting subsets of connected users without having to use the broadcast option that sends to everyone.</p>
+<p>UPDATE #2: Flask-SocketIO version 1.0 adds support for Python 3.3+, and offers the choice to use gevent or eventlet as web server, as well as the standard Flask server. When using the Flask server the bi-directional channel is emulated using the HTTP long-polling technique.</p>
+<p>Miguel</p></div>
+</div></body></html>

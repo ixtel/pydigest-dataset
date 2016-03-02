@@ -1,0 +1,115 @@
+<html><body><div><article itemprop="articleBody">
+    
+    
+    <p><a href="https://www.docker.com/">Docker</a> is a platform for running applications in isolation. Using Linux containers makes the software layer isolated from the base system. The overhead needed for hardware virtualization used by for example Virtualbox is removed. Docker can help in development and deployment of web based applications and services - let us see how and when.</p>
+
+
+<a name="1" class="3" title="Why do I need Docker?"/>
+<p>Docker can be used in various way. It may provide a service working in the background, like a PostgreSQL server in given version. It can also contain our application and we could use images of such container do deploy the application to production.</p>
+<p>For Python developers Docker can be described as virtualenv for any application - wherever it will be a Python interpreter or some server at some given version. It's handy when you want to test some new versions or to run legacy application on much recent host system.</p>
+
+<a name="2" class="3" title="Installing docker"/>
+<p>Docker should be available in repositories of various Linux distributions. OSX and MS Windows users will have to try Virtualbox aided solution to provide a Linux system for the Docker to run.</p>
+<p>It's also a good idea to get the latest version available. I used <a href="http://www.ubuntuupdates.org/ppa/docker">PPA</a> for Ubuntu to get newer version. When you have it installed you can add yourself to the <q>docker</q> group so that using it won't require sudo.</p>
+
+
+<a name="3" class="3" title="First containers"/>
+<p>When we have Docker ready we can run many containers from <a href="https://registry.hub.docker.com/">registry.hub.docker.com</a>, for example <a href="https://registry.hub.docker.com/_/python/">Python</a>. To run Python 3.4 container just execute:</p>
+
+<p class="box">docker run -it --rm python:3.4</p>
+
+<p>At first run Docker will have to download some files. When that is done we will get by default a Python interpreter console. The <strong>-it</strong> runs the container in interactive mode and binds it to the console so that we can interact with it. <strong>--rm</strong> will remove the instance when we quit it. The <q>python</q> is the container name and after <q>:</q> we have the tag, which usually is used to indicate version - in this case Python version available in the container.</p>
+
+<p>We can also change default behavior of the container to for example run our script. To override the command from the command line just add the command to execute on the end of the line, like so:</p>
+
+<p class="box">docker run  -it --rm python:3.4 ls</p>
+<p>Which will run <q>ls</q> listing all files and filters in the main directory.</p>
+
+<a name="4" class="4" title="Dockerfile"/>
+<p>The <strong>Dockerfile</strong> file is used to make a recipe for our container. If we have a script that we want to be able to execute within a Python enabled container here is what we have to use:</p>
+
+<div class="box"><div class="highlight"><pre>FROM python:3.4
+ADD ./test.py /
+RUN ls -al
+CMD python test.py
+</pre></div>
+</div>
+<p><strong>FROM</strong> indicates base container, in this case Python 3.4 image. Next we can use ADD, RUN, ENV commands to configure the container. The <strong>RUN</strong> command will execute tasks when the container is build. The <strong>CMD</strong> command will be run at the start of an container instance. Operations of building the image are cached so if beginning of the instructions set didn't changed then they will be cached and skipped on subsequent build attempts (so the RUN command from the example above will execute at first build but not on the second).</p>
+
+<p>Using a terminal we can now build and run the image in Docker:</p>
+<div class="box"><div class="highlight"><pre>docker build --tag=foo .
+docker run  -it --rm foo
+</pre></div>
+</div>
+
+<a name="5" class="4" title="Dockerfile with Django"/>
+<p><a href="https://github.com/django-ckeditor/django-ckeditor">django-ckeditor</a> has a basic demo application that can be run with <strong>manage.py</strong> and runserver. Let us try to make a Dockerfile that will create an image running the demo application. Let us starting with something simple but not very perfect:</p>
+
+<div class="box"><div class="highlight"><pre>FROM python:3.4
+MAINTAINER Piotr Maliński &lt;riklaunim@gmail.com&gt;
+ADD . /ckeditor
+ENV DJANGO_SETTINGS_MODULE ckeditor_demo.settings
+RUN pip install -r /ckeditor/ckeditor_demo_requirements.txt
+RUN pip install /ckeditor
+RUN python /ckeditor/manage.py validate
+RUN python /ckeditor/manage.py collectstatic --noinput
+CMD python /ckeditor/manage.py runserver 0.0.0.0:8080
+</pre></div>
+</div>
+<p>So I use Python 3.4 here, and all the code from the repository is added to <q>ckeditor</q> folder within the container. I also set DJANGO_SETTINGS_MODULE env variable, install dependencies and the editor itself. Next some validation, collectstatic and in the end CMD to run the dev server. It's also handy to make that server available outside the docker, that's why it's set to use 0.0.0.0 IP.</p>
+<p>Build and run:</p>
+<div class="box"><div class="highlight"><pre>dockebuild --tag=django-ckeditor .
+dockerun -it --rm  --publish=192.168.0.110:8080:8080 django-ckeditor
+</pre></div>
+</div>
+<p><strong>--publish</strong> allows mapping public IP/Port addressed from a running container to local IP/Port. In this example 192.168.0.110 is the IP of the host machine. Publishing the port mapping allows me to open the application on the 8080 port of my localhost. Without the publish option the server would only be available from the running container IP address.</p>
+<p>The Dockerfile configuration I showed up isn't perfect as it will only work if SQLite database was available with the code. Docker rule is to run separate services within separate containers. So for example let us use PostgreSQL database running in a second container.</p>
+
+<p>So let us launch a PostgreSQL instance:</p>
+<p class="box">docker run -d postgres:9.4</p>
+<p>This will run in in the background and we can check it's status or name with <strong>docker ps</strong>. The names by default are quite random, like <q>clever_ptolemy</q> in my case. Now we have to create a database on that server, but first we need it IP address. We can get it from <strong>docker inspect INSTANCE_NAME</strong> which will list various informations about the container, including IP address. Then we can create the database:</p>
+<p class="box">createdb -h IP_ADDRESS DATABASE_NAME -U postgres</p>
+<p>We have the database and now we have to pass it to the application container. The Docker way of doing this is by using env variables. For Django it's handy to use <strong>dj_database_url</strong> to have database configuration as a string:</p>
+
+<div class="box"><div class="highlight"><pre><span class="kn">from</span> <span class="nn">os</span> <span class="kn">import</span> <span class="n">environ</span>
+
+<span class="kn">import</span> <span class="nn">dj_database_url</span>
+
+
+<span class="n">DATABASES</span> <span class="o">=</span> <span class="p">{</span><span class="s">'default'</span><span class="p">:</span> <span class="n">dj_database_url</span><span class="o">.</span><span class="n">parse</span><span class="p">(</span><span class="n">environ</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'DATABASE'</span><span class="p">,</span> <span class="s">'postgres:///'</span><span class="p">))}</span>
+</pre></div>
+</div>
+<p>So now we have to pass an env variable called <strong>DATABASE</strong> to the container to make it work. It can be done like this:</p>
+
+<div class="box"><div class="highlight"><pre>docker run -it --rm --link=POSTGRES_INSTANCE_NAME:OUR_NAME -e DATABASE=postgres://postgres@OUR_NAME/DATABASE_NAME --publish=192.168.0.110:8080:8080 django-ckeditor
+</pre></div>
+</div>
+<p>The name of the database server instance we can get from <q>docker ps</q> and <q>OUR_NAME</q> is just a label we can use later on in -e value. In my case it looked like so:</p>
+<div class="box"><div class="highlight"><pre>docker run -it --rm --link=clever_ptolemy:db -e DATABASE=postgres://postgres@db/ckeditor --publish=192.168.0.110:8080:8080 django-ckeditor python /ckeditor/manage.py syncdb 
+docker run -it --rm --link=clever_ptolemy:db -e DATABASE=postgres://postgres@db/ckeditor --publish=192.168.0.110:8080:8080 django-ckeditor
+</pre></div>
+</div>
+<p>First line executes syncdb - creates tables in the database. The next one starts the development server.</p>
+
+
+<a name="6" class="4" title="Fig"/>
+<p>Such simple example as above already requires a lot of naming and linking. To make it easier there are tools like <a href="http://www.fig.sh/index.html">fig</a> to help us out. In a YAML (fig.yml) file we can specify all the steps and linking needed:</p>
+<div class="box"><div class="highlight"><pre><span class="l-Scalar-Plain">ckeditor</span><span class="p-Indicator">:</span>
+  <span class="l-Scalar-Plain">build</span><span class="p-Indicator">:</span> <span class="l-Scalar-Plain">.</span>
+  <span class="l-Scalar-Plain">command</span><span class="p-Indicator">:</span> <span class="l-Scalar-Plain">python /ckeditor/manage.py runserver 0.0.0.0:8080</span>
+  <span class="l-Scalar-Plain">links</span><span class="p-Indicator">:</span>
+   <span class="p-Indicator">-</span> <span class="l-Scalar-Plain">db</span>
+  <span class="l-Scalar-Plain">ports</span><span class="p-Indicator">:</span>
+   <span class="p-Indicator">-</span> <span class="s">"8080:8080"</span>
+<span class="l-Scalar-Plain">db</span><span class="p-Indicator">:</span>
+  <span class="l-Scalar-Plain">image</span><span class="p-Indicator">:</span> <span class="l-Scalar-Plain">postgres:9.4</span>
+</pre></div>
+</div>
+<p>Next we build it with <strong>fig build</strong> and run it with <strong>fig up</strong> which should result in working application. We will need some tables so we can run syncdb with the help of <strong>fig run NAME COMMAND</strong>, where the name is the name from the fig.yml file for given instance. When fig launches all containers you can check them with <q>docker ps</q>.</p>
+<p>You can find more about <a href="http://www.fig.sh/yml.html">fig.yml syntax</a> on the project page. It allows to for example mount a folder from the host machine. There is also a <a href="http://www.fig.sh/django.html">Django tutorial</a> in which an other way of Postgres configuration was presented.</p>
+
+<a name="7" class="3" title="About Docker on the web:"/>
+
+    
+</article>
+</div></body></html>

@@ -1,0 +1,40 @@
+<html><body><div><section class="body">
+        <p>I had the need to create a column in some database tables that are completely controlled by the database, but the value of which is <em>sometimes</em> needed by the <a href="https://www.djangoproject.com/">Django</a> object.</p>
+
+<p>It should never be presented in a Form, and never, ever be written to by the Django infrastructure.</p>
+
+<p>So, we need a way to fetch the data from the database, but, even if the value is changed, and the object saved, is not written back.</p>
+
+<p>The detail of how this data is set in the database is irrelevant: it’s a column that gets it’s value from a sequence (and, incidentally, this sequence is shared across multiple tables).</p>
+
+<p>But, we need a way to get this data.</p>
+
+<p>A nice technique is to leverage two parts of Django: the <code>QuerySet.extra(select={})</code> method to actually add this field to the query, and <code>Manager.get_query_set()</code> (<code>get_queryset()</code> in older versions of Django) to make this apply to every fetch of the objects.</p>
+
+<p>Our extra column will be called <code>sequence_number</code></p>
+
+<div class="highlight"><pre><code class="python"><span class="k">class</span> <span class="nc">SequenceNumberManager</span><span class="p">(</span><span class="n">models</span><span class="o">.</span><span class="n">managers</span><span class="o">.</span><span class="n">Manager</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">get_query_set</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+      <span class="k">return</span> <span class="nb">super</span><span class="p">(</span><span class="n">SequenceNumberManager</span><span class="p">,</span> <span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="n">get_query_set</span><span class="p">()</span><span class="o">.</span><span class="n">extra</span><span class="p">(</span><span class="n">select</span><span class="o">=</span><span class="p">{</span>
+        <span class="s">'sequence_number'</span><span class="p">:</span> <span class="s">'"</span><span class="si">%s</span><span class="s">"."sequence_number"'</span> <span class="o">%</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">_meta</span><span class="o">.</span><span class="n">db_table</span>
+      <span class="p">})</span>
+
+<span class="k">class</span> <span class="nc">Thing</span><span class="p">(</span><span class="n">models</span><span class="o">.</span><span class="n">Model</span><span class="p">):</span>
+    <span class="c"># Column definitions. Do not define sequence_number!</span>
+
+    <span class="n">objects</span> <span class="o">=</span> <span class="n">SequenceNumberManager</span><span class="p">()</span>
+</code></pre>
+</div>
+
+<p>That’s it.</p>
+
+<p>Now, <code>Thing.objects.all()[0].sequence_number</code> will give you the value from the database. Because it’s not a Django field, it will never be written back to the database.</p>
+
+<p>The <code>SequenceNumberManager</code>, as it stands, could be applied to multiple models, as it dynamically looks for the database table that should be used for the field lookup. You need to define the table name, as otherwise if you join to another table with the same column name, your database will (correctly) reject the query, as it is ambiguous to which table it refers.</p>
+
+<p>I’ve done a similar thing, but using <a href="http://django-model-utils.readthedocs.org/en/latest/managers.html#passthroughmanager">django-model-utils</a>’ <code>PassThroughManager</code> in conjunction with a <code>QuerySet</code> subclass, since I’m a big fan of the approach described at <a href="http://www.dabapps.com/blog/higher-level-query-api-django-orm/">Building a higher-level query API: the right way to use Django’s ORM</a>, which I link to at least once a week in IRC.</p>
+
+<p>I’d be interested to hear of alternative methods of achieving this, or if there are any possible drawbacks. I think you could do it with a custom field (that never wrote to the database), but I think that would actually be a whole lot more code. There is also the benefit in this case that you could have the <code>.extra()</code> call as a queryset method, so you only add it when you need it, although the performance gains there would be insignificant, I suspect.</p>
+
+    </section>
+    </div></body></html>

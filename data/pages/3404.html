@@ -1,0 +1,221 @@
+<html><body><div><div class="content html_format"><p>
+      Всем привет!</p>
+<p>
+Эта статья — о скрытых командах операционной системы Junos. Тем, кто работал с оборудованием Juniper под управлением ОС Junos (сюда относятся серии MX, SRX, EX, QFX, T, J, и многие другие) наверняка известно, что кроме «официальных» (документированных) команд в системе имеются и недокументированные. Их особенность в том, что они не видны в интерфейсе командной строки по контекстной подсказке (это когда вводишь вопросительный знак) и для них не работает автозаполнение, то есть команду нужно знать и ввести полностью (все буквы). Видимо, самая известная </p><s>(и самая бесполезная)</s><p> из таких команд — show version and haiku, выдающая «японское» трехстишие о жизни сетевых инженеров.
+</p><p>
+Скрытых команд, на самом деле, много. Вендор нигде не приводит их полного списка, но, например, на официальном форуме Juniper имеется прилепленный </p><a href="http://forums.juniper.net/t5/SRX-Services-Gateway/Junos-Hidden-Commands/td-p/151772">топик</a><p> с довольно большим набором. Так что производитель не возражает против использования нами таких команд, просто на них не дается никакой гарантии — может работать, а может и положить ваше оборудование.
+</p><p>
+В этой статье я расскажу о том, как можно получить список всех скрытых команд Junos операционного режима, в пределах какой-то начальной ветки. Метод основан на довольно простом наблюдении, но гуглением мне не удалось найти свидетельств того, что вопрос раньше ставился в такой форме. Пример скрипта на Python прилагается.
+
+</p><a name="habracut"/>
+
+<h4>Идея</h4><p>
+Основная идея подхода очень проста, но чтобы ее уяснить, все-таки хорошо иметь доступ к CLI какого-либо Junos-устройства. 
+</p><p>
+Рассмотрим, например, команду «show version». Если мы вводим «show version a» (в конце — всегда жмем Enter), то вывод команды — такой:
+</p><pre><code class="tex">lab@jsrxA-1&gt; show version a
+                           ^
+syntax error.
+</code></pre><p>
+А если «show version с», то
+</p><pre><code class="tex">lab@jsrxA-1&gt; show version c   
+                          ^
+syntax error, expecting &lt;command&gt;.
+</code></pre><p>
+В первом случае имеется скрытое продолжение (and haiku), во втором — нет. Как видно, реакция CLI при наличии скрытого продолжения отличается двумя аспектами:
+</p><ul>
+<li> «syntax error.» вместо «syntax error, expecting ‹command›.»;</li>
+<li> шляпка (a.k.a. циркумфлекс) стоит под следующей позицией строки.</li>
+</ul><p>
+Соответственно, перебирая буквы одну за другой (хоть и вручную, но лучше автоматизировать), мы можем найти спрятанные команды — Junos сам их подсказывает, хоть и не так явно, как с обычными командами!
+
+</p><h4>Предварительные замечания</h4><p>
+Прежде чем писать скрипт, я должен предупредить читателей, что скрытые команды были скрыты разработчиком не просто так. Некоторые из них могут нарушить работу устройства, повредить файловую систему, и т.п. Поэтому их, даже по одной, следует использовать с большой осторожностью. В нашем случае, когда делается поиск перебором, это предостережение возводится в такую степень, что ни в коем случае не следует запускать подобный скрипт на обрабатывающем пользовательский трафик оборудовании. Ведь мы перебираем все команды, среди которых могут содержаться и file delete, и request system zeroize, и restart routing, и еще много чего. Так что играйтесь только с неподключенными к сети железками, которые не жалко убить, а лучше с виртуальным SRX (a.k.a. Firefly Perimeter).
+</p><p>
+Также следует пояснить, что хотя у Junos имеется очень удобный и продвинутый, основанный на XML, API, его использование для данной задачи не представляется возможным, так как наш подход поиска команд основан на особенностях работы CLI. Поэтому будем открывать обычную telnet-сессию, давать команды и парсить текстовый вывод.
+</p><p>
+В данной статье я ограничусь поиском команд операционного режима. Есть еще конфигурация, и в ней тоже много всего интересного припрятано (тот же commit full). Поиск скрытых команд там можно проводить аналогично.
+
+</p><h4>Алгоритм</h4><p>
+Итак, начиная с определенной команды (commandStart в скрипте) мы будем обходить все возможные варианты команд, добавляя каждый раз по символу (из массива alphabet) и вводя Enter. Вывод, присылаемый Junos в ответ, может быть следующим:
+</p><ol>
+<li> Ругань про «syntax error.» (и при этом шляпка указывает на наличие продолжения команды) — признак наличия hidden-команды, перебираем дальше, добавляя новые символы. </li>
+<li> Ругань про «syntax error, expecting ‹command›.» — <br/>
+здесь необходимо анализировать положение шляпки. Если она на текущей букве, как выше в примере «show version c», то далее не идем, скрытых команд нет.<br/>
+Если же она указывает на продолжение команды, как здесь:<br/>
+<pre><code class="tex">lab@jsrxA-1&gt; show version and 
+                              ^
+syntax error, expecting &lt;command&gt;.
+</code></pre> <br/>
+то в этом случае команда имеет продолжение и необходимо перебирать дальше (команда тут может быть скрытой или нет, в зависимости от предыстории).<br/>
+</li>
+<li> Просто вывод команды, без ругани про синтаксические ошибки, но возможно с руганью про двусмысленный (ambiguous) ввод, например как здесь:<br/>
+<pre><code class="tex">lab@jlab-Firefly-3&gt; show chassis cluster i
+                                          ^
+'i' is ambiguous.
+Possible completions:
+  interfaces           Display chassis cluster interfaces
+  ip-monitoring        Display IP monitoring related information
+</code></pre><br/>
+В этом случае перебор необходимо продолжать, т.к. далее может содержаться скрытая команда (в данном случае, show chassis cluster information).<br/>
+</li>
+</ol><p>
+ Также необходимо учитывать, что выводы некоторых команд могут занимать несколько экранов, что приводит к выдаче приглашения "---(more)---". В этом случае просто шлем пробел.
+
+</p><h4>Скрипт</h4><p>
+Собственно, вот он.
+</p><div class="spoiler"><b class="spoiler_title">Скрипт (Python 3)</b><div class="spoiler_text"><pre><code class="python">import telnetlib
+import re
+
+HOST = "192.168.65.161"
+user = "lab"
+password = "lab123"
+commandStart = "show version "     # note space at the end
+
+alphabet = "abcdefghijklmnopqrstuvwxyz-1234567890."
+PAUSE = 3 
+
+def SearchCommands (cmd, on_hidden_now=False):
+    for nChar in range(0, len(alphabet)):
+        char = str(alphabet[nChar])
+        tn.write(cmd.encode('ascii') + char.encode('ascii') + b"\n")
+    
+        totData=""
+        finished = False
+        while (not finished):
+            inpData = tn.read_until(prompt.encode('ascii'), PAUSE)
+            totData = totData + inpData.decode('ascii')
+            if "---(more" in inpData.decode('ascii'): 
+                tn.write(b" ")
+            else:
+                finished = True
+
+        cmdNext = cmd + str(char)
+        synt_error_exp_cmd = False
+        synt_error_period = False
+        if "syntax error, expecting &lt;command&gt;." in totData:
+            synt_error_exp_cmd = True
+        if "syntax error." in totData:
+            synt_error_period = True
+        
+        if not (synt_error_exp_cmd or synt_error_period):  # normal output or ambiguity
+            if on_hidden_now:
+                print("hidden command &gt;&gt; " + cmdNext)
+            else:
+                SearchCommands(cmdNext, on_hidden_now) # i.e. False
+        else:
+            l = re.findall(' *\^', totData)
+            lenToHat = len(l[len(l)-1])            
+            if synt_error_period:                         
+                if lenToHat &gt; lenPrompt + len(cmdNext):
+                    SearchCommands(cmdNext, True)        # Hidden command in progress
+            if synt_error_exp_cmd:
+                if (lenToHat == 2 + lenPrompt + len(cmdNext)): 
+                    if on_hidden_now:
+                        print("hidden command &gt;&gt; " + cmdNext + "  (incomplete)")
+                    # else: print("Entering: " + cmdNext)
+                    SearchCommands(cmdNext+" ", on_hidden_now)
+                if lenToHat &gt; 2 + lenPrompt + len(cmdNext):  
+                    SearchCommands(cmdNext, on_hidden_now)                            
+
+tn = telnetlib.Telnet(HOST)
+tn.read_until(b"login: ")
+tn.write(user.encode('ascii') + b"\n")
+tn.read_until(b"Password:")
+tn.write(password.encode('ascii') + b"\n")
+
+loginText = tn.read_until(b"&gt; ").decode('ascii')
+prompt = re.search(".*@.*", loginText).group()
+print("Working with prompt = " + prompt)
+lenPrompt = len(prompt)
+SearchCommands(commandStart)
+
+</code></pre>
+</div></div><p>
+Примеры работы:
+</p><div class="spoiler"><b class="spoiler_title">Запуск для ветки show version</b><p class="spoiler_text">hidden command &gt;&gt; show version and (incomplete)<br/>
+hidden command &gt;&gt; show version and blame<br/>
+hidden command &gt;&gt; show version and haiku<br/>
+hidden command &gt;&gt; show version extensive<br/>
+hidden command &gt;&gt; show version forwarding-context<br/>
+hidden command &gt;&gt; show version invoke-on (incomplete)<br/>
+hidden command &gt;&gt; show version invoke-on a<br/>
+hidden command &gt;&gt; show version invoke-on o<br/>
+hidden command &gt;&gt; show version no-forwarding<br/>
+hidden command &gt;&gt; show version scc-dont-forward<br/>
+hidden command &gt;&gt; show version sdk<br/>
+</p></div>
+<div class="spoiler"><b class="spoiler_title">Запуск для ветки show chassis</b><p class="spoiler_text">hidden command &gt;&gt; show chassis accurate-statistics<br/>
+hidden command &gt;&gt; show chassis beacon<br/>
+hidden command &gt;&gt; show chassis broadcom<br/>
+hidden command &gt;&gt; show chassis cfeb<br/>
+hidden command &gt;&gt; show chassis cip<br/>
+hidden command &gt;&gt; show chassis clocks<br/>
+hidden command &gt;&gt; show chassis cluster ethernet-switching (incomplete)<br/>
+hidden command &gt;&gt; show chassis cluster information<br/>
+hidden command &gt;&gt; show chassis cluster ip-monitoring (incomplete)<br/>
+hidden command &gt;&gt; show chassis craft-interface<br/>
+hidden command &gt;&gt; show chassis customer-id<br/>
+hidden command &gt;&gt; show chassis ethernet-switch<br/>
+hidden command &gt;&gt; show chassis fabric (incomplete)<br/>
+hidden command &gt;&gt; show chassis fchip<br/>
+hidden command &gt;&gt; show chassis feb<br/>
+hidden command &gt;&gt; show chassis fpc-feb-connectivity<br/>
+hidden command &gt;&gt; show chassis hsl (incomplete)<br/>
+hidden command &gt;&gt; show chassis hsr<br/>
+hidden command &gt;&gt; show chassis hss (incomplete)<br/>
+hidden command &gt;&gt; show chassis hst<br/>
+hidden command &gt;&gt; show chassis in-service-upgrade<br/>
+hidden command &gt;&gt; show chassis ioc-npc-connectivity<br/>
+hidden command &gt;&gt; show chassis lccs<br/>
+hidden command &gt;&gt; show chassis message-statistics (incomplete)<br/>
+hidden command &gt;&gt; show chassis message-statistics i<br/>
+hidden command &gt;&gt; show chassis network-services<br/>
+hidden command &gt;&gt; show chassis nonstop-upgrade<br/>
+hidden command &gt;&gt; show chassis power-budget-statistics<br/>
+hidden command &gt;&gt; show chassis psd<br/>
+hidden command &gt;&gt; show chassis redundancy (incomplete)<br/>
+hidden command &gt;&gt; show chassis redundant-power-system<br/>
+hidden command &gt;&gt; show chassis scb<br/>
+hidden command &gt;&gt; show chassis sfm<br/>
+hidden command &gt;&gt; show chassis sibs<br/>
+hidden command &gt;&gt; show chassis spmb<br/>
+hidden command &gt;&gt; show chassis ssb<br/>
+hidden command &gt;&gt; show chassis synchronization<br/>
+hidden command &gt;&gt; show chassis tfeb<br/>
+hidden command &gt;&gt; show chassis timers<br/>
+hidden command &gt;&gt; show chassis usb (incomplete)<br/>
+hidden command &gt;&gt; show chassis zones<br/>
+</p></div>
+<div class="spoiler"><b class="spoiler_title">Запуск для ветки show security idp (на SRX240)</b><p class="spoiler_text">hidden command &gt;&gt; show security idp active-policy<br/>
+hidden command &gt;&gt; show security idp application-ddos (incomplete)<br/>
+hidden command &gt;&gt; show security idp application-identification (incomplete)<br/>
+hidden command &gt;&gt; show security idp detector (incomplete)<br/>
+hidden command &gt;&gt; show security idp detector a<br/>
+hidden command &gt;&gt; show security idp detector c<br/>
+hidden command &gt;&gt; show security idp detector p<br/>
+hidden command &gt;&gt; show security idp ips-cache<br/>
+hidden command &gt;&gt; show security idp logical-system (incomplete)<br/>
+</p></div><p>
+Как видно, скрипт помечает некоторые команды как incomplete — это те, у которых предполагается продолжение. В случае, если продолжение команды Junos уже не прячет, такая команда далее тоже находится скриптом, но выдается в сокращенном виде (show chassis message-statistics i — это show chassis message-statistics ipc).
+</p><p>
+Цели обработать скриптом все возможные ошибки и ситуации не ставилось, поэтому если у вас в дескрипшенах интерфейсов содержится строка про synax error, на которую скрипт реагирует, или включен логгинг в терминал, логика работы может нарушиться. 
+</p><p>
+Еще одной проблемой являются команды, принимающие на вход любое имя, например show interfaces AnyInterfaceNameIsOKHere (в отсутствии такого интерфейса выдается ошибка, другие подобные команды могут не выдавать ничего). По понятной причине, скрипт при натравливании его на show interfaces, вылетает с ошибкой про maximum recursion depth exceeded. Зато поиск с commandStart = «show interfaces ge-0/0/0 » работает нормально:
+</p><div class="spoiler"><b class="spoiler_title">Запуск для show interfaces ge-0/0/0</b><p class="spoiler_text">hidden command &gt;&gt; show interfaces ge-0/0/0 forwarding-context<br/>
+hidden command &gt;&gt; show interfaces ge-0/0/0 ifd-index<br/>
+hidden command &gt;&gt; show interfaces ge-0/0/0 ifl-index<br/>
+hidden command &gt;&gt; show interfaces ge-0/0/0 instance<br/>
+hidden command &gt;&gt; show interfaces ge-0/0/0 no-forwarding<br/>
+hidden command &gt;&gt; show interfaces ge-0/0/0 scc-dont-forward<br/>
+</p></div> 
+
+<h4>Заключение</h4><p>
+Надо понимать, что значительная часть hidden-команд скрыты по причине того, что не поддерживаются (или не имеют смысла) на данном оборудовании или в данной версии софта. Многие из них бесполезны, тем не менее, среди них встречаются и «самородки» (например, show chassis cluster information). Поскольку я работаю инструктором по Juniper, то довольно часто приходится слышать от студентов вопрос — где взять список всех скрытых команд. Так что буду теперь всех отсылать к этой статье. Надеюсь, что какая-то польза от данного рецепта кому-то будет.
+
+      
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

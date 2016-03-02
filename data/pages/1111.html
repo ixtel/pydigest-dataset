@@ -1,0 +1,128 @@
+<html><body><div><div id="entry" class="usertext">
+<p><a href="http://en.wikipedia.org/wiki/Carpet_bombing">Carpet bombing</a> is a "large aerial bombing done in a progressive manner to inflict damage in every part of a selected area of land." Similarly, carpet <em>testing</em> is done by progressively tossing random data samples at your code without regard for its internal structure, hoping that sufficient amount of data will eventually cover it all.</p>
+<p>Or at least, this is the analogy that kept floating up in my mind while I was refactoring discovery testing in python-openid. This post is a part of <a href="http://softwaremaniacs.org/blog/category/openid-refactor/">the series</a>.</p>
+<p><a name="more"/></p>
+<p>Examples here are rather long to better show the point I want to make. But at the same time they aren't complicated and aren't supposed to be followed line by line anyway.</p>
+<h2>Simple example</h2>
+<pre><code>class TestIsOPIdentifier(unittest.TestCase):
+    def setUp(self):
+        self.endpoint = discover.OpenIDServiceEndpoint()
+
+    def test_none(self):
+        self.assertFalse(self.endpoint.isOPIdentifier())
+
+    def test_openid1_0(self):
+        self.endpoint.type_uris = [discover.OPENID_1_0_TYPE]
+        self.assertFalse(self.endpoint.isOPIdentifier())
+
+    def test_openid1_1(self):
+        self.endpoint.type_uris = [discover.OPENID_1_1_TYPE]
+        self.assertFalse(self.endpoint.isOPIdentifier())
+
+    def test_openid2(self):
+        self.endpoint.type_uris = [discover.OPENID_2_0_TYPE]
+        self.assertFalse(self.endpoint.isOPIdentifier())
+
+    def test_openid2OP(self):
+        self.endpoint.type_uris = [discover.OPENID_IDP_2_0_TYPE]
+        self.assertTrue(self.endpoint.isOPIdentifier())
+
+    def test_multipleMissing(self):
+        self.endpoint.type_uris = [discover.OPENID_2_0_TYPE,
+                                   discover.OPENID_1_0_TYPE]
+        self.assertFalse(self.endpoint.isOPIdentifier())
+
+    def test_multiplePresent(self):
+        self.endpoint.type_uris = [discover.OPENID_2_0_TYPE,
+                                   discover.OPENID_1_0_TYPE,
+                                   discover.OPENID_IDP_2_0_TYPE]
+        self.assertTrue(self.endpoint.isOPIdentifier())
+</code></pre>
+<p>This whole test case is dedicated to this one method:</p>
+<pre><code>def isOPIdentifier(self):
+    return OPENID_IDP_2_0_TYPE in self.type_uris
+</code></pre>
+<p>That's right. Seven tests to test an <code>in</code> operation on a list. This might be justifiable for a "black box" testing of unknown code. But here it shouldn't be more complicated than testing just two states in a single test.</p>
+<h2>Generated example</h2>
+<p>This code is more OpenID-specific but the problem is still the same. As soon as you start writing too much of not too different code you want to automate it and naturally come to <em>generated tests</em>:</p>
+<pre><code>@gentests
+class Discover(unittest.TestCase):
+    data = [
+        ("equiv",               (True, "equiv", "equiv" , "xrds")),
+        ("header",              (True, "header", "header" , "xrds")),
+        ("lowercase_header",    (True, "lowercase_header", "lowercase_header" , "xrds")),
+        ("xrds",                (True, "xrds", "xrds" , "xrds")),
+        ("xrds_ctparam",        (True, "xrds_ctparam", "xrds_ctparam" , "xrds_ctparam")),
+        ("xrds_ctcase",         (True, "xrds_ctcase", "xrds_ctcase" , "xrds_ctcase")),
+        ("xrds_html",           (False, "xrds_html", "xrds_html" , "xrds_html")),
+        ("redir_equiv",         (True, "redir_equiv", "equiv" , "xrds")),
+        ("redir_header",        (True, "redir_header", "header" , "xrds")),
+        ("redir_xrds",          (True, "redir_xrds", "xrds" , "xrds")),
+        ("redir_xrds_html",     (False, "redir_xrds_html", "xrds_html" , "xrds_html")),
+        ("redir_redir_equiv",   (True, "redir_redir_equiv", "equiv" , "xrds")),
+        ("404_server_response", (False, "404_server_response", None , None)),
+        ("404_with_header",     (False, "404_with_header", None , None)),
+        ("404_with_meta",       (False, "404_with_meta", None , None)),
+        ("500_server_response", (False, "500_server_response", None , None)),
+    ]
+
+    @mock.patch('openid.fetchers.fetch', fetch)
+    def _test(self, success, input_name, id_name, result_name):
+        input_url, expected = discoverdata.generateResult(
+            BASE_URL,
+            input_name,
+            id_name,
+            result_name,
+            success,
+        )
+        if expected is None:
+            self.assertRaises(urllib.error.HTTPError, discover, input_url)
+        else:
+            result = discover(input_url)
+            self.assertEqual(input_url, result.request_uri)
+            self.assertEqual(result.__dict__, expected.__dict__)
+</code></pre>
+<p>Actual test methods are generated from <code>self.data</code>, each calling <code>self._test</code> with provided arguments. The test function compares a generated expected result with a result returned from a real <code>discover</code> function which is being tested.</p>
+<p>It seems reasonable at first, but there's quite a few things wrong with it that <strong>nobody can see</strong>:</p>
+<ul>
+<li>
+<p>For starters, there are two distinct code paths — for successes and failures — that share nothing in common. Yes, even the seemingly "common" call to <code>generateResult</code> actually <a href="https://github.com/isagalaev/python3-openid/blob/ae2a56ec2238d3b6de05124019a9bec80bf31d36/openid/test/discoverdata.py#L110">has its own <code>if</code></a> that returns completely different result for failures.</p>
+</li>
+<li>
+<p>Though these tests are grouped together, they in fact test very different parts of OpenID discovery process: request headers, response headers, HTML <code>&lt;meta&gt;</code> overrides, etc. But instead of being asserted directly those are implied by the success of the overall discovery process. Which makes debugging more complicated: instead of saying: "you don't recognize this content type", your test will say: "uhm... the discovery is broken somewhere".</p>
+</li>
+<li>
+<p>A few of those tests are completely useless — guess which ones? Redirects. Redirects are never even exposed to the client code, they're handled by the HTTP library. So what we're testing here is our own HTTP mock, not the discovery process.</p>
+</li>
+<li>
+<p>Some of those tests hide actual bugs. For example tests 3, 4 and 5 should test, in theory, that we recognize an XRDS-formatted response even with slight variations in its Content-type header. But they don't even call the method <code>isXRDS()</code> responsible for this, they implicitly compare the <code>content_type</code> attributs of the expected and the actual results that — and here's the best part — <em>are being generated from the same test sample</em>!</p>
+</li>
+</ul>
+<p>This last bit is, by the way, makes <em>all</em> of those tests rather useless. Probably out of desire to reuse more code both the <code>generateResult()</code> and the mock <code>fetch()</code> ultimately read the same data file.</p>
+<h2>Killer example</h2>
+<p>I won't even paste it here as it is too big.</p>
+<p>It's a hierarchy of a base class and three descendants accompanied by two mock fetchers. Test methods assert many different things but use a single complicated generalized test function from the base. You probably want to have a look at this test function <a href="https://github.com/isagalaev/python3-openid/blob/ae2a56ec2238d3b6de05124019a9bec80bf31d36/openid/test/test_discover.py#L78">_checkService()</a> and at <em>The Boss</em> itself, the class called <a href="https://github.com/isagalaev/python3-openid/blob/ae2a56ec2238d3b6de05124019a9bec80bf31d36/openid/test/test_discover.py#L151">TestDiscovery</a>.</p>
+<p>All tests work approximately the same way:</p>
+<ul>
+<li>call <code>discover</code> (with additional checks)</li>
+<li>feed the result to <code>self._checkService</code> with a whole lot of control values that tell it which code path to take</li>
+</ul>
+<p>In addition to all the problems that I already mentioned it has another rather obvious one: it's <strong>big</strong>. Apparently, because of the many subtle differences in individual tests the generalized testing code was becoming too complicated and made it impossible to converted this test case into a generated one. (This is just my hypothesis.)</p>
+<p class="strong"><strong>Don't do carpet testing. It doesn't make tests "more complete" but makes it harder to reason about them, leading to hidden bugs.</strong></p>
+
+<h2>Refactoring it</h2>
+<p>BOOOOORING!!!! It took me several days and a lot of patience :-).</p>
+<p>Deconstruction of such a thing may seem an insurmountable task at first. And I made a few false starts trying to do too much too soon.</p>
+<p>My general approach is to start reading through the file looking for obvious, easy to fix code smell, like <a href="https://github.com/isagalaev/python3-openid/commit/7f13874778a3d01ece26939179dc8d4369848cf2">moving a repeated function call into one place</a> or <a href="https://github.com/isagalaev/python3-openid/commit/641937d5bb8647a4ba7d8b44cc109f2e8a41ce84">killing a class attribute that does the job of a local variable</a>. Dealing with those removes some code but more importantly gives you a better understanding of its scope and intentions.</p>
+<p>Then you start noticing corner cases that differ from the general shape the most, <a href="https://github.com/isagalaev/python3-openid/commit/49eb05b98b9e013eb45a2101f2bdeee082cb59a3">remove</a> <a href="https://github.com/isagalaev/python3-openid/commit/3300a33e1b2f29ba54e30dfc574abe998588d05c">their</a> <a href="https://github.com/isagalaev/python3-openid/commit/35095a52c9a57ba342572cf341b4859d8e27c0ed">dependency</a> on the common parts and then <a href="https://github.com/isagalaev/python3-openid/commit/a2e26612a800be992b5486cc87fd6484dedc7eab">extract them</a>. This groups uniform bits of code together and removes code dealing with the differences.</p>
+<p>And then at some magical point you suddenly realize that all similar looking code is completely identical and then you just remove all the repetitions <a href="https://github.com/isagalaev/python3-openid/commit/c3dd27f3cf9e26855acae3f3c520579073427a1a">in one big swoop</a>.</p>
+<p>And never, ever try to "just rewrite" the <a href="https://github.com/isagalaev/python3-openid/compare/isagalaev:7f13874...204a764b">entire thing</a> from scratch!</p>
+<h2>urlopen mock</h2>
+<p>One thing that allowed me to kill a lot of custom mocking code is the <a href="https://github.com/isagalaev/python3-openid/blob/8e086303de55a2c7267833bdc0ee86b68a8a3c1e/openid/test/support.py#L129">generalized mock for <code>urlopen()</code></a> that I now use in all the tests. It can serve regular files from the designated test directory with the correct <code>Content-type</code> determined from extensions. You can also use query parameters to ask it for a specific status code or a response header:</p>
+<pre><code>query = {'status': 400, 'header': 'X-XRDS-Location: http://...'}
+url = 'http://unittest/test-sample.html?' + urlencode(query)
+</code></pre>
+<p>I wonder if someone has already done that before?
+
+</p></div>
+</div></body></html>

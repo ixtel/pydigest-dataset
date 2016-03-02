@@ -1,0 +1,299 @@
+<html><body><div><div class="content html_format">
+      
+<blockquote>«В жизни каждого Django-разработчика наступает момент, когда он решительно рвет со своим прошлым, лишенным функционального тестирования!»</blockquote><p>
+Об этом и поговорим.
+</p><a name="habracut"/><p>
+Эта статья – результат поиска оптимального инструмента тестирования готовых страниц небольшого проекта. За критерий оценки оптимальности инструмента условно примем минимальное время выполнения теста при стремлении к равным условиям каждого из наборов приложений.
+</p><p>
+В статье рассматриваются 3 варианта функционального тестирования Django приложения на Python 3.4 под Django 1.7 с помощью Selenium WebDriver (на Хабре есть статьи с подробным описанием возможностей Selenium </p><a href="http://habrahabr.ru/post/248559/">тут</a><p> и </p><a href="http://habrahabr.ru/post/152653/">тут</a><p>). А </p><a href="http://selenium-python.readthedocs.org/en/latest/api.html">тут</a><p> полная информация по Selenium WebDriver API. </p><a href="http://selenium.googlecode.com/svn/trunk/docs/api/py/index.html">Еще документация</a><p>, </p><a href="http://selenium2.ru/docs.html">на русском</a><p> и </p><a href="http://forworktests.blogspot.ru/2013/03/selenium-web-driver.html">примеры использования</a><p>.
+</p><p>
+В тестах использовались технологии и приложения: VirtualBox 4.3.6, Debian 7.7, Virtualenv 12.0.7, Python 3.4, Django 1.7, Selenium Webdriver 2.47.3, Iceweasel, Xvfb, PyVirtualDisplay 0.1.5, PhantomJS 1.9.8, Nginx 1.2.1, uWSGI.
+</p><p>
+Рассмотрим следующие связки для </p><b>Debian 7.7</b><p> + </p><b>Virtualenv 12.0.7</b><p> + </p><b>Django 1.7</b><p> +:
+
+</p><ul>
+<li><b>1 вариант.</b> <b>X.org</b> + <b>Selenium WebDriver</b> + <b>Firefox </b>(<b>Iceweacel </b>для Debian) — с графической оболочкой</li>
+<li><b>2 вариант.</b> <b>Terminal</b> + <b>Selenium WebDriver</b> + <b>Xvfb</b>, <b>PyVirtualDisplay</b> — запуск через терминал</li>
+<li><b>3 вариант.</b> <b>Terminal</b> + <b>Selenium</b> + <b>PhantomJS</b> — запуск через терминал</li>
+</ul><p>
+Инструменты функционального тестирования позволяют провести оценку работоспособности конечного сайта и поведения страниц в браузере, а так-же помогают если базовый тестовый клиент Django оказывается не удобен при тестировании динамически подгружаемых данных (при использовании JavaScript, Ajax). Когда различные технологии объединены в едином продукте и возникает закономерный вопрос, как они поведут себя вместе в том или ином случае.
+</p><p>
+При помощи этих инструментов мы можем симулировать реальное поведение пользователей.
+</p><p>
+Приступим!
+</p><p>
+В виртуальное окружение ставим Selenium:
+
+</p><pre><code class="bash">pip install selenium
+</code></pre><p>
+В нашем случае будем тестировать процесс аутентификации пользователя, поэтому файл tests.py создадим в приложении authentication (Пункт Б).
+
+</p><h4><b>Вариант 1.</b> Визуальное симулирование поведения пользователя</h4>
+<b>А.</b><p> Предполагаем, что графический интерфейс установлен, тут — X.org.
+ </p><p>
+Ставим Debian Iceweasel (ранее Debian Firefox — модификация браузера Mozilla Firefox в Debian GNU/Linux):
+
+</p><pre><code class="bash">sudo apt-get install iceweasel
+</code></pre>
+<blockquote><b><i>! Примечание:</i></b><br/>
+При попытке запустить тест из терминала, без запуска графической среды, мы получим исключение: raise WebDriverException(«The browser appears to have exited „selenium.common.exceptions.WebDriverException: Message: The browser appears to have exited before we could connect. If you specified a log_file in the FirefoxBinary constructor, check it for details.)</blockquote>
+<b>Б.</b><p> Создаем файл tests.py.
+
+</p><div class="spoiler"><b class="spoiler_title">Вариант 1</b><div class="spoiler_text"><pre><code class="python"># Подключить встроенный сервер Django для использования клиента Selenium 
+from django.test import LiveServerTestCase
+# Подключить вебдрайвер управления браузером (тут FireFox)
+from selenium import webdriver
+import time
+	
+class SeleniumTests(LiveServerTestCase):
+    def test_auth(self):
+        # Подключить webdriver Firefox
+        br = webdriver.Firefox()
+	# Перейти на главную страницу, получив адрес сервера 'localhost:8081' и полный URL
+	br.get('%s%s' % (self.live_server_url, '/'))
+                
+        # Перейти по ссылке регистрации
+	br.find_element_by_xpath('//a[@href="/register/"]').click()
+        # Подождать 3 секунды
+	time.sleep(3)
+
+	# Регистрация пользователя
+        # Найти поле username и указать значение 'new'
+	br.find_element_by_id('username').send_keys('new')
+	# Найти поле email и указать значение 'new@new.ru'
+	br.find_element_by_id('email').send_keys('new@new.ru')
+	# Указать пароль в 2-ух полях
+	br.find_element_by_id('password1').send_keys('12345678')
+	br.find_element_by_id('password2').send_keys('12345678')
+	# Перейти по ссылке регистрации
+        br.find_element_by_id('btn_register').click()
+
+	# Активизировать пользователя в тестовой БД
+        pis = Myuser.objects.get(username='new')
+	# Поставить признак пользователя - Активен
+	pis.is_active = True
+	# Сохранить в БД
+        pis.save()
+
+	# Перейти на домашнюю страницу
+        br.find_element_by_xpath('//a[@href="/"]').click()
+	# Подождать 3 секунды
+        time.sleep(3)
+
+	# Войти под зарегистрированным пользователем
+        br.find_element_by_id('username').send_keys('new')
+	br.find_element_by_id('password').send_keys('12345678')
+        br.find_element_by_name('Вход').click()
+	# Проверить наличие имени авторизованного пользователя в соответствующем теге
+        assert br.find_element_by_xpath('//a[@data-content="Личный кабинет"]').text == 'new'
+		
+	# Отключить вебдрайвер, закрыть браузер
+	br.quit()
+</code></pre>
+</div></div>
+<blockquote><i><b>! Примечание:</b></i><br/>
+В тексте программы необходимо ставить паузу time.sleep(3) во избежание ошибки: “selenium.common.exceptions.NoSuchElementException: Message: Unable to locate element: {»method":«id»,«selector»:«username»}", «Не удается найти элемент», вызванной тем, что не успел подгрузиться весь контекст страницы. При возникновении ошибки можно увеличить время ожидания.</blockquote>
+<b>В.</b><p> Запускаем наш тест из authentication/tests.py:
+</p><pre><code class="bash">python manage.py test authentication/
+</code></pre><p>
+Еще варианты запуска.</p><p>
+Всех тестов проекта:
+</p><pre><code class="bash">python manage.py test
+</code></pre><p>
+Конкретного класса SeleniumTests из tests.py:
+</p><pre><code class="bash">python manage.py test authentication.tests.SeleniumTests
+</code></pre><p>
+Метода test_auth класса SeleniumTests:
+</p><pre><code class="bash">python manage.py test authentication.tests.SeleniumTests.test_auth
+</code></pre>
+
+<u>ВРЕМЯ РАБОТЫ ТЕСТА (Debian 7.7, VirtualBox, 12 Mb VideoRAM, 512 Mb RAM, 1 core): (29.89 + 25.65 + 26.73)/3 = <b>27.42 сек</b></u>
+
+<h4><b>Вариант 2.</b> Запуск тестов через терминал без запуска графической оболочки на xvfb + pyvirtualdisplay</h4>
+<b>А.</b><p> Для запуска из консоли необходимо установить в виртуальном окружении Virtualenv X-сервер: Xvfb и виртуальный дисплей: Pyvirtualdisplay.
+
+</p><pre><code class="bash">sudo apt-get install xvfb
+pip install pyvirtualdisplay
+</code></pre>
+<blockquote><i><b>! Примечание:</b></i><br/>
+PyVirtualDisplay ставим от имени локального пользователя, иначе при тестировании из-под пользователя в строке импорта: from pyvirtualdisplay import Display, будет ошибка.<br/>
+PyVirtualDisplay 0.1.5 официально поддерживает версии python: 2.6, 2.7, 3.2, 3.3, проверено на 3.4 — работает</blockquote>
+<b>Б.</b><p> Создаем файл tests.py. К ранее описанному в Варианте 1 добавляем строки для работы с виртуальным дисплеем.
+
+</p><div class="spoiler"><b class="spoiler_title">Вариант 2</b><div class="spoiler_text"><pre><code class="python"># Подключить виртуальный дисплей
+from pyvirtualdisplay import Display
+
+# Подключить встроенный сервер Django для использования клиента Selenium 
+from django.test import LiveServerTestCase
+# Подключить вебдрайвер управления браузером (тут FireFox)
+from selenium import webdriver
+import time
+
+class SeleniumTests(LiveServerTestCase):
+    def test_auth(self):
+	# Инициализировать и запустить виртуальный дисплей
+        display = Display(visible=0, size=(800, 600))
+	display.start()
+
+	# Подключить webdriver Firefox
+        br = webdriver.Firefox()
+		
+        # Перейти на главную страницу, получив адрес сервера 'localhost:8081' и полный URL
+	br.get('%s%s' % (self.live_server_url, '/'))
+                
+        # Перейти по ссылке регистрации
+	br.find_element_by_xpath('//a[@href="/register/"]').click()
+        # Подождать 3 секунды
+	time.sleep(3)
+	# Регистрация пользователя
+        # Найти поле username и указать значение 'new'
+	br.find_element_by_id('username').send_keys('new')
+	# Найти поле email и указать значение 'new@new.ru'
+	br.find_element_by_id('email').send_keys('new@new.ru')
+	# Указать пароль в 2-ух полях
+	br.find_element_by_id('password1').send_keys('12345678')
+	br.find_element_by_id('password2').send_keys('12345678')
+	# Перейти по ссылке регистрации
+        br.find_element_by_id('btn_register').click()
+
+	# Активизировать пользователя в тестовой БД
+        pis = Myuser.objects.get(username='new')
+	# Поставить признак пользователя - Активен
+	pis.is_active = True
+	# Сохранить в БД
+        pis.save()
+
+	# Перейти на домашнюю страницу
+        br.find_element_by_xpath('//a[@href="/"]').click()
+	# Подождать 3 секунды
+        time.sleep(3)
+        
+	# Войти под зарегистрированным пользователем
+        br.find_element_by_id('username').send_keys('new')
+	br.find_element_by_id('password').send_keys('12345678')
+        br.find_element_by_name('Вход').click()
+	# Проверить наличие имени авторизованного пользователя в соответствующем теге
+        assert br.find_element_by_xpath('//a[@data-content="Личный кабинет"]').text == 'new'
+		
+	# Остановить виртуальный дисплей
+	display.stop()
+	# Отключить вебдрайвер, закрыть браузер
+	br.quit()
+</code></pre>
+</div></div>
+<u>ВРЕМЯ РАБОТЫ ТЕСТА (Putty SSH, Screen, Virtualenv, Debian 7.7, VirtualBox, 12 Mb VideoRAM, 512 Mb RAM, 1 core): (28.5 + 25.82 + 24.98)/3 = <b>26.43 сек</b></u> 
+
+<h4><b>Вариант 3.</b> Запуск тестов через терминал без запуска графической оболочки на PhantomJS</h4>
+<b>А.</b><p> Для запуска из консоли необходимо установить PhantomJS:
+ 
+</p><pre><code class="bash">cd /usr/local/share
+sudo wget https://bitbucket.org/ariya/phantomjs/downloads/phantomjs-1.9.8-linux-x86_64.tar.bz2
+sudo tar xjf phantomjs-1.9.8-linux-x86_64.tar.bz2
+sudo ln -s /usr/local/share/phantomjs-1.9.8-linux-x86_64/bin/phantomjs /usr/local/share/phantomjs
+sudo ln -s /usr/local/share/phantomjs-1.9.8-linux-x86_64/bin/phantomjs /usr/local/bin/phantomjs
+sudo ln -s /usr/local/share/phantomjs-1.9.8-linux-x86_64/bin/phantomjs /usr/bin/phantomjs
+</code></pre><p>
+И запускаем: 
+
+</p><pre><code class="bash">phantomjs -v
+</code></pre>
+<blockquote><i><b>! Примечание:</b></i><br/>
+Если полученный пакет не годится данной системе, получим ошибку: «Не могу запустить бинарный файл» (Часто из-за попытки установить на 32-ух разрядную систему (x86) 64-разрядное приложение (x64)).</blockquote>
+<b>Б.</b><p> Создаем файл tests.py. К ранее описанному в Варианте 1 добавляем строки для работы с PhantomJS.
+
+</p><div class="spoiler"><b class="spoiler_title">Вариант 3</b><div class="spoiler_text"><pre><code class="python"># Подключить PhantomJS 
+from selenium.webdriver import PhantomJS
+
+# Подключить встроенный сервер Django для использования клиента Selenium 
+from django.test import LiveServerTestCase
+import time
+# НЕ НУЖЕН
+# Подключить вебдрайвер управления браузером (тут FireFox)
+#from selenium import webdriver
+
+class SeleniumTests(LiveServerTestCase):
+    def test_auth(self):
+	# НЕ НУЖЕН
+        # Подключить webdriver Firefox
+       	#br = webdriver.Firefox()
+
+	# Инициализировать драйвер PhantomJS
+        br = PhantomJS()
+        # установить разрешение страницы
+        br.set_window_size(800, 600)
+
+        # Перейти на главную страницу, получив адрес сервера 'localhost:8081' и полный URL
+        br.get('%s%s' % (self.live_server_url, '/'))
+       	# Перейти по ссылке регистрации
+        br.find_element_by_xpath('//a[@href="/register/"]').click()
+       	# Подождать 3 секунды
+	time.sleep(3)
+
+        # Регистрация пользователя
+       	# Найти поле username и указать значение 'new'
+        br.find_element_by_id('username').send_keys('new')
+        # Найти поле email и указать значение 'new@new.ru'
+        br.find_element_by_id('email').send_keys('new@new.ru')
+        # Указать пароль в 2-ух полях
+        br.find_element_by_id('password1').send_keys('12345678')
+        br.find_element_by_id('password2').send_keys('12345678')
+        # Перейти по ссылке регистрации
+       	br.find_element_by_id('btn_register').click()
+
+        # Активизировать пользователя в тестовой БД
+       	pis = Myuser.objects.get(username='new')
+	# Поставить признак пользователя - Активен
+        pis.is_active = True
+	# Сохранить в БД
+       	pis.save()
+
+        # Перейти на домашнюю страницу
+       	br.find_element_by_xpath('//a[@href="/"]').click()
+        # Подождать 3 секунды
+       	time.sleep(3)
+
+        # Добавлено:
+        # Сделать скриншот всей страницы
+        br.save_screenshot('screenshot_firstpage.png')
+
+        # Войти под зарегистрированным пользователем
+       	br.find_element_by_id('username').send_keys('new')
+        br.find_element_by_id('password').send_keys('12345678')
+       	br.find_element_by_name('Вход').click()
+        # Проверить наличие имени авторизованного пользователя в соответствующем теге
+       	assert br.find_element_by_xpath('//a[@data-content="Личный кабинет"]').text == 'new'
+		
+	# Отключить вебдрайвер, закрыть браузер
+        br.quit()
+</code></pre>
+</div></div><p>
+У PhantomJS при создании скриншота есть проблема с фоном, при сохранении он прозрачный (черный фон). Для исправления этого недоразумения перед br.save_screenshot('screenshot_firstpage.png') можно использовать
+</p><div class="spoiler"><b class="spoiler_title">такой код:</b><p class="spoiler_text">br.execute_script("""(function() {<br/>
+ var style = document.createElement('style'), text = document.createTextNode('body { background: #fff }');<br/>
+ style.setAttribute('type', 'text/css');<br/>
+ style.appendChild(text);<br/>
+ document.head.insertBefore(style, document.head.firstChild);<br/>
+})();""")<br/>
+</p></div>
+
+<u>ВРЕМЯ РАБОТЫ ТЕСТА <b>без создания скриншота страницы</b> (Putty SSH, Screen, Virtualenv, Debian 7.7, VirtualBox, 12 Mb VideoRAM, 512 Mb RAM, 1 core): (14.64 + 14.89 + 13.05)/3 = <b>14.19 сек</b>. </u> 
+<p>
+Добавлено:
+</p><u>ВРЕМЯ РАБОТЫ ТЕСТА <b>со скриншотом страницы</b> (Putty SSH, Screen, Virtualenv, Debian 7.7, VirtualBox, 12 Mb VideoRAM, 512 Mb RAM, 1 core): (17.63 + 17.74 + 17.94)/3 = <b>17.77 сек</b>. </u> 
+
+
+<hr/>
+<h4><b>Резюме:</b></h4><p>
+Использование Варианта 3 без скриншота страницы — [</p><b>14.19 сек.</b><p>] предоставляет </p><b>почти в 2 раза меньше времени</b><p> на перекуры, чем Вариант 2 — [26.43 сек.] и Вариант 1 — [27.42 сек.] и годится для использования на боевом сервере без графической оболочки. Но Вариант 1 — </p><b>визуально информативнее</b><p> и удобен для предварительных тестов при разработке, перед выкаткой кода на боевой сервер.
+</p><p>
+ПС. Тут нужно дополнительно учесть, что в коде теста в общей сложности использованы 6 сек. ожидания. 
+</p><p>
+Добавлено:</p><p>
+Уважаемые коллеги, а какими связками при функциональном тестировании пользуетесь Вы? Какие у них преимущества и недостатки?
+</p><p>
+Спасибо за внимание!
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

@@ -1,0 +1,282 @@
+<html><body><div><div>
+<div class="section" id="introduction">
+<h2>Introduction</h2>
+<p>This post is the first in what I hope will be a series on neat things
+you can do with <a class="reference external" href="http://morepath.readthedocs.org">Morepath</a>. Morepath is a Python web micro framework
+with some very interesting capabilities. What we'll look at today is
+what you can do with Morepath's link generation in a server-driven web
+application. While Morepath is an excellent fit to create REST APIs,
+it also works well server aplications. So let's look at how Morepath
+can help you to create a batching UI.</p>
+<p>On the special occasion of this post we also released a new version of
+Morepath, <a class="reference external" href="https://morepath.readthedocs.org/en/0.11.1/changes.html">Morepath 0.11.1</a>!</p>
+<p>A batching UI is a UI where you have a larger amount of data available
+than you want to show to the user at once. You instead partition the
+data in smaller batches, and you let the user navigate through these
+batches by clicking a <em>previous</em> and <em>next</em> link. If you have 56 items
+in total and the batch size is 10, you first see items 0-9. You can
+then click <em>next</em> to see items 10-19, then items 20-29, and so on until
+you see the last few items 50-55. Clicking <em>previous</em> will take you
+backwards again.</p>
+<p>In this example, a URL to see a single batch looks like this:</p>
+<pre class="literal-block">
+http://example.com/?start=20
+</pre>
+<p>To see items 20-29. You can also approach the application like this:</p>
+<pre class="literal-block">
+http://example.com/
+</pre>
+<p>to start at the first batch.</p>
+<p>I'm going to highlight the relevant parts of the application here. The
+<a class="reference external" href="https://github.com/morepath/morepath_batching">complete example project</a> can be found on Github. I have included
+instructions on how to install the app in the README.rst there.</p>
+</div>
+<div class="section" id="model">
+<h2>Model</h2>
+<p>First we need to define a few model classes to define the
+application. We are going to go for a fake database of fake persons
+that we want to batch through.</p>
+<p>Here's the <cite>Person</cite> class:</p>
+<pre class="code python literal-block">
+<span class="k">class</span> <span class="nc">Person</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="nb">id</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">address</span><span class="p">,</span> <span class="n">email</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">id</span> <span class="o">=</span> <span class="nb">id</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">name</span> <span class="o">=</span> <span class="n">name</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">address</span> <span class="o">=</span> <span class="n">address</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">email</span> <span class="o">=</span> <span class="n">email</span>
+</pre>
+<p>We use the neat <a class="reference external" href="https://pypi.python.org/pypi/fake-factory">fake-factory</a> package to create some fake data
+for our fake database; the fake database is just a Python list:</p>
+<pre class="code python literal-block">
+<span class="n">fake</span> <span class="o">=</span> <span class="n">Faker</span><span class="p">()</span>
+
+<span class="k">def</span> <span class="nf">generate_random_person</span><span class="p">(</span><span class="nb">id</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">Person</span><span class="p">(</span><span class="nb">id</span><span class="p">,</span> <span class="n">fake</span><span class="o">.</span><span class="n">name</span><span class="p">(),</span> <span class="n">fake</span><span class="o">.</span><span class="n">address</span><span class="p">(),</span> <span class="n">fake</span><span class="o">.</span><span class="n">email</span><span class="p">())</span>
+
+<span class="k">def</span> <span class="nf">generate_random_persons</span><span class="p">(</span><span class="n">amount</span><span class="p">):</span>
+    <span class="k">return</span> <span class="p">[</span><span class="n">generate_random_person</span><span class="p">(</span><span class="nb">id</span><span class="p">)</span> <span class="k">for</span> <span class="nb">id</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">amount</span><span class="p">)]</span>
+
+<span class="n">person_db</span> <span class="o">=</span> <span class="n">generate_random_persons</span><span class="p">(</span><span class="mi">56</span><span class="p">)</span>
+</pre>
+<p>So far nothing special. But next we create a special
+<cite>PersonCollection</cite> model that represents a batch of persons:</p>
+<pre class="code python literal-block">
+<span class="k">class</span> <span class="nc">PersonCollection</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">persons</span><span class="p">,</span> <span class="n">start</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">persons</span> <span class="o">=</span> <span class="n">persons</span>
+        <span class="k">if</span> <span class="n">start</span> <span class="o">&lt;</span> <span class="mi">0</span> <span class="ow">or</span> <span class="n">start</span> <span class="o">&gt;=</span> <span class="nb">len</span><span class="p">(</span><span class="n">persons</span><span class="p">):</span>
+            <span class="n">start</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">start</span> <span class="o">=</span> <span class="n">start</span>
+
+    <span class="k">def</span> <span class="nf">query</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">persons</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">start</span><span class="p">:</span><span class="bp">self</span><span class="o">.</span><span class="n">start</span> <span class="o">+</span> <span class="n">BATCH_SIZE</span><span class="p">]</span>
+
+    <span class="k">def</span> <span class="nf">previous</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">start</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="k">return</span> <span class="bp">None</span>
+        <span class="n">start</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">start</span> <span class="o">-</span> <span class="n">BATCH_SIZE</span>
+        <span class="k">if</span> <span class="n">start</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="n">start</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="k">return</span> <span class="n">PersonCollection</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">persons</span><span class="p">,</span> <span class="n">start</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">next</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">start</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">start</span> <span class="o">+</span> <span class="n">BATCH_SIZE</span>
+        <span class="k">if</span> <span class="n">start</span> <span class="o">&gt;=</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">persons</span><span class="p">):</span>
+            <span class="k">return</span> <span class="bp">None</span>
+        <span class="k">return</span> <span class="n">PersonCollection</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">persons</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">start</span> <span class="o">+</span> <span class="n">BATCH_SIZE</span><span class="p">)</span>
+</pre>
+<p>To create an instance of <cite>PersonCollection</cite> you need two arguments:
+<cite>persons</cite>, which is going to be our <cite>person_db</cite> we created before, and
+<cite>start</cite>, which is the start index of the batch.</p>
+<p>We define a <cite>query</cite> method that queries the persons we need from the
+larger batch, based on <cite>start</cite> and a global constant,
+<cite>BATCH_SIZE</cite>. Here we do this by simply taking a slice. In a real
+application you'd execute some kind of database query.</p>
+<p>We also define <cite>previous</cite> and <cite>next</cite> methods. These give back the
+previous <cite>PersonCollection</cite> and next <cite>PersonCollection</cite>. They use the
+same <cite>persons</cite> database, but adjust the <cite>start</cite> of the batch. If there
+is no previous or next batch as we're at the beginning or the end,
+these methods return <tt class="docutils literal">None</tt>.</p>
+<p>There is nothing directly web related in this code, though of course
+<cite>PersonCollection</cite> is there to serve our web application in
+particular. But as you notice there is absolutely no interaction with
+<cite>request</cite> or any other parts of the Morepath API. This makes it easier
+to reason about this code: you can for instance write unit tests that
+just test the behavior of these instances without dealing with
+requests, HTML, etc.</p>
+</div>
+<div class="section" id="path">
+<h2>Path</h2>
+<p>Now we expose these models to the web. We tell Morepath what models
+are behind what URLs, and how to create URLs to models:</p>
+<pre class="code python literal-block">
+<span class="nd">@App.path</span><span class="p">(</span><span class="n">model</span><span class="o">=</span><span class="n">PersonCollection</span><span class="p">,</span> <span class="n">path</span><span class="o">=</span><span class="s">'/'</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">get_person_collection</span><span class="p">(</span><span class="n">start</span><span class="o">=</span><span class="mi">0</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">PersonCollection</span><span class="p">(</span><span class="n">person_db</span><span class="p">,</span> <span class="n">start</span><span class="p">)</span>
+
+<span class="nd">@App.path</span><span class="p">(</span><span class="n">model</span><span class="o">=</span><span class="n">Person</span><span class="p">,</span> <span class="n">path</span><span class="o">=</span><span class="s">'{id}'</span><span class="p">,</span>
+          <span class="n">converters</span><span class="o">=</span><span class="p">{</span><span class="s">'id'</span><span class="p">:</span> <span class="nb">int</span><span class="p">})</span>
+<span class="k">def</span> <span class="nf">get_person</span><span class="p">(</span><span class="nb">id</span><span class="p">):</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">person_db</span><span class="p">[</span><span class="nb">id</span><span class="p">]</span>
+    <span class="k">except</span> <span class="ne">IndexError</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">None</span>
+</pre>
+<p>Let's look at this in more detail:</p>
+<pre class="code python literal-block">
+<span class="nd">@App.path</span><span class="p">(</span><span class="n">model</span><span class="o">=</span><span class="n">PersonCollection</span><span class="p">,</span> <span class="n">path</span><span class="o">=</span><span class="s">'/'</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">get_person_collection</span><span class="p">(</span><span class="n">start</span><span class="o">=</span><span class="mi">0</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">PersonCollection</span><span class="p">(</span><span class="n">person_db</span><span class="p">,</span> <span class="n">start</span><span class="p">)</span>
+</pre>
+<p>This is not a lot of code, but it actually tells Morepath a lot:</p>
+<ul class="simple">
+<li>When you go to the root path <cite>/</cite> you get the instance returned by the
+<cite>get_person_collection</cite> function.</li>
+<li>This URL takes a request parameter <cite>start</cite>, for instance <tt class="docutils literal"><span class="pre">?start=10</span></tt>.</li>
+<li>This request parameter is optional. If it's not given it defaults to <cite>0</cite>.</li>
+<li>Since the default is a Python <cite>int</cite> object, Morepath rejects any
+requests with request parameters that cannot be converted to an
+integer as a 400 Bad Request. So <cite>?start=11</cite> is legal, but
+<cite>?start=foo</cite> is not.</li>
+<li>When asked for the link to a <cite>PersonCollection</cite> instance in Python
+code, as we'll see soon, Morepath uses this information to
+reconstruct it.</li>
+</ul>
+<p>Now let's look at <cite>get_person</cite>:</p>
+<pre class="code python literal-block">
+<span class="nd">@App.path</span><span class="p">(</span><span class="n">model</span><span class="o">=</span><span class="n">Person</span><span class="p">,</span> <span class="n">path</span><span class="o">=</span><span class="s">'{id}'</span><span class="p">,</span>
+          <span class="n">converters</span><span class="o">=</span><span class="p">{</span><span class="s">'id'</span><span class="p">:</span> <span class="nb">int</span><span class="p">})</span>
+<span class="k">def</span> <span class="nf">get_person</span><span class="p">(</span><span class="nb">id</span><span class="p">):</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">person_db</span><span class="p">[</span><span class="nb">id</span><span class="p">]</span>
+    <span class="k">except</span> <span class="ne">IndexError</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">None</span>
+</pre>
+<p>This uses a path with a parameter in it, <cite>id</cite>, which is passed to the
+<cite>get_person</cite> function. It explicitly sets the system to expect an
+<cite>int</cite> and reject anything else, but we could've used <cite>id=0</cite> as a
+default parameter instead here too. Finally, <cite>get_person</cite> can return
+<cite>None</cite> if the id is not known in our Python list "database". Morepath
+automatically turns this into a <cite>404 Not Found</cite> for you.</p>
+</div>
+<div class="section" id="view-template-for-person">
+<h2>View &amp; template for Person</h2>
+<p>While <cite>PersonCollection</cite> and <cite>Person</cite> instances now have a URL, we
+didn't tell Morepath yet what to do when someone goes there. So for
+now, these URLs will respond with a 404.</p>
+<p>Let's fix this by defining some Morepath views. We'll do a simple view
+for <cite>Person</cite> first:</p>
+<pre class="code python literal-block">
+<span class="nd">@App.html</span><span class="p">(</span><span class="n">model</span><span class="o">=</span><span class="n">Person</span><span class="p">,</span> <span class="n">template</span><span class="o">=</span><span class="s">'person.jinja2'</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">person_default</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">request</span><span class="p">):</span>
+    <span class="k">return</span> <span class="p">{</span>
+        <span class="s">'id'</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">id</span><span class="p">,</span>
+        <span class="s">'name'</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">name</span><span class="p">,</span>
+        <span class="s">'address'</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">address</span><span class="p">,</span>
+        <span class="s">'email'</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">email</span>
+    <span class="p">}</span>
+</pre>
+<p>We use the <cite>html</cite> decorator to indicate that this view delivers data
+of Content-Type <cite>text/html</cite>, and that it uses a <cite>person.jinja2</cite>
+template to do so.</p>
+<p>The <cite>person_default</cite> function itself gets a <cite>self</cite> and a <cite>request</cite>
+argument.  The <cite>self</cite> argument is an instance of the model class
+indicated in the decorator, so a <cite>Person</cite> instance. The request
+argument is a <a class="reference external" href="http://webob.org/">WebOb</a> request instance. We give the template the data
+returned in the dictionary.</p>
+<p>The template <cite>person.jinja2</cite> looks like this:</p>
+<pre class="code html+jinja literal-block">
+<span class="cp">&lt;!DOCTYPE html&gt;</span>
+<span class="nt">&lt;html&gt;</span>
+  <span class="nt">&lt;head&gt;</span>
+    <span class="nt">&lt;title&gt;</span>Morepath batching demo<span class="nt">&lt;/title&gt;</span>
+  <span class="nt">&lt;/head&gt;</span>
+  <span class="nt">&lt;body&gt;</span>
+    <span class="nt">&lt;p&gt;</span>
+      Name: <span class="cp">{{</span> <span class="nv">name</span> <span class="cp">}}</span><span class="nt">&lt;br/&gt;</span>
+      Address: <span class="cp">{{</span> <span class="nv">address</span> <span class="cp">}}</span><span class="nt">&lt;br/&gt;</span>
+      Email: <span class="cp">{{</span> <span class="nv">email</span> <span class="cp">}}</span><span class="nt">&lt;br</span> <span class="nt">/&gt;</span>
+    <span class="nt">&lt;/p&gt;</span>
+  <span class="nt">&lt;/body&gt;</span>
+<span class="nt">&lt;/html&gt;</span>
+</pre>
+<p>Here we use the <a class="reference external" href="http://jinja.pocoo.org/">Jinja2 template language</a> to render the data to
+HTML.  Morepath out of the box does not support Jinja2; it's template
+language agnostic. But in our example we use the Morepath extension
+<a class="reference external" href="https://pypi.python.org/pypi/more.jinja2">more.jinja2</a> which integrates Jinja2. Chameleon support is also
+available in <a class="reference external" href="https://pypi.python.org/pypi/more.chameleon">more.chameleon</a> in case you prefer that.</p>
+</div>
+<div class="section" id="view-template-for-personcollection">
+<h2>View &amp; template for PersonCollection</h2>
+<p>Here is the view that exposes <cite>PersonCollection</cite>:</p>
+<pre class="code python literal-block">
+<span class="nd">@App.html</span><span class="p">(</span><span class="n">model</span><span class="o">=</span><span class="n">PersonCollection</span><span class="p">,</span> <span class="n">template</span><span class="o">=</span><span class="s">'person_collection.jinja2'</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">person_collection_default</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">request</span><span class="p">):</span>
+    <span class="k">return</span> <span class="p">{</span>
+        <span class="s">'persons'</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">query</span><span class="p">(),</span>
+        <span class="s">'previous_link'</span><span class="p">:</span> <span class="n">request</span><span class="o">.</span><span class="n">link</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">previous</span><span class="p">()),</span>
+        <span class="s">'next_link'</span><span class="p">:</span> <span class="n">request</span><span class="o">.</span><span class="n">link</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">next</span><span class="p">()),</span>
+    <span class="p">}</span>
+</pre>
+<p>It gives the template the list of persons that is in the current
+<cite>PersonCollection</cite> instance so it can show them in a template as we'll
+see in a moment. It also creates two URLs: <cite>previous_link</cite> and
+<cite>next_link</cite>.  These are links to the previous and next batch
+available, or <tt class="docutils literal">None</tt> if no previous or next batch exists (this is
+the first or the last batch).</p>
+<p>Let's look at the template:</p>
+<pre class="code html+jinja literal-block">
+<span class="cp">&lt;!DOCTYPE html&gt;</span>
+<span class="nt">&lt;html&gt;</span>
+ <span class="nt">&lt;head&gt;</span>
+   <span class="nt">&lt;title&gt;</span>Morepath batching demo<span class="nt">&lt;/title&gt;</span>
+  <span class="nt">&lt;/head&gt;</span>
+  <span class="nt">&lt;body&gt;</span>
+    <span class="nt">&lt;table&gt;</span>
+      <span class="nt">&lt;tr&gt;</span>
+        <span class="nt">&lt;th&gt;</span>Name<span class="nt">&lt;/th&gt;</span>
+        <span class="nt">&lt;th&gt;</span>Email<span class="nt">&lt;/th&gt;</span>
+        <span class="nt">&lt;th&gt;</span>Address<span class="nt">&lt;/th&gt;</span>
+      <span class="nt">&lt;/tr&gt;</span>
+      <span class="cp">{%</span> <span class="k">for</span> <span class="nv">person</span> <span class="k">in</span> <span class="nv">persons</span> <span class="cp">%}</span>
+      <span class="nt">&lt;tr&gt;</span>
+        <span class="nt">&lt;td&gt;&lt;a</span> <span class="na">href=</span><span class="s">"</span><span class="cp">{{</span> <span class="nv">request.link</span><span class="o">(</span><span class="nv">person</span><span class="o">)</span> <span class="cp">}}</span><span class="s">"</span><span class="nt">&gt;</span><span class="cp">{{</span> <span class="nv">person.name</span> <span class="cp">}}</span><span class="nt">&lt;/a&gt;&lt;/td&gt;</span>
+        <span class="nt">&lt;td&gt;</span><span class="cp">{{</span> <span class="nv">person.email</span> <span class="cp">}}</span><span class="nt">&lt;/td&gt;</span>
+        <span class="nt">&lt;td&gt;</span><span class="cp">{{</span> <span class="nv">person.address</span> <span class="cp">}}</span><span class="nt">&lt;/td&gt;</span>
+      <span class="nt">&lt;/tr&gt;</span>
+      <span class="cp">{%</span> <span class="k">endfor</span> <span class="cp">%}</span>
+    <span class="nt">&lt;/table&gt;</span>
+    <span class="cp">{%</span> <span class="k">if</span> <span class="nv">previous_link</span> <span class="cp">%}</span>
+    <span class="nt">&lt;a</span> <span class="na">href=</span><span class="s">"</span><span class="cp">{{</span> <span class="nv">previous_link</span> <span class="cp">}}</span><span class="s">"</span><span class="nt">&gt;</span>Previous<span class="nt">&lt;/a&gt;</span>
+    <span class="cp">{%</span> <span class="k">endif</span> <span class="cp">%}</span>
+    <span class="cp">{%</span> <span class="k">if</span> <span class="nv">next_link</span> <span class="cp">%}</span>
+    <span class="nt">&lt;a</span> <span class="na">href=</span><span class="s">"</span><span class="cp">{{</span> <span class="nv">next_link</span> <span class="cp">}}</span><span class="s">"</span><span class="nt">&gt;</span>Next<span class="nt">&lt;/a&gt;</span>
+    <span class="cp">{%</span> <span class="k">endif</span> <span class="cp">%}</span>
+  <span class="nt">&lt;/body&gt;</span>
+<span class="nt">&lt;/html&gt;</span>
+</pre>
+<p>A bit more is going on here. First it loops through the <cite>persons</cite> list
+to show all the persons in a batch in a HTML table. The name in the
+table is a link to the person instance; we use <cite>request.link()</cite> in the
+template to create this URL.</p>
+<p>The template also shows a <cite>previous</cite> and <cite>next</cite> link, but only if
+they're not <cite>None</cite>, so when there is actually a previous or next batch
+available.</p>
+</div>
+<div class="section" id="that-s-it">
+<h2>That's it</h2>
+<p>And that's it, besides a few details of application setup, which you
+can find in the <a class="reference external" href="https://github.com/morepath/morepath_batching">complete example project</a> on Github.</p>
+<p>There's not much to this code, and that's how it should be. I invite
+you to compare this approach to a batching UI to what an
+implementation for another web framework looks like. Do you put the
+link generation code in the template itself? Or as ad hoc code inside
+the view functions? How clear and concise and testable is that code
+compared to what we just did here? Do you give back the right HTTP
+status codes when things go wrong? Consider also how easy it would be
+to expand the code to include searching in addition to batching.</p>
+<p>Do you want to try out Morepath now? Read the <a class="reference external" href="https://morepath.readthedocs.org">very extensive
+documentation</a>. I hope to hear from you!</p>
+</div>
+</div>
+    </div></body></html>

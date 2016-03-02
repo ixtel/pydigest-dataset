@@ -1,0 +1,151 @@
+<html><body><div><div class="post-text" itemprop="text">
+<p>Here's a slightly more generic version of the accepted answer:<br/>
+<a href="https://github.com/stuarteberg/printnum" rel="nofollow">https://github.com/stuarteberg/printnum</a></p>
+
+<p>(The converter is copied from the <a href="https://github.com/ukoethe/vigra" rel="nofollow">VIGRA</a> C++/Python bindings.)</p>
+
+<p>The accepted answer points out that it does not support casting between scalar types. This converter <em>will</em> allow implicit conversion between any two scalar types (even, say, <code>int32</code> to <code>int8</code>, or <code>float32</code> to <code>uint8</code>).  I think that's generally nicer, but there is a slight convenience/safety trade-off made here.</p>
+
+<p/>
+
+<pre><code>#include &lt;iostream&gt;
+#include &lt;boost/python.hpp&gt;
+
+#define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
+
+// http://docs.scipy.org/doc/numpy/reference/c-api.array.html#importing-the-api
+#define PY_ARRAY_UNIQUE_SYMBOL printnum_cpp_module_PyArray_API
+#include &lt;numpy/arrayobject.h&gt;
+#include &lt;numpy/arrayscalars.h&gt;
+
+
+/*
+ * Boost python converter for numpy scalars, e.g. numpy.uint32(123).
+ * Enables automatic conversion from numpy.intXX, floatXX
+ * in python to C++ char, short, int, float, etc.
+ * When casting from float to int (or wide int to narrow int),
+ * normal C++ casting rules apply.
+ *
+ * Like all boost::python converters, this enables automatic conversion for function args
+ * exposed via boost::python::def(), as well as values converted via boost::python::extract&lt;&gt;().
+ *
+ * Copied from the VIGRA C++ library source code (MIT license).
+ * http://ukoethe.github.io/vigra
+ * https://github.com/ukoethe/vigra
+ */
+template &lt;typename ScalarType&gt;
+struct NumpyScalarConverter
+{
+    NumpyScalarConverter()
+    {
+        using namespace boost::python;
+        converter::registry::push_back( &amp;convertible, &amp;construct, type_id&lt;ScalarType&gt;());
+    }
+
+    // Determine if obj_ptr is a supported numpy.number
+    static void* convertible(PyObject* obj_ptr)
+    {
+        if (PyArray_IsScalar(obj_ptr, Float32) ||
+            PyArray_IsScalar(obj_ptr, Float64) ||
+            PyArray_IsScalar(obj_ptr, Int8)    ||
+            PyArray_IsScalar(obj_ptr, Int16)   ||
+            PyArray_IsScalar(obj_ptr, Int32)   ||
+            PyArray_IsScalar(obj_ptr, Int64)   ||
+            PyArray_IsScalar(obj_ptr, UInt8)   ||
+            PyArray_IsScalar(obj_ptr, UInt16)  ||
+            PyArray_IsScalar(obj_ptr, UInt32)  ||
+            PyArray_IsScalar(obj_ptr, UInt64))
+        {
+            return obj_ptr;
+        }
+        return 0;
+    }
+
+    static void construct( PyObject* obj_ptr, boost::python::converter::rvalue_from_python_stage1_data* data)
+    {
+        using namespace boost::python;
+
+        // Grab pointer to memory into which to construct the C++ scalar
+        void* storage = ((converter::rvalue_from_python_storage&lt;ScalarType&gt;*) data)-&gt;storage.bytes;
+
+        // in-place construct the new scalar value
+        ScalarType * scalar = new (storage) ScalarType;
+
+        if (PyArray_IsScalar(obj_ptr, Float32))
+            (*scalar) = PyArrayScalar_VAL(obj_ptr, Float32);
+        else if (PyArray_IsScalar(obj_ptr, Float64))
+            (*scalar) = PyArrayScalar_VAL(obj_ptr, Float64);
+        else if (PyArray_IsScalar(obj_ptr, Int8))
+            (*scalar) = PyArrayScalar_VAL(obj_ptr, Int8);
+        else if (PyArray_IsScalar(obj_ptr, Int16))
+            (*scalar) = PyArrayScalar_VAL(obj_ptr, Int16);
+        else if (PyArray_IsScalar(obj_ptr, Int32))
+            (*scalar) = PyArrayScalar_VAL(obj_ptr, Int32);
+        else if (PyArray_IsScalar(obj_ptr, Int64))
+            (*scalar) = PyArrayScalar_VAL(obj_ptr, Int64);
+        else if (PyArray_IsScalar(obj_ptr, UInt8))
+            (*scalar) = PyArrayScalar_VAL(obj_ptr, UInt8);
+        else if (PyArray_IsScalar(obj_ptr, UInt16))
+            (*scalar) = PyArrayScalar_VAL(obj_ptr, UInt16);
+        else if (PyArray_IsScalar(obj_ptr, UInt32))
+            (*scalar) = PyArrayScalar_VAL(obj_ptr, UInt32);
+        else if (PyArray_IsScalar(obj_ptr, UInt64))
+            (*scalar) = PyArrayScalar_VAL(obj_ptr, UInt64);
+
+        // Stash the memory chunk pointer for later use by boost.python
+        data-&gt;convertible = storage;
+    }
+};
+
+/*
+ * A silly function to test scalar conversion.
+ * The first arg tests automatic function argument conversion.
+ * The second arg is used to demonstrate explicit conversion via boost::python::extract&lt;&gt;()
+ */
+void print_number( uint32_t number, boost::python::object other_number )
+{
+    using namespace boost::python;
+    std::cout &lt;&lt; "The number is: " &lt;&lt; number &lt;&lt; std::endl;
+    std::cout &lt;&lt; "The other number is: " &lt;&lt; extract&lt;int16_t&gt;(other_number) &lt;&lt; std::endl;
+}
+
+/*
+ * Instantiate the python extension module 'printnum'.
+ *
+ * Example Python usage:
+ *
+ *     import numpy as np
+ *     from printnum import print_number
+ *     print_number( np.uint8(123), np.int64(-456) )
+ *
+ *     ## That prints the following:
+ *     # The number is: 123
+ *     # The other number is: -456
+ */
+BOOST_PYTHON_MODULE(printnum)
+{
+    using namespace boost::python;
+
+    // http://docs.scipy.org/doc/numpy/reference/c-api.array.html#importing-the-api
+    import_array();
+
+    // Register conversion for all scalar types.
+    NumpyScalarConverter&lt;signed char&gt;();
+    NumpyScalarConverter&lt;short&gt;();
+    NumpyScalarConverter&lt;int&gt;();
+    NumpyScalarConverter&lt;long&gt;();
+    NumpyScalarConverter&lt;long long&gt;();
+    NumpyScalarConverter&lt;unsigned char&gt;();
+    NumpyScalarConverter&lt;unsigned short&gt;();
+    NumpyScalarConverter&lt;unsigned int&gt;();
+    NumpyScalarConverter&lt;unsigned long&gt;();
+    NumpyScalarConverter&lt;unsigned long long&gt;();
+    NumpyScalarConverter&lt;float&gt;();
+    NumpyScalarConverter&lt;double&gt;();
+
+    // Expose our C++ function as a python function.
+    def("print_number", &amp;print_number, (arg("number"), arg("other_number")));
+}
+</code></pre>
+    </div>
+    </div></body></html>

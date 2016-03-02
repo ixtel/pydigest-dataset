@@ -1,0 +1,113 @@
+<html><body><div><div class="post-content">
+        
+
+        
+
+        
+        <h2>Introduction</h2>
+<p>The aim of this guide (I plan to create couple of separate parts for different aspects of running web application in production mode) is to introduce You to key concepts and problems that may occur on live server. I'll touch server itself, database, application server and deployment and provide You with configuration files and flow that I use and rely on. Note that it's extremely subjective, but I think that configuration may be considered at least as "reasonable default". Let's dig in, shall we?</p>
+<h2>Stack</h2>
+<p>Most of the posts refer to the stack I work on, which is:<br/>
+    - nginx<br/>
+    - haproxy<br/>
+    - uwsgi<br/>
+    - redis<br/>
+    - postgresql<br/>
+    - python2.7</p>
+<h2>Linux</h2>
+<p>By <strong>Linux</strong> I refer to Ubuntu since that's the distribution I use for most of my projects. So, playing with linux configuration we can affect three things mostly:<br/>
+    - I/O<br/>
+    - Nginx<br/>
+    - Memory</p>
+<h3>Max open files</h3>
+<p>By default set to 1024. Since sockets are used to communication between different tools, they affect conncurrent connections which our stack is able to handle. If we expect high traffic, it's a good practice to tune that setting:</p>
+
+<figure class="figure-code code"><figcaption><span>
+</span></figcaption>
+</figure><figure class="figure-code code"><figcaption><span>
+</span></figcaption><div class="highlight"><pre><span class="gp">$ </span>vi /etc/security/limits.conf
+    nginx       soft    nofile  99999
+    nginx       hard    nofile  99999
+</pre></div>
+</figure><p>Now reload the changes</p>
+
+<figure class="figure-code code"><figcaption><span>
+</span></figcaption>
+</figure><h3>Kernel queue for accepting new connections</h3>
+<p>By default set to 128, it represents a size of kernel queue for accepting new connections.</p>
+
+<figure class="figure-code code"><figcaption><span>
+</span></figcaption><div class="highlight"><pre><span class="gp">$ </span>sysctl -w net.core.somaxconn<span class="o">=</span>99999
+<span class="gp">$ </span>vi /etc/sysctl.d/haproxy-tuning.conf
+    net.core.somaxconn<span class="o">=</span>99999
+</pre></div>
+</figure><h3>Usable ports</h3>
+<p>By default set to 32768-61000, it represents range of ports that can be used by our system. The number affects number of concurrent open connections.</p>
+
+<figure class="figure-code code"><figcaption><span>
+</span></figcaption><div class="highlight"><pre><span class="gp">$ </span>sysctl -w net.ipv4.ip_local_port_range<span class="o">=</span><span class="s2">"10000 61000"</span>
+<span class="gp">$ </span>vi /etc/sysctl.d/haproxy-tuning.conf
+    net.ipv4.ip_local_port_range<span class="o">=</span>10000 61000
+</pre></div>
+</figure><h3>Socket recycling</h3>
+<p>DO NOT ENABLE IT !</p>
+
+<p>Common misconception is to enable fast recycling (most of tuning guides provide such advice), so sockets do not stay in TIME_WAIT, like that:</p>
+
+<figure class="figure-code code"><figcaption><span>
+</span></figcaption><div class="highlight"><pre><span class="gp">$ </span>vi /etc/sysctl.conf
+  net.ipv4.tcp_tw_recycle <span class="o">=</span> 1
+  net.ipv4.tcp_tw_reuse <span class="o">=</span> 1
+</pre></div>
+</figure><p>However, as explained here: <a href="http://vincent.bernat.im/en/blog/2014-tcp-time-wait-state-linux.html">Click</a> its highly discouraged.</p>
+<h3>Filesystem access</h3>
+<p>In order to improve I/O we can tell linux not to store information about last file access or read time (which it keeps by default). In order to change that, modify confiration of a partition which your files reside in </p>
+
+<p><strong>Replace</strong></p>
+
+<figure class="figure-code code"><div class="highlight"><pre>$ vi /etc/fstab
+    UUID=&lt;UUID&gt; /               ext4    errors=remount-ro 0       1
+</pre></div>
+</figure><p><strong>with</strong> </p>
+
+<figure class="figure-code code"><div class="highlight"><pre>$ vi /etc/fstab
+    UUID=&lt;UUID&gt; /               ext4    noatime,nodiratime,errors=remount-ro 0       1
+</pre></div>
+</figure><p><strong>noatime</strong> affects files, and <strong>nodiratime</strong> directories respectively</p>
+<h3>In memory filesystem for /tmp</h3>
+<p>Putting </p>
+
+<figure class="figure-code code"><div class="highlight"><pre>$ vi /etc/fstab
+    tmpfs /tmp               tmpfs    defaults,nosuid,noatime 0       0
+</pre></div>
+</figure><p>to your <strong>/etc/fstab</strong> file results in replacing a filesystem for /tmp directory with an in-memory filesystem. This will highly increase I/O performance on file uploads. Note that it may be a bottleneck when files that are being uploaded are large or if you are lacking RAM.</p>
+
+<p>At the very end mount new filesystem:</p>
+
+<figure class="figure-code code">
+</figure><h3>Getting swap right</h3>
+<p>When you're forced to add some swap for your system be sure to put those two lines in your sysctl.conf:</p>
+
+<figure class="figure-code code"><div class="highlight"><pre>$ vi /etc/sysctl.conf
+    vm.swappiness=10
+  vm.vfs_cache_pressure = 50
+</pre></div>
+</figure><p>which respectively tell our system not to swap data of RAM to swap place that often (swapiness) and <br/>
+tell our system to cache access data so it's not looked up frequently (vfs_cache_pressure).</p>
+
+<p>The three things I want you to remember after this part are:</p>
+
+<ol>
+<li>Default configuration of you system is good, but may not be properly tuned for high loads and getting maximum out of tools from your stack (nginx, haproxy).</li>
+<li>No one knows all that stuff by heart (at least I don't), so if you find that article useful, save it somewhere so you can look it up later when it comes to configuration, or create an ansible playbook that deals with that stuff :-).</li>
+<li>Stay tuned for part 2 !</li>
+</ol>
+<p>Cheers!</p>
+        
+      </div>
+
+      
+
+      
+         
+        </div></body></html>

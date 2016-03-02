@@ -1,0 +1,383 @@
+<html><body><div><div class="content html_format"><p>
+      Недавно на хабре была статья </p><a href="http://habrahabr.ru/company/amperka/blog/263505/">«Отображаем данные из Serial в Chrome Application»</a><p> о том, как красиво представить данные, отправляемые Arduin-кой в Serial. По-моему, ребята предложили очень красивое решение, которое с одной стороны выглядит достаточно простым, а с другой позволяет получить прекрасный результат с минимумом усилий.
+</p><p>
+В комментариях к статье было высказано сожаление о том, что такое решение не заработает под Firefox-ом и высказана идея, что «можно еще написать простенький веб-сервер с выдачей html на основе этой штуки». Меня эта идея «зацепила», быстрый поиск в google готового решения не выдал, и я решил реализовать идею сам. И вот, что из этого вышло.
+
+</p><i>Предупреждение! Предлагаемое решение ни в коем случае нельзя рассматривать как законченное. В отличие от Serial Projector от Амперки — это концепт, демонстрация возможного подхода, работающий прототип и не более того. </i>
+<a name="habracut"/><p>
+Некоторое время назад я делал проект, в котором использовал встроенные в Android-смартфон акселерометры для управления сервами, подключёнными к Arduino. Тогда для этих целей я воспользовался проектами </p><a href="https://github.com/damonkohler/sl4a">Scripting Layer for Android (SL4A)</a><p> и </p><a href="https://github.com/Jonty/RemoteSensors">RemoteSensors</a><p>. Оказывается, в стандартную библиотеку python-а входит пакет </p><a href="https://docs.python.org/2/library/basehttpserver.html">BaseHTTPServer</a><p>, с помощью которого поднять веб-сервис на питоне — это задача на пару строчек кода.
+</p><p>
+Под рукой не было никаких датчиков для Arduino, поэтому в качестве источника отображаемой информации я воспользовался встроенным в Arduino Uno внутренним термометром. Насколько я понимаю, он не очень точный и совсем не предназначен для измерения температуры окружающей среды, но для прототипирования вполне сойдёт.
+</p><p>
+После недолгого гугления возник вот такой скетч для ардуинки:
+
+</p><pre><code>// source: https://code.google.com/p/tinkerit/wiki/SecretThermometer
+
+long readTemp() {
+  long result;
+  // Read temperature sensor against 1.1V reference
+  ADMUX = _BV(REFS1) | _BV(REFS0) | _BV(MUX3);
+  delay(2); // Wait for Vref to settle
+  ADCSRA |= _BV(ADSC); // Convert
+  while (bit_is_set(ADCSRA,ADSC));
+  result = ADCL;
+  result |= ADCH&lt;&lt;8;
+  result = (result - 125) * 1075;
+  return result;
+}
+
+void setup() {
+  Serial.begin(115200);
+}
+
+int count = 0;
+
+void loop() {
+  String s = String(count++, DEC) + ": " + String( readTemp(), DEC );
+  Serial.println(s)
+  delay(1000);
+}
+</code></pre><p>
+Этот скетч открывает COM-порт, настраивает его на скорость 115200 бод и затем каждую секунду пишет в него текущее значение встроенного термометра. (Не спрашивайте меня, в каких единицах выдаётся температура — для описываемой задачи это не важно). Поскольку значение меняется не очень активно, для лучшей видимости изменения данных перед температурой выводится номер строки.
+</p><p>
+Для проверки того, что веб-сервер будет отдавать наружу только целые строки, а не их части по мере чтения из COM-порта, строка
+</p><pre><code>  Serial.println(s)
+</code></pre><p>
+была заменена на
+</p><pre><code>  for(int i=0; i &lt; s.length(); i++ ){
+    Serial.print( s.charAt(i) );
+    delay( 200 );
+  }
+  Serial.println("");
+</code></pre><p>
+т.е. сформированная строка выводится в последовательный порт не целиком, а посимвольно, с паузами в 200 мс.
+</p><p>
+Для начала был написан совсем простенький прототип веб-сервера (ниже он разобран по частям):
+</p><pre><code class="python"># -*- coding: utf-8 -*-
+
+#-- based on: https://raw.githubusercontent.com/Jonty/RemoteSensors/master/remoteSensors.py
+
+SERIAL_PORT_NAME = 'COM6'
+SERIAL_PORT_SPEED = 115200
+
+WEB_SERVER_PORT = 8000
+
+import time, BaseHTTPServer, urlparse
+import serial
+
+ser = None
+
+def main():
+
+    global ser
+    
+    httpd = BaseHTTPServer.HTTPServer(("", WEB_SERVER_PORT), Handler)
+
+    #-- workaround for getting IP address at which serving
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.connect(('google.co.uk', 80))
+    sData = s.getsockname()
+
+    print "Serving at '%s:%s'" % (sData[0], WEB_SERVER_PORT)
+    
+    ser = serial.Serial(SERIAL_PORT_NAME, SERIAL_PORT_SPEED, timeout=0)
+
+    
+    httpd.serve_forever()
+
+    
+class Handler(BaseHTTPServer.BaseHTTPRequestHandler):
+
+    # Disable logging DNS lookups
+    def address_string(self):
+        return str(self.client_address[0])
+
+    def do_GET(self):
+
+        self.send_response(200)
+        self.send_header("Content-type", "application/x-javascript; charset=utf-8")
+        self.end_headers()
+
+        try:
+            while True:
+                
+                new_serial_line = get_full_line_from_serial()
+                if new_serial_line is not None:
+                
+                    self.wfile.write(new_serial_line)
+                    self.wfile.write("\n")
+                    self.wfile.flush()
+
+
+        except socket.error, e:
+            print "Client disconnected.\n"
+            
+
+
+captured = ''
+def get_full_line_from_serial():
+    """ returns full line from serial or None 
+        Uses global variables 'ser' and 'captured'
+    """
+    global captured
+    part = ser.readline()
+    if part:
+        captured += part
+        parts = captured.split('\n', 1);
+        if len(parts) == 2:
+            captured = parts[1]
+            return parts[0]
+            
+    return None
+    
+    
+if __name__ == '__main__':
+    main()
+
+</code></pre><p>
+Разберём скрипт по частям.
+</p><p>
+Поскольку это прототип, то все основные параметры работы (имя COM-порта, его скорость, а также номер TCP-порта, на котором будет работать веб-сервер) указаны прямо в исходном тексте:
+</p><pre><code class="python">SERIAL_PORT_NAME = 'COM6'
+SERIAL_PORT_SPEED = 115200
+
+WEB_SERVER_PORT = 8000
+</code></pre><p>
+Разумеется, можно организовать чтение этих параметров из командной строки. Например, с помощью модуля argparse это делается очень быстро, просто и гибко.
+</p><p>
+В данном же случае пользователям Windows надо в диспетчере устройств узнать имя COM-порта, к которому подключена Arduin-ка. У меня это был 'COM6'. Пользователям других операционок надо использовать средства своих ОС. У меня совсем нет опыта работы с MacOS и в Linux-е я с COM-портами тоже не работал, но там, скорее всего, это будет что-нибудь типа "/dev/ttySn".
+</p><p>
+Далее идёт определение глобальной переменной, к которой будет привязан экземпляр класса Serial, отвечающего в питоне за работу с COM-портом:
+</p><pre><code class="python">ser = None
+</code></pre><p>
+В строчке
+</p><pre><code class="python">httpd = BaseHTTPServer.HTTPServer(("", WEB_SERVER_PORT), Handler)
+</code></pre><p>
+создаётся веб-сервер, который будет слушать запросы на заданном порту WEB_SERVER_PORT. А обрабатывать эти запросы будет экземпляр класса Handler, описанный ниже.
+</p><p>
+Следующие строки — это небольшой «хак», позволяющий вывести IP-адрес, на котором собственно работает запущенный веб-сервер:
+</p><pre><code class="python">    #-- workaround for getting IP address at which serving
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.connect(('google.co.uk', 80))
+    sData = s.getsockname()
+
+    print "Serving at '%s:%s'" % (sData[0], WEB_SERVER_PORT)
+</code></pre><p>
+Насколько я понял, не существует иного способа узнать этот IP. А как без этого знания мы будем обращаться из браузера к нашему серверу?
+</p><p>
+Поэтому приходится открывать сокет и подключаться к сайту гугла, чтобы из атрибутов уже этого сокета извлечь информацию о собственном IP-адресе.
+</p><p>
+Чуть ниже происходит открытие COM-порта и собственно запуск веб-сервера:
+</p><pre><code class="python">    ser = serial.Serial(SERIAL_PORT_NAME, SERIAL_PORT_SPEED, timeout=0)
+ 
+    httpd.serve_forever()
+</code></pre><p>
+Затем следует описание класса, который отвечает за обработку полученных запущенным веб-сервером запросов:
+</p><pre><code class="python">class Handler(BaseHTTPServer.BaseHTTPRequestHandler):
+</code></pre><p>
+Это наследник встроенного в модуль BaseHTTPServer класса, в котором достаточно переопределить только метод do_GET
+</p><p>
+Поскольку, это ещё пока прототип, то сервер будет «рад» любому запросу — какой бы URL у него не запросили, он будет отдавать клиенту все данные читаемые из COM-порта. Поэтому в Handler.do_GET он сразу отвечает кодом успеха и нужными заголовками:
+</p><pre><code class="python">        self.send_response(200)
+        self.send_header("Content-type", "application/x-javascript; charset=utf-8")
+        self.end_headers()
+</code></pre><p>
+после чего запускается бесконечный цикл, в котором происходит попытка чтения целой строчки из COM-порта и, если эта попытка оказалась успешной, передача её веб-клиенту:
+</p><pre><code class="python">            while True:
+                
+                new_serial_line = get_full_line_from_serial()
+                if new_serial_line is not None:
+                
+                    self.wfile.write(new_serial_line)
+                    self.wfile.write("\n")
+                    self.wfile.flush()
+</code></pre><p>
+В проекте, который был взят за основу, этот бесконечный цикл был «завёрнут» в блок try … except, с помощью которого предполагалось аккуратно обрабатывать разрыв соединения. Возможно, в Android-е (базовый проект разрабатывался под него) это и работает нормально, но у меня под Windows XP так не вышло — при разрыве соединения возникало какое-то другое исключение, которое я так и не научился перехватывать. Но, к счастью, это не мешало веб-серверу работать нормально и принимать следующие запросы.
+</p><p>
+Функция получения целой строки из COM-порта работает по тому же принципу, что и у создателей Serial Projector:
+</p><ul>
+<li>есть некоторый глобальный буфер, в котором хранится всё, что прочитано из COM-порта </li>
+<li> при каждом обращении к функции она пытается прочитать что-нибудь из COM-порта </li>
+<li> если ей это удаётся, то <br/>
+ <ul>
+<li> она добавляет только что прочитанное к указанному глобальному буферу </li>
+<li> пытается поделить глобальный буфер максимум на две части символом конца строки </li>
+<li> если и это ей удаётся, то первую часть она возвращает в вызвавшую процедуру, а вторую часть использует в качестве нового значения глобального буфера </li>
+</ul><br/>
+ </li>
+<li> если в COM-порту нет новых данных или не найден символ конца строки, то функция возвращает None: </li>
+</ul> 
+<pre><code class="python">captured = ''
+def get_full_line_from_serial():
+    """ returns full line from serial or None 
+        Uses global variables 'ser' and 'captured'
+    """
+    global captured
+    part = ser.readline()
+    if part:
+        captured += part
+        parts = captured.split('\n', 1);
+        if len(parts) == 2:
+            captured = parts[1]
+            return parts[0]
+            
+    return None
+</code></pre><p>
+В результате получилось так:
+</p><iframe src="https://www.youtube.com/embed/b6_8YW4e9zE?feature=oembed" frameborder="0" allowfullscreen="">VIDEO</iframe>
+<p>
+Видно, что в браузере появляются строчки, читаемые из COM-порта. Я ничего не понимаю в веб-фронтенде: JavaScript, Ajax, CSS и DOM — это для меня тёмный лес. Но мне кажется, что для программистов, создающих веб-интерфейсы, этого должно быть вполне достаточно, чтобы преобразовать этот вывод в такую же красивую картинку, что выдаёт Serial Projector от Амперки. По-моему, задача сводится к тому, чтобы создать javascript-сценарий, который обращается к веб-серверу, читает из него поток и последнюю прочитанную строчку выводит в нужное место веб-страницы.
+</p><p>
+На всякий случай я решил подстраховаться и попытался сделать первое приближение своими силами. Не очень глубокий поиск в гугле подсказал, что вообще-то для таких целей, по крайней мере, раньше использовали WebSockets или Server-Sent Events. Я нашел, как мне показалось, неплохой </p><a href="http://www.html5rocks.com/en/tutorials/eventsource/basics">учебник </a><p> по использованию Server-Sent Events и решил использовать эту технологию. 
+
+</p><i>Примечание! Похоже, это не самое лучшее решение, потому что эта технология не заработала ни в Internet Explorer 8, ни в браузере, встроенном в Android 2.3.5. Но она заработала хотя бы в Firefox 39.0, поэтому я не стал «копать» дальше. </i>
+<p>
+Почитав указанный учебник, а также ещё один </p><a href="http://webonrails.ru/post/398545752424454925/">на русском языке</a><p>, я взял за основу проект </p><a href="https://simpl.info/eventsource/">simpl.info/eventsource</a><p>.
+</p><p>
+С точки зрения питоновского скрипта изменения под Server-Sent Events совершенно незначительные:
+</p><ul>
+<li> надо заменить тип отдаваемых клиенту данных:<br/>
+ строчку<br/>
+<pre><code class="python">		        self.send_header("Content-type", "application/x-javascript; charset=utf-8")
+</code></pre><br/>
+ заменить на<br/>
+<pre><code class="python">		        self.send_header("Content-type", "text/event-stream")
+</code></pre><br/>
+ </li>
+<li> а также перед прочитанной из COM-порта строчкой вставить префикс «data: » и добавить ещё один символ перевода строки:<br/>
+ строки <br/>
+<pre><code class="python">	                   self.wfile.write(new_serial_line)
+	                   self.wfile.write("\n")
+</code></pre><br/>
+ заменить на<br/>
+<pre><code class="python">	                    self.wfile.write('data: ' + new_serial_line)
+	                    self.wfile.write("\n\n")
+</code></pre><br/>
+ </li>
+</ul>
+ <p>
+Всё остальное могло бы, наверное, остаться без изменений, но…
+ </p><p>
+Сперва я создал файл index.html вот такого содержания:
+</p><pre><code class="html">&lt;!DOCTYPE html&gt;
+&lt;html&gt;
+&lt;head&gt;
+  &lt;meta charset="utf-8" /&gt;
+&lt;/head&gt;
+&lt;body&gt;
+  &lt;h1&gt;Заголовок&lt;/h1&gt;
+  &lt;p id="data"&gt;&lt;/p&gt;
+  &lt;script&gt;
+    var dataDiv = document.querySelector('#data');
+    var source = new EventSource('http://192.168.1.207:8000/')
+    source.onmessage = function(e) {
+      dataDiv.innerHTML = e.data;
+    };
+  &lt;/script&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</code></pre><p>
+Самые интересные в нём — это строка
+</p><pre><code class="html">  &lt;p id="data"&gt;&lt;/p&gt;
+</code></pre><p>
+которая формирует место для вывода очередной строчки из COM-порта, и javascript-сценарий
+</p><pre><code class="javascript">  &lt;script&gt;
+    var dataDiv = document.querySelector('#data');
+    var source = new EventSource('http://192.168.1.207:8000/')
+    source.onmessage = function(e) {
+      dataDiv.innerHTML = e.data;
+    };
+  &lt;/script&gt;
+</code></pre><p>
+который собственно и занимается чтением потока из веб-сервера и выводом прочитанной информации в указанное место.
+</p><p>
+Я предполагал открывать этот файл в браузере, например, с диска или с какого-нибудь другого веб-сервера, но это не сработало: при открытии страницы с диска javascript-сценарий однократно обращался к запущенному питоновскому веб-серверу и тут же разрывал соединение. Я не понял, почему так происходит, и предположил, что это, возможно, какое-то проявление защиты браузера от различных атак. Наверное, ему не нравится, что сама страница открыта с одного источника, а сценарий считывает данные из другого источника. 
+</p><p>
+Поэтому было принято решение поменять питоновский веб-сервер так, чтобы он отдавал и эту html-страницу. Тогда бы получилось, что и страница, и поток считываются из одного источника. Не знаю, то ли моё предположение насчёт безопасности оказалось верным, то ли ещё что, но при такой реализации всё заработало как надо.
+</p><p>
+Поменять, разумеется, надо только класс-обработчик запросов Handler:
+</p><pre><code class="python">class Handler(BaseHTTPServer.BaseHTTPRequestHandler):
+
+    # Disable logging DNS lookups
+    def address_string(self):
+        return str(self.client_address[0])
+
+    def do_GET(self):
+
+        if self.path == '/' or self.path == '/index.html':
+            self.process_index()
+        elif self.path == '/get_serial':
+            self.process_get_serial()
+        else:
+            self.process_unknown()
+        
+
+    def process_index(self):            
+    
+        self.send_response(200)
+        self.send_header("Content-type", "text/html; charset=utf-8")
+        self.end_headers()
+
+        self.wfile.write(open('index.html').read())
+        self.wfile.write("\n\n")
+        self.wfile.flush()
+
+        
+    def process_get_serial(self):
+
+        self.send_response(200)
+        self.send_header("Content-type", "text/event-stream")
+        self.end_headers()
+
+        try:
+            while True:
+                
+                new_serial_line = get_full_line_from_serial()
+                if new_serial_line is not None:
+                
+                    self.wfile.write('data: ' + new_serial_line)
+                    self.wfile.write("\n\n")
+                    self.wfile.flush()
+
+
+        except socket.error, e:
+            print "Client disconnected.\n"
+
+
+    def process_unknown(self):
+        self.send_response(404)
+</code></pre><p>
+В данном варианте предполагается, что веб-сервер будет отвечать только на два запроса: '/index.html' (отдавая html-код страницы) и '/get_serial' (отдавая бесконечный поток строк, считываемых из COM-порта). На все остальные запросы он будет отвечать кодом 404. 
+</p><p>
+Поскольку index.html отдаётся питоновским веб-сервером, то его можно слегка изменить, указав вместо абсолютного адреса потока строк из COM-порта относительный:</p><p>
+строку
+</p><pre><code class="javascript">    var source = new EventSource('http://192.168.1.207:8000/')
+</code></pre><p>
+заменить на
+</p><pre><code class="javascript">    var source = new EventSource('/get_serial')
+</code></pre><p>
+В итоге получилось вот так:
+
+</p><iframe src="https://www.youtube.com/embed/C0ffOHTN8sU?feature=oembed" frameborder="0" allowfullscreen="">VIDEO</iframe>
+<p>
+На этом я решил остановиться. Как мне кажется, оформить страницу красиво — это уже должно быть совсем просто. Но я не владею ни HTML, ни CSS, поэтому пусть это сделает кто-нибудь другой. Я видел свою задачу в том, чтобы показать, что сделать веб-сервис, отдающий данные из COM-порта, вроде бы, совсем не сложно.
+</p><p>
+Все исходники можно взять </p><a href="https://github.com/alguryanow/serial2web">на гитхабе</a><p>.
+</p><p>
+Ещё раз повторюсь: представленный код — это не законченное решение, которое можно «пускать в продакшен». Это только прототип, который показывает принципиальный подход к решению задачи.
+</p><p>
+Над чем тут ещё можно поработать:
+</p><p>
+В заключение: может возникнуть вопрос: «а не проще ли эту задачу решать через какое-нибудь готовое облако?». Почему бы не публиковать читаемые из COM-порта данные в облаке, а на клиентах просто обращаться к соответствующему сервису в облаке? Наверное, такое решение тоже имеет право на существование, но перед применением такого решения надо ответить на следующие вопросы:
+</p><ul>
+<li> существуют ли готовые веб-сервисы, которые позволяют публиковать данные с нужной мне скоростью/частотой? Существуют ли среди них бесплатные или готовы ли вы платить соответствующие деньги?</li>
+<li> готовы ли вы к тому, что в случае падения облака или коннекта к нему, вы останетесь без данных </li>
+<li> не смущает ли вас то, что для того, чтобы передать данные из одной комнаты в другую, они два раза пересекут океан или полконтинента?</li>
+</ul>
+      <p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

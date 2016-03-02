@@ -1,0 +1,74 @@
+<html><body><div><div class="entry clear">
+								<p>I’ve been looking into <a href="http://www.ansible.com/home">Ansible</a> lately, and have had some problems in explaining what I think is wrong with Ansible, so this blog post is an attempt to do that, by comparing it with <a href="http://www.buildout.org/en/latest/">Buildout</a>. This may seem a bit strange, since they don’t really do the same thing, but I think it will make sense in the end. So hang in there.</p>
+<h2>Ansible</h2>
+<p>Ansible calls itself “software automation”, and this is correct, but it’s often presented as an SCM system, but in my opinion it is not. And the reason for this is that Ansible is based around writing scripts. Because these scripts are written in YAML, they superficially look like configuration but that is misleading. Ansible calls these YAML files “playbooks” which again indicates what you do with them: You play them. They have a start and finish, and then perform a set of actions, in the order that the actions are defined in the playbook. The actions are often of the form “ensure that software X is installed” or “make sure that the file Y contains the line Z”. But it doesn’t change the fact that they are actions performed in the order written in the files. Therefore these files are scripts, and not configuration. Configuration does not have a specific order, configuration you first parse, and then you access the configuration data arbitrarily. This is not what Ansible playbooks does.</p>
+<p>And that’s fine. It’s not criticism against Ansible per se. Ansible mainly calls itself a system for automation. And it is, just like any sort of script files. Bash scripts are also designed for automation. Ansible just has a very complicated (as opposed to complex) script language. Thanks to the choice of YAML the language is very restricted and often tricky to use as you end up having to fight the syntax by a very liberal and exact application of quote characters.</p>
+<p>However, they do state on their website that “<span id="hs_cos_wrapper_module_13892079309161998" class="hs_cos_wrapper hs_cos_wrapper_widget hs_cos_wrapper_type_rich_text">Ansible features an state-driven resource model that describes the desired state of computer systems and services, not the paths to get them to this state. </span>” And that is really only partly true. If you <strong>only</strong> use modules that check for state, it is true for a reasonable definition of “True”. But a lot of the modules shipped with Ansible doesn’t do that. And more importantly, the state is not defined in configuration, the state is defined in a script. This leads to limitations, which we will talk about later.</p>
+<p>You can add new commands to Ansible by writing modules. They can be written in any language, which sounds like a neat idea, but it means that the API for a module is passing in JSON data on stdin an returning it on stdout. This makes debugging painful, and it means writing new modules a pain. In addition to that, to write Python modules you have to add a specific line at the end of the file with a “star import”, that breaks PEP8 and also confuses some syntax aware Python editors.</p>
+<p>Ansible also recommends a specific directory layout, with several folders, who all have a file called main.yml. That means your editor quickly ends up having a whole lot of main.yml open, and that gets confusing. My good friend Jörgen Modin called that kind of layout “A conspiracy on the hard disk” in reference to using Zope Toolkit style programming which does the same with it’s configure.zcml files. A file name should reflect what is in it, not what role it plays (unless that role is unique within one project).</p>
+<p>For SCM you also need to have several layers of orthogonal modularity. You need to be able to define up the installation of for example MySQL, and then you need to define up what software should go onto each machine. Ansible can do this, although confusingly most people tend to use what Ansible calls “roles” to define up one component, and then you use the groups in the inventory file as roles. But that’s just naming, you’ll get used to that.</p>
+<h2>Buildout</h2>
+<p>Buildout calls itself a “software build system” and that’s not incorrect, but it makes it sound like it’s competing with make and scons, and it does not. In my opinion, Buildout is closer to being a Software Configuration Management system than a build system. I would call it a Environment Configuration System as it’s mainly designed to set up development environments, although it can also be used to deploy software. It’s main shortfall to being a proper SCM is that it lacks modules to do common SCM tasks, such as installing system packages with yum and apt, and more problematically, it lacks support for running some bits, like for example yum and apt, as a superuser.</p>
+<p>Buildout does not have any support for remote deployment, so you need to use a separate program like Fabric to run Buildout remotely.</p>
+<p>Just like Ansible has modules you can use to create new commands, Buildout has recipes. I Ansible they can be written in any language, in Buildout they have to be written in Python. This perhaps lessens the appear to some people, but I do think the benefits are worth it. A Buildout recipe is just a Python module, like any other, and they can be made available on the Python Cheese Shop, in which case Buildout will download and install them when you run it.</p>
+<h3>Configuration, not scripting</h3>
+<p>The most important thing about Buildout for the purposes of this blog is that Buildout is configured entirely with configuration files, more specifically of the <a href="https://docs.python.org/2/library/configparser.html">ConfigParser</a> variety. INI-files in general have the benefit of being designed for configuration, and it’s extremely minimalist syntax means it never gets in the way. Buildout of course has to extend the syntax by allowing variable substitution, but that is also all it does. Everything written in the configuration is also a variable and can be used, so you only need to define one piece of information once.</p>
+<p>It also means that a part of a Buildout configuration only needs to be run once, if it succeeds. It then has set up the configuration correctly, and subsequent runs can skip the parts that has succeeded, unless the configuration changes. It also means that it is, at least in theory, possible to write uninstallers, as you can record the state before the run.</p>
+<p>The choice of INI-style syntax also means there is no inherent execution order to the configuration. The configuration instead is split up into what Buildout calls “parts”, each part executed by a recipe given in the part. Here are two examples of parts. The first one will download, compile and install nginx locally (in the buildout directory). The second will generate an nginx configuration file from a template.</p>
+<pre>[nginx]
+recipe = zc.recipe.cmmi
+url = http://html-xslt.googlecode.com/files/nginx-0.7.67-html-xslt-4.tar.gz
+# The SSI bug was fixed in nginx-0.7.65-html-xslt-2.tar.gz
+extra_options =
+    --conf-path=${buildout:directory}/etc/nginx.conf
+    --sbin-path=${buildout:directory}/bin
+    --error-log-path=${buildout:directory}/var/log/nginx-error.log
+    --http-log-path=${buildout:directory}/var/log/nginx-access.log
+    --pid-path=${buildout:directory}/var/nginx.pid
+    --lock-path=${buildout:directory}/var/nginx.lock
+
+[nginx.conf]
+recipe = collective.recipe.template
+port = 8000
+root = ${buildout:directory}/examples
+input = ${buildout:directory}/templates/nginx.conf.in
+output = ${buildout:directory}/etc/nginx.conf</pre>
+<p>What makes this configuration and not a script is that none of this is executed unless the part is listed in a separate configuration:</p>
+<pre>[buildout]
+parts = nginx
+        nginx.conf
+</pre>
+<p>Buildout configuration files can also extend other files. So if we save the above in a file called base.cfg, we can then create another configuration file:</p>
+<pre>[buildout]
+extends = base.cfg
+
+[nginx.conf]
+port = 8080
+</pre>
+<p>The only difference between the base.cfg and this file is that nginx will run on another port. This makes it easy for me to checkout a development environment and then make my own configuration file that just overrides the bits I need to change. Because it’s all configuration. With Ansible I would have to make the port into a variable and pass a new value in when I run Ansible. And that means that when writing Ansible playbooks, to make them proper configuration management and not scripts, everything must be a variable. Buildout avoids that issue by not having the intermediary step of Playbooks, but just having recipes, and configuration.</p>
+<p>With buildout your configuration can also extend another configuration file, and add, skip or insert parts as you like.</p>
+<pre>[buildout]
+extends = base.cfg
+parts = nginx.config
+        loadbalancer
+        nginx
+
+[loadbalancer]
+...
+</pre>
+<p>Each part remains the same, but the order is different and there is a new one in the middle. In general, because all configuration is parsed and gathered before the parts are run, it doesn’t matter much which order you run them in, but in some cases they of course do. If you are going to not just configure software, but also start it, obviously you have to install and configure it first, to take an obvious example.</p>
+<p>There is also a special syntax for adding and removing values from a configuration like the parts-definition:</p>
+<pre>[buildout]
+parts += newpart1 newpart2
+develop -= foo.bar</pre>
+<h3>A Buildout example</h3>
+<p>Buildout is often used to set up both development, staging and production environments. I have an <a href="https://github.com/regebro/Plone-Buildout-Example" target="_blank">example</a> where I have a <strong>base.cfg</strong> that only installs the Plone CMS. I then have a <strong>production.cfg</strong> which also sets up load balancing and caching, a supervisord to run the services, a cronjob to start the services on reboot, and cronjobs to do backups and database maintenance. My <strong>staging.cfg</strong> extends the production configuration only to change the ports, so that I can run the staging server on the same machine as the production server. The <strong>development.cfg</strong> also just extends base.cfg, so you don’t get any of the production services, but it instead adds loads of development tools. Lastly there is a <strong>version.cfg</strong> which contains version numbers for everything to be installed, so you know that if you set up a local environment to test a problem, you are using the same software as production.</p>
+<p>If you were aiming to deploy this onto several servers, and have the database on one server and caching and loadbalancing on one, and the CMS instances on separate servers, then you would make a configuration file per server-type, and use that.</p>
+<h3>Buildout extensions</h3>
+<p>Buildout has a final level of indirection, it has extensions. Examples of extensions that are available are buildout.dumppickedversions (although it’s now a part of Buildout itself) that would list all Python packages that you has not given a specific version number for. Another is called <a href="https://pypi.python.org/pypi/mr.developer" target="_blank">mr.developer</a>, which gives you commands to make sure that the Python packages that you are working on are all synced to the versioning system. It can even allow you to switch between the latest release and a checked out development version of a Python package, which is really neat.</p>
+<p>Perhaps it would possible to make an extension which will allow you to run some Buildout parts as root and other as a normal used, and I’m willing to give implementing it a try, but I’m a bit busy at the moment, so it will have to wait. And if you can’t write an extension like that, adding that feature should be relatively easy. And with that feature, I would be prepared to call Buildout a Software Configuration Management system. It may be originally developed to manage only development environments, but it has proven itself capable of much more, and it certainly has done the most important design decisions in SCM correct. Hopefully the above text will clarify why.</p>
+		<div id="jp-post-flair" class="sharedaddy sd-like-enabled sd-sharing-enabled"><div class="sharedaddy sd-block sd-like jetpack-likes-widget-wrapper jetpack-likes-widget-unloaded" id="like-post-wrapper-1158551-1038-56d5b795af88b" data-src="//widgets.wp.com/likes/#blog_id=1158551&amp;post_id=1038&amp;origin=regebro.wordpress.com&amp;obj_id=1158551-1038-56d5b795af88b" data-name="like-post-frame-1158551-1038-56d5b795af88b"><h3 class="sd-title">Like this:</h3><p class="likes-widget-placeholder post-likes-widget-placeholder"><span class="button"><span>Like</span></span> <span class="loading">Loading...</span></p><span class="sd-text-color"/><a class="sd-link-color"/></div>
+<p id="jp-relatedposts" class="jp-relatedposts">
+	<h3 class="jp-relatedposts-headline"><em>Related</em></h3>
+</p></div>											</div>
+			</div></body></html>

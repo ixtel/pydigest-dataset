@@ -1,0 +1,177 @@
+<html><body><div><div><p>I'm going to show you how a micro optimization can speed up your python code by
+a whopping 5%.  5%!  It can also annoy anyone that has to maintain your code.</p>
+<p>But really, this is about explaining code might you see occasionally
+see in the standard library or in other people's code.  Let's take an example
+from the standard library, specifically the <tt class="docutils literal">collections.OrderedDict</tt> class:</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">__setitem__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">key</span><span class="p">,</span> <span class="n">value</span><span class="p">,</span> <span class="n">dict_setitem</span><span class="o">=</span><span class="nb">dict</span><span class="o">.</span><span class="n">__setitem__</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">key</span> <span class="ow">not</span> <span class="ow">in</span> <span class="bp">self</span><span class="p">:</span>
+        <span class="n">root</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">__root</span>
+        <span class="n">last</span> <span class="o">=</span> <span class="n">root</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+        <span class="n">last</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">=</span> <span class="n">root</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">__map</span><span class="p">[</span><span class="n">key</span><span class="p">]</span> <span class="o">=</span> <span class="p">[</span><span class="n">last</span><span class="p">,</span> <span class="n">root</span><span class="p">,</span> <span class="n">key</span><span class="p">]</span>
+    <span class="k">return</span> <span class="n">dict_setitem</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">key</span><span class="p">,</span> <span class="n">value</span><span class="p">)</span>
+</pre></div>
+<p>Notice the last arg: <tt class="docutils literal">dict_setitem=dict.__setitem__</tt>.  It makes sense if you
+think about it.  To associate a key with a value, you'll need to provide a
+<tt class="docutils literal">__setitem__</tt> method which takes three arguments: the key you're setting, the
+value associated with the key, and the <tt class="docutils literal">__setitem__</tt> class method to the
+built in dict class.  Wait.  Ok maybe the last argument makes no sense.</p>
+<div class="section" id="scope-lookups">
+<h2>Scope Lookups</h2>
+<p>To understand what's going on here, we need to take a look at scopes.  Let's
+start with a simple question, if I'm in a python function, and I encounter
+something named <tt class="docutils literal">open</tt>, how does python go about figuring out the value of
+<tt class="docutils literal">open</tt>?</p>
+<div class="highlight"><pre><span class="c"># &lt;GLOBAL: bunch of code here&gt;</span>
+
+<span class="k">def</span> <span class="nf">myfunc</span><span class="p">():</span>
+    <span class="c"># &lt;LOCAL: bunch of code here&gt;</span>
+    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s">'foo.txt'</span><span class="p">,</span> <span class="s">'w'</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="k">pass</span>
+</pre></div>
+<p>The short answer is that without knowing the contents of the GLOBAL and the
+LOCAL section, you can't know for certain the value of <tt class="docutils literal">open</tt>.  Conceptually,
+python checks three namespaces for a name (ignoring nested scopes to keep
+things simple):</p>
+
+<p>So in the <tt class="docutils literal">myfunc</tt> function, if we're trying to find a value for <tt class="docutils literal">open</tt>,
+we'll first check the local namespace, then the globals namespace, then the
+builtins namespace.  And if <tt class="docutils literal">open</tt> is not defined in any namespace, a
+<tt class="docutils literal">NameError</tt> is raised.</p>
+</div>
+<div class="section" id="scope-lookups-the-implementation">
+<h2>Scope Lookups, the Implementation</h2>
+<p>The lookup process above is just conceptual.  The implementation of this
+lookup process gives us room to exploit the implementation.</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">foo</span><span class="p">():</span>
+    <span class="n">a</span> <span class="o">=</span> <span class="mi">1</span>
+    <span class="k">return</span> <span class="n">a</span>
+
+<span class="k">def</span> <span class="nf">bar</span><span class="p">():</span>
+    <span class="k">return</span> <span class="n">a</span>
+
+<span class="k">def</span> <span class="nf">baz</span><span class="p">(</span><span class="n">a</span><span class="o">=</span><span class="mi">1</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">a</span>
+</pre></div>
+<p>Let's look at the bytecode of each function:</p>
+<pre class="literal-block">
+&gt;&gt;&gt; import dis
+&gt;&gt;&gt; dis.dis(foo)
+  2           0 LOAD_CONST               1 (1)
+              3 STORE_FAST               0 (a)
+
+  3           6 LOAD_FAST                0 (a)
+              9 RETURN_VALUE
+
+
+&gt;&gt;&gt; dis.dis(bar)
+  2           0 LOAD_GLOBAL              0 (a)
+              3 RETURN_VALUE
+
+
+&gt;&gt;&gt; dis.dis(baz)
+  2           0 LOAD_FAST                0 (a)
+              3 RETURN_VALUE
+</pre>
+<p>Look at the differences between foo and bar.  Right away we can
+see that at the bytecode level python has already determined
+what's a local variable and what is not because <tt class="docutils literal">foo</tt> is using
+<tt class="docutils literal">LOAD_FAST</tt> and <tt class="docutils literal">bar</tt> is using <tt class="docutils literal">LOAD_GLOBAL</tt>.</p>
+<p>We won't get into the details of how python's compiler knows when to emit which
+bytecode (perhaps that's another post), but suffice to say python knows which
+type of lookup it needs to perform when it executes a function.</p>
+<p>One other thing that can be confusing is that <tt class="docutils literal">LOAD_GLOBAL</tt> is used
+for lookups in the global as well as the builtin namespace.  You can
+think of this as "not local", again ignoring the issue of nested scopes.
+The C code for this is roughly :</p>
+<div class="highlight"><pre><span class="k">case</span> <span class="nl">LOAD_GLOBAL</span><span class="p">:</span>
+    <span class="n">v</span> <span class="o">=</span> <span class="n">PyObject_GetItem</span><span class="p">(</span><span class="n">f</span><span class="o">-&gt;</span><span class="n">f_globals</span><span class="p">,</span> <span class="n">name</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">v</span> <span class="o">==</span> <span class="nb">NULL</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">v</span> <span class="o">=</span> <span class="n">PyObject_GetItem</span><span class="p">(</span><span class="n">f</span><span class="o">-&gt;</span><span class="n">f_builtins</span><span class="p">,</span> <span class="n">name</span><span class="p">);</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">v</span> <span class="o">==</span> <span class="nb">NULL</span><span class="p">)</span> <span class="p">{</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">PyErr_ExceptionMatches</span><span class="p">(</span><span class="n">PyExc_KeyError</span><span class="p">))</span>
+                <span class="n">format_exc_check_arg</span><span class="p">(</span>
+                            <span class="n">PyExc_NameError</span><span class="p">,</span>
+                            <span class="n">NAME_ERROR_MSG</span><span class="p">,</span> <span class="n">name</span><span class="p">);</span>
+            <span class="k">goto</span> <span class="n">error</span><span class="p">;</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+    <span class="n">PUSH</span><span class="p">(</span><span class="n">v</span><span class="p">);</span>
+</pre></div>
+<p>Even if you've never seen any of the C code for CPython, the above code is
+pretty straightforward.  First, check if the key name we're looking for is in
+<tt class="docutils literal"><span class="pre">f-&gt;f_globals</span></tt> (the globals dict), then check if the name is in
+<tt class="docutils literal"><span class="pre">f-&gt;f_builtins</span></tt> (the builtins dict), and finally, raise a <tt class="docutils literal">NameError</tt> if
+both checks failed.</p>
+</div>
+<div class="section" id="binding-constants-to-the-local-scope">
+<h2>Binding Constants to the Local Scope</h2>
+<p>Now when we look at the initial code sample, we can see that the
+last argument is binding a function into the local scope of a function.
+It does this by assigning a value, <tt class="docutils literal">dict.__setitem__</tt>, as the default
+value of an argument.  Here's another example:</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">not_list_or_dict</span><span class="p">(</span><span class="n">value</span><span class="p">):</span>
+  <span class="k">return</span> <span class="ow">not</span> <span class="p">(</span><span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="nb">dict</span><span class="p">)</span> <span class="ow">or</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="nb">list</span><span class="p">))</span>
+
+<span class="k">def</span> <span class="nf">not_list_or_dict</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">_isinstance</span><span class="o">=</span><span class="nb">isinstance</span><span class="p">,</span> <span class="n">_dict</span><span class="o">=</span><span class="nb">dict</span><span class="p">,</span> <span class="n">_list</span><span class="o">=</span><span class="nb">list</span><span class="p">):</span>
+  <span class="k">return</span> <span class="ow">not</span> <span class="p">(</span><span class="n">_isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">_dict</span><span class="p">)</span> <span class="ow">or</span> <span class="n">_isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">_list</span><span class="p">))</span>
+</pre></div>
+<p>We're doing the same thing here, binding what would normally be objects
+that are in the builtin namespace into the local namespace instead.
+So instead of requiring the use of <tt class="docutils literal">LOAD_GLOBAL</tt> (a global lookup),
+python instead will use <tt class="docutils literal">LOCAL_FAST</tt>.  So
+how much faster is this?  Let's do some crude testing:</p>
+<pre class="literal-block">
+$ python -m timeit -s 'def not_list_or_dict(value): return not (isinstance(value, dict) or isinstance(value, list))' 'not_list_or_dict(50)'
+1000000 loops, best of 3: 0.48 usec per loop
+$ python -m timeit -s 'def not_list_or_dict(value, _isinstance=isinstance, _dict=dict, _list=list): return not (_isinstance(value, _dict) or _isinstance(value, _list))' 'not_list_or_dict(50)'
+1000000 loops, best of 3: 0.423 usec per loop
+</pre>
+<p>Or in other words, <strong>that's an 11.9% improvement</strong> .  That's way more than the
+5% I promised at the beginning of this post!</p>
+</div>
+<div class="section" id="there-s-more-to-the-story">
+<h2>There's More to the Story</h2>
+<p>It's reasonable to think that the speed improvment is because <tt class="docutils literal">LOAD_FAST</tt>
+reads from the local namespace whereas <tt class="docutils literal">LOAD_GLOBAL</tt> will first check the
+global namespace before falling back to checking the builtin namespace.  And in
+the example function above, <tt class="docutils literal">isinstance</tt>, <tt class="docutils literal">dict</tt>, and <tt class="docutils literal">list</tt> all come
+from the built in namespace.</p>
+<p>However, there's more going on.  Not only are we able to skip additional lookup
+with <tt class="docutils literal">LOAD_FAST</tt>, <strong>it's also a different type of lookup</strong>.</p>
+<p>The C code snippet above showed the code for <tt class="docutils literal">LOAD_GLOBAL</tt>, but here's the
+code for <tt class="docutils literal">LOAD_FAST</tt>:</p>
+<div class="highlight"><pre><span class="k">case</span> <span class="nl">LOAD_FAST</span><span class="p">:</span>
+    <span class="n">PyObject</span> <span class="o">*</span><span class="n">value</span> <span class="o">=</span> <span class="n">fastlocal</span><span class="p">[</span><span class="n">oparg</span><span class="p">];</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">value</span> <span class="o">==</span> <span class="nb">NULL</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">format_exc_check_arg</span><span class="p">(</span><span class="n">PyExc_UnboundLocalError</span><span class="p">,</span>
+                             <span class="n">UNBOUNDLOCAL_ERROR_MSG</span><span class="p">,</span>
+                             <span class="n">PyTuple_GetItem</span><span class="p">(</span><span class="n">co</span><span class="o">-&gt;</span><span class="n">co_varnames</span><span class="p">,</span> <span class="n">oparg</span><span class="p">));</span>
+        <span class="k">goto</span> <span class="n">error</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="n">Py_INCREF</span><span class="p">(</span><span class="n">value</span><span class="p">);</span>
+    <span class="n">PUSH</span><span class="p">(</span><span class="n">value</span><span class="p">);</span>
+    <span class="n">FAST_DISPATCH</span><span class="p">();</span>
+</pre></div>
+<p>We're retrieving the local value by indexing into an <em>array</em>.  It's not shown
+here, but <tt class="docutils literal">oparg</tt> is just an index into that array.</p>
+<p>Now it's starting to make sense.  In our first version <tt class="docutils literal">not_list_or_dict</tt>
+had to perform 4 lookups, and each name was in the builtins namespace which
+we only look at after looking in the globals namespace.  That's 8 dictionary
+key lookups.  Compare that to directly indexing into a C array 4 times,
+which is what happens in the second version of <tt class="docutils literal">not_list_or_dict</tt>, which
+all use <tt class="docutils literal">LOAD_FAST</tt> under the hood.  This is why lookups in the local
+namespace are faster.</p>
+</div>
+<div class="section" id="wrapping-up">
+<h2>Wrapping Up</h2>
+<p>Now the next time you see this in someone else's code you'll know what's
+going on.</p>
+<p>And one final thing. Please don't actually do these kinds of optimizations
+unless you really need to.  And most of the time you don't need to.  But when
+the time really comes, and you really need to squeeze out every last bit of
+performance, you'll have this in your back pocket.</p>
+
+</div>
+</div>
+
+        </div></body></html>

@@ -1,0 +1,511 @@
+<html><body><div><article>
+  <header>
+  
+  <time data-url="/archives/2014/09/01/postgresql-fts/" datetime="2014-01-09 00:00:00-0500" pubdate="">Monday, September  1, 2014</time>
+</header>
+
+
+
+  <p>After hearing a few months back that PostgreSQL had built-in full-text search support, I had been continually searching for reasons to take advantage of it. A few months went by, and when one of our clients at <a href="http://lionheartsw.com">Lionheart</a> started running into issues with slowness using the Django admin’s built-in search support, I knew I had a solid candidate. After all was said and done, searches returned results approximately 20x faster than vanilla Django. Here’s how you can do it too.</p>
+
+<h2 id="the-basics">The Basics</h2>
+
+<p>One of the great things about PostgreSQL full-text search is that there isn’t too much to learn if you’re already pretty familiar with search engines and how they work. The main idea is that you generate an index using a document containing terms you’d like to search on. PostgreSQL provides a lot of flexibility with regards to <em>how</em> you choose to do this, but I opted to store the documents as a field called <code class="highlighter-rouge">fts_document</code> on the table we wanted to search on.</p>
+
+<p>PostgreSQL stores search data in a data type called a <code class="highlighter-rouge">tsvector</code>. Here’s how the <a href="http://www.postgresql.org/docs/9.3/static/datatype-textsearch.html">PostgreSQL documentation</a> describes it:</p>
+
+<blockquote>
+  <p>A tsvector value is a sorted list of distinct lexemes, which are words that have been normalized to merge different variants of the same word. Sorting and duplicate-elimination are done automatically during input.</p>
+</blockquote>
+
+<p>Here’s an example of a sentence converted to a tsvector:</p>
+
+<figure class="highlight"><pre><code class="language-psql" data-lang="psql">=# SELECT to_tsvector('simple', 'The quick brown fox jumps over the lazy dog.');
+                                to_tsvector
+---------------------------------------------------------------------------
+ 'brown':3 'dog':9 'fox':4 'jumps':5 'lazy':8 'over':6 'quick':2 'the':1,7
+(1 row)</code></pre></figure>
+
+<p>When you want to search for something, you create what’s called a <code class="highlighter-rouge">tsquery</code>.</p>
+
+<blockquote>
+  <p>A tsquery value stores lexemes that are to be searched for, and combines them honoring the Boolean operators &amp; (AND), | (OR), and ! (NOT). Parentheses can be used to enforce grouping of the operators</p>
+</blockquote>
+
+<p>Here’s an example:</p>
+
+<figure class="highlight"><pre><code class="language-psql" data-lang="psql">dan=# SELECT to_tsquery('simple', 'fox | jumps');
+   to_tsquery
+-----------------
+ 'fox' | 'jumps'
+(1 row)</code></pre></figure>
+
+<p>When you want to test for a match, you use the <code class="highlighter-rouge">@@</code> operator.</p>
+
+<figure class="highlight"><pre><code class="language-psql" data-lang="psql">dan=# SELECT to_tsvector('simple', 'The quick brown fox jumps over the lazy dog.') @@ to_tsquery('simple', 'fox');
+ ?column?
+----------
+ t</code></pre></figure>
+
+<p>It’s a match!</p>
+
+<p>The <code class="highlighter-rouge">@@</code> operator also provides a shorthand whereby you don’t need to use the <code class="highlighter-rouge">to_tsvector</code> / <code class="highlighter-rouge">to_tsquery</code> functions explicitly. E.g.,</p>
+
+<figure class="highlight"><pre><code class="language-psql" data-lang="psql">dan=# SELECT 'The quick brown fox jumps over the lazy dog.' @@ 'fox';
+ ?column?
+----------
+ t</code></pre></figure>
+
+<p>Sweet! However, you might be confused by the following:</p>
+
+<figure class="highlight"><pre><code class="language-psql" data-lang="psql">dan=# SELECT 'The quick brown fox jumps over the lazy dog.' @@ 'fox | random';
+ ?column?
+----------
+ f</code></pre></figure>
+
+<p>Huh? We’re searching for <em>either</em> the term “fox” or “random”. This doesn’t seem right…</p>
+
+<p>Well, it turns out that when you specify plain text as an argument to the <code class="highlighter-rouge">@@</code> operator, it wraps it in <code class="highlighter-rouge">plainto_tsquery</code>, which functions a little bit differently than the <code class="highlighter-rouge">to_tsquery</code> function that we’ve been playing around with above. Notably, it ignores every logical operator except <code class="highlighter-rouge">&amp;</code>. So <code class="highlighter-rouge">|</code>’s, parentheses, etc., will all be ignored. Personally, I don’t find it to be all that useful.</p>
+
+<p>Also, as you might have noticed above, I provided an additional argument to both the <code class="highlighter-rouge">to_tsvector</code> and <code class="highlighter-rouge">to_tsquery</code> functions called ‘simple’. This represents the simple text search configuration. Other text search configurations are language-based and strip out stopwards and other lexemes based on what language you might be indexing. Here’s a few other options that I have available on my machine.</p>
+
+<figure class="highlight"><pre><code class="language-psql" data-lang="psql">dan=# \dF
+               List of text search configurations
+   Schema   |    Name    |              Description
+------------+------------+---------------------------------------
+ pg_catalog | danish     | configuration for danish language
+ pg_catalog | dutch      | configuration for dutch language
+ pg_catalog | english    | configuration for english language
+ pg_catalog | finnish    | configuration for finnish language
+ pg_catalog | french     | configuration for french language
+ pg_catalog | german     | configuration for german language
+ pg_catalog | hungarian  | configuration for hungarian language
+ pg_catalog | italian    | configuration for italian language
+ pg_catalog | norwegian  | configuration for norwegian language
+ pg_catalog | portuguese | configuration for portuguese language
+ pg_catalog | romanian   | configuration for romanian language
+ pg_catalog | russian    | configuration for russian language
+ pg_catalog | simple     | simple configuration
+ pg_catalog | spanish    | configuration for spanish language
+ pg_catalog | swedish    | configuration for swedish language
+ pg_catalog | turkish    | configuration for turkish language
+(16 rows)</code></pre></figure>
+
+<p>Play around with a few and see which one suits you best.</p>
+
+<h2 id="django">Django</h2>
+
+<p>By now you know how to create search vectors and queries, search on some data, and specify a text search configuration. Let’s get started on connecting these tools with your Django project.</p>
+
+<p>Since <code class="highlighter-rouge">tsvector</code> and <code class="highlighter-rouge">tsquery</code> are both standard PostgreSQL data types, we can use them just as we might any other data type like <code class="highlighter-rouge">int</code> or <code class="highlighter-rouge">varchar</code> in a column definition. This is very handy. Otherwise, we would have to regenerate vectors on-the-fly, which might offset any speedup we get from using FTS in the first place. :)</p>
+
+<p>For the sake of moving forward, let’s say we have a model called <code class="highlighter-rouge">Employee</code> in our Django project. We’re trying to speed up searches on anything related to an employee. Assume we’re storing their first name, last name, and full address.</p>
+
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><table><tbody><tr><td class="gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8</pre></td><td class="code"><pre><span class="k">class</span> <span class="nc">Employee</span><span class="p">(</span><span class="n">db</span><span class="o">.</span><span class="n">Model</span><span class="p">):</span>
+    <span class="n">first_name</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">CharField</span><span class="p">(</span><span class="n">max_length</span><span class="o">=</span><span class="mi">64</span><span class="p">)</span>
+    <span class="n">last_name</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">CharField</span><span class="p">(</span><span class="n">max_length</span><span class="o">=</span><span class="mi">64</span><span class="p">)</span>
+    <span class="n">address_1</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">TextField</span><span class="p">()</span>
+    <span class="n">address_2</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">TextField</span><span class="p">()</span>
+    <span class="n">city</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">CharField</span><span class="p">(</span><span class="n">max_length</span><span class="o">=</span><span class="mi">64</span><span class="p">)</span>
+    <span class="n">state</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">CharField</span><span class="p">(</span><span class="n">max_length</span><span class="o">=</span><span class="mi">2</span><span class="p">)</span>
+    <span class="nb">zip</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">CharField</span><span class="p">(</span><span class="n">max_length</span><span class="o">=</span><span class="mi">9</span><span class="p">)</span><span class="w">
+</span></pre></td></tr></tbody></table></code></pre></figure>
+
+<p>We’re now going to create an <code class="highlighter-rouge">tsvector</code> based on these fields. To do this, we’ll concatenate all of the fields into a list and then flatten the list into a string to feed into the <code class="highlighter-rouge">to_tsvector</code> function.</p>
+
+<figure class="highlight"><pre><code class="language-psql" data-lang="psql">dan=# SELECT to_tsvector('simple', concat_ws(' ', first_name, last_name, address_1, address_2, city, state, zip)) FROM employee;
+                               to_tsvector
+-------------------------------------------------------------------------
+ '123':3 '12345':8 'in':7 'main':4 'pawnee':6 'ron':1 'st':5 'swanson':2
+(1 row)</code></pre></figure>
+
+<p>If we wanted to stop here, we could just do FTS matches on the fly, but this would be quite slow.</p>
+
+<figure class="highlight"><pre><code class="language-psql" data-lang="psql">dan=# SELECT COUNT(*) FROM employee WHERE to_tsvector('simple', concat_ws(' ', first_name, last_name, address_1, address_2, city, state, zip)) @@ 'swanson';
+ count
+-------
+     1
+(1 row)</code></pre></figure>
+
+<p>The next step is to store this <code class="highlighter-rouge">tsvector</code> in a field and keep it updated when the data changes. First step seems easy enough:</p>
+
+<figure class="highlight"><pre><code class="language-psql" data-lang="psql">dan=# ALTER TABLE employee ADD COLUMN fts_document tsvector;</code></pre></figure>
+
+<p>Hmm, but how to we keep this updated? There are a bunch of options, but according to the PostgreSQL documention, the best one is to add a trigger on document updates and additions. To make things easy, we’re going to create a function to generate the fts document. E.g.,</p>
+
+<figure class="highlight"><pre><code class="language-plpgsql" data-lang="plpgsql"><table><tbody><tr><td class="gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8</pre></td><td class="code"><pre>CREATE FUNCTION employee_fts_document(e employee) RETURNS tsvector AS $$
+DECLARE
+    employee_document TEXT;
+BEGIN
+    SELECT concat_ws(' ', e.first_name, e.last_name, e.address_1, e.address_2, e.city, e.state, e.zip) INTO employee_document;
+    RETURN to_tsvector('pg_catalog.simple', employee_document);
+END;
+$$ LANGUAGE plpgsql;<span class="w">
+</span></pre></td></tr></tbody></table></code></pre></figure>
+
+<p>We can then reference this function in the trigger.</p>
+
+<figure class="highlight"><pre><code class="language-plpgsql" data-lang="plpgsql"><table><tbody><tr><td class="gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6</pre></td><td class="code"><pre>CREATE FUNCTION employee_fts_document_trigger() RETURNS TRIGGER AS $$
+BEGIN
+    NEW.fts_document=employee_fts_document(NEW);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;<span class="w">
+</span></pre></td></tr></tbody></table></code></pre></figure>
+
+<p>Finally, we tell PostgreSQL to execute the trigger on employee updates and inserts.</p>
+
+<figure class="highlight"><pre><code class="language-postgresql" data-lang="postgresql">CREATE TRIGGER employee_fts_update_trigger BEFORE UPDATE ON employee FOR EACH ROW EXECUTE PROCEDURE employee_fts_document_trigger();
+CREATE TRIGGER employee_fts_insert_trigger BEFORE INSERT ON employee FOR EACH ROW EXECUTE PROCEDURE employee_fts_document_trigger();</code></pre></figure>
+
+<p>We’re almost done. The <em>last</em> thing we might want to do is to tell PostgreSQL that we’d like to index the <code class="highlighter-rouge">fts_document</code> column which contains our full-text search vectors. We’re going to add a GIN (Generalized Inverted Index)-based index to our column. You can read about the GIN-based and GiST-based indices in the <a href="http://www.postgresql.org/docs/9.3/static/textsearch-indexes.html">PostgreSQL documentation</a>. Here’s how we add our index.</p>
+
+<figure class="highlight"><pre><code class="language-postgresql" data-lang="postgresql">CREATE INDEX employee_fts_index ON employee USING gin(fts_document);</code></pre></figure>
+
+<p>That’s it. Our employee table now has an always up-to-date search index that we can use. Before we continue, let’s instantiate the search vectors. We’ll then test everything out to make sure things are working a-ok.</p>
+
+<figure class="highlight"><pre><code class="language-psql" data-lang="psql">dan=# UPDATE employee SET fts_document=employee_fts_document(id);
+dan=# SELECT COUNT(*) FROM employee WHERE fts_document @@ 'ron';
+ count
+-------
+     1
+(1 row)</code></pre></figure>
+
+<p>Success!</p>
+
+<h3 id="south">South</h3>
+
+<p>Now that we understand the internals, wouldn’t it be nice if we could keep our databases up-to-date without having to manually copy and paste commands on our PostgreSQL shell? South to the rescue!</p>
+
+<p>We’ll need to generate a blank migration.</p>
+
+<figure class="highlight"><pre><code class="language-bash" data-lang="bash"><span class="gp">$ </span>./manage.py schemamigration app create_employee_fts
+Created 0001_create_employee_fts.py. You must now edit this migration and add the code <span class="k">for </span>each direction.</code></pre></figure>
+
+<p>Next, open up the migration, and copy in the SQL above in the <code class="highlighter-rouge">forwards</code> and <code class="highlighter-rouge">backwards</code> methods, as illustrated below.</p>
+
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><table><tbody><tr><td class="gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41
+42
+43
+44
+45
+46
+47</pre></td><td class="code"><pre><span class="c"># ... imports, etc ...</span>
+
+<span class="kn">from</span> <span class="nn">django.db</span> <span class="kn">import</span> <span class="n">connection</span>
+
+<span class="k">class</span> <span class="nc">Migration</span><span class="p">(</span><span class="n">SchemaMigration</span><span class="p">):</span>
+
+    <span class="k">def</span> <span class="nf">forwards</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">orm</span><span class="p">):</span>
+        <span class="n">sql</span> <span class="o">=</span> <span class="s">"""
+CREATE FUNCTION employee_fts_document(integer) RETURNS tsvector AS $$
+DECLARE
+    employee_document TEXT;
+BEGIN
+    SELECT concat_ws(' ', first_name, last_name, address_1, address_2, city, state, zip) INTO employee_document FROM employee WHERE id=$1;
+    RETURN to_tsvector('pg_catalog.simple', employee_document);
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE FUNCTION employee_fts_document_trigger() RETURNS TRIGGER AS $$
+BEGIN
+    NEW.fts_document=employee_fts_document(NEW.id);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+"""</span>
+
+        <span class="n">cursor</span> <span class="o">=</span> <span class="n">connection</span><span class="o">.</span><span class="n">cursor</span><span class="p">()</span>
+        <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">sql</span><span class="p">);</span>
+        <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="s">"ALTER TABLE employee ADD COLUMN fts_document tsvector"</span><span class="p">)</span>
+        <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="s">"UPDATE employee SET fts_document=employee_fts_document(id)"</span><span class="p">);</span>
+        <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="s">"CREATE TRIGGER employee_fts_update_trigger BEFORE UPDATE ON employee FOR EACH ROW EXECUTE PROCEDURE employee_fts_document_trigger()"</span><span class="p">)</span>
+        <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="s">"CREATE TRIGGER employee_fts_insert_trigger BEFORE INSERT ON employee FOR EACH ROW EXECUTE PROCEDURE employee_fts_document_trigger()"</span><span class="p">)</span>
+        <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="s">"CREATE INDEX employee_fts_index ON employee USING gin(fts_document)"</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">backwards</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">orm</span><span class="p">):</span>
+        <span class="n">cursor</span> <span class="o">=</span> <span class="n">connection</span><span class="o">.</span><span class="n">cursor</span><span class="p">()</span>
+        <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="s">"DROP INDEX employee_fts_index"</span><span class="p">)</span>
+        <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="s">"ALTER TABLE employee DROP COLUMN fts_document"</span><span class="p">)</span>
+        <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="s">"DROP TRIGGER employee_fts_update_trigger ON employee"</span><span class="p">)</span>
+        <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="s">"DROP TRIGGER employee_fts_insert_trigger ON employee"</span><span class="p">)</span>
+        <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="s">"DROP FUNCTION employee_fts_document (integer)"</span><span class="p">)</span>
+        <span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="s">"DROP FUNCTION employee_fts_document_trigger ()"</span><span class="p">)</span>
+
+    <span class="n">models</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="s">"""
+        App-specific model definitions here...
+        """</span>
+    <span class="p">}</span><span class="w">
+</span></pre></td></tr></tbody></table></code></pre></figure>
+
+<p>Now, just run this migration…</p>
+
+<figure class="highlight"><pre><code class="language-bash" data-lang="bash"><span class="gp">$ </span>./manage.py migrate app</code></pre></figure>
+
+<p>…and watch as your FTS column, indices, and triggers are automagically created.</p>
+
+<h3 id="the-django-admin">The Django Admin</h3>
+
+<p>OK, so we have our FTS document created, have generated a migration to keep things in sync across machines, and are indexing everything we might possibly want to search on to find an employee. The next step is to use what we have and integrate it into the Django Admin. This assumes that you have an <code class="highlighter-rouge">EmployeeAdmin</code> object similar to the below:</p>
+
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><span class="k">class</span> <span class="nc">EmployeeAdmin</span><span class="p">(</span><span class="n">admin</span><span class="o">.</span><span class="n">ModelAdmin</span><span class="p">):</span>
+    <span class="n">search_fields</span> <span class="o">=</span> <span class="p">(</span><span class="s">"first_name"</span><span class="p">,</span> <span class="s">"last_name"</span><span class="p">,</span> <span class="s">"address_1"</span><span class="p">,</span> <span class="s">"address_2"</span><span class="p">)</span>
+    <span class="c"># ... other admin configuration here ...</span>
+
+<span class="n">admin</span><span class="o">.</span><span class="n">site</span><span class="o">.</span><span class="n">register</span><span class="p">(</span><span class="n">models</span><span class="o">.</span><span class="n">Employee</span><span class="p">,</span> <span class="n">EmployeeAdmin</span><span class="p">)</span></code></pre></figure>
+
+<p>Our goal is to make searching with the Django Admin use our shiny new FTS index. To do this, we’re going to need to override the <code class="highlighter-rouge">get_search_results</code> method in <code class="highlighter-rouge">EmployeeAdmin</code> to something like this:</p>
+
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><table><tbody><tr><td class="gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15</pre></td><td class="code"><pre><span class="k">class</span> <span class="nc">EmployeeAdmin</span><span class="p">(</span><span class="n">admin</span><span class="o">.</span><span class="n">ModelAdmin</span><span class="p">):</span>
+    <span class="c"># ...</span>
+
+    <span class="k">def</span> <span class="nf">get_search_results</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">request</span><span class="p">,</span> <span class="n">queryset</span><span class="p">,</span> <span class="n">search_term</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">search_term</span> <span class="o">==</span> <span class="s">''</span><span class="p">:</span>
+            <span class="n">queryset</span><span class="p">,</span> <span class="n">distinct</span> <span class="o">=</span> <span class="nb">super</span><span class="p">(</span><span class="n">EmployeeAdmin</span><span class="p">,</span> <span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="n">get_search_results</span><span class="p">(</span><span class="n">request</span><span class="p">,</span> <span class="n">queryset</span><span class="p">,</span> <span class="n">search_term</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">queryset</span><span class="p">,</span> <span class="n">distinct</span> <span class="o">=</span> <span class="nb">super</span><span class="p">(</span><span class="n">EmployeeAdmin</span><span class="p">,</span> <span class="bp">self</span><span class="p">)</span> \
+                    <span class="o">.</span><span class="n">get_search_results</span><span class="p">(</span><span class="n">request</span><span class="p">,</span> <span class="n">queryset</span><span class="p">,</span> <span class="bp">None</span><span class="p">)</span>
+            <span class="n">queryset</span> <span class="o">=</span> <span class="n">queryset</span><span class="o">.</span><span class="n">extra</span><span class="p">(</span>
+                <span class="n">where</span><span class="o">=</span><span class="p">[</span><span class="s">"employee.fts_document @@ to_tsquery('simple', </span><span class="si">%</span><span class="s">s)"</span><span class="p">],</span>
+                <span class="n">params</span><span class="o">=</span><span class="p">[</span><span class="n">search_term</span><span class="p">]</span>
+            <span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">queryset</span><span class="p">,</span> <span class="n">distinct</span><span class="w">
+</span></pre></td></tr></tbody></table></code></pre></figure>
+
+<p>Looks close, but we’re missing something. <code class="highlighter-rouge">to_tsquery</code> will expect a “properly-formed” query, and we can’t always trust or depend on users of the admin to know PostgreSQL search syntax (don’t blame them). We need to somehow sanitize the input before feeding it into PostgreSQL.</p>
+
+<p>Here are some examples of things that we might want to handle:</p>
+
+<ul>
+  <li>Strip padded whitespace.</li>
+  <li>Remove duplicated whitespace.</li>
+  <li>Add &amp;’s between words that are only separated by spaces.</li>
+  <li>Replace double quotes (which PostgreSQL doesn’t like) to single quotes.</li>
+  <li>Clear up situations where search operators are used ambiguously (i.e., “ron &amp; | swanson”)</li>
+  <li>Add a prefix wildcard to every search term, so that a search for “swan” will return “Ron Swanson” in the search results.</li>
+</ul>
+
+<p>Luckily for you, I’ve already done all of the heavy lifting. Below is a function called <code class="highlighter-rouge">sanitize_search_term</code> which will take a string and form it into a proper PostgreSQL search query.</p>
+
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><table><tbody><tr><td class="gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41
+42
+43
+44
+45
+46
+47
+48
+49</pre></td><td class="code"><pre><span class="kn">import</span> <span class="nn">re</span>
+<span class="kn">import</span> <span class="nn">string</span>
+
+<span class="k">def</span> <span class="nf">sanitize_search_term</span><span class="p">(</span><span class="n">term</span><span class="p">):</span>
+    <span class="c"># Replace all puncuation with spaces.</span>
+    <span class="n">allowed_punctuation</span> <span class="o">=</span> <span class="nb">set</span><span class="p">([</span><span class="s">'&amp;'</span><span class="p">,</span> <span class="s">'|'</span><span class="p">,</span> <span class="s">'"'</span><span class="p">,</span> <span class="s">"'"</span><span class="p">])</span>
+    <span class="n">all_punctuation</span> <span class="o">=</span> <span class="nb">set</span><span class="p">(</span><span class="n">string</span><span class="o">.</span><span class="n">punctuation</span><span class="p">)</span>
+    <span class="n">punctuation</span> <span class="o">=</span> <span class="s">""</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">all_punctuation</span> <span class="o">-</span> <span class="n">allowed_punctuation</span><span class="p">)</span>
+    <span class="n">term</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">sub</span><span class="p">(</span><span class="s">r"[{}]+"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">re</span><span class="o">.</span><span class="n">escape</span><span class="p">(</span><span class="n">punctuation</span><span class="p">)),</span> <span class="s">" "</span><span class="p">,</span> \
+            <span class="n">term</span><span class="p">)</span>
+
+    <span class="c"># Substitute all double quotes to single quotes.</span>
+    <span class="n">term</span> <span class="o">=</span> <span class="n">term</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s">'"'</span><span class="p">,</span> <span class="s">"'"</span><span class="p">)</span>
+    <span class="n">term</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">sub</span><span class="p">(</span><span class="s">r"[']+"</span><span class="p">,</span> <span class="s">"'"</span><span class="p">,</span> <span class="n">term</span><span class="p">)</span>
+
+    <span class="c"># Create regex to find strings within quotes.</span>
+    <span class="n">quoted_strings_re</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="nb">compile</span><span class="p">(</span><span class="s">r"('[^']*')"</span><span class="p">)</span>
+    <span class="n">space_between_words_re</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="nb">compile</span><span class="p">(</span><span class="s">r'([^ &amp;|])[ ]+([^ &amp;|])'</span><span class="p">)</span>
+    <span class="n">spaces_surrounding_letter_re</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="nb">compile</span><span class="p">(</span><span class="s">r'[ ]+([^ &amp;|])[ ]+'</span><span class="p">)</span>
+    <span class="n">multiple_operator_re</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="nb">compile</span><span class="p">(</span><span class="s">r"[ &amp;]+(&amp;|</span><span class="err">\</span><span class="s">|)[ &amp;]+"</span><span class="p">)</span>
+
+    <span class="n">tokens</span> <span class="o">=</span> <span class="n">quoted_strings_re</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="n">term</span><span class="p">)</span>
+    <span class="n">processed_tokens</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">token</span> <span class="ow">in</span> <span class="n">tokens</span><span class="p">:</span>
+        <span class="c"># Remove all surrounding whitespace.</span>
+        <span class="n">token</span> <span class="o">=</span> <span class="n">token</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+
+        <span class="k">if</span> <span class="n">token</span> <span class="ow">in</span> <span class="p">[</span><span class="s">''</span><span class="p">,</span> <span class="s">"'"</span><span class="p">]:</span>
+            <span class="k">continue</span>
+
+        <span class="k">if</span> <span class="n">token</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">!=</span> <span class="s">"'"</span><span class="p">:</span>
+            <span class="c"># Surround single letters with &amp;'s</span>
+            <span class="n">token</span> <span class="o">=</span> <span class="n">spaces_surrounding_letter_re</span><span class="o">.</span><span class="n">sub</span><span class="p">(</span><span class="s">r' &amp; </span><span class="err">\</span><span class="s">1 &amp; '</span><span class="p">,</span> <span class="n">token</span><span class="p">)</span>
+
+            <span class="c"># Specify '&amp;' between words that have neither | or &amp; specified.</span>
+            <span class="n">token</span> <span class="o">=</span> <span class="n">space_between_words_re</span><span class="o">.</span><span class="n">sub</span><span class="p">(</span><span class="s">r'</span><span class="err">\</span><span class="s">1 &amp; </span><span class="err">\</span><span class="s">2'</span><span class="p">,</span> <span class="n">token</span><span class="p">)</span>
+
+            <span class="c"># Add a prefix wildcard to every search term.</span>
+            <span class="n">token</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">sub</span><span class="p">(</span><span class="s">r'([^ &amp;|]+)'</span><span class="p">,</span> <span class="s">r'</span><span class="err">\</span><span class="s">1:*'</span><span class="p">,</span> <span class="n">token</span><span class="p">)</span>
+
+        <span class="n">processed_tokens</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">token</span><span class="p">)</span>
+
+    <span class="n">term</span> <span class="o">=</span> <span class="s">" &amp; "</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">processed_tokens</span><span class="p">)</span>
+
+    <span class="c"># Replace ampersands or pipes surrounded by ampersands.</span>
+    <span class="n">term</span> <span class="o">=</span> <span class="n">multiple_operator_re</span><span class="o">.</span><span class="n">sub</span><span class="p">(</span><span class="s">r" </span><span class="err">\</span><span class="s">1 "</span><span class="p">,</span> <span class="n">term</span><span class="p">)</span>
+
+    <span class="c"># Escape single quotes</span>
+    <span class="k">return</span> <span class="n">term</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s">"'"</span><span class="p">,</span> <span class="s">"''"</span><span class="p">)</span><span class="w">
+</span></pre></td></tr></tbody></table></code></pre></figure>
+
+<p>Combining everything together, we get the following:</p>
+
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><table><tbody><tr><td class="gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16</pre></td><td class="code"><pre><span class="k">class</span> <span class="nc">EmployeeAdmin</span><span class="p">(</span><span class="n">admin</span><span class="o">.</span><span class="n">ModelAdmin</span><span class="p">):</span>
+    <span class="c"># ...</span>
+
+    <span class="k">def</span> <span class="nf">get_search_results</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">request</span><span class="p">,</span> <span class="n">queryset</span><span class="p">,</span> <span class="n">search_term</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">search_term</span> <span class="o">==</span> <span class="s">''</span><span class="p">:</span>
+            <span class="n">queryset</span><span class="p">,</span> <span class="n">distinct</span> <span class="o">=</span> <span class="nb">super</span><span class="p">(</span><span class="n">EmployeeAdmin</span><span class="p">,</span> <span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="n">get_search_results</span><span class="p">(</span><span class="n">request</span><span class="p">,</span> <span class="n">queryset</span><span class="p">,</span> <span class="n">search_term</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">search_term</span> <span class="o">=</span> <span class="n">sanitize_search_term</span><span class="p">(</span><span class="n">search_term</span><span class="p">)</span>
+            <span class="n">queryset</span><span class="p">,</span> <span class="n">distinct</span> <span class="o">=</span> <span class="nb">super</span><span class="p">(</span><span class="n">EmployeeAdmin</span><span class="p">,</span> <span class="bp">self</span><span class="p">)</span> \
+                    <span class="o">.</span><span class="n">get_search_results</span><span class="p">(</span><span class="n">request</span><span class="p">,</span> <span class="n">queryset</span><span class="p">,</span> <span class="bp">None</span><span class="p">)</span>
+            <span class="n">queryset</span> <span class="o">=</span> <span class="n">queryset</span><span class="o">.</span><span class="n">extra</span><span class="p">(</span>
+                <span class="n">where</span><span class="o">=</span><span class="p">[</span><span class="s">"employee.fts_document @@ to_tsquery('simple', </span><span class="si">%</span><span class="s">s)"</span><span class="p">],</span>
+                <span class="n">params</span><span class="o">=</span><span class="p">[</span><span class="n">search_term</span><span class="p">]</span>
+            <span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">queryset</span><span class="p">,</span> <span class="n">distinct</span><span class="w">
+</span></pre></td></tr></tbody></table></code></pre></figure>
+
+<p>And…we’re done! Searches in the admin will now use PostgreSQL FTS.</p>
+
+<p>Here’s to speedy searching!</p>
+
+<hr/>
+
+<p>EDIT 12/15/2014: In a previous version of this post, <code class="highlighter-rouge">employee_fts_document</code> would pull stale values from the DB while generating the FTS document and performed an extraneous <code class="highlighter-rouge">SELECT</code>. Thanks, <a href="http://dlo.me/archives/2014/09/01/postgresql-fts/#comment-1742372939">Roger</a>!</p>
+
+
+</article>
+
+
+        </div></body></html>

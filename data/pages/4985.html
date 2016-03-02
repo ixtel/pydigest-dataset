@@ -1,0 +1,113 @@
+<html><body><div><div class="content html_format"><p>
+      Когда пишешь программу в среде LabView, в определенный момент её становится слишком много для того, чтобы уместиться в один экран. «Правила хорошего тона» LabView говорят о том, что в таких случаях надо разбивать один vi файл на несколько subvi файлов. Со временем таких subvi становится очень много. Однако об удобной навигации ребята из NI как-то не позаботились.</p>
+<p>
+Мало того, что LabView сдвигает все свои окна в начало Alt-Tab списка (больше так не делает никто: </p><a href="https://en.wikipedia.org/wiki/Alt-Tab">en.wikipedia.org/wiki/Alt-Tab</a><p>), так еще, несмотря на активно используемую возможность переопределять иконки для vi файлов, в списке Alt-Tab вместо них – стройные ряды из логотипов LabView:
+
+</p><img src="https://habrastorage.org/files/eb1/677/117/eb1677117c194fd884572efe6eb664fc.png" alt="image"/>
+<p>
+Некоторых такое поведение подталкивает к покупке второго монитора. Для них в значительной степени проблема этим и решается. Еще частично помогает интерфейс Windows Aero с его миниатюрами в меню Alt-Tab. Но вроде бы лежащее на поверхности решение – (а) сделать переключение такое же, как во всех остальных приложениях, и (б) выводить в списке иконки vi – стандартными средствами недостижимо.
+</p><p>
+Судя по тому, что началось это едва ли не с самой первой версии, а соответствующая «идея по улучшению» пылится на «форуме по обмену идеями» с 2010 года </p><a href="https://forums.ni.com/t5/LabVIEW-Idea-Exchange/Make-Alt-Tab-behaviour-consistent-with-other-applications/idi-p/1162219">forums.ni.com/t5/LabVIEW-Idea-Exchange/Make-Alt-Tab-behaviour-consistent-with-other-applications/idi-p/1162219</a><p>, просить об этом National Instruments бесполезно. Однако кое-что сделать всё-таки можно.
+</p><a name="habracut"/>
+<h4>Часть 1. Выйти из Labview за одно нажатие</h4><p>
+Во-первых, я написал вот такой </p><a href="https://github.com/axil/labview-switcher">скрипт</a><p> на python, при помощи которого можно переключаться между, например, браузером и текущим окном LV за одно нажатие, скажем, Alt-`:
+
+</p><pre><code class="python">import ctypes
+ 
+EnumWindows = ctypes.windll.user32.EnumWindows
+EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int))
+GetWindowText = ctypes.windll.user32.GetWindowTextW
+GetWindowTextLength = ctypes.windll.user32.GetWindowTextLengthW
+IsWindowVisible = ctypes.windll.user32.IsWindowVisible
+GetClassName = ctypes.windll.user32.GetClassNameW
+SwitchToThisWindow = ctypes.windll.user32.SwitchToThisWindow
+ 
+we_are_in_labview = None
+
+def get_title(hwnd):
+    length = GetWindowTextLength(hwnd)
+    buff = ctypes.create_unicode_buffer(length + 1)
+    GetWindowText(hwnd, buff, length + 1)
+    return buff.value
+
+def get_cls(hwnd):
+    buff = ctypes.create_unicode_buffer(100)
+    GetClassName(hwnd, buff, 99)
+    return buff.value
+
+def foreach_window(hwnd, lParam):
+    global we_are_in_labview
+
+    title, cls = get_title(hwnd), get_cls(hwnd)
+    
+    if IsWindowVisible(hwnd):
+        title, cls = get_title(hwnd), get_cls(hwnd)
+        
+        if (title, cls) in (('Start', 'Button'), ('', 'Shell_TrayWnd')) or \
+           cls == 'TeamViewer_TitleBarButtonClass':
+            return True
+        
+        if we_are_in_labview is None:
+            we_are_in_labview = cls.startswith('LV')
+        else:
+            if we_are_in_labview and cls.startswith('LV'):
+                return True
+
+            SwitchToThisWindow(hwnd, True)
+            return False
+    return True
+
+EnumWindows(EnumWindowsProc(foreach_window), 0)
+</code></pre><p>
+Вообще, я параллельно писал на c и на python, здесь привожу версию на python потому что так код чуть более читаемый и его можно запустить без visual studio (требуется лишь установленный python любой версии: 2.x или 3.x).</p><p>
+Повесить запуск скрипта на сочетание клавиш можно и на python’е, но при помощи autohotkey сделать это проще:
+
+</p><pre><code>#IfWinNotActive ahk_class PuTTY
+!`::
+Run, C:\alttab\switch.py,,Hide
+</code></pre><p>
+(здесь биндинг отключается в отдельно взятой программе putty)
+
+</p><h4>Часть 2. Переключиться в vi кликом на его иконку</h4><p>
+Во-вторых, я доработал соответствующий quickqrop плагин </p><a href="https://decibel.ni.com/content/docs/DOC-31302">Show Open VIs</a><p>, чтобы придать ему божеский вид и добавил навигацию с клавиатуры. 
+
+</p><img src="https://habrastorage.org/files/e37/728/44c/e3772844c2634907bb6d0ad4b88270c1.png" alt="image" align="left"/>
+<img src="https://habrastorage.org/files/fd1/594/986/fd159498605a496fa42e15d294ffe68f.png" alt="image" align="right"/>
+
+<p>
+По сравнению с существующими инструментами навигации Show Open VIs: </p><p>
+– лучше Project Explorer тем, что показывает только открытые файлы, а не все файлы в проекте, плюс не занимает лишнее место на панели задач и в Alt-Tab списке (рис.слева);</p><p>
+– лучше встроенного в LV менеджер окон (Ctrl-Alt-W) наличием иконок (рис.справа); </p><p>
+– лучше системного Alt-Tab тем, что это именно иконки vi а не многократный логотип NI. 
+</p><p>
+По нажатию на правую кнопку мыши можно выбрать, куда необходимо переключиться: на Front Panel или на Block Diagram.
+</p><p>
+В оригинале этот плагин выглядел очень сырым и неаккуратным. Всё друг на друга налезало, а когда уменьшаешь размер окна до размеров, сравнимых с обычным окном alt-tab, вообще переставал работать.
+</p><p>
+Код плагина я выложил на </p><a href="https://github.com/axil/show-open-vis">гитхабе</a><p>. Проверял в LV 2011 и 2014, x32 и x64. Для установки надо скопировать несколько файлов в «правильный» подкаталог My Documents, перезапуск Labview не требуется. Зависит от «OpenG File Library». Подробности в readme.
+</p><p>
+Управление с клавиатуры сделал такое: Ctrl-Space Ctrl-4 для запуска (чтобы уж точно не было конфликтов с другими плагинами), [Ctrl-] Tab или стрелка вправо следующий пункт, [Ctrl-] Shift-Tab или стрелка влево – предыдущий, Enter или Space – переключение, Esc – выход. 
+</p><p>
+Чтобы не нажимать этот лишний Ctrl-Space (вход в меню quickdrop), можно использовать вот такой скрипт на autohotkey, чтобы запуск происходил, например, по Ctrl-`:
+
+</p><pre><code>#IfWinActive ahk_class LVDChild
+^`b::
+Send ^{Space}
+WinWait Quick Drop
+Send ^4
+</code></pre><p>
+Временной зазор между появлением окна quickdrop и его закрытием после получения сочетания клавиш составил у меня около 0.12 секунды. В принципе, это неплохо, но глаз успевает увидеть «лишнее» окно. Тем, кто, как я, quickdrop кроме как для запуска плагинов не использует, может оказаться полезной вот такая недокументированная опция в labview.ini:
+
+</p><pre><code>QuickDropTransparency=100
+</code></pre><p>
+Она делает окно QuickDrop невидимым (параметр означает, что на 100%) с сохранением всего функционала.
+</p><p>
+Как совместить эти два улучшения (отображение иконок vi и привычное поведение alt-tab) я не придумал – все окна LabView находятся в одной группе окон и программно перемещаются внутри z-order последовательности точно так же, как и через GUI: только как одно целое, то есть информация о том, из какого рода было переключение – изнутри LabView или снаружи LabView – теряется. Можно запоминать историю при нажатии alt-tab, но такой способ не универсален, так как не отлавливает переключения при помощью мыши.
+
+</p><h4>В итоге</h4><p>
+Установив описанные скрипт и плагин, получаем такие возможности: нажимая Alt-` очень удобно переключаться между, например, браузером и каким-то конкретным окном в LabView, а по нажатию Ctrl-` можно видеть иконки открытых vi файлов и переключаться между ними либо при помощи мыши либо с клавиатуры.
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

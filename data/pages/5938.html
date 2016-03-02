@@ -1,0 +1,66 @@
+<html><body><div><div class="post-text" itemprop="text">
+<blockquote>
+  <p>When does <code>datetime.now(pytz_timezone)</code> fail?</p>
+</blockquote>
+
+<p>As far as I can tell, there are no scenarios where it could fail.  <code>datetime.now</code> invokes the <code>fromutc</code> function on the <code>tzinfo</code> instance passed in the parameter.  All conversions from UTC to local time are unambiguous, so there are no opportunities for failure.</p>
+
+<p>Also, the original code does not even work.</p>
+
+<pre><code>d = est.normalize(EST)
+</code></pre>
+
+<p>This would appear to pass a string as the only parameter to <code>normalize</code>, which is intended to take a <code>datetime</code>.  This gives:</p>
+
+<pre><code>AttributeError: 'str' object has no attribute 'tzinfo'
+</code></pre>
+
+<p>I believe they meant to write:</p>
+
+<pre><code>d = est.normalize(d.astimezone(est))
+</code></pre>
+
+<p>That said, I don't think the verbosity of their code adds much value.  As you noted, it's just as easy to do this in a single step:</p>
+
+<pre><code>d = datetime.now(est)
+</code></pre>
+
+<p>Looking at the <a href="https://github.com/python/cpython/blob/f18916ecc6ca733478257e1cc0793386eed9a4c9/Modules/_datetimemodule.c#L4157" rel="nofollow">cpython source code for <code>datetime.now</code></a>, I can see that when a <code>tzinfo</code> object is provided, it calls the <code>fromutc</code> method on that object.</p>
+
+<pre class="lang-c prettyprint-override"><code>if (self != NULL &amp;&amp; tz != Py_None) {
+    /* Convert UTC to tzinfo's zone. */
+    PyObject *temp = self;
+
+    self = _PyObject_CallMethodId(tz, &amp;PyId_fromutc, "O", self);
+    Py_DECREF(temp);
+}
+</code></pre>
+
+<p>Then, in the pytz source, I see that the <code>fromutc</code> method is implemented differently depending on whether the zone is <code>pytz.UTC</code>, or an instance of <code>StaticTzInfo</code>, or <code>DstTzInfo</code>.  In all three cases, the transformation from the input UTC value to the target time zone is unambiguous.  Here is the <code>DstTzInfo</code> implementation, which is the more complex of the three:</p>
+
+<pre><code>def fromutc(self, dt):
+    '''See datetime.tzinfo.fromutc'''
+    if (dt.tzinfo is not None
+        and getattr(dt.tzinfo, '_tzinfos', None) is not self._tzinfos):
+        raise ValueError('fromutc: dt.tzinfo is not self')
+    dt = dt.replace(tzinfo=None)
+    idx = max(0, bisect_right(self._utc_transition_times, dt) - 1)
+    inf = self._transition_info[idx]
+    return (dt + inf[0]).replace(tzinfo=self._tzinfos[inf])
+</code></pre>
+
+<p>This would appear to find the transition from <code>_utc_transition_times</code> of the time zone, then apply it to the returned <code>datetime</code>.  There are no ambiguities in this direction, so the results will be equivalent.</p>
+
+<p>Also worth noting, in <a href="https://docs.python.org/2/library/datetime.html#datetime.datetime" rel="nofollow">the <code>datetime</code> docs</a> it says that <code>datetime.now</code> is equivalent to calling:</p>
+
+<pre><code>tz.fromutc(datetime.utcnow().replace(tzinfo=tz))
+</code></pre>
+
+<p>Given the source of <code>fromutc</code> in pytz I showed earlier, I'm not sure that this is any different than just:</p>
+
+<pre><code>tz.fromutc(datetime.utcnow())
+</code></pre>
+
+<p>But in either case, I don't think <code>localize</code> and <code>normalize</code> are necessary.</p>
+    </div>
+    </div></body></html>

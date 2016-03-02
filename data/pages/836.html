@@ -1,0 +1,264 @@
+<html><body><div><div class="content">
+      
+        <h1 class="content-title">Using SQLite Full-Text Search with Python</h1>
+      
+      
+      
+  
+  
+  
+    <p><a href="http://media.charlesleifer.com/blog/photos/fts-sqlite.png" title="Full-text search with SQLite"><img alt="Full-text search with SQLite" class="img-responsive" src="http://m.charlesleifer.com/t/800x-/blog/photos/fts-sqlite.png?key=49PkWkKVF69-aL0iPLKZKA"/></a></p>
+<p>In this post I will show how to use SQLite full-text search with Python (and a lot of help from <a href="http://docs.peewee-orm.com/">peewee ORM</a>). We will see how to index content for searching, how to perform searches, and how to order search results using two ranking algorithms.</p>
+<p>Last week I migrated my site from <a href="/blog/migrating-to-sqlite/">Postgresql to SQLite</a>. I had been using <a href="/blog/powerful-autocomplete-with-redis-in-under-200-lines-of-python/">Redis to power my site's search</a>, but since SQLite has an awesome <a href="http://www.sqlite.org/fts3.html">full-text search extension</a>, I decided to give it a try. I am really pleased with the results, and being able to specify boolean search queries is an added plus. Here is a brief overview of the types of search queries SQLite supports:</p>
+<ul>
+<li>Simple phrase: <em>peewee</em> would return all docs containing the word <em>peewee</em>.</li>
+<li>Prefix queries: <em>py*</em> would return docs containing <em>Python</em>, <em>pypi</em>, etc.</li>
+<li>Quoted phrases: <em>"sqlite extension"</em></li>
+<li><code>NEAR</code>: <em>peewee NEAR sqlite</em> would return docs containing the words <em>peewee</em> and <em>sqlite</em> with no more than <code>10</code> intervening words. You can also specify the max number of intervening words, e.g. <em>peewee NEAR/3 sqlite</em>. With SQLite FTS5 the syntax is slightly different: <em>NEAR(peewee sqlite, 3)</em>.</li>
+<li><code>AND</code>, <code>OR</code>, <code>NOT</code>: <em>sqlite OR postgresql AND NOT mysql</em> would return docs about high-quality databases (just trollin).</li>
+</ul>
+<p>If you'd like to give it a try, here are a couple example searches on my blog:</p>
+
+<h3>Getting started</h3>
+<p>In order to use this cool SQLite feature, we need to use the <code>playhouse.sqlite_ext.SqliteExtDatabase</code> class for our application's database:</p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">playhouse.sqlite_ext</span> <span class="kn">import</span> <span class="n">SqliteExtDatabase</span>
+
+<span class="n">db</span> <span class="o">=</span> <span class="n">SqliteExtDatabase</span><span class="p">(</span><span class="s1">'blog.db'</span><span class="p">,</span> <span class="n">threadlocals</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+</pre></div>
+<p>This database subclass comes with special support for SQLite extensions and virtual tables, which we will need to index content for searching. If you're curious, the <code>threadlocals=True</code> is important for multi-threaded (or green-threaded) servers, which, if you're using a production WSGI server, is probably what you have.</p>
+<h4>A note on virtual tables</h4>
+<p>In order to use full-text searches with SQLite, you need to create a special <em>virtual table</em> in the database for the content you wish to index. Rows are created in this table just like any other, but behind-the-scenes the FTS extension will create some indexes that will enable fast searches. Since we'll be using peewee ORM, we need to create a <a href="http://docs.peewee-orm.com/en/latest/peewee/playhouse.html#FTSModel">Model</a> to represent the search content. The peewee <a href="http://docs.peewee-orm.com/en/latest/peewee/playhouse.html#sqlite-ext">SQLite helpers</a> will allow us to create the model with the appropriate table definition. To create a virtual table for the FTS extension, simply subclass <code>playhouse.sqlite_ext.FTSModel</code> instead of the usual <code>Model</code> class.</p>
+<h3>Creating the Models</h3>
+<p>With our database configured, we'll create a really basic blog entry model that has a <code>title</code> and a <code>content</code> field. In reality you may have a number of other fields like <code>status</code>, <code>timestamp</code>, etc, but since the other columns have no effect on the rest of the implementation, I will skip them. Here is the model definition:</p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">peewee</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="kn">from</span> <span class="nn">playhouse.sqlite_ext</span> <span class="kn">import</span> <span class="o">*</span>
+
+<span class="n">db</span> <span class="o">=</span> <span class="n">SqliteExtDatabase</span><span class="p">(</span><span class="s1">'blog.db'</span><span class="p">,</span> <span class="n">threadlocals</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+
+<span class="k">class</span> <span class="nc">Entry</span><span class="p">(</span><span class="n">Model</span><span class="p">):</span>
+    <span class="n">title</span> <span class="o">=</span> <span class="n">CharField</span><span class="p">()</span>
+    <span class="n">content</span> <span class="o">=</span> <span class="n">TextField</span><span class="p">()</span>
+    <span class="c1"># You may have any number of other fields, such as status,</span>
+    <span class="c1"># timestamp, etc.</span>
+
+    <span class="k">class</span> <span class="nc">Meta</span><span class="p">:</span>
+        <span class="n">database</span> <span class="o">=</span> <span class="n">db</span>
+</pre></div>
+<p>We now need to create a special model for storing and indexing the entry content. Since each row in the index table will correspond exactly to one blog entry, we can specify the <code>entry</code> as the primary key. If you have multiple columns you wish to search, such as a <code>title</code> and a <code>content</code> field, you could add them to the <code>FTSEntry</code> model <em>or</em> just concatenate the data together and dump it into a single text field. For simplicity we'll do the latter and store everything in a single <code>content</code> field:</p>
+<div class="highlight"><pre><span class="k">class</span> <span class="nc">FTSEntry</span><span class="p">(</span><span class="n">FTSModel</span><span class="p">):</span>
+    <span class="n">entry_id</span> <span class="o">=</span> <span class="n">IntegerField</span><span class="p">()</span>
+    <span class="n">content</span> <span class="o">=</span> <span class="n">TextField</span><span class="p">()</span>
+
+    <span class="k">class</span> <span class="nc">Meta</span><span class="p">:</span>
+        <span class="n">database</span> <span class="o">=</span> <span class="n">db</span>
+</pre></div>
+<p>You may wonder why not just have all your searchable models be subclasses of <code>FTSModel</code>. I would advise against doing this because of some limitations to SQLite's virtual tables. Virtual tables do not support indexes, which can really hurt performance. Additionally the full-text virtual tables treat all columns as having the <code>TEXT</code> data-type, regardless of the actual column definition. So instead of using <code>FTSModel</code> for everything, typically you'll keep your data in a normal table, and then store the search content in a related virtual table.</p>
+<p>Open up a python shell and create the tables:</p>
+<div class="highlight"><pre><span class="go"># Create the tables.</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">search_example</span> <span class="kn">import</span> <span class="n">Entry</span><span class="p">,</span> <span class="n">FTSEntry</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">Entry</span><span class="o">.</span><span class="n">create_table</span><span class="p">()</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">FTSEntry</span><span class="o">.</span><span class="n">create_table</span><span class="p">()</span>
+</pre></div>
+<p>After creating the tables from the python shell, we can introspect the schema and see that SQLite has created the <code>FTSEntry</code> table as well as several other tables to store search metadata:</p>
+<div class="highlight"><pre><span class="gp">sqlite&gt; </span><span class="p">.</span><span class="k">schema</span>
+<span class="go">CREATE TABLE "entry" (</span>
+<span class="go">    "id" INTEGER NOT NULL PRIMARY KEY,</span>
+<span class="go">    "title" VARCHAR(255) NOT NULL,</span>
+<span class="go">    "content" TEXT NOT NULL);</span>
+<span class="go">CREATE VIRTUAL TABLE "ftsentry" USING FTS4 (</span>
+<span class="go">    "entry_id" INTEGER NOT NULL,</span>
+<span class="go">    "content" TEXT NOT NULL);</span>
+<span class="go">CREATE TABLE 'ftsentry_content'(...)</span>
+<span class="go">CREATE TABLE 'ftsentry_segments'(...)</span>
+<span class="go">CREATE TABLE 'ftsentry_segdir'(...)</span>
+<span class="go">CREATE TABLE 'ftsentry_docsize'(...)</span>
+<span class="go">CREATE TABLE 'ftsentry_stat'(...)</span>
+</pre></div>
+<p>For this example I'm going to use the actual blog entries from site, but if you're following along and want to create some entries, you might write some code like this:</p>
+<div class="highlight"><pre>  <span class="n">entry</span> <span class="o">=</span> <span class="n">Entry</span><span class="o">.</span><span class="n">create</span><span class="p">(</span>
+      <span class="n">title</span><span class="o">=</span><span class="s1">'How I rewrote everything with golang'</span><span class="p">,</span>
+      <span class="n">content</span><span class="o">=</span><span class="s1">'Blah blah blah, type system, channels, blurgh'</span><span class="p">)</span>
+  <span class="n">FTSEntry</span><span class="o">.</span><span class="n">create</span><span class="p">(</span>
+      <span class="n">entry_id</span><span class="o">=</span><span class="n">entry</span><span class="o">.</span><span class="n">id</span><span class="p">,</span>
+      <span class="n">content</span><span class="o">=</span><span class="s1">'</span><span class="se">\n</span><span class="s1">'</span><span class="o">.</span><span class="n">join</span><span class="p">((</span><span class="n">entry</span><span class="o">.</span><span class="n">title</span><span class="p">,</span> <span class="n">entry</span><span class="o">.</span><span class="n">content</span><span class="p">)))</span>
+
+  <span class="n">entry</span> <span class="o">=</span> <span class="n">Entry</span><span class="o">.</span><span class="n">create</span><span class="p">(</span>
+      <span class="n">title</span><span class="o">=</span><span class="s1">'Why ORMs are a terrible idea'</span><span class="p">,</span>
+      <span class="n">content</span><span class="o">=</span><span class="s1">'Blah blah blah, leaky abstraction, impedance mismatch'</span><span class="p">)</span>
+  <span class="n">FTSEntry</span><span class="o">.</span><span class="n">create</span><span class="p">(</span>
+      <span class="n">entry_id</span><span class="o">=</span><span class="n">entry</span><span class="o">.</span><span class="n">id</span><span class="p">,</span>
+      <span class="n">content</span><span class="o">=</span><span class="s1">'</span><span class="se">\n</span><span class="s1">'</span><span class="o">.</span><span class="n">join</span><span class="p">((</span><span class="n">entry</span><span class="o">.</span><span class="n">title</span><span class="p">,</span> <span class="n">entry</span><span class="o">.</span><span class="n">content</span><span class="p">)))</span>
+</pre></div>
+<p>As you can see, indexing content is as simple as creating a new row in the <code>FTSEntry</code> table. Coming up with good content is another story...</p>
+<h3>Performing searches</h3>
+<p>SQLite uses the <code>MATCH</code> operator to express a full-text search query, e.g.</p>
+<div class="highlight"><pre><span class="gp">sqlite&gt; </span><span class="k">SELECT</span> <span class="n">entry</span><span class="p">.</span><span class="n">title</span>
+<span class="gp">   ...&gt; </span><span class="k">FROM</span> <span class="n">ftsentry</span>
+<span class="gp">   ...&gt; </span><span class="k">JOIN</span> <span class="n">entry</span> <span class="k">ON</span> <span class="n">ftsentry</span><span class="p">.</span><span class="n">entry_id</span> <span class="o">=</span> <span class="n">entry</span><span class="p">.</span><span class="n">id</span>
+<span class="gp">   ...&gt; </span><span class="k">WHERE</span> <span class="n">ftsentry</span> <span class="k">MATCH</span> <span class="s1">'django AND peewee AND flask'</span><span class="p">;</span>
+<span class="go">Structuring flask apps, a how-to for those coming from Django</span>
+<span class="go">Peewee was baroque, so I rewrote it</span>
+<span class="go">The missing library: ad-hoc queries for your models</span>
+<span class="go">Using Redis Pub/Sub and IRC for Error Logging with Python</span>
+<span class="go">Don't sweat the small stuff - use flask blueprints</span>
+<span class="go">Integrating the flask microframework with the peewee ORM</span>
+<span class="go">Peewee, a lightweight Python ORM - Original Post</span>
+</pre></div>
+<p>You can still use equality or <code>LIKE</code> comparisons with the <code>FTSEntry</code> table, but these will be slow because they involve a full table scan. The <code>MATCH</code> operator, on the other hand, makes use of the special full-text search indexes and is very performant. From peewee, we can perform simple search queries by using the <code>FTSModel.match</code> helper:</p>
+<div class="highlight"><pre><span class="n">query</span> <span class="o">=</span> <span class="p">(</span><span class="n">FTSEntry</span>
+         <span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">Entry</span><span class="o">.</span><span class="n">title</span><span class="p">)</span>
+         <span class="o">.</span><span class="n">join</span><span class="p">(</span>
+             <span class="n">Entry</span><span class="p">,</span> 
+             <span class="n">on</span><span class="o">=</span><span class="p">(</span><span class="n">FTSEntry</span><span class="o">.</span><span class="n">entry_id</span> <span class="o">==</span> <span class="n">Entry</span><span class="o">.</span><span class="n">id</span><span class="p">)</span><span class="o">.</span><span class="n">alias</span><span class="p">(</span><span class="s1">'entry'</span><span class="p">))</span>
+         <span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">FTSEntry</span><span class="o">.</span><span class="n">match</span><span class="p">(</span><span class="s1">'javascript AND canvas'</span><span class="p">))</span>
+         <span class="o">.</span><span class="n">dicts</span><span class="p">())</span>
+<span class="k">for</span> <span class="n">row_dict</span> <span class="ow">in</span> <span class="n">query</span><span class="p">:</span>
+    <span class="k">print</span> <span class="n">row_dict</span>
+
+<span class="c1"># Prints...</span>
+<span class="p">{</span><span class="s1">'title'</span><span class="p">:</span> <span class="s1">u'Using python and k-means to find the dominant colors in images'</span><span class="p">}</span>
+<span class="p">{</span><span class="s1">'title'</span><span class="p">:</span> <span class="s1">u'Even more Canvas fun - Tetris in JavaScript'</span><span class="p">}</span>
+<span class="p">{</span><span class="s1">'title'</span><span class="p">:</span> <span class="s1">u'More fun with Canvas - a JavaScript Starfield!'</span><span class="p">}</span>
+<span class="p">{</span><span class="s1">'title'</span><span class="p">:</span> <span class="s1">u'Nokia Snake with JavaScript + Canvas'</span><span class="p">}</span>
+</pre></div>
+<p>Suppose that we wanted to perform a search and retrieve the populated <code>Entry</code> object along with the results without incurring O(n) queries. In the previous code snippet we're doing a <code>JOIN</code> to get the content, but peewee will also allow us to get the entire <code>Entry</code> instance:</p>
+<div class="highlight"><pre><span class="n">query</span> <span class="o">=</span> <span class="p">(</span><span class="n">FTSEntry</span>
+         <span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">Entry</span><span class="p">,</span> <span class="n">FTSEntry</span><span class="p">)</span>
+         <span class="o">.</span><span class="n">join</span><span class="p">(</span>
+             <span class="n">Entry</span><span class="p">,</span>
+             <span class="n">on</span><span class="o">=</span><span class="p">(</span><span class="n">FTSEntry</span><span class="o">.</span><span class="n">entry_id</span> <span class="o">==</span> <span class="n">Entry</span><span class="o">.</span><span class="n">id</span><span class="p">)</span><span class="o">.</span><span class="n">alias</span><span class="p">(</span><span class="s1">'entry'</span><span class="p">))</span>
+         <span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">FTSEntry</span><span class="o">.</span><span class="n">match</span><span class="p">(</span><span class="s1">'javascript AND canvas'</span><span class="p">)))</span>
+<span class="k">for</span> <span class="n">fts_entry</span> <span class="ow">in</span> <span class="n">query</span><span class="p">:</span>
+    <span class="k">print</span> <span class="n">fts_entry</span><span class="o">.</span><span class="n">entry</span><span class="o">.</span><span class="n">title</span>
+
+<span class="c1"># Prints:</span>
+<span class="n">Using</span> <span class="n">python</span> <span class="ow">and</span> <span class="n">k</span><span class="o">-</span><span class="n">means</span> <span class="n">to</span> <span class="n">find</span> <span class="n">the</span> <span class="n">dominant</span> <span class="n">colors</span> <span class="ow">in</span> <span class="n">images</span>
+<span class="n">Even</span> <span class="n">more</span> <span class="n">Canvas</span> <span class="n">fun</span> <span class="o">-</span> <span class="n">Tetris</span> <span class="ow">in</span> <span class="n">JavaScript</span>
+<span class="n">More</span> <span class="n">fun</span> <span class="k">with</span> <span class="n">Canvas</span> <span class="o">-</span> <span class="n">a</span> <span class="n">JavaScript</span> <span class="n">Starfield</span><span class="err">!</span>
+<span class="n">Nokia</span> <span class="n">Snake</span> <span class="k">with</span> <span class="n">JavaScript</span> <span class="o">+</span> <span class="n">Canvas</span>
+</pre></div>
+<h3>Sorting by best match</h3>
+<p>By default, the results returned from a <code>MATCH</code> query are in an unspecified order. For full-text search to be useful, though, the results should be ordered by <em>relevance</em>. SQLite's FTS extension does not come with a relevance function per-se, but it is possible to extract metadata from the full-text index and get pretty good results. The SQLite documentation on FTS contains a brief <a href="http://www.sqlite.org/fts3.html#appendix_a">appendix</a> which describes one method I will demonstrate below. The idea is that we will use the SQLite <a href="http://www.sqlite.org/fts3.html#matchinfo">matchinfo</a> function, which returns information about term counts, to <em>rank</em> the result rows.</p>
+<p>The <code>blob</code> returned by <code>matchinfo()</code> contains several fields:</p>
+<ul>
+<li><code>p</code>: the number of matchable phrases in the query.</li>
+<li><code>c</code>: the number of user-defined columns on the FTS table, excluding <code>docid</code> or any hidden meta-columns.</li>
+<li><code>x</code>: for each combination of column and phrase (<code>c * p</code>), return three values:<ol>
+<li>The number of times the phrase appears in the column for the current row.</li>
+<li>The total number of times the phrase appears in the column across all rows.</li>
+<li>The total number of rows in the FTS table which contain the phrase in the column.</li>
+</ol>
+</li>
+</ul>
+<p>If you are using FTS4, then there are several additional fields available:</p>
+<ul>
+<li><code>n</code>: the number of rows in the table</li>
+<li><code>a</code>: for each column, the average number of tokens that are stored.</li>
+<li><code>l</code>: for each column, the length of the value stored in the current row (in tokens).</li>
+<li><code>s</code>: for each column, the length of the longest subsequence of phrase matches that the column value has in common with the query text.</li>
+</ul>
+<p>Our first ranking function will calculate ∑(x<sub>1</sub> / x<sub>2</sub>) for each phrase/column pair in a given row. We will implement this function in Python, then register it with the SQLite connection as a user-defined function.</p>
+<div class="callout callout-success">
+<h4>Note</h4>
+<p>The peewee <code>sqlite_ext</code> module defines and automatically registers this function for you. This code is presented by way of explanation in case you're curious how things work.</p>
+</div>
+<p>The <code>matchinfo()</code> function returns a blob of 32-bit unsigned ints for each value, so we will need to convert this data to a Python <code>list</code> of <code>int</code>:</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">_parse_match_info</span><span class="p">(</span><span class="n">buf</span><span class="p">):</span>
+    <span class="n">bufsize</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">buf</span><span class="p">)</span>  <span class="c1"># Length in bytes.</span>
+    <span class="k">return</span> <span class="p">[</span><span class="n">struct</span><span class="o">.</span><span class="n">unpack</span><span class="p">(</span><span class="s1">'@I'</span><span class="p">,</span> <span class="n">buf</span><span class="p">[</span><span class="n">i</span><span class="p">:</span><span class="n">i</span><span class="o">+</span><span class="mi">4</span><span class="p">])[</span><span class="mi">0</span><span class="p">]</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">bufsize</span><span class="p">,</span> <span class="mi">4</span><span class="p">)]</span>
+</pre></div>
+<p>The length of the <code>matchinfo</code> data varies depending on the number of phrases in the search query, and the number of columns on the table being queried. Our <code>rank</code> function will determine the number of phrases and columns, then calculate a sum of counts, which we will treat as the <em>rank</em> of the document:</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">rank</span><span class="p">(</span><span class="n">raw_match_info</span><span class="p">):</span>
+    <span class="c1"># handle match_info called w/default args 'pcx' - based on the example rank</span>
+    <span class="c1"># function http://sqlite.org/fts3.html#appendix_a</span>
+    <span class="n">match_info</span> <span class="o">=</span> <span class="n">_parse_match_info</span><span class="p">(</span><span class="n">raw_match_info</span><span class="p">)</span>
+    <span class="n">score</span> <span class="o">=</span> <span class="mf">0.0</span>
+    <span class="n">p</span><span class="p">,</span> <span class="n">c</span> <span class="o">=</span> <span class="n">match_info</span><span class="p">[:</span><span class="mi">2</span><span class="p">]</span>
+    <span class="k">for</span> <span class="n">phrase_num</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">p</span><span class="p">):</span>
+        <span class="n">phrase_info_idx</span> <span class="o">=</span> <span class="mi">2</span> <span class="o">+</span> <span class="p">(</span><span class="n">phrase_num</span> <span class="o">*</span> <span class="n">c</span> <span class="o">*</span> <span class="mi">3</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">col_num</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">c</span><span class="p">):</span>
+            <span class="n">col_idx</span> <span class="o">=</span> <span class="n">phrase_info_idx</span> <span class="o">+</span> <span class="p">(</span><span class="n">col_num</span> <span class="o">*</span> <span class="mi">3</span><span class="p">)</span>
+            <span class="n">x1</span><span class="p">,</span> <span class="n">x2</span> <span class="o">=</span> <span class="n">match_info</span><span class="p">[</span><span class="n">col_idx</span><span class="p">:</span><span class="n">col_idx</span> <span class="o">+</span> <span class="mi">2</span><span class="p">]</span>
+            <span class="k">if</span> <span class="n">x1</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+                <span class="n">score</span> <span class="o">+=</span> <span class="nb">float</span><span class="p">(</span><span class="n">x1</span><span class="p">)</span> <span class="o">/</span> <span class="n">x2</span>
+    <span class="k">return</span> <span class="n">score</span>
+</pre></div>
+<p>Now that we have our ranking function ready, we can start to use it in our SQLite queries. The peewee SQLite helper module automatically handles registering this function for you, so it will <em>just work</em>.</p>
+<p>Here is an example of the SQL we will now generate to order search results by relevance:</p>
+<div class="highlight"><pre><span class="k">SELECT</span> <span class="n">entry</span><span class="p">.</span><span class="n">title</span><span class="p">,</span> <span class="n">rank</span><span class="p">(</span><span class="n">matchinfo</span><span class="p">(</span><span class="n">ftsentry</span><span class="p">))</span> <span class="k">AS</span> <span class="n">score</span>
+<span class="k">FROM</span> <span class="n">ftsentry</span>
+<span class="k">JOIN</span> <span class="n">entry</span> <span class="k">ON</span> <span class="n">ftsentry</span><span class="p">.</span><span class="n">entry_id</span> <span class="o">=</span> <span class="n">entry</span><span class="p">.</span><span class="n">id</span>
+<span class="k">WHERE</span> <span class="n">ftsentry</span> <span class="k">MATCH</span> <span class="s1">'1337 desktop'</span>
+<span class="k">ORDER</span> <span class="k">BY</span> <span class="n">score</span> <span class="k">DESC</span><span class="p">;</span>
+
+<span class="c1">-- returns --</span>
+<span class="n">Ricing</span> <span class="n">the</span> <span class="n">Desktop</span><span class="p">:</span> <span class="ss">"Brown rice"</span><span class="p">,</span> <span class="mi">0</span><span class="p">.</span><span class="mi">273</span>
+<span class="k">In</span> <span class="n">Honor</span> <span class="k">of</span> <span class="n">Spring</span><span class="p">...,</span> <span class="mi">0</span><span class="p">.</span><span class="mi">152</span>
+<span class="n">leet</span><span class="p">,</span> <span class="mi">0</span><span class="p">.</span><span class="mi">148</span>
+<span class="k">Using</span> <span class="n">SQLite</span> <span class="k">Full</span><span class="o">-</span><span class="nb">Text</span> <span class="k">Search</span> <span class="k">with</span> <span class="n">Python</span><span class="p">,</span> <span class="mi">0</span><span class="p">.</span><span class="mi">090</span>
+</pre></div>
+<p>The first result returned contains the best match, and has two occurrences of the term <code>1337</code>, and four for <code>desktop</code>. The second result contains the term <code>desktop</code> three times. You can see that the ranking algorithm gave each row a score corresponding to the number of times the search term occurs.</p>
+<p>Peewee provides convenience methods to handle this common use-case, so we can simply write:</p>
+<div class="highlight"><pre><span class="n">query</span> <span class="o">=</span> <span class="p">(</span><span class="n">FTSEntry</span>
+         <span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">Entry</span><span class="o">.</span><span class="n">content</span><span class="p">,</span> <span class="n">FTSEntry</span><span class="o">.</span><span class="n">rank</span><span class="p">()</span><span class="o">.</span><span class="n">alias</span><span class="p">(</span><span class="s1">'score'</span><span class="p">))</span>
+         <span class="o">.</span><span class="n">join</span><span class="p">(</span>
+             <span class="n">Entry</span><span class="p">,</span>
+             <span class="n">on</span><span class="o">=</span><span class="p">(</span><span class="n">FTSEntry</span><span class="o">.</span><span class="n">entry_id</span> <span class="o">==</span> <span class="n">Entry</span><span class="o">.</span><span class="n">id</span><span class="p">)</span><span class="o">.</span><span class="n">alias</span><span class="p">(</span><span class="s1">'entry'</span><span class="p">))</span>
+         <span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">FTSEntry</span><span class="o">.</span><span class="n">match</span><span class="p">(</span><span class="s1">'1337 desktop'</span><span class="p">))</span>
+         <span class="o">.</span><span class="n">order_by</span><span class="p">(</span><span class="n">SQL</span><span class="p">(</span><span class="s1">'score'</span><span class="p">)</span><span class="o">.</span><span class="n">desc</span><span class="p">()))</span>
+</pre></div>
+<p>If all of the information you need is contained in the FTS table, then you can use the <code>FTSModel.search()</code> helper. In the following snippet we'll search the <code>FTSEntry</code> table and return the first line of the indexed search content:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="k">for</span> <span class="n">result</span> <span class="ow">in</span> <span class="n">FTSEntry</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="s1">'sqlite AND berkeleydb'</span><span class="p">):</span>
+<span class="gp">... </span>    <span class="k">print</span> <span class="n">result</span><span class="o">.</span><span class="n">content</span><span class="o">.</span><span class="n">splitlines</span><span class="p">()[</span><span class="mi">0</span><span class="p">],</span> <span class="nb">round</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">score</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span>
+<span class="go">Building the python SQLite driver for use with BerkeleyDB 0.68</span>
+<span class="go">Migrating to SQLite 0.56</span>
+<span class="go">Saturday morning hack: personalized news digest with boolean query parser 0.14</span>
+</pre></div>
+<p>And that is all there is to it! As I mentioned earlier, the <code>playhouse.sqlite_ext</code> module contains an implementation of the <code>rank()</code> function and will automatically register it on the SQLite connection. The <code>sqlite_ext</code> module also contains the <code>FTSModel</code> class which can be used for full-text search virtual tables.</p>
+<h3>Ranking results using the Okapi BM25 algorithm</h3>
+<p>If you're looking for a more sophisticated ranking algorithm, <code>playhouse.sqlite_ext</code> also contains an implementation of the <a href="https://en.wikipedia.org/wiki/Okapi_BM25">Okapi BM25</a> algorithm, which is derived from <a href="https://github.com/rads/sqlite-okapi-bm25/blob/master/okapi_bm25.c">this C code</a>. This ranking method requires the <code>n</code>, <code>a</code> and <code>l</code> fields of the <code>matchinfo</code> structure, so <strong>this only works with FTS4 tables</strong>.</p>
+<p>To use the BM25 algorithm, you can simply use the <code>search_bm25</code> helper:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="k">for</span> <span class="n">result</span> <span class="ow">in</span> <span class="n">FTSEntry</span><span class="o">.</span><span class="n">search_bm25</span><span class="p">(</span><span class="s1">'javascript AND canvas'</span><span class="p">):</span>
+<span class="gp">... </span>    <span class="k">print</span> <span class="n">result</span><span class="o">.</span><span class="n">content</span><span class="o">.</span><span class="n">splitlines</span><span class="p">()[</span><span class="mi">0</span><span class="p">],</span> <span class="nb">round</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">score</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span>
+<span class="go">Even more Canvas fun - Tetris in JavaScript 4.07</span>
+<span class="go">Nokia Snake with JavaScript + Canvas 4.05</span>
+<span class="go">More fun with Canvas - a JavaScript Starfield! 3.91</span>
+<span class="go">Using python and k-means to find the dominant colors in images 1.79</span>
+</pre></div>
+<p>If you are performing a JOIN or otherwise would like finer-grained control, you can write something like this instead:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">query</span> <span class="o">=</span> <span class="p">(</span><span class="n">FTSEntry</span>
+<span class="gp">... </span>         <span class="o">.</span><span class="n">select</span><span class="p">(</span>
+<span class="gp">... </span>             <span class="n">Entry</span><span class="p">,</span>
+<span class="gp">... </span>             <span class="n">FTSEntry</span><span class="p">,</span>
+<span class="gp">... </span>             <span class="n">FTSEntry</span><span class="o">.</span><span class="n">bm25</span><span class="p">(</span><span class="n">FTSEntry</span><span class="o">.</span><span class="n">content</span><span class="p">)</span><span class="o">.</span><span class="n">alias</span><span class="p">(</span><span class="s1">'score'</span><span class="p">))</span>
+<span class="gp">... </span>         <span class="o">.</span><span class="n">join</span><span class="p">(</span>
+<span class="gp">... </span>              <span class="n">Entry</span><span class="p">,</span>
+<span class="gp">... </span>              <span class="n">on</span><span class="o">=</span><span class="p">(</span><span class="n">FTSEntry</span><span class="o">.</span><span class="n">entry_id</span> <span class="o">==</span> <span class="n">Entry</span><span class="o">.</span><span class="n">id</span><span class="p">)</span><span class="o">.</span><span class="n">alias</span><span class="p">(</span><span class="s1">'entry'</span><span class="p">))</span>
+<span class="gp">... </span>         <span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">FTSEntry</span><span class="o">.</span><span class="n">match</span><span class="p">(</span><span class="s1">'javascript AND canvas'</span><span class="p">))</span>
+<span class="gp">... </span>         <span class="o">.</span><span class="n">order_by</span><span class="p">(</span><span class="n">SQL</span><span class="p">(</span><span class="s1">'score'</span><span class="p">)</span><span class="o">.</span><span class="n">desc</span><span class="p">()))</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="k">for</span> <span class="n">fts_entry</span> <span class="ow">in</span> <span class="n">query</span><span class="p">:</span>
+<span class="gp">... </span>    <span class="k">print</span> <span class="n">fts_entry</span><span class="o">.</span><span class="n">entry</span><span class="o">.</span><span class="n">title</span><span class="p">,</span> <span class="nb">round</span><span class="p">(</span><span class="n">fts_entry</span><span class="o">.</span><span class="n">score</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span>
+<span class="go">Even more Canvas fun - Tetris in JavaScript 4.07</span>
+<span class="go">Nokia Snake with JavaScript + Canvas 4.05</span>
+<span class="go">More fun with Canvas - a JavaScript Starfield! 3.91</span>
+<span class="go">Using python and k-means to find the dominant colors in images 1.79</span>
+</pre></div>
+<p>The BM25 method supports several parameters for tuning, so if you're interested in more details, <a href="http://docs.peewee-orm.com/en/latest/peewee/playhouse.html#FTSModel.search_bm25">check out the documentation</a>. For more control and direct access to the BM25 function, check out the <a href="http://docs.peewee-orm.com/en/latest/peewee/playhouse.html#FTSModel.bm25">BM25 helper docs</a>.</p>
+<h3>Thanks for reading</h3>
+<p>Thank you for taking the time to read this post, I hope you found it interesting. If you have any questions, comments or suggestions, please feel free to <a href="#comments">leave a comment</a> below or <a href="/contact/">contact me</a>.</p>
+<h3>Links</h3>
+
+<p>Here are some blog posts on similar topics which you may find interesting:</p>
+
+  
+  
+
+
+<hr/>
+
+  <p>Commenting has been closed, but please feel free to <a href="/contact/">contact me</a></p>
+
+
+    </div>
+
+    </div></body></html>

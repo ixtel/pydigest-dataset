@@ -1,0 +1,166 @@
+<html><body><div><div class="entry-content padding-bottom">
+            <p>A lot of people read up on good Python practice, and there's plenty of
+information about that on the Internet. Many tips are included in the book I
+wrote this year,
+<a href="/books/the-hacker-guide-to-python">The Hacker's Guide to Python</a>. Today I'd
+like to show a concrete case of code that I don't consider being the state of
+the art.</p>
+<p><img src="/media/images/blog/2014/python-thumb-down.png" class="illustration pull-left"/></p>
+<p>In my <a href="/blog/2014/openstack-ceilometer-the-gnocchi-experiment">last article</a>
+where I talked about my new project Gnocchi, I wrote about how I tested, hacked
+and then ditched <em><a href="http://graphite.wikidot.com/whisper">whisper</a></em> out. Here I'm
+going to explain part of my thought process and a few things that raised my
+eyebrows when hacking this code.</p>
+<p>Before I start, please don't get the spirit of this article wrong. It's in no
+way a personal attack to the authors and contributors (who I don't know).
+Furthermore, <em>whisper</em> is a piece of code that is in production in thousands of
+installation, storing metrics for years. While I can argue that I consider the
+code not to be following best practice, it definitely works well enough and is
+worthy to a lot of people.</p>
+<h1>Tests</h1>
+<p><img src="/media/images/blog/2014/testtube_icon.png" class="illustration pull-right"/></p>
+<p>The first thing that I noticed when trying to hack on <em>whisper</em>, is the lack of
+test. There's only one file containing tests, named <code>test_whisper.py</code>, and the
+coverage it provides is pretty low. One can check that using the <em>coverage</em>
+tool.</p>
+<div class="highlight"><pre><span class="nv">$ </span>coverage run test_whisper.py<br/>...........<br/>----------------------------------------------------------------------<br/>Ran <span class="m">11</span> tests in 0.014s<br/> <br/>OK<br/><span class="nv">$ </span>coverage report<br/>Name           Stmts   Miss  Cover<br/>----------------------------------<br/>test_whisper     <span class="m">134</span>      <span class="m">4</span>    97%<br/>whisper          <span class="m">584</span>    <span class="m">227</span>    61%<br/>----------------------------------<br/>TOTAL            <span class="m">718</span>    <span class="m">231</span>    67%<br/></pre></div>
+
+<p><br/>
+ While one would think that 61% is "not so bad", taking a quick peak at the
+actual test code shows that the tests are incomplete. Why I mean by incomplete
+is that they for example use the library to store values into a database, but
+they never check if the results can be fetched and if the fetched results are
+accurate. Here's a good reason one should never blindly trust the test cover
+percentage as a quality metric.</p>
+<p>When I tried to modify <em>whisper</em>, as the tests do not check the entire cycle of
+the values fed into the database, I ended up doing wrong changes but had the
+tests still pass.</p>
+<h1>No PEP 8, no Python 3</h1>
+<p><img src="/media/images/blog/2014/codesearch_icon.png" class="illustration pull-left"/></p>
+<p>The code doesn't respect PEP 8 . A run of
+<a href="https://flake8.readthedocs.org/">flake8</a> +
+<a href="https://pypi.python.org/pypi/hacking">hacking</a> shows 732 errors… While it does
+not impact the code itself, it's more painful to hack on it than it is on most
+Python projects.</p>
+<p>The <em>hacking</em> tool also shows that the code is not Python 3 ready as there is
+usage of Python 2 only syntax.</p>
+<p>A good way to fix that would be to set up <a href="https://testrun.org/tox/latest/">tox</a>
+and adds a few targets for PEP 8 checks and Python 3 tests. Even if the test
+suite is not complete, starting by having flake8 run without errors and the few
+unit tests working with Python 3 should put the project in a better light.</p>
+<h1>Not using idiomatic Python</h1>
+<p><img src="/media/images/blog/2014/brain_icon.png" class="illustration pull-right"/></p>
+<p>A lot of the code could be simplified by using idiomatic Python. Let's take a
+simple example:</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">fetch</span><span class="p">(</span><span class="n">path</span><span class="p">,</span><span class="n">fromTime</span><span class="p">,</span><span class="n">untilTime</span><span class="o">=</span><span class="bp">None</span><span class="p">,</span><span class="n">now</span><span class="o">=</span><span class="bp">None</span><span class="p">):</span><br/>  <span class="n">fh</span> <span class="o">=</span> <span class="bp">None</span><br/>  <span class="k">try</span><span class="p">:</span><br/>    <span class="n">fh</span> <span class="o">=</span> <span class="nb">open</span><span class="p">(</span><span class="n">path</span><span class="p">,</span><span class="s">'rb'</span><span class="p">)</span><br/>    <span class="k">return</span> <span class="n">file_fetch</span><span class="p">(</span><span class="n">fh</span><span class="p">,</span> <span class="n">fromTime</span><span class="p">,</span> <span class="n">untilTime</span><span class="p">,</span> <span class="n">now</span><span class="p">)</span><br/>  <span class="k">finally</span><span class="p">:</span><br/>    <span class="k">if</span> <span class="n">fh</span><span class="p">:</span><br/>      <span class="n">fh</span><span class="o">.</span><span class="n">close</span><span class="p">()</span><br/></pre></div>
+
+<p><br/>
+That piece of code could be easily rewritten as:</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">fetch</span><span class="p">(</span><span class="n">path</span><span class="p">,</span><span class="n">fromTime</span><span class="p">,</span><span class="n">untilTime</span><span class="o">=</span><span class="bp">None</span><span class="p">,</span><span class="n">now</span><span class="o">=</span><span class="bp">None</span><span class="p">):</span><br/>  <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">path</span><span class="p">,</span> <span class="s">'rb'</span><span class="p">)</span> <span class="k">as</span> <span class="n">fh</span><span class="p">:</span><br/>    <span class="k">return</span> <span class="n">file_fetch</span><span class="p">(</span><span class="n">fh</span><span class="p">,</span> <span class="n">fromTime</span><span class="p">,</span> <span class="n">untilTime</span><span class="p">,</span> <span class="n">now</span><span class="p">)</span><br/></pre></div>
+
+<p><br/>
+This way, the function looks actually so simple that one can even wonder why it
+should exists – but why not.</p>
+<p>Usage of loops could also be made more Pythonic:</p>
+<div class="highlight"><pre><span class="k">for</span> <span class="n">i</span><span class="p">,</span><span class="n">archive</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">archiveList</span><span class="p">):</span><br/>  <span class="k">if</span> <span class="n">i</span> <span class="o">==</span> <span class="nb">len</span><span class="p">(</span><span class="n">archiveList</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span><span class="p">:</span><br/>    <span class="k">break</span><br/></pre></div>
+
+<p><br/>
+could be actually:</p>
+<div class="highlight"><pre><span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">archive</span> <span class="ow">in</span> <span class="n">itertools</span><span class="o">.</span><span class="n">islice</span><span class="p">(</span><span class="n">archiveList</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">archiveList</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span><span class="p">):</span><br/></pre></div>
+
+<p><br/>
+That reduce the code size and makes it easier to read through the code.</p>
+<h1>Wrong abstraction level</h1>
+<p><img src="/media/images/blog/2014/star_icon.png" class="illustration pull-left"/></p>
+<p>Also, one thing that I noticed in <em>whisper</em>, is that it abstracts its features
+at the wrong level.</p>
+<p>Take the <code>create()</code> function, it's pretty obvious:</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">create</span><span class="p">(</span><span class="n">path</span><span class="p">,</span><span class="n">archiveList</span><span class="p">,</span><span class="n">xFilesFactor</span><span class="o">=</span><span class="bp">None</span><span class="p">,</span><span class="n">aggregationMethod</span><span class="o">=</span><span class="bp">None</span><span class="p">,</span><span class="n">sparse</span><span class="o">=</span><span class="bp">False</span><span class="p">,</span><span class="n">useFallocate</span><span class="o">=</span><span class="bp">False</span><span class="p">):</span><br/>  <span class="c"># Set default params</span><br/>  <span class="k">if</span> <span class="n">xFilesFactor</span> <span class="ow">is</span> <span class="bp">None</span><span class="p">:</span><br/>    <span class="n">xFilesFactor</span> <span class="o">=</span> <span class="mf">0.5</span><br/>  <span class="k">if</span> <span class="n">aggregationMethod</span> <span class="ow">is</span> <span class="bp">None</span><span class="p">:</span><br/>    <span class="n">aggregationMethod</span> <span class="o">=</span> <span class="s">'average'</span><br/> <br/>  <span class="c">#Validate archive configurations...</span><br/>  <span class="n">validateArchiveList</span><span class="p">(</span><span class="n">archiveList</span><span class="p">)</span><br/> <br/>  <span class="c">#Looks good, now we create the file and write the header</span><br/>  <span class="k">if</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">path</span><span class="p">):</span><br/>    <span class="k">raise</span> <span class="n">InvalidConfiguration</span><span class="p">(</span><span class="s">"File </span><span class="si">%s</span><span class="s"> already exists!"</span> <span class="o">%</span> <span class="n">path</span><span class="p">)</span><br/>  <span class="n">fh</span> <span class="o">=</span> <span class="bp">None</span><br/>  <span class="k">try</span><span class="p">:</span><br/>    <span class="n">fh</span> <span class="o">=</span> <span class="nb">open</span><span class="p">(</span><span class="n">path</span><span class="p">,</span><span class="s">'wb'</span><span class="p">)</span><br/>    <span class="k">if</span> <span class="n">LOCK</span><span class="p">:</span><br/>      <span class="n">fcntl</span><span class="o">.</span><span class="n">flock</span><span class="p">(</span> <span class="n">fh</span><span class="o">.</span><span class="n">fileno</span><span class="p">(),</span> <span class="n">fcntl</span><span class="o">.</span><span class="n">LOCK_EX</span> <span class="p">)</span><br/> <br/>    <span class="n">aggregationType</span> <span class="o">=</span> <span class="n">struct</span><span class="o">.</span><span class="n">pack</span><span class="p">(</span> <span class="n">longFormat</span><span class="p">,</span> <span class="n">aggregationMethodToType</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">aggregationMethod</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span> <span class="p">)</span><br/>    <span class="n">oldest</span> <span class="o">=</span> <span class="nb">max</span><span class="p">([</span><span class="n">secondsPerPoint</span> <span class="o">*</span> <span class="n">points</span> <span class="k">for</span> <span class="n">secondsPerPoint</span><span class="p">,</span><span class="n">points</span> <span class="ow">in</span> <span class="n">archiveList</span><span class="p">])</span><br/>    <span class="n">maxRetention</span> <span class="o">=</span> <span class="n">struct</span><span class="o">.</span><span class="n">pack</span><span class="p">(</span> <span class="n">longFormat</span><span class="p">,</span> <span class="n">oldest</span> <span class="p">)</span><br/>    <span class="n">xFilesFactor</span> <span class="o">=</span> <span class="n">struct</span><span class="o">.</span><span class="n">pack</span><span class="p">(</span> <span class="n">floatFormat</span><span class="p">,</span> <span class="nb">float</span><span class="p">(</span><span class="n">xFilesFactor</span><span class="p">)</span> <span class="p">)</span><br/>    <span class="n">archiveCount</span> <span class="o">=</span> <span class="n">struct</span><span class="o">.</span><span class="n">pack</span><span class="p">(</span><span class="n">longFormat</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">archiveList</span><span class="p">))</span><br/>    <span class="n">packedMetadata</span> <span class="o">=</span> <span class="n">aggregationType</span> <span class="o">+</span> <span class="n">maxRetention</span> <span class="o">+</span> <span class="n">xFilesFactor</span> <span class="o">+</span> <span class="n">archiveCount</span><br/>    <span class="n">fh</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">packedMetadata</span><span class="p">)</span><br/>    <span class="n">headerSize</span> <span class="o">=</span> <span class="n">metadataSize</span> <span class="o">+</span> <span class="p">(</span><span class="n">archiveInfoSize</span> <span class="o">*</span> <span class="nb">len</span><span class="p">(</span><span class="n">archiveList</span><span class="p">))</span><br/>    <span class="n">archiveOffsetPointer</span> <span class="o">=</span> <span class="n">headerSize</span><br/> <br/>    <span class="k">for</span> <span class="n">secondsPerPoint</span><span class="p">,</span><span class="n">points</span> <span class="ow">in</span> <span class="n">archiveList</span><span class="p">:</span><br/>      <span class="n">archiveInfo</span> <span class="o">=</span> <span class="n">struct</span><span class="o">.</span><span class="n">pack</span><span class="p">(</span><span class="n">archiveInfoFormat</span><span class="p">,</span> <span class="n">archiveOffsetPointer</span><span class="p">,</span> <span class="n">secondsPerPoint</span><span class="p">,</span> <span class="n">points</span><span class="p">)</span><br/>      <span class="n">fh</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">archiveInfo</span><span class="p">)</span><br/>      <span class="n">archiveOffsetPointer</span> <span class="o">+=</span> <span class="p">(</span><span class="n">points</span> <span class="o">*</span> <span class="n">pointSize</span><span class="p">)</span><br/> <br/>    <span class="c">#If configured to use fallocate and capable of fallocate use that, else</span><br/>    <span class="c">#attempt sparse if configure or zero pre-allocate if sparse isn't configured.</span><br/>    <span class="k">if</span> <span class="n">CAN_FALLOCATE</span> <span class="ow">and</span> <span class="n">useFallocate</span><span class="p">:</span><br/>      <span class="n">remaining</span> <span class="o">=</span> <span class="n">archiveOffsetPointer</span> <span class="o">-</span> <span class="n">headerSize</span><br/>      <span class="n">fallocate</span><span class="p">(</span><span class="n">fh</span><span class="p">,</span> <span class="n">headerSize</span><span class="p">,</span> <span class="n">remaining</span><span class="p">)</span><br/>    <span class="k">elif</span> <span class="n">sparse</span><span class="p">:</span><br/>      <span class="n">fh</span><span class="o">.</span><span class="n">seek</span><span class="p">(</span><span class="n">archiveOffsetPointer</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)</span><br/>      <span class="n">fh</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s">'</span><span class="se">\x00</span><span class="s">'</span><span class="p">)</span><br/>    <span class="k">else</span><span class="p">:</span><br/>      <span class="n">remaining</span> <span class="o">=</span> <span class="n">archiveOffsetPointer</span> <span class="o">-</span> <span class="n">headerSize</span><br/>      <span class="n">chunksize</span> <span class="o">=</span> <span class="mi">16384</span><br/>      <span class="n">zeroes</span> <span class="o">=</span> <span class="s">'</span><span class="se">\x00</span><span class="s">'</span> <span class="o">*</span> <span class="n">chunksize</span><br/>      <span class="k">while</span> <span class="n">remaining</span> <span class="o">&gt;</span> <span class="n">chunksize</span><span class="p">:</span><br/>        <span class="n">fh</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">zeroes</span><span class="p">)</span><br/>        <span class="n">remaining</span> <span class="o">-=</span> <span class="n">chunksize</span><br/>      <span class="n">fh</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">zeroes</span><span class="p">[:</span><span class="n">remaining</span><span class="p">])</span><br/> <br/>    <span class="k">if</span> <span class="n">AUTOFLUSH</span><span class="p">:</span><br/>      <span class="n">fh</span><span class="o">.</span><span class="n">flush</span><span class="p">()</span><br/>      <span class="n">os</span><span class="o">.</span><span class="n">fsync</span><span class="p">(</span><span class="n">fh</span><span class="o">.</span><span class="n">fileno</span><span class="p">())</span><br/>  <span class="k">finally</span><span class="p">:</span><br/>    <span class="k">if</span> <span class="n">fh</span><span class="p">:</span><br/>      <span class="n">fh</span><span class="o">.</span><span class="n">close</span><span class="p">()</span><br/></pre></div>
+
+<p><br/>
+The function is doing <strong>everything</strong>: checking if the file doesn't exist
+already, opening it, building the structured data, writing this, building more
+structure, then writing that, etc.</p>
+<p>That means that the caller has to give a file path, even if it just wants a
+<em>whipser</em> data structure to store itself elsewhere. <code>StringIO()</code> could be used
+to fake a file handler, but it will fail if the call to <code>fcntl.flock()</code> is not
+disabled – and it is inefficient anyway.</p>
+<p>There's a lot of other functions in the code, such as for example
+<code>setAggregationMethod()</code>, that mixes the handling of the files – even doing
+things like <code>os.fsync()</code> – while manipulating structured data. This is
+definitely not a good design, especially for a library, as it turns out reusing
+the function in different context is near impossible.</p>
+<h1>Race conditions</h1>
+<p><img src="/media/images/blog/2014/sackrace_icon.png" class="illustration pull-right"/></p>
+<p>There are race conditions, for example in <code>create()</code> (see added comment):</p>
+<div class="highlight"><pre><span class="k">if</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">path</span><span class="p">):</span><br/>  <span class="k">raise</span> <span class="n">InvalidConfiguration</span><span class="p">(</span><span class="s">"File </span><span class="si">%s</span><span class="s"> already exists!"</span> <span class="o">%</span> <span class="n">path</span><span class="p">)</span><br/><span class="n">fh</span> <span class="o">=</span> <span class="bp">None</span><br/><span class="k">try</span><span class="p">:</span><br/>  <span class="c"># TOO LATE I ALREADY CREATED THE FILE IN ANOTHER PROCESS YOU ARE GOING TO</span><br/>  <span class="c"># FAIL WITHOUT GIVING ANY USEFUL INFORMATION TO THE CALLER :-(</span><br/>  <span class="n">fh</span> <span class="o">=</span> <span class="nb">open</span><span class="p">(</span><span class="n">path</span><span class="p">,</span><span class="s">'wb'</span><span class="p">)</span><br/></pre></div>
+
+<p><br/>
+That code should be:</p>
+<div class="highlight"><pre><span class="k">try</span><span class="p">:</span><br/>  <span class="n">fh</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">fdopen</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">open</span><span class="p">(</span><span class="n">path</span><span class="p">,</span> <span class="n">os</span><span class="o">.</span><span class="n">O_WRONLY</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">O_CREAT</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">O_EXCL</span><span class="p">),</span> <span class="s">'wb'</span><span class="p">)</span><br/><span class="k">except</span> <span class="ne">OSError</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span><br/>  <span class="k">if</span> <span class="n">e</span><span class="o">.</span><span class="n">errno</span> <span class="o">=</span> <span class="n">errno</span><span class="o">.</span><span class="n">EEXIST</span><span class="p">:</span><br/>    <span class="k">raise</span> <span class="n">InvalidConfiguration</span><span class="p">(</span><span class="s">"File </span><span class="si">%s</span><span class="s"> already exists!"</span> <span class="o">%</span> <span class="n">path</span><span class="p">)</span><br/></pre></div>
+
+<p><br/>
+to avoid any race condition.</p>
+<h1>Unwanted optimization</h1>
+<p><img src="/media/images/blog/2014/stopwatch_icon.png" class="illustration pull-left"/></p>
+<p>We saw earlier the <code>fetch()</code> function that is barely useful, so let's take a
+look at the <code>file_fetch()</code> function that it's calling.</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">file_fetch</span><span class="p">(</span><span class="n">fh</span><span class="p">,</span> <span class="n">fromTime</span><span class="p">,</span> <span class="n">untilTime</span><span class="p">,</span> <span class="n">now</span> <span class="o">=</span> <span class="bp">None</span><span class="p">):</span><br/>  <span class="n">header</span> <span class="o">=</span> <span class="n">__readHeader</span><span class="p">(</span><span class="n">fh</span><span class="p">)</span><br/><span class="p">[</span><span class="o">...</span><span class="p">]</span><br/></pre></div>
+
+<p><br/>
+The first thing the function does is to read the header from the file handler.
+Let's take a look at that function:</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">__readHeader</span><span class="p">(</span><span class="n">fh</span><span class="p">):</span><br/>  <span class="n">info</span> <span class="o">=</span> <span class="n">__headerCache</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">fh</span><span class="o">.</span><span class="n">name</span><span class="p">)</span><br/>  <span class="k">if</span> <span class="n">info</span><span class="p">:</span><br/>    <span class="k">return</span> <span class="n">info</span><br/> <br/>  <span class="n">originalOffset</span> <span class="o">=</span> <span class="n">fh</span><span class="o">.</span><span class="n">tell</span><span class="p">()</span><br/>  <span class="n">fh</span><span class="o">.</span><span class="n">seek</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><br/>  <span class="n">packedMetadata</span> <span class="o">=</span> <span class="n">fh</span><span class="o">.</span><span class="n">read</span><span class="p">(</span><span class="n">metadataSize</span><span class="p">)</span><br/> <br/>  <span class="k">try</span><span class="p">:</span><br/>    <span class="p">(</span><span class="n">aggregationType</span><span class="p">,</span><span class="n">maxRetention</span><span class="p">,</span><span class="n">xff</span><span class="p">,</span><span class="n">archiveCount</span><span class="p">)</span> <span class="o">=</span> <span class="n">struct</span><span class="o">.</span><span class="n">unpack</span><span class="p">(</span><span class="n">metadataFormat</span><span class="p">,</span><span class="n">packedMetadata</span><span class="p">)</span><br/>  <span class="k">except</span><span class="p">:</span><br/>    <span class="k">raise</span> <span class="n">CorruptWhisperFile</span><span class="p">(</span><span class="s">"Unable to read header"</span><span class="p">,</span> <span class="n">fh</span><span class="o">.</span><span class="n">name</span><span class="p">)</span><br/><span class="p">[</span><span class="o">...</span><span class="p">]</span><br/></pre></div>
+
+<p><br/>
+The first thing the function does is to look into a cache. Why is there a cache?</p>
+<p>It actually caches the header based with an index based on the file path
+(<code>fh.name</code>). Except that if one for example decide not to use file and cheat
+using <code>StringIO</code>, then it does not have any name attribute. So this code path
+will raise an <code>AttributeError</code>.</p>
+<p>One has to set a fake name manually on the <code>StringIO</code> instance, and it must be
+unique so nobody messes with the cache</p>
+<div class="highlight"><pre><span class="kn">import</span> <span class="nn">StringIO</span><br/> <br/><span class="n">packedMetadata</span> <span class="o">=</span> <span class="o">&lt;</span><span class="n">some</span> <span class="n">source</span><span class="o">&gt;</span><br/><span class="n">fh</span> <span class="o">=</span> <span class="n">StringIO</span><span class="o">.</span><span class="n">StringIO</span><span class="p">(</span><span class="n">packedMetadata</span><span class="p">)</span><br/><span class="n">fh</span><span class="o">.</span><span class="n">name</span> <span class="o">=</span> <span class="s">"myfakename"</span><br/><span class="n">header</span> <span class="o">=</span> <span class="n">__readHeader</span><span class="p">(</span><span class="n">fh</span><span class="p">)</span><br/></pre></div>
+
+<p><br/>
+The cache may actually be useful when accessing files, but it's definitely
+useless when not using files. But it's not necessarily true that the complexity
+(even if small) that the cache adds is worth it. I doubt most of <em>whisper</em> based
+tools are long run processes, so the cache that is really used when accessing
+the files is the one handled by the operating system kernel, and this one is
+going to be much more efficient anyway, and shared between processed.
+There's also no expiry of that cache, which could end up of tons of memory used
+and wasted.</p>
+<h1>Docstrings</h1>
+<p><img src="/media/images/blog/2014/documents_icon.png" class="illustration pull-right"/></p>
+<p>None of the docstrings are written in a a parsable syntax like
+<a href="http://sphinx-doc.org/">Sphinx</a>. This means you cannot generate any
+documentation in a nice format that a developer using the library could read
+easily.</p>
+<p>The documentation is also not up to date:</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">fetch</span><span class="p">(</span><span class="n">path</span><span class="p">,</span><span class="n">fromTime</span><span class="p">,</span><span class="n">untilTime</span><span class="o">=</span><span class="bp">None</span><span class="p">,</span><span class="n">now</span><span class="o">=</span><span class="bp">None</span><span class="p">):</span><br/>  <span class="sd">"""fetch(path,fromTime,untilTime=None)</span><br/><span class="sd">[...]</span><br/><span class="sd">"""</span><br/> <br/><span class="k">def</span> <span class="nf">create</span><span class="p">(</span><span class="n">path</span><span class="p">,</span><span class="n">archiveList</span><span class="p">,</span><span class="n">xFilesFactor</span><span class="o">=</span><span class="bp">None</span><span class="p">,</span><span class="n">aggregationMethod</span><span class="o">=</span><span class="bp">None</span><span class="p">,</span><span class="n">sparse</span><span class="o">=</span><span class="bp">False</span><span class="p">,</span><span class="n">useFallocate</span><span class="o">=</span><span class="bp">False</span><span class="p">):</span><br/>  <span class="sd">"""create(path,archiveList,xFilesFactor=0.5,aggregationMethod='average')</span><br/><span class="sd">[...]</span><br/><span class="sd">"""</span><br/></pre></div>
+
+<p><br/>
+This is something that could be avoided if a proper format was picked to write
+the docstring. A tool cool be used to be noticed when there's a diversion
+between the actual function signature and the documented one, like missing an
+argument.</p>
+<h1>Duplicated code</h1>
+<p><img src="/media/images/blog/2014/duplicate_icon.png" class="illustration pull-left"/></p>
+<p>Last but not least, there's a lot of code that is duplicated around in the
+scripts provided by <em>whisper</em> in its <code>bin</code> directory. Theses scripts should be
+very lightweight and be using the <code>console_scripts</code> facility of <em>setuptools</em>,
+but they actually contains a lot of (untested) code. Furthermore, some of that
+code is partially duplicated from the <code>whisper.py</code> library which is against
+<a href="http://en.wikipedia.org/wiki/Don't_repeat_yourself">DRY</a>.</p>
+<h1>Conclusion</h1>
+<p>There are a few more things that made me stop considering <em>whisper</em>, but these
+are part of the <em>whisper</em> features, not necessarily code quality. One can also
+point out that the code is very condensed and hard to read, and that's a more
+general problem about how it is organized and abstracted.</p>
+<p>A lot of these defects are actually points that made me start writing
+<a href="/books/the-hacker-guide-to-python">The Hacker's Guide to Python</a> a year ago.
+Running into this kind of code makes me think it was a really good idea to write
+a book on advice to write better Python code!</p>          </div>
+
+          </div></body></html>

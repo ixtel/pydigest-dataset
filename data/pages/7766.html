@@ -1,0 +1,426 @@
+<html><body><div><p>This is yet another real-time log scanner done for the ever reoccurring reason of failure to find an existing suitable
+tool.</p>
+<div id="configuration">
+<h2>Configuration</h2>
+<p>Lognotify reads a configuration file specified on the command line with the <tt><span class="pre">--config</span></tt> or <tt><span class="pre">-c</span></tt> option. The
+configuration specifies what content to search for and what to do if some is found in the log.</p>
+<div id="overview">
+<h3>Overview</h3>
+<p>Consider this example:</p>
+<pre>when:
+    - error
+    - problem
+    - critical
+    - fatal
+    - bad
+    -
+        - not
+        - ^perl
+        - ^/pascal/i
+do:
+    python: |
+        if logfile:
+            print(logfile, messages[-1][-1])
+    burst: 2
+---
+when:
+    - strange
+do: |
+    echo $logfile: ${message[-1]}
+</pre>
+<p>A configuration can have one ore more sections, denoted by a <tt><span class="pre">---</span></tt> delimiting line. Each section specifies what to
+look for and what to do if something interesting is found.</p>
+</div>
+<div id="sections">
+<h3>Sections</h3>
+<p>Each section consists of a <cite>when</cite> clause and a <cite>do</cite> clause. For every line from a logfile, all sections are checked for
+matching search expressions in the <cite>when</cite> clause.  When a match is found for a section, the corresponding <cite>do</cite> clause
+is executed.</p>
+</div>
+<div id="when-clause">
+<h3><cite>When</cite> clause</h3>
+<p>The <cite>when</cite> clause contains an itemized list of expressions to searche for in every incoming line from the log.
+Variations in syntax specify how to search for the item. The expressions are tried in order. As soon as a match is
+found, the <cite>do</cite> clause is executed and processing of this particular section is terminated.</p>
+<p>The <cite>when</cite> list forms an <cite>OR</cite>-expression. Within the list, sublists may specify <cite>AND</cite>-expressions. Thus</p>
+<pre>- expr1
+-
+    - expr2a
+    - expr2b
+</pre>
+<p>means</p>
+<pre>expr1 OR (expr2a AND expr2b)
+</pre>
+<p>Groups can be infinitely nested. The general rule is that every group within an <cite>OR</cite> group is an <cite>AND</cite> group and vice
+versa.</p>
+</div>
+<div id="search-expressions">
+<h3>Search expressions</h3>
+<p>A search expression can have one of the following forms:</p>
+<dl>
+<dt><strong>word</strong></dt>
+<dd><p>Search for <cite>word</cite> irrespective of case and match only at word boundaries. Thus <tt>error</tt> matches in the following
+lines:</p>
+<blockquote>
+<p>Error: invalid syntax</p>
+<p>An error occurred.</p>
+<p>No error-checking enabled.</p>
+</blockquote>
+<p>but <em>not</em> in:</p>
+<blockquote>
+<p>No errorchecking.</p>
+<p>maxerror</p>
+</blockquote>
+<p>If you want to match irrespective of word boundaries, you have to use regular expressions (see below).</p>
+</dd>
+<dt><strong>/word/[flags]</strong></dt>
+<dd><p>Search for a <a href="https://docs.python.org/2/library/re.html" rel="nofollow">regular expression</a>. Some flags for altering the
+operation are available:</p>
+<dl>
+<dt><em>i</em></dt>
+<dd>match case insensitive. See <a href="https://docs.python.org/2/library/re.html#re.IGNORECASE" rel="nofollow">IGNORECASE</a>.</dd>
+<dt><em>m</em></dt>
+<dd>match in multi-line mode. Probably not very useful. See
+<a href="https://docs.python.org/2/library/re.html#re.MULTILINE" rel="nofollow">MULTILINE</a>.</dd>
+<dt><em>l</em></dt>
+<dd>match according to the current locale. See
+<a href="https://docs.python.org/2/library/re.html#re.LOCALE" rel="nofollow">LOCALE</a>.</dd>
+<dt><em>s</em></dt>
+<dd>make ‘.’ match any character, including newline. See
+<a href="https://docs.python.org/2/library/re.html#re.DOTALL" rel="nofollow">DOTALL</a>.</dd>
+<dt><em>u</em></dt>
+<dd>match according to the Unicode character properties table. See
+<a href="https://docs.python.org/2/library/re.html#re.UNICODE" rel="nofollow">UNICODE</a>.</dd>
+<dt><em>x</em></dt>
+<dd>parse verbose regex with comments and white space. See
+<a href="https://docs.python.org/2/library/re.html#re.VERBOSE" rel="nofollow">VERBOSE</a>.</dd>
+</dl>
+</dd>
+</dl>
+<p>All these expressions can be prefixed with a caret (<tt>^</tt>) to mean “do not match word”:</p>
+<p><strong>^word</strong></p>
+<p><strong>^/word/</strong></p>
+<div>
+<p>Note</p>
+<p>Since the whole configuration is expressed in YAML, strings containing certain characters must be quoted in order
+not to interfere with the YAML syntax. These characters are: <tt>[ ] { } ! " ' : ? % @ , - # ~ | &gt; * &amp;</tt>. Also,
+certain words have special meaning in YAML and must therefore also be quoted: <tt>yes</tt>, <tt>no</tt>, <tt>on</tt>, <tt>off</tt>,
+<tt>true</tt>, <tt>false</tt>, and <tt>null</tt>.</p>
+</div>
+</div>
+<div id="pitfalls">
+<h3>Pitfalls</h3>
+<p>The search algorithm gives rise to surprises in certain constellations. One common error is to request something
+like this:</p>
+<pre>-
+    - not
+    - ^this
+-
+    - not
+    - ^that
+</pre>
+<p>where <cite>^this</cite> and <cite>^that</cite> cancel each other out. If a line contains ‘not’ it will always match, no matter whether <cite>this</cite>
+or <cite>that</cite> occurs in the line. The proper way would be</p>
+<pre>-
+    - not
+    - ^this
+    - ^that
+</pre>
+<p>The most common pattern is to search for any line containing <cite>word1</cite>, <cite>word2</cite> or <cite>word3</cite> but not <cite>except1</cite> or <cite>except2</cite>.
+You might be inclined to write this as</p>
+<pre>- word1
+- word2
+- word3
+-
+    - ^except1
+    - ^except2
+</pre>
+<p>But this would not work. The way to do it goes along the follong lines: written as a logical expression, it would be</p>
+<pre>(word1 OR word2 OR word3) AND (NOT except1 OR NOT except2)
+</pre>
+<p>which translates to</p>
+<pre>(word1 OR word2 OR word3) AND NOT except1 AND NOT except2
+</pre>
+<p>which, expressed as list operations, translates to</p>
+<pre>AND(OR(word1, word2, word3), NOT(except1), NOT(except2))
+</pre>
+<p>We have therefore an <cite>AND</cite> list on top. However, in lognotify we start out in an <cite>OR</cite> list. We therefore have to put our
+<cite>AND</cite> list as the single element into the top <cite>OR</cite> list. The final result would be</p>
+<pre># OR list
+-
+    # AND list
+    -
+        # OR list
+        - word1
+        - word2
+        - word3
+    - ^except1
+    - ^except2
+</pre>
+</div>
+<div id="do-clause">
+<h3><cite>Do</cite> clause</h3>
+<p>The <cite>do</cite> clause specifies what action to take when one of the expressions in the <cite>when</cite> clause matches. To run commands
+on the selected logfile lines, <a href="http://python.org" rel="nofollow">Python</a>, <cite>bash</cite> or <a href="http://tcl.tk" rel="nofollow">Tcl</a> can be used. Some
+variables are injected, depending on the language used. Scripts receive one or more events at a time depending on
+whether context and/or burst mode was requested. If neither context not burst mode is requested, one single line is
+reported at a time.</p>
+<div>
+<p>Note</p>
+<p>Use the pipe character at the end of a line prior to the code block to cause YAML to process the following indented
+block without interpretation, leaving line endings intact (see the examples below).</p>
+</div>
+<div id="context">
+<h4>Context</h4>
+<p>Context is a number of lines running up to the actual log event line. It can be requested with the <tt><span class="pre">--config</span></tt>/<tt><span class="pre">-C</span></tt>
+flag. Context lines are marked with a <tt>True</tt> value in <cite>Python</cite> or <cite>Tcl</cite> or a value of 1 in <cite>bash</cite> or <cite>sh</cite> to
+distinguish them from log lines. However, if a context line is also a regular log line (appearing because it is part of
+a burst) it is not marked as such.</p>
+</div>
+<div id="burst-mode">
+<h4>Burst mode</h4>
+<p>In burst mode, log lines arriving within a certain time frame are kept together and appear in the same call. Burst mode
+can be requested either as a <cite>burst</cite> specifier in a <cite>do</cite> clause or with a <tt><span class="pre">--burst</span></tt> or <tt><span class="pre">--force-burst</span></tt> command line
+flag. Good values for burst time frames are between 2 and 5 seconds. The <tt><span class="pre">--force-burst</span></tt> flag overrides values
+specified in <cite>do</cite> clauses while <tt><span class="pre">--burst</span></tt> does not.</p>
+</div>
+<div id="id1">
+<h4>Python</h4>
+<p><cite>Python</cite> code can be one block or be split into an initialization section and a runtime section. The former is executed
+once at startup and is intended to contain stuff like <tt>import</tt> statements, function definitions and the like. The
+latter is run for every event.</p>
+<p>In <cite>Python</cite>, the following variables are available:</p>
+<dl>
+<dt><strong>logfile</strong></dt>
+<dd>A string containing the path of the logfile where the event was coming from</dd>
+<dt><strong>messages</strong></dt>
+<dd><dl>
+<dt>A list of tuples. For each event the tuple contains:</dt>
+<dd><ul>
+<li>a bool which is True if the entry is a context line</li>
+<li>the sequence number</li>
+<li>a float with a timestamp</li>
+<li>a string with the message text</li>
+</ul>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>Example (assuming Python3 syntax):</p>
+<pre>do:
+    python: |
+        for msg in messages:
+            print('%s: %s' % (logfile, msg[3]))
+</pre>
+<p>Example with initialization (assuming Python3 syntax):</p>
+<pre>python:
+    - |
+        # Setup UDP socket
+        import sys
+        import socket
+        sock = socket.socket(type=socket.SOCK_DGRAM)
+        sock.connect(('127.0.0.1', 7777))
+    - |
+        # Write stuff to UDP socket
+        for msg in messages:
+            sock.send('json:{}\n'.format(msg[3].replace(r'\n', ' ')).encode('u8'))
+</pre>
+</div>
+<div id="id2">
+<h4>Tcl</h4>
+<p><cite>Tcl</cite> code can be one block or be split into an initialization section and a runtime section. The former is executed
+once at startup and is intended to contain stuff like <tt>proc</tt> statements. The latter is run for every
+event.</p>
+<p>In <cite>Tcl</cite>, the following variables are available:</p>
+<dl>
+<dt><strong>logfile</strong></dt>
+<dd>The path of the logfile where the event was coming from</dd>
+<dt><strong>messages</strong></dt>
+<dd><dl>
+<dt>A list of lists. For each event the inner list contains:</dt>
+<dd><ul>
+<li>a bool which is True if the entry is a context line</li>
+<li>the sequence number</li>
+<li>an int with a timestamp</li>
+<li>a string with the message text</li>
+</ul>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>Example:</p>
+<pre>do:
+    tcl: |
+        foreach m $messages {
+            puts "$logfile: [clock format [expr int([lindex $m 2])]] [lindex $m 3]"
+        }
+</pre>
+<p>Example with initialization:</p>
+<pre>do:
+    tcl:
+        - |
+            proc output {m} {
+                puts $m
+            }
+        - |
+            foreach m $messages {
+                output "$logfile: [clock format [expr int([lindex $m 2])]] [lindex $m 3]"
+            }
+</pre>
+</div>
+<div id="bash-and-sh">
+<h4>Bash and sh</h4>
+<p>In <cite>bash</cite> and <cite>sh</cite>, the following variables are available:</p>
+<dl>
+<dt><strong>logfile</strong></dt>
+<dd>The path of the logfile where the event was coming from</dd>
+<dt><strong>iscontext</strong></dt>
+<dd>An array with an int for every line where 1 means it is a context line or 0 otherwise</dd>
+<dt><strong>seqno</strong></dt>
+<dd>An array containing the sequence number for every line</dd>
+<dt><strong>time</strong></dt>
+<dd>An array containing the timestamp in ISO format for every line</dd>
+<dt><strong>message</strong></dt>
+<dd>An array containing the text for every line</dd>
+</dl>
+<p>Example:</p>
+<pre>do:
+    bash: |
+        echo $logfile: ${time[-1]} ${message[-1]}
+</pre>
+<p>But since <cite>bash</cite> is the default language, it can be written as:</p>
+<pre>do: |
+    echo $logfile: ${message[-1]}
+</pre>
+<p>The <cite>do</cite> clause can be omitted altogether in which case a default of</p>
+<pre>do:
+    python: |
+        for msg in messages:
+            print('%s: %s' % (logfile, msg[3]))
+</pre>
+<p>is assumed.</p>
+</div>
+</div>
+</div>
+<div id="running">
+<h2>Running</h2>
+<dl>
+<dt>Command synopsis:</dt>
+<dd><dl>
+<dt><tt>lognotify</tt> [-h] –config <cite>CONFIG</cite> [–full]</dt>
+<dd>[–burst <cite>BURST</cite> | –force-burst <cite>FORCE_BURST</cite>]
+[–context <cite>CONTEXT</cite>] [–debug] [–version]
+logfile [logfile …]</dd>
+</dl>
+</dd>
+<dt>Positional arguments:</dt>
+<dd><dl>
+<dt><cite>logfile</cite></dt>
+<dd>A log file to scan</dd>
+</dl>
+</dd>
+<dt>Optional arguments:</dt>
+<dd><table>
+<colgroup><col/>
+<col/>
+</colgroup><tbody>
+<tr><td>
+<kbd><span class="option">-h</span>, <span class="option">--help</span></kbd></td>
+<td>show this help message and exit</td></tr>
+<tr><td>
+<kbd><span class="option">--config <var>CONFIG</var></span>, <span class="option">-c <var>CONFIG</var></span></kbd></td>
+</tr>
+<tr><td> </td><td>specify config file</td></tr>
+<tr><td>
+<kbd><span class="option">--full</span>, <span class="option">-f</span></kbd></td>
+<td>scan files from beginning</td></tr>
+<tr><td>
+<kbd><span class="option">--burst <var>BURST</var></span>, <span class="option">-b <var>BURST</var></span></kbd></td>
+</tr>
+<tr><td> </td><td>report bursts of BURST seconds together</td></tr>
+<tr><td>
+<kbd><span class="option">--force-burst <var>FORCE_BURST</var></span>, <span class="option">-B <var>FORCE_BURST</var></span></kbd></td>
+</tr>
+<tr><td> </td><td>force reporting bursts of BURST seconds together</td></tr>
+<tr><td>
+<kbd><span class="option">--context <var>CONTEXT</var></span>, <span class="option">-C <var>CONTEXT</var></span></kbd></td>
+</tr>
+<tr><td> </td><td>specify context size</td></tr>
+<tr><td>
+<kbd><span class="option">--debug</span>, <span class="option">-d</span></kbd></td>
+<td>Print some debug information to stderr</td></tr>
+<tr><td>
+<kbd><span class="option">--version</span>, <span class="option">-v</span></kbd></td>
+<td>display version and exit</td></tr>
+</tbody>
+</table>
+</dd>
+</dl>
+<p>At least one path to an existing, readable log file is expected.</p>
+<p>The <tt><span class="pre">--full</span></tt> or <tt><span class="pre">-f</span></tt> option requests reading files from the start. Without the flag, reading begins at the current
+end of file. Sequence numbering always begins from the point where reading begins.</p>
+<p>The <tt><span class="pre">--debug</span></tt> or <tt><span class="pre">-d</span></tt> option sends information to the standard error file. Repeating the flag increases the
+amount of information.</p>
+</div>
+<div id="useful-scripts">
+<h2>Useful scripts</h2>
+<p>This section is a collection of useful scripts.</p>
+<div id="send-desktop-notification">
+<h3>Send desktop notification</h3>
+<p>To be used as root (change <tt>'username'</tt> accordingly):</p>
+<pre>from subprocess import check_call
+
+check_call(
+    [
+        'su', 'username', '-c',
+        'DISPLAY=:0 notify-send "%s" "%s"' % (logfile, '\n'.join('&gt; '[m[0]] + m[3] for m in messages))
+    ]
+)
+</pre>
+</div>
+<div id="send-desktop-notification-to-remote-machine">
+<h3>Send desktop notification to remote machine</h3>
+<p>To be used as root (change <tt>'hostname'</tt> and <tt>username</tt> accordingly):</p>
+<pre>from subprocess import check_call
+from platform import node
+
+check_call(
+    [
+        'ssh', 'hostname',
+        r'su username -c "DISPLAY=:0 notify-send \"%s: %s\" \"%s\""' % (
+            node(),
+            logfile,
+            '\n'.join('! '[m[0]] + m[3] for m in messages)
+        )
+    ]
+)
+</pre>
+</div>
+<div id="send-e-mail">
+<h3>Send e-mail</h3>
+<p>Change <tt><span class="pre">'mail-user'</span></tt>, <tt><span class="pre">'mail-user-password'</span></tt>, <tt><span class="pre">source-email</span></tt> and <tt><span class="pre">destination-email</span></tt> accordingly:</p>
+<pre>do:
+    python: |
+        from smtplib import SMTP
+        import sys
+
+        client = SMTP('localhost')
+        try:
+            client.starttls()
+        except:
+            pass
+        client.login('mail-user', 'mail-user-password')
+        client.sendmail(
+            'source-email',
+            'destination-email',
+            'From: source-email\n'
+            'To: destination-email\n'
+            'Subject: Message in %s\n\n'
+            '%s\n' % (logfile, '\n'.join('&gt; '[m[0]] + m[3] for m in messages))
+        )
+</pre>
+</div>
+</div>
+
+
+</div></body></html>

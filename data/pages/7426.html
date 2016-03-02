@@ -1,0 +1,70 @@
+<html><body><div><div class="post-text" itemprop="text">
+<p>If this is just a single JSON document per file all you need is <code>SparkContext.wholeTextFiles</code>. First lets create some dummy data:</p>
+
+<pre><code>import tempfile
+import json 
+
+input_dir = tempfile.mkdtemp()
+
+docs = [
+    {'data': {'text': {'de': 'Ein Text.', 'en': 'A text.'}}},
+    {'data': {'text': {'de': 'Ein Bahnhof.', 'en': 'A railway station.'}}},
+    {'data': {'text': {'de': 'Ein Hund.', 'en': 'A dog.'}}}]
+
+for doc in docs:
+    with open(tempfile.mktemp(suffix="json", dir=input_dir), "w") as fw:
+        json.dump(doc, fw, indent=4)
+</code></pre>
+
+<p>Now lets read data:</p>
+
+<pre><code>rdd = sc.wholeTextFiles(input_dir).values()
+</code></pre>
+
+<p>and make sure that files are indeed indented:</p>
+
+<pre><code>print rdd.top(1)[0]
+
+## {
+##     "data": {
+##         "text": {
+##             "de": "Ein Text.", 
+##             "en": "A text."
+##         }
+##     }
+## }
+</code></pre>
+
+<p>Finally we can parse:</p>
+
+<pre><code>parsed = rdd.map(json.loads)
+</code></pre>
+
+<p>and check if everything worked as expected:</p>
+
+<pre><code>parsed.takeOrdered(3)
+
+## [{u'data': {u'text': {u'de': u'Ein Bahnhof.', u'en': u'A railway station.'}}},
+##  {u'data': {u'text': {u'de': u'Ein Hund.', u'en': u'A dog.'}}},
+##  {u'data': {u'text': {u'de': u'Ein Text.', u'en': u'A text.'}}}]
+</code></pre>
+
+<p>If you still experience some problems it is most likely due to some malformed entries. The simplest thing you can do is to discard malformed entries using <code>flatMap</code> with custom wrapper:</p>
+
+<pre><code>rdd_malformed = sc.parallelize(["{u'data': {u'text': {u'de':"]).union(rdd)
+
+## org.apache.spark.api.python.PythonException: Traceback (most recent call ...
+##     ...
+## ValueError: Expecting property name: line 1 column 2 (char 1)
+</code></pre>
+
+<p>and wrapped using <code>try_seq</code> (defined here: <a href="http://stackoverflow.com/a/33387150/1560062">What is the equivalent to scala.util.Try in pyspark?</a>)</p>
+
+<pre><code>rdd_malformed.flatMap(lambda x: seq_try(json.loads, x)).collect()
+
+## [{u'data': {u'text': {u'de': u'Ein Hund.', u'en': u'A dog.'}}},
+##  {u'data': {u'text': {u'de': u'Ein Text.', u'en': u'A text.'}}},
+##  {u'data': {u'text': {u'de': u'Ein Bahnhof.', u'en': u'A railway station.'}}}]
+</code></pre>
+    </div>
+    </div></body></html>

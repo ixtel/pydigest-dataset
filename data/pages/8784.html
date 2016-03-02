@@ -1,0 +1,812 @@
+<html><body><div><div class="content html_format"><p>
+      Хочу поделиться опытом работы с задачей </p><a href="https://www.kaggle.com/c/titanic">известного конкурса</a><p> по машинному обучению от Kaggle. Этот конкурс позиционируется как конкурс для начинающих, а у меня как раз не было почти никакого практического опыта в этой области. Я немного знал теорию, но с реальными данными дела почти не имел и с питоном плотно не работал. В итоге, потратив пару предновогодних вечеров, набрал 0.80383 (первая четверть рейтинга).
+
+</p><img src="https://habrastorage.org/files/fb4/856/19f/fb485619f6a24cd791db6792433c1bf0.jpeg"/>
+
+<a name="habracut"/>
+
+<h1>Титаник</h1>
+<p>
+Включаем подходящую для работы музыку и начинаем исследование.
+
+</p><iframe src="https://www.youtube.com/embed/nXOE6EQtKcU?feature=oembed" frameborder="0" allowfullscreen="">VIDEO</iframe>
+<p>
+Конкурс «по титанику» был уже неоднократно отмечен на Хабре. Особенно хотелось бы отметить последнюю статью из списка — оказывается, что исследование данных может быть не менее интригующим чем хороший детективный роман, а отличный результат (0.81340) можно получить не только Random Forest классификатором.
+
+</p>
+<p>
+Также хотелось бы отметить статью о другом конкурсе. Из нее можно понять каким именно образом должен работать мозг исследователя и что большая часть времени должна быть уделена предварительному анализу и обработке данных. 
+
+</p>
+
+<h1>Инструментарий</h1>
+<p>
+Для решения задачи я использую Python-стек технологий. Этот подход не является единственно возможным: существуют R, Matlab, Mathematica, Azure Machine Learning, Apache Weka, Java-ML и я думаю список можно еще долго продолжать. Использование Python имеет ряд преимуществ: библиотек действительно много и они отличного качества, а поскольку большинство из них представляют собой обертки над C-кодом они еще и достаточно быстрые. К тому же построенная модель может быть легко запущена в эксплуатацию.
+</p><p>
+Должен признаться, что я не очень большой поклонник скриптовых нестрого-типизированных языков, но богатство библиотек для python не позволяет его как-либо игнорировать. 
+</p><p>
+Запускать все будем под Linux (Ubuntu 14.04). Понадобятся: python 2.7, seaborn, matplotlib, sklearn, xgboost, pandas. Вообще обязательны только pandas и sklearn, а остальные нужны для иллюстрации. 
+</p><p>
+Под Linux библиотеки для Python можно устанавливать двумя способами: штатным пакетным (deb) менеджером или через питоновскую утилиту pip. 
+</p><p>
+Установка deb-пакетами проще и быстрее, но зачастую библиотеки там устаревшие (стабильность превыше всего). 
+
+</p><pre><code class="bash"># Установка будет произведена в /usr/lib/python2.7/dist-packages/
+$ sudo apt-get install python-matplotlib
+</code></pre>
+<p>
+Установка пакетов через pip дольше (будет произведена компиляция), но с ней можно рассчитывать на получение свежих версий пакетов. 
+
+</p><pre><code class="bash"># Установка будет произведена в /usr/local/lib/python2.7/dist-packages/
+$ sudo pip install matplotlib
+</code></pre>
+<p>
+Так каким именно образом лучше устанавливать пакеты? Я использую компромисс: массивные и требующие множества зависимостей для сборки NumPy и SciPy ставлю из DEB-пакетов.
+
+</p><pre><code class="bash">$ sudo apt-get install python 
+$ sudo apt-get install python-pip
+$ sudo apt-get install python-numpy
+$ sudo apt-get install python-scipy
+$ sudo apt-get install ipython
+</code></pre>
+<p>
+А остальные, более легкие пакеты, устанавливаю через pip.
+
+</p><pre><code class="bash">$ sudo pip install pandas 
+$ sudo pip install matplotlib==1.4.3
+$ sudo pip install skimage
+$ sudo pip install sklearn
+$ sudo pip install seaborn
+$ sudo pip install statsmodels
+$ sudo pip install xgboost
+</code></pre>
+<p>
+Если я что-то забыл — то все нужные пакеты как правило легко вычисляются и устанавливаются аналогичным способом.
+</p><p>
+Пользователям других платформ необходимо предпринять аналогичные действия по установке пакетов. Но существует вариант сильно проще: уже есть прекомпилированные дистрибутивы с питоном и почти всеми нужными библиотеками. Cам я их не пробовал, но на первый взгляд выглядят они многообещающе.
+
+</p> 
+
+<h1>Данные</h1>
+<p>
+Скачаем </p><a href="https://www.kaggle.com/c/titanic/data">исходные данные</a><p> для задачи и посмотрим что же нам выдали. 
+
+</p><pre><code class="bash">$ wc -l train.csv test.csv 
+  892 train.csv
+  419 test.csv
+ 1311 total
+</code></pre>
+<p>
+Данных прямо скажем не очень много — всего 891 пассажир в train-выборке, и 418 в test-выборке (одна строчка идет на заголовок со списком полей).
+</p><p>
+Откроем train.csv в любом табличном процессоре (я использую LibreOffice Calc) чтобы визуально посмотреть данные.
+
+</p><pre><code class="bash">$ libreoffice --calc train.csv
+</code></pre>
+<p>
+Видим следующее:
+</p><ul>
+<li>Возраст заполнен не у всех</li>
+<li>Билеты имеют какой-то странный и неконсистентный формат</li>
+<li>В именах есть титул (мисс, мистер, миссис и т.д.)</li>
+<li>Номера кают прописаны мало у кого (<a href="http://habrahabr.ru/company/mlclass/blog/270973/">тут</a> есть леденящая душу история почему)</li>
+<li>В существующих номерах кают видимо прописан код палубы (так и есть, как <a href="http://habrahabr.ru/company/mlclass/blog/270973/">оказалось</a>)</li>
+<li>Также, согласно <a href="http://habrahabr.ru/company/mlclass/blog/270973/">статье</a>, в номере каюты зашифрована сторона</li>
+<li>Сортируем по имени. Видно, что многие путешествовали семьями, и виден масштаб трагедии — часто семьи оказались разделены, выжила лишь часть</li>
+<li>Сортируем по билету. Видно, что по одному коду билета путешествовало сразу несколько людей, причем часто — с разными фамилиями. Беглый взгляд вроде бы показывает, что люди с одинаковым номером билета часто разделяют одну и ту же участь.</li>
+<li>У части пассажиров не проставлен порт посадки</li>
+</ul>
+<p>
+Вроде приблизительно все ясно, переходим непостредственно к работе с данными.
+
+</p><h1>Загрузка данных</h1>
+<p>
+Чтобы не зашумлять дальшейший код сразу приведу все используемые импорты:
+</p><div class="spoiler"><b class="spoiler_title">Шапка скрипта</b><p class="spoiler_text"># coding=utf8<br/>
+<br/>
+import pandas as pd<br/>
+import numpy as np<br/>
+import matplotlib.pyplot as plt<br/>
+import xgboost as xgb<br/>
+import re<br/>
+import seaborn as sns<br/>
+from sklearn.linear_model import LinearRegression<br/>
+from sklearn.linear_model import LogisticRegression<br/>
+from sklearn.linear_model import SGDClassifier<br/>
+from sklearn.ensemble import RandomForestClassifier<br/>
+from sklearn.grid_search import GridSearchCV<br/>
+from sklearn.neighbors import KNeighborsClassifier<br/>
+from sklearn.naive_bayes import GaussianNB<br/>
+from sklearn.svm import SVC<br/>
+from sklearn.feature_selection import SelectKBest, f_classif<br/>
+from sklearn.cross_validation import StratifiedKFold<br/>
+from sklearn.cross_validation import KFold<br/>
+from sklearn.cross_validation import cross_val_score<br/>
+from sklearn.preprocessing import StandardScaler<br/>
+from sklearn import metrics<br/>
+<br/>
+pd.set_option('display.width', 256)<br/>
+</p></div>
+<p>
+Наверное большая часть моей мотивации к написанию этой статьи вызвана восторгом от работы с пакетом </p><a href="http://pandas.pydata.org/">pandas</a><p>. Я знал о существовании этой технологии, но не мог даже представить насколько приятно с ней работать. Pandas — это Excel в командной строке с удобной функциональностью по вводу/выводу и обработке табличных данных.
+</p><p>
+Загружаем обе выборки.
+
+</p><pre><code class="python">train_data = pd.read_csv("data/train.csv")
+test_data = pd.read_csv("data/test.csv")
+</code></pre>
+<p>
+Собираем обе выборки (train-выборку и test-выборку) в одну суммарную all-выборку.
+
+</p><pre><code class="python">all_data = pd.concat([train_data, test_data])
+</code></pre>
+<p>
+Зачем это делать, ведь в test-выборке отсутствует поле с результатирующим флагом выживаемости? Полная выборка полезна для вычисления статистики по всем остальным полям (средние, медианы, квантили, минимумы и максимумы), а также связи между этими полями. То есть, считая статистику только по train-выборке, мы фактически игнорируем часть очень полезной для нас информации.
+
+</p><h1>Анализ данных</h1>
+<p>
+Анализ данных в Python можно осуществлять сразу несколькими способами, например:
+
+</p><ul>
+<li>Вручную готовить данные и выводить через <a href="http://matplotlib.org/">matplotlib</a></li>
+<li>Использовать все готовое в <a href="http://stanford.edu/~mwaskom/software/seaborn/">seaborn</a></li>
+<li>Использовать текстовый вывод с группировкой в <a href="http://pandas.pydata.org/">pandas</a></li>
+</ul> 
+<p>
+Мы попробуем все три, но сначала запустим самый простой текстовый вариант. Выведем статистику выживаемости в зависимости от класса и пола.
+
+</p><pre><code class="python">print("===== survived by class and sex")
+print(train_data.groupby(["Pclass", "Sex"])["Survived"].value_counts(normalize=True))
+</code></pre>
+<div class="spoiler"><b class="spoiler_title">Результат</b><div class="spoiler_text"><pre>
+===== survived by class and sex
+Pclass  Sex     Survived
+1       female  1           0.968085
+                0           0.031915
+        male    0           0.631148
+                1           0.368852
+2       female  1           0.921053
+                0           0.078947
+        male    0           0.842593
+                1           0.157407
+3       female  0           0.500000
+                1           0.500000
+        male    0           0.864553
+                1           0.135447
+dtype: float64
+</pre>
+</div></div>
+<p>
+Видим, что в шлюпки действительно сажали сначала женщин — шанс женщины на выживаемость составляет 96.8%, 92.1% и 50% в зависимости от класса билета. Шанс на выживание мужчины гораздно ниже и составляет соответственно 36.9%, 15.7% и 13.5%.
+</p><p>
+С помощью pandas быстро посчитаем сводку по всем числовым полям обеих выборок — отдельно по мужчинам и по женщинам.
+
+</p><pre><code class="python">describe_fields = ["Age", "Fare", "Pclass", "SibSp", "Parch"]
+
+print("===== train: males")
+print(train_data[train_data["Sex"] == "male"][describe_fields].describe())
+
+print("===== test: males")
+print(test_data[test_data["Sex"] == "male"][describe_fields].describe())
+
+print("===== train: females")
+print(train_data[train_data["Sex"] == "female"][describe_fields].describe())
+
+print("===== test: females")
+print(test_data[test_data["Sex"] == "female"][describe_fields].describe())
+</code></pre>
+<div class="spoiler"><b class="spoiler_title">Результат</b><div class="spoiler_text"><pre>
+===== train: males
+              Age        Fare      Pclass       SibSp       Parch
+count  453.000000  577.000000  577.000000  577.000000  577.000000
+mean    30.726645   25.523893    2.389948    0.429809    0.235702
+std     14.678201   43.138263    0.813580    1.061811    0.612294
+min      0.420000    0.000000    1.000000    0.000000    0.000000
+25%     21.000000    7.895800    2.000000    0.000000    0.000000
+50%     29.000000   10.500000    3.000000    0.000000    0.000000
+75%     39.000000   26.550000    3.000000    0.000000    0.000000
+max     80.000000  512.329200    3.000000    8.000000    5.000000
+===== test: males
+              Age        Fare      Pclass       SibSp       Parch
+count  205.000000  265.000000  266.000000  266.000000  266.000000
+mean    30.272732   27.527877    2.334586    0.379699    0.274436
+std     13.389528   41.079423    0.808497    0.843735    0.883745
+min      0.330000    0.000000    1.000000    0.000000    0.000000
+25%     22.000000    7.854200    2.000000    0.000000    0.000000
+50%     27.000000   13.000000    3.000000    0.000000    0.000000
+75%     40.000000   26.550000    3.000000    1.000000    0.000000
+max     67.000000  262.375000    3.000000    8.000000    9.000000
+===== train: females
+              Age        Fare      Pclass       SibSp       Parch
+count  261.000000  314.000000  314.000000  314.000000  314.000000
+mean    27.915709   44.479818    2.159236    0.694268    0.649682
+std     14.110146   57.997698    0.857290    1.156520    1.022846
+min      0.750000    6.750000    1.000000    0.000000    0.000000
+25%     18.000000   12.071875    1.000000    0.000000    0.000000
+50%     27.000000   23.000000    2.000000    0.000000    0.000000
+75%     37.000000   55.000000    3.000000    1.000000    1.000000
+max     63.000000  512.329200    3.000000    8.000000    6.000000
+===== test: females
+              Age        Fare      Pclass       SibSp       Parch
+count  127.000000  152.000000  152.000000  152.000000  152.000000
+mean    30.272362   49.747699    2.144737    0.565789    0.598684
+std     15.428613   73.108716    0.887051    0.974313    1.105434
+min      0.170000    6.950000    1.000000    0.000000    0.000000
+25%     20.500000    8.626050    1.000000    0.000000    0.000000
+50%     27.000000   21.512500    2.000000    0.000000    0.000000
+75%     38.500000   55.441700    3.000000    1.000000    1.000000
+max     76.000000  512.329200    3.000000    8.000000    9.000000
+</pre>
+</div></div>
+<p>
+Видно, что по средним и перцентилям все в целом ровненько. Но у мужчин по выборкам отличаются максимумы по возрасту и по стоимости билета. У женщин в обеих выборках также есть различие в максимуме возраста.
+
+</p><h1>Сборка дайджеста по данным</h1>
+<p>
+Соберем небольшой дайджест по полной выборке — он будет нужен для дальшейшего преобразования выборок. В частности нам нужны значения которые будут подставлены вместо отсутствующих, а также различные справочники для перевода текстовых значения в числовые. Дело в том, что многие классификаторы могут работать только с числами, поэтому каким-то образом мы должны перевести категориальные признаки в числовые, но независимо от способа преобразования нам будут нужны справочники этих значений. 
+
+</p><pre><code class="python">class DataDigest:
+
+    def __init__(self):
+        self.ages = None
+        self.fares = None
+        self.titles = None
+        self.cabins = None
+        self.families = None
+        self.tickets = None
+
+def get_title(name):
+    if pd.isnull(name):
+        return "Null"
+
+    title_search = re.search(' ([A-Za-z]+)\.', name)
+    if title_search:
+        return title_search.group(1).lower()
+    else:
+        return "None"
+
+
+def get_family(row):
+    last_name = row["Name"].split(",")[0]
+    if last_name:
+        family_size = 1 + row["Parch"] + row["SibSp"]
+        if family_size &gt; 3:
+            return "{0}_{1}".format(last_name.lower(), family_size)
+        else:
+            return "nofamily"
+    else:
+        return "unknown"
+
+
+data_digest = DataDigest()
+data_digest.ages = all_data.groupby("Sex")["Age"].median()
+data_digest.fares = all_data.groupby("Pclass")["Fare"].median()
+data_digest.titles = pd.Index(test_data["Name"].apply(get_title).unique())
+data_digest.families = pd.Index(test_data.apply(get_family, axis=1).unique())
+data_digest.cabins = pd.Index(test_data["Cabin"].fillna("unknown").unique())
+data_digest.tickets = pd.Index(test_data["Ticket"].fillna("unknown").unique())
+</code></pre>
+<p>
+Небольшое пояснение по полям дайджеста:
+</p><ul>
+<li>ages — справочник медиан возрастов в зависимости от пола;</li>
+<li>fares — справочник медиан стоимости билетов в зависимости от класса билета;</li>
+<li>titles — справочник титулов;</li>
+<li>families — справочник идентификаторов семейств (фамилия + количество членов семьи);</li>
+<li>cabins — справочник идентификаторов кают;</li>
+<li>tickets — справочник идентификаторов билетов.</li>
+</ul>
+<p>
+Справочники для восстановления отсутствующих данных (медианы) мы строим по комбинированной выборке. А вот справочники для перевода категориальных признаков — только по тестовым данным. Идея заключалась в следующем: допустим в train-наборе у нас есть фамилия «Иванов», а в test-наборе этой фамилии нет. Знание внутри классификатора о том что «Иванов» выжил (или не выжил) никак не поможет в оценке test-набора, поскольку в test-наборе этой фамилии все равно нет. Поэтому в справочник добавляем только те фамилии которые есть в test-наборе. Еще более правильным способом будет добавлять в справочник только переcечение признаков (только те признаки которые есть в обоих наборах) — я попробовал, но результат верификации ухудшился на 3 процента.
+
+</p><h1>Выделяем признаки</h1>
+<p>
+Теперь нам нужно выделить признаки. Как уже было сказано — многие классификаторы умеют работать только с числами, поэтому нам нужно:
+
+</p><ul>
+<li>Перевести категории в числовое представление</li>
+<li>Выделить неявные признаки, то есть те которые явно не заданы (титул, палуба)</li>
+<li>Что-то сделать с отсутствующими значениями</li>
+</ul>
+<p>
+Есть два способа преобразования категориального признака в числовой. Можем рассмотреть задачу на примере пола пассажира.
+</p><p>
+В первом варианте мы просто меняем пол на некоторое число, например мы можем заменить female на 0, а male на 1 (</p><em>кругляшок и палочка — очень удобно запоминать</em><p>). Такой вариант не увеличивает число признаков, однако внутри признака для его значений теперь появляется отношение «больше» и «меньше». В случае когда значений много, такое неожиданное свойство признака не всегда желательно и может привести к проблемам в геометрических классификаторах. 
+</p><p>
+Второй вариант преобразования — завести две колонки «sex_male» и «sex_female». В случае мужского пола мы будем присваивать sex_male=1, sex_female=0. В случае женского пола наоборот: sex_male=0, sex_female=1. Отношений «больше»/«меньше» мы теперь избегаем, однако теперь у нас стало больше признаков, а чем больше признаков тем больше данных для тренировки классификатора нам нужно — эта проблема известна как </p><a href="https://ru.wikipedia.org/wiki/%D0%9F%D1%80%D0%BE%D0%BA%D0%BB%D1%8F%D1%82%D0%B8%D0%B5_%D1%80%D0%B0%D0%B7%D0%BC%D0%B5%D1%80%D0%BD%D0%BE%D1%81%D1%82%D0%B8">«проклятие размерности»</a><p>. Особенно сложной становится ситуация когда значений признаков очень много, например идентификаторы билетов, в таких случаях можно например откинуть редко встречающиеся значения подставив вместо них какой-нибудь специальный тег — таким образом уменьшив итоговое количество признаков после расширения.
+</p><p>
+Небольшой спойлер: мы делаем ставки в первую очередь на классификатор Random Forest. Во-первых </p><em>все так делают</em><p>, а во-вторых он не требует расширения признаков, устойчив к масштабу значений признаков и рассчитывается быстро. Несмотря на это, признаки мы готовим в общем универсальном виде поскольку главная поставленная перед собой цель — исследовать принципы работы с sklearn и возможности. 
+</p><p>
+Таким образом какие-то категориальные признаки мы заменяем на числа, какие-то расширяем, какие-то и заменяем и расширяем. Мы не экономим на числе признаков, поскольку в дальшейшем мы всегда можем выбрать какие именно из них будут участвовать в работе. 
+</p><p>
+В большинстве пособий и примеров из сети исходные наборы данных очень вольно модифицируются: исходные колонки заменяются новыми значениями, ненужные колонки удаляются и т.д. В этом нет никакой необходимости пока у нас есть достаточное количество оперативной памяти: всегда лучше добавлять новые признаки к набору никак не изменяя существующие данные, поскольку pandas впоследствии всегда позволит нам выбрать только нужные. 
+</p><p>
+Создаем метод для преобразования наборов данных.
+
+</p><pre><code class="python">def get_index(item, index):
+    if pd.isnull(item):
+        return -1
+
+    try:
+        return index.get_loc(item)
+    except KeyError:
+        return -1
+
+
+def munge_data(data, digest):
+    # Age - замена пропусков на медиану в зависимости от пола
+    data["AgeF"] = data.apply(lambda r: digest.ages[r["Sex"]] if pd.isnull(r["Age"]) else r["Age"], axis=1)
+
+    # Fare - замена пропусков на медиану в зависимости от класса
+    data["FareF"] = data.apply(lambda r: digest.fares[r["Pclass"]] if pd.isnull(r["Fare"]) else r["Fare"], axis=1)
+
+    # Gender - замена
+    genders = {"male": 1, "female": 0}
+    data["SexF"] = data["Sex"].apply(lambda s: genders.get(s))
+
+    # Gender - расширение
+    gender_dummies = pd.get_dummies(data["Sex"], prefix="SexD", dummy_na=False)
+    data = pd.concat([data, gender_dummies], axis=1)
+
+    # Embarkment - замена
+    embarkments = {"U": 0, "S": 1, "C": 2, "Q": 3}
+    data["EmbarkedF"] = data["Embarked"].fillna("U").apply(lambda e: embarkments.get(e))
+
+    # Embarkment - расширение
+    embarkment_dummies = pd.get_dummies(data["Embarked"], prefix="EmbarkedD", dummy_na=False)
+    data = pd.concat([data, embarkment_dummies], axis=1)
+
+    # Количество родственников на борту
+    data["RelativesF"] = data["Parch"] + data["SibSp"]
+
+    # Человек-одиночка?
+    data["SingleF"] = data["RelativesF"].apply(lambda r: 1 if r == 0 else 0)
+
+    # Deck - замена
+    decks = {"U": 0, "A": 1, "B": 2, "C": 3, "D": 4, "E": 5, "F": 6, "G": 7, "T": 8}
+    data["DeckF"] = data["Cabin"].fillna("U").apply(lambda c: decks.get(c[0], -1))
+
+    # Deck - расширение
+    deck_dummies = pd.get_dummies(data["Cabin"].fillna("U").apply(lambda c: c[0]), prefix="DeckD", dummy_na=False)
+    data = pd.concat([data, deck_dummies], axis=1)
+
+    # Titles - расширение
+    title_dummies = pd.get_dummies(data["Name"].apply(lambda n: get_title(n)), prefix="TitleD", dummy_na=False)
+    data = pd.concat([data, title_dummies], axis=1)
+
+    # амена текстов на индекс из соответствующего справочника или -1 если значения в справочнике нет (расширять не будем)
+    data["CabinF"] = data["Cabin"].fillna("unknown").apply(lambda c: get_index(c, digest.cabins))
+
+    data["TitleF"] = data["Name"].apply(lambda n: get_index(get_title(n), digest.titles))
+
+    data["TicketF"] = data["Ticket"].apply(lambda t: get_index(t, digest.tickets))
+
+    data["FamilyF"] = data.apply(lambda r: get_index(get_family(r), digest.families), axis=1)
+
+    # для статистики
+    age_bins = [0, 5, 10, 15, 20, 25, 30, 40, 50, 60, 70, 80, 90]
+    data["AgeR"] = pd.cut(data["Age"].fillna(-1), bins=age_bins).astype(object)
+
+    return data
+</code></pre>
+<p>
+Небольшое пояснение по добавлению новых признаков:
+</p><ul>
+<li>добавляем собственный индекс каюты</li>
+<li>добавляем собственный индекс палубы (вырезаем из номера каюты)</li>
+<li>добавляем собственный индекс билета</li>
+<li>добавляем собственный индекс титула (вырезаем из имени)</li>
+<li>добавляем собственный индекс идентификатора семьи (формируем из фамилии и численности семейства)</li>
+</ul>
+<p>
+В общем, мы добавляем в признаки вообще все что приходит в голову. Видно что некоторые признаки дублируют друг друга (например расширение и замена пола), некоторые явно коррелируют друг с другом (класс билета и стоимость билета), некоторые явно бессмысленны (вряд ли порт посадки влияет на выживаемость). Разбираться со всем этим будем позже — когда будем производить отбор признаков для обучения.
+</p><p>
+Преобразуем оба имеющихся набора и также опять создаем объединенный набор.
+
+</p><pre><code class="python">train_data_munged = munge_data(train_data, data_digest)
+test_data_munged = munge_data(test_data, data_digest)
+all_data_munged = pd.concat([train_data_munged, test_data_munged])
+</code></pre>
+<p>
+Хотя мы нацелились на использование Random Forest хочется попробовать и другие классификаторы. А с ними есть следующеая проблема: многие классификаторы чувствительны к масштабу признаков. Другими словами если у нас есть один признак со значениями от [-10,5] и второй признак со значениями [0,10000] то одинаковая в процентном отношении ошибка на обоих признаках будет приводить к большому отличию в абсолютном значении и классификатор будет трактовать второй признак как более важный.
+</p><p>
+Чтобы избежать этого мы приводим все числовые (а других у нас уже нет) признаки к одинаковой шкале [-1,1] и нулевому среднему значению. Сделать это в sklearn можно очень просто.
+
+</p><pre><code class="python">scaler = StandardScaler()
+scaler.fit(all_data_munged[predictors])
+
+train_data_scaled = scaler.transform(train_data_munged[predictors])
+test_data_scaled = scaler.transform(test_data_munged[predictors])
+</code></pre>
+<p>
+Сначала мы вычисляем коэффициенты масштабирования (снова пригодился полный набор), а затем масштабируем оба набора индивидуально.
+
+</p><h1>Выбор признаков</h1>
+<p>
+Ну и пришел момент когда мы можем отобрать те признаки, с которыми будем работать дальше.
+
+</p><pre><code class="python">predictors = ["Pclass",
+              "AgeF",
+              "TitleF",
+              "TitleD_mr", "TitleD_mrs", "TitleD_miss", "TitleD_master", "TitleD_ms", 
+              "TitleD_col", "TitleD_rev", "TitleD_dr",
+              "CabinF",
+              "DeckF",
+              "DeckD_U", "DeckD_A", "DeckD_B", "DeckD_C", "DeckD_D", "DeckD_E", "DeckD_F", "DeckD_G",
+              "FamilyF",
+              "TicketF",
+              "SexF",
+              "SexD_male", "SexD_female",
+              "EmbarkedF",
+              "EmbarkedD_S", "EmbarkedD_C", "EmbarkedD_Q",
+              "FareF",
+              "SibSp", "Parch",
+              "RelativesF",
+              "SingleF"]
+</code></pre>
+<p>
+Просто ставим комментарий на ненужных и запускаем обучение. Какие именно не нужны — </p><em>решать вам</em><p>.
+
+</p><h1>Еще раз анализ</h1>
+ <p>
+Поскольку теперь у нас появилась колонка в которой прописан диапазон в который попадает возраст пассажира — оценим выживаемость в зависимости от возраста (диапазона). 
+
+</p><pre><code class="python">print("===== survived by age")
+print(train_data.groupby(["AgeR"])["Survived"].value_counts(normalize=True))
+
+print("===== survived by gender and age")
+print(train_data.groupby(["Sex", "AgeR"])["Survived"].value_counts(normalize=True))
+
+print("===== survived by class and age")
+print(train_data.groupby(["Pclass", "AgeR"])["Survived"].value_counts(normalize=True))
+</code></pre>
+<div class="spoiler"><b class="spoiler_title">Результат</b><div class="spoiler_text"><pre>
+===== survived by age
+AgeR      Survived
+(0, 5]    1           0.704545
+          0           0.295455
+(10, 15]  1           0.578947
+          0           0.421053
+(15, 20]  0           0.656250
+          1           0.343750
+(20, 25]  0           0.655738
+          1           0.344262
+(25, 30]  0           0.611111
+          1           0.388889
+(30, 40]  0           0.554839
+          1           0.445161
+(40, 50]  0           0.616279
+          1           0.383721
+(5, 10]   0           0.650000
+          1           0.350000
+(50, 60]  0           0.595238
+          1           0.404762
+(60, 70]  0           0.764706
+          1           0.235294
+(70, 80]  0           0.800000
+          1           0.200000
+dtype: float64
+===== survived by gender and age
+Sex     AgeR      Survived
+female  (0, 5]    1           0.761905
+                  0           0.238095
+        (10, 15]  1           0.750000
+                  0           0.250000
+        (15, 20]  1           0.735294
+                  0           0.264706
+        (20, 25]  1           0.755556
+                  0           0.244444
+        (25, 30]  1           0.750000
+                  0           0.250000
+        (30, 40]  1           0.836364
+                  0           0.163636
+        (40, 50]  1           0.677419
+                  0           0.322581
+        (5, 10]   0           0.700000
+                  1           0.300000
+        (50, 60]  1           0.928571
+                  0           0.071429
+        (60, 70]  1           1.000000
+male    (0, 5]    1           0.652174
+                  0           0.347826
+        (10, 15]  0           0.714286
+                  1           0.285714
+        (15, 20]  0           0.870968
+                  1           0.129032
+        (20, 25]  0           0.896104
+                  1           0.103896
+        (25, 30]  0           0.791667
+                  1           0.208333
+        (30, 40]  0           0.770000
+                  1           0.230000
+        (40, 50]  0           0.781818
+                  1           0.218182
+        (5, 10]   0           0.600000
+                  1           0.400000
+        (50, 60]  0           0.857143
+                  1           0.142857
+        (60, 70]  0           0.928571
+                  1           0.071429
+        (70, 80]  0           0.800000
+                  1           0.200000
+dtype: float64
+===== survived by class and age
+Pclass  AgeR      Survived
+1       (0, 5]    1           0.666667
+                  0           0.333333
+        (10, 15]  1           1.000000
+        (15, 20]  1           0.800000
+                  0           0.200000
+        (20, 25]  1           0.761905
+                  0           0.238095
+        (25, 30]  1           0.684211
+                  0           0.315789
+        (30, 40]  1           0.755102
+                  0           0.244898
+        (40, 50]  1           0.567568
+                  0           0.432432
+        (50, 60]  1           0.600000
+                  0           0.400000
+        (60, 70]  0           0.818182
+                  1           0.181818
+        (70, 80]  0           0.666667
+                  1           0.333333
+2       (0, 5]    1           1.000000
+        (10, 15]  1           1.000000
+        (15, 20]  0           0.562500
+                  1           0.437500
+        (20, 25]  0           0.600000
+                  1           0.400000
+        (25, 30]  0           0.580645
+                  1           0.419355
+        (30, 40]  0           0.558140
+                  1           0.441860
+        (40, 50]  1           0.526316
+                  0           0.473684
+        (5, 10]   1           1.000000
+        (50, 60]  0           0.833333
+                  1           0.166667
+        (60, 70]  0           0.666667
+                  1           0.333333
+3       (0, 5]    1           0.571429
+                  0           0.428571
+        (10, 15]  0           0.571429
+                  1           0.428571
+        (15, 20]  0           0.784615
+                  1           0.215385
+        (20, 25]  0           0.802817
+                  1           0.197183
+        (25, 30]  0           0.724138
+                  1           0.275862
+        (30, 40]  0           0.793651
+                  1           0.206349
+        (40, 50]  0           0.933333
+                  1           0.066667
+        (5, 10]   0           0.812500
+                  1           0.187500
+        (50, 60]  0           1.000000
+        (60, 70]  0           0.666667
+                  1           0.333333
+        (70, 80]  0           1.000000
+dtype: float64
+</pre>
+</div></div>
+<p>
+Видим, что шансы на выживание велики у детей до 5 лет, а уже в пожилом возрасте шанс выжить падает с возрастом. Но это не относится к женщинам — у женщины шанс на выживаемость велик в любом возрасте. 
+</p><p>
+Попробуем визуализацию от </p><a href="http://stanford.edu/~mwaskom/software/seaborn/">seaborn</a><p> — уж очень красивые картинки она дает, хотя я больше привык к тексту.
+
+</p><pre><code class="python">sns.pairplot(train_data_munged, vars=["AgeF", "Pclass", "SexF"], hue="Survived", dropna=True)
+sns.plt.show()
+</code></pre>
+
+<img src="https://habrastorage.org/files/418/edf/72a/418edf72a3aa44eb97b9fdfb39c307c6.png"/>
+<p>
+Красиво, но например корреляция в паре «класс-пол» не очень наглядна.
+</p><p>
+Оценим важность наших признаков алгоритмом </p><a href="http://scikit-learn.org/stable/modules/generated/sklearn.feature_selection.SelectKBest.html">SelectKBest</a><p>. 
+
+</p><pre><code class="python">selector = SelectKBest(f_classif, k=5)
+selector.fit(train_data_munged[predictors], train_data_munged["Survived"])
+
+scores = -np.log10(selector.pvalues_)
+
+plt.bar(range(len(predictors)), scores)
+plt.xticks(range(len(predictors)), predictors, rotation='vertical')
+plt.show()
+</code></pre>
+
+<img src="https://habrastorage.org/files/3bf/0ba/24e/3bf0ba24e88d47ecb44c01c218aac755.png"/>
+<p>
+Вот вам </p><a href="https://ru.wikipedia.org/wiki/F-%D1%82%D0%B5%D1%81%D1%82">статья</a><p> с описанием того как именно он это делает. В параметрах SelectKBest можно указать и другие стратегии.
+</p><p>
+В принципе, мы и так уже все знаем — очень важен пол. Титулы важны — но у них сильная коррелляция с полом. Важен класс билета и каким-то образом палуба «F».
+
+</p><h1>Оценка классификации</h1>
+<p>
+Перед тем как начинать запуск какой-либо классификации, нам нужно понять каким образом мы будем ее оценивать. В случае с конкурсами Kaggle все очень просто: мы просто читаем их правила. В случае Титаника оценкой будет служить отношение правильных оценок классификатора к общему числу пассажиров. Иными словами эта оценка называется </p><a href="https://en.wikipedia.org/wiki/Accuracy_and_precision#In_binary_classification">accuracy</a><p>. 
+</p><p>
+Но прежде чем отправлять результат классификации по test-выборке на оценку в Kaggle, нам неплохо бы сначала самим понять хотя бы приблизительное качество работы нашего классификатора. Понять это мы сможем только используя train-выборку, поскольку только она содержит промаркированные данные. Но остается вопрос — как именно?
+</p><p>
+Часто в примерах можно увидеть нечто подобное:
+
+</p><pre><code class="python">classifier.fit(train_X, train_y)
+predict_y = classifier.predict(train_X)
+return metrics.accuracy_score(train_y, predict_y)
+</code></pre>
+<p>
+То есть мы обучаем классификатор на train-наборе, после чего на нем же его и проверяем. Несомненно в какой-то степени это дает некую оценку качества работы классификатора, но в целом этот подход неверен. Классификатор должен описывать не данные на котором его тренировали, а некую модель которая эти данные сгенерировала. В противном случае классификатор отлично подстраивается под train-выборку, при проверке на ней же показывает отличные результаты, однако при проверке на неком другом наборе данных с треском сливается. Что и называется </p><a href="https://en.wikipedia.org/wiki/Overfitting">overfitting</a><p>. 
+</p><p>
+Правильным подходом будет разделение имеющегося train-набора на некоторое количество кусков. Мы можем взять несколько из них, натренировать на них классификатор, после чего проверить его работу на оставшихся. Производить этот процесс можно несколько раз просто тасуя куски. В sklearn этот процесс называется </p><a href="http://scikit-learn.org/stable/modules/cross_validation.html">кросс-валидацией</a><p>.
+</p><p>
+Можно уже представить в голове циклы которые будут разделять данные, производить обучение и оценивание, но фишка в том, что все что нужно для реализации этого в sklearn — это определить стратегию.
+
+</p><pre><code class="python">cv = StratifiedKFold(train_data["Survived"], n_folds=3, shuffle=True, random_state=1)
+</code></pre>
+<p>
+Здесь мы определяем достаточно сложный процесс: тренировочные данные будут разделены на три куска, причем записи будут попадать в каждый кусок случайным образом (чтобы нивелировать возможную зависимость от порядка), кроме того стратегия отследит чтобы отношение классов в каждом куске было приблизительно равным. Таким образом мы будем производить три измерения по кускам 1+2 vs 3, 1+3 vs 2, 2+3 vs 1 — после этого сможем получить среднюю оценку аккуратности классификатора (что будет характеризовать качество работы), а также дисперсию оценки (что будет характеризовать стабильность его работы).
+
+</p><h1>Классификация</h1>
+<p>
+Теперь протестируем работу различных классификаторов.
+
+</p><a href="http://scikit-learn.org/stable/modules/generated/sklearn.neighbors.KNeighborsClassifier.html">KNeighborsClassifier</a><p>:
+</p><pre><code class="python">alg_ngbh = KNeighborsClassifier(n_neighbors=3)
+scores = cross_val_score(alg_ngbh, train_data_scaled, train_data_munged["Survived"], cv=cv, n_jobs=-1)
+print("Accuracy (k-neighbors): {}/{}".format(scores.mean(), scores.std()))
+</code></pre>
+
+<a href="http://scikit-learn.org/stable/modules/generated/sklearn.linear_model.SGDClassifier.html">SGDClassifier</a><p>:
+</p><pre><code class="python">alg_sgd = SGDClassifier(random_state=1)
+scores = cross_val_score(alg_sgd, train_data_scaled, train_data_munged["Survived"], cv=cv, n_jobs=-1)
+print("Accuracy (sgd): {}/{}".format(scores.mean(), scores.std()))
+</code></pre>
+
+<a href="http://scikit-learn.org/stable/modules/generated/sklearn.svm.SVC.html">SVC</a><p>:
+</p><pre><code class="python">alg_svm = SVC(C=1.0)
+scores = cross_val_score(alg_svm, train_data_scaled, train_data_munged["Survived"], cv=cv, n_jobs=-1)
+print("Accuracy (svm): {}/{}".format(scores.mean(), scores.std()))
+</code></pre>
+
+<a href="http://scikit-learn.org/stable/modules/generated/sklearn.naive_bayes.GaussianNB.html">GaussianNB</a><p>:
+</p><pre><code class="python">alg_nbs = GaussianNB()
+scores = cross_val_score(alg_nbs, train_data_scaled, train_data_munged["Survived"], cv=cv, n_jobs=-1)
+print("Accuracy (naive bayes): {}/{}".format(scores.mean(), scores.std()))
+</code></pre>
+
+<a href="http://scikit-learn.org/stable/modules/generated/sklearn.linear_model.LinearRegression.html">LinearRegression</a><p>:
+</p><pre><code class="python">def linear_scorer(estimator, x, y):
+    scorer_predictions = estimator.predict(x)
+
+    scorer_predictions[scorer_predictions &gt; 0.5] = 1
+    scorer_predictions[scorer_predictions &lt;= 0.5] = 0
+
+    return metrics.accuracy_score(y, scorer_predictions)
+
+alg_lnr = LinearRegression()
+scores = cross_val_score(alg_lnr, train_data_scaled, train_data_munged["Survived"], cv=cv, n_jobs=-1,
+                         scoring=linear_scorer)
+print("Accuracy (linear regression): {}/{}".format(scores.mean(), scores.std()))
+
+</code></pre>
+<p>
+Метод linear_scorer нужен поскольку LinearRegression — это регрессия возвращающая любое вещественное число. Соответственно мы разделяем шкалу границей 0.5 и приводим любые числа к двум классам — 0 и 1.
+
+</p><a href="http://scikit-learn.org/stable/modules/generated/sklearn.linear_model.LogisticRegression.html">LogisticRegression</a><p>:
+</p><pre><code class="python">alg_log = LogisticRegression(random_state=1)
+scores = cross_val_score(alg_log, train_data_scaled, train_data_munged["Survived"], cv=cv, n_jobs=-1,
+                         scoring=linear_scorer)
+print("Accuracy (logistic regression): {}/{}".format(scores.mean(), scores.std()))
+</code></pre>
+
+<a href="http://scikit-learn.org/stable/modules/generated/sklearn.ensemble.RandomForestClassifier.html">RandomForestClassifier</a><p>:
+</p><pre><code class="python">alg_frst = RandomForestClassifier(random_state=1, n_estimators=500, min_samples_split=8, min_samples_leaf=2)
+scores = cross_val_score(alg_frst, train_data_scaled, train_data_munged["Survived"], cv=cv, n_jobs=-1)
+print("Accuracy (random forest): {}/{}".format(scores.mean(), scores.std()))
+</code></pre>
+
+<div class="spoiler"><b class="spoiler_title">У меня получилось примерно так</b><p class="spoiler_text">Accuracy (k-neighbors): 0.698092031425/0.0111105442611<br/>
+Accuracy (sgd): 0.708193041526/0.0178870678457<br/>
+Accuracy (svm): 0.693602693603/0.018027360723<br/>
+Accuracy (naive bayes): 0.791245791246/0.0244349506813<br/>
+Accuracy (linear regression): 0.805836139169/0.00839878201296<br/>
+Accuracy (logistic regression): 0.806958473625/0.0156323100754<br/>
+Accuracy (random forest): 0.827160493827/0.0063488824349<br/>
+</p></div>
+<p>
+Алгоритм Random Forest победил и дисперсия у него неплохая — кажется он стабилен.
+ 
+</p><h1>Еще лучше</h1>
+<p>
+Вроде все хорошо и можно отправлять результат, но остался один мутный момент: у каждого классификатора есть свои параметры — как нам понять что мы выбрали наилучший вариант? Без сомнения можно долго сидеть и перебирать параметры вручную — но что если </p><a href="http://scikit-learn.org/stable/modules/generated/sklearn.grid_search.GridSearchCV.html">поручить</a><p> эту работу компьютеру?
+
+</p><pre><code class="python">alg_frst_model = RandomForestClassifier(random_state=1)
+alg_frst_params = [{
+    "n_estimators": [350, 400, 450],
+    "min_samples_split": [6, 8, 10],
+    "min_samples_leaf": [1, 2, 4]
+}]
+alg_frst_grid = GridSearchCV(alg_frst_model, alg_frst_params, cv=cv, refit=True, verbose=1, n_jobs=-1)
+alg_frst_grid.fit(train_data_scaled, train_data_munged["Survived"])
+alg_frst_best = alg_frst_grid.best_estimator_
+print("Accuracy (random forest auto): {} with params {}"
+      .format(alg_frst_grid.best_score_, alg_frst_grid.best_params_))
+</code></pre> 
+
+<div class="spoiler"><b class="spoiler_title">Получается еще лучше!</b><p class="spoiler_text">Accuracy (random forest auto): 0.836139169473 with params {'min_samples_split': 6, 'n_estimators': 350, 'min_samples_leaf': 2}<br/>
+</p></div>
+<p>
+Подбор можно сделать еще тоньше при наличии времени и желания — либо изменив параметры, либо используя другую стратегию подбора, например </p><a href="http://scikit-learn.org/stable/modules/generated/sklearn.grid_search.RandomizedSearchCV.html">RandomizedSearchCV</a><p>.
+
+</p><h1>Пробуем xgboost</h1>
+<p>
+Все хвалят xgboost — давайте попробуем и его.
+
+</p><pre><code class="python">ald_xgb_model = xgb.XGBClassifier()
+ald_xgb_params = [
+    {"n_estimators": [230, 250, 270],
+     "max_depth": [1, 2, 4],
+     "learning_rate": [0.01, 0.02, 0.05]}
+]
+alg_xgb_grid = GridSearchCV(ald_xgb_model, ald_xgb_params, cv=cv, refit=True, verbose=1, n_jobs=1)
+alg_xgb_grid.fit(train_data_scaled, train_data_munged["Survived"])
+alg_xgb_best = alg_xgb_grid.best_estimator_
+print("Accuracy (xgboost auto): {} with params {}"
+      .format(alg_xgb_grid.best_score_, alg_xgb_grid.best_params_))
+</code></pre>
+<p>
+Почему-то тренировка зависала при использовании всех ядер, поэтому я ограничился одним потоком (n_jobs=1), но и в однопоточном режиме тренировка и классификация в xgboost работает очень быстро.
+
+</p><div class="spoiler"><b class="spoiler_title">Результат тоже неплох</b><p class="spoiler_text">Accuracy (xgboost auto): 0.835016835017 with params {'n_estimators': 270, 'learning_rate': 0.02, 'max_depth': 2}<br/>
+</p></div>
+
+<h1>Результат</h1>
+<p>
+Классификатор выбран, параметры рассчитаны — осталось сформировать результат и отправить на проверку в Kaggle.
+
+</p><pre><code class="python">alg_test = alg_frst_best
+
+alg_test.fit(train_data_scaled, train_data_munged["Survived"])
+
+predictions = alg_test.predict(test_data_scaled)
+
+submission = pd.DataFrame({
+    "PassengerId": test_data["PassengerId"],
+    "Survived": predictions
+})
+
+submission.to_csv("titanic-submission.csv", index=False)
+</code></pre>
+<p>
+Вообще стоит отметить несколько моментов в подобных соревнованиях, которые показались мне интересными:
+
+</p><ul>
+<li>Борьба в топе идет на сотые доли процентов — поэтому решает даже одна правильная или неправильная классификация из верификационного набора. Также на результат влияют случайные модификации параметров и алгоритма;</li>
+<li>Лучший результат при локальной кросс-валидации не гарантирует лучшего результата при проверке верификационного набора. Бывает что реализация вроде бы разумной гипотезы улучшает локальный результат кросс-валидации и ухудшает результат проверки на Kaggle;</li>
+<li>Вышеперечисленный два пункта приводят к третьему — скрипт и набор для отправки на верификацию должны находится под управлением любой системы управления версиями — в случае прорыва в счете нужно обязательно коммититься с указанием полученного результата в описании коммита;</li>
+<li>Само соревнование несколько искусственно. В реальном мире у вас нет верификационного набора — только размеченная выборка на которой можно проводить кросс-валидацию, окончательное качество работы алгоритма оценивается как правило косвенно, например, по количеству жалоб пользователей;</li>
+<li>Не очень понятна максимальная степень качества оценки которую можно получить машинным обучением на задаче — размер обучающего набора не очень высок, а сам <em>процесс</em> неочевиден. На самом деле — что такое процесс в случае бегства пассажиров с гибнущего корабля? Вполне вероятно, что не все усаженные в лодки выжили, также как вполне вероятно что не все неусаженные в лодки погибли — часть процесса должна быть очень хаотична и должна сопротивляться какому-либо моделированию.</li>
+</ul>
+
+<h1>Глава, в которой автор одновременно испытал удивление и просветление</h1>
+<p>
+Просматривая топ конкурсантов, нельзя не заметить людей которые набрали 1 (все ответы правильные) — причем у некоторых это получилось с первой же попытки.
+
+</p><img src="https://habrastorage.org/files/c9d/9d7/1a7/c9d9d71a7597491d9193edcda5f2fb5d.png"/>
+<p>
+На ум приходит следующий вариант: кто-то зарегистрировал учетку с которой начал перебором подбирать (позволяется не более 10 попыток в день) правильные ответы. Если я правильно понимаю это является разновидностью </p><a href="https://ru.wikipedia.org/wiki/%D0%97%D0%B0%D0%B4%D0%B0%D1%87%D0%B8_%D0%BD%D0%B0_%D0%B2%D0%B7%D0%B2%D0%B5%D1%88%D0%B8%D0%B2%D0%B0%D0%BD%D0%B8%D0%B5">задач о взвешивании</a><p>.
+</p><p>
+Однако подумав еще немного, нельзя не улыбнуться своей догадке: мы говорим о задаче, ответы по которой уже давно известны! В самом деле, гибель Титаника была потрясением для современников, и этому событию были посвящены фильмы, книги и документалистика. И скорее всего где-то есть полный поименный перечень пассажиров Титаника с описанием их судьбы. Но к машинному обучению это уже не относится. 
+</p><p>
+Однако из этого можно и нужно сделать вывод, который я собираюсь применить в следующих конкурсах — необязательно (если это не запрещено правилами конкурса) ограничиваться только данными которые выдал организатор. Например по известному времени и месту можно выявить погодные условия, состояние рынков ценных бумаг, курсы валют, является ли день праздничным — другими словами можно поженить данные от организаторов с любыми доступными наборами публичных данных которые могут помочь в описании характеристик модели.
+
+</p><h1>Код</h1>
+<p>
+Полный код скрипта есть </p><a href="https://github.com/mazurkin/titanic">тут</a><p>. Не забудьте выбрать признаки для обучения.
+
+      
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

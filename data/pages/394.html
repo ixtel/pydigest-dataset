@@ -1,0 +1,63 @@
+<html><body><div><div class="cont group"><p>Over the weekend I made an initial attempt at implementing Acid’s <a href="http://pythonsweetness.tumblr.com/post/73248785592/acid-batch-record-format">new batch record format</a>, inevitably bumping into some surprises along the way, even though I fully expected no such thing. Due to some glaring oversights the format had to change from what was described last week, but that’s not what this post is about.</p>
+<p>Originally designed to handle just 4 or 5 items per batch, one of the goals of the new batch format was to allow efficient storage of far more items per record, by avoiding storing shared prefixes of member keys, and by making it cheaper to seek to the middle of a batch without expensive decode/scan steps.</p>
+<p>I’m reasonably happy with the new format, however it exposed an issue with how records are being constructed. Currently, the library will iteratively regenerate a batch, adding one new member at a time until the record size (or member count) target is exceeded. Originally that only required at most 5 or so generation+zlib compression steps before a batch was complete.</p>
+<p>With the new format, given a batch target size of 4KiB, it becomes natural to store perhaps 1000 or more tiny 10-20 byte records (such as timeseries), but this causes a huge slowdown during creation of the batches, since the old function regenerates and recompresses everything for every new member added, simply to test whether the result meets the 4KiB user-supplied target.</p>
+<p>Given a batch that could fit 1000 records, that means 999 regeneration/zlib compression steps that were totally redundant. On a server hoping to perform batch compression in a background thread, suddenly the cost of doing so might become unmanageable.</p>
+<p>Clearly a better approach is needed, preferably one that doesn’t involve endlessly recompressing data just to throw all but the last result away. Anyone with sense might immediately recognize the above as an optimization problem.</p>
+<p>Well, I don’t really know anything about optimization algorithms, but I do know how to search a sorted array..</p>
+<p><strong>Enter binary search</strong></p>
+<p>Array bisection is the most marvellously trivial solution to so many problems that I ever learned. Perhaps it is merely because I am a cowboy and know few tricks that I see it everywhere, but regarding the recompression problem it once again jumped out.</p>
+<p>The idea is simple: given a sorted array, compare its middle value against a target value. If it is higher than the target, then replace the array with the slice <em>[0..midpoint]</em>. If it is lower than the target, replace it with <em>[midpoint..length]</em>. Repeat until the array has just one member - the target element, or the element closest to the target, all in far fewer compares than existed members of the original array, since on each repetition we’re discarding half of the array.</p>
+<p>The array doesn’t need to be sliced - it’s just more easily described that way. We can instead iteratively update <em>lo</em> and <em>hi</em> index variables until they converge.</p>
+<p>Look what happens if we replace “compare the array by accessing its middle index” with “call a function with the middle index as the sole parameter, then compare its return value”. We are now <a href="http://t.umblr.com/redirect?z=http%3A%2F%2Fen.wikipedia.org%2Fwiki%2FBisection_method&amp;t=OGI1YWRiMTRjNmEzZjZmYzI3MWQ4NDk2NGQ4ZGJjZjJlMjE4NmYwZix1SnRHWklJcw%3D%3D">bisecting a function</a>, updating our idea of <em>lo</em> and <em>hi</em> until they converge, requiring LOG(input size) steps.</p>
+<p><strong>Back to our problem</strong></p>
+<p>Now let’s redefine the compression problem. We want to find the maximum number of candidate records that will fit in a single compression batch, without exceeding the user’s specified maximum batch size.</p>
+<p>Essentially we are searching an array that contains one element for each possible number of batch members, and that element represents the output batch size. The value we are searching for is the user’s desired batch size.</p>
+<p>Given our old brute force algorithm, we start at index 0, comparing each index until we find one larger than the user’s desired size. This may require as many compares as there are candidate records - in the case that all candidates will fit in a single batch.</p>
+<p>Instead if the batch generation function is bisected over the range lo=1, hi=(number of candidate records), we quickly converge on the optimal batch size, yet perform only LOG(input size) recompressions. In the case of 1000 candidates, the optimal size is found after only 10 recompressions.</p>
+<p>This is a much better number than 999 recompressions - in comparison it’s practically no work at all.</p>
+<p><strong>Does it work?</strong></p>
+<p>Well, I haven’t implemented it yet, but thinking about it this afternoon led to <a href="http://t.umblr.com/redirect?z=https%3A%2F%2Fgithub.com%2Fdw%2Fscratch%2Fblob%2Fmaster%2Fbisect-test.py&amp;t=NWFiMzViYTExNTM0NzI1ZGUwYjcxNWRkOWUwMDhhNTk2ZTZiZjVmMCx1SnRHWklJcw%3D%3D">hacking on a small prototype</a>. The prototype reads /usr/share/dict/words (235k words on my OS X machine) and finds how many words will compress together simultaneously:</p>
+<pre>[16:53:05 Eldil!124 ~] python bisect-test.py
+input len: 235886
+input avgsize: 10.569126612
+input steps: 17.8477302706
+target size: 3000
+
+[117943, 376880, 125.62666666666667]
+[58972, 192764, 64.25466666666667]
+[29486, 99224, 33.074666666666666]
+[14743, 50107, 16.702333333333332]
+[7372, 25207, 8.402333333333333]
+[3686, 12374, 4.124666666666666]
+[1843, 6125, 2.0416666666666665]
+[922, 3051, 1.017]
+[461, 1543, 0.5143333333333333]
+[692, 2320, 0.7733333333333333]
+[807, 2679, 0.893]
+[865, 2866, 0.9553333333333334]
+[894, 2964, 0.988]
+[908, 3007, 1.0023333333333333]
+[901, 2984, 0.9946666666666667]
+[905, 2999, 0.9996666666666667]
+[907, 3004, 1.0013333333333334]
+[906, 3002, 1.0006666666666666]
+[905, 2999, 0.9996666666666667]
+
+time taken: 321.50387764
+output steps: [19]
+maxlines: 905
+maxlines len: 8293
+target ratio: 0.999666666667
+outlen: 2999</pre>
+<p>We can see it took 19 recompressions and 321ms to discover how many of the 235k candidate members fit in the target batch size - 3000 bytes in this case. The answer is 905, and the resulting batch is 2999 bytes - 1 byte short of the target.</p>
+<p>The prototype uses <a href="http://t.umblr.com/redirect?z=http%3A%2F%2Fsortedfile.readthedocs.org%2Fen%2Flatest%2F%23sortedfile.bisect_func_right&amp;t=NzE5OWMxMjRkYjY1ZmI3OWFlNTg2ZjNjMGZmYzczZTczYzcxMTJjOCx1SnRHWklJcw%3D%3D">bisect_func_right()</a> from my little <a href="http://t.umblr.com/redirect?z=http%3A%2F%2Fsortedfile.readthedocs.org%2Fen%2Flatest%2F&amp;t=MDgxNTIzOGJjMmNiMWFiOGZjM2NmNmRlNDk3MDkzZTUzZDliMTU1YSx1SnRHWklJcw%3D%3D">sortedfile</a> library. Aside from bisecting functions, there is support for bisecting sorted text files - the original use case for the library.</p>
+<p><strong>Can we do better?</strong></p>
+<p>With a little more effort we could improve on the above result. For example by maintaining statistics on how well the data in a collection compresses, it would be possible to initialize <em>lo</em> and <em>hi</em> with aggressive initial estimates or place a hard upper bound on the number of candidates.</p>
+<p>The prototype doesn’t bother caching compression output, so after finding the optimal number a final step is needed to recompress everything. This is easily fixed.</p>
+<p>Finally we don’t take into account the <em>distance</em> of a candidate batch’s output size from our target. With a little research I’m certain there are better algorithms for accomplishing this (answers on a postcard!).</p>
+<p>But for the time being I am simply happy that the above approach allows batching operations to complete in seconds instead of minutes while I continue hacking on other bits of the library.</p>
+
+<hr/><p><em><a href="http://t.umblr.com/redirect?z=https%3A%2F%2Fgithub.com%2Fdw%2Fscratch%2Fblob%2Fmaster%2Fbisect-test2.py&amp;t=Mjc3MjE3MTY3ZWFmYmI5ZTUwMjJmZjFiYWMwMzZhYmVhZTRiZjlkZSx1SnRHWklJcw%3D%3D">bisect-test2.py</a> implements a very simple heuristic: simply assume better than 20x compression is never possible. Still it requires too many steps, so this is probably the wrong approach for a “permanent” solution.</em></p></div>
+                                    
+                                </div></body></html>

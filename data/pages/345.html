@@ -1,0 +1,360 @@
+<html><body><div><div class="content html_format">
+      <img src="https://habrastorage.org/getpro/habr/post_images/fc0/be6/122/fc0be61225bee85fbec6ac3ea1eb79d3.png" alt="image"/>
+
+
+<div class="spoiler"><b class="spoiler_title">Разъяснение к публикации</b><p class="spoiler_text">Пользователь @duse ранее выкладывал переводы двух предыдущих статей, явно намереваясь перевести всю серию. Так как тема меня очень интересует, а новых переводов нет, обратился к первоисточнику. С английским не очень силён, чтобы не терять суть, стал переводить на русский. Так и родился этот перевод. Прошу прощения у @duse в случае, если мне стоило ещё чуточку потерпеть. Но для сообщества в любом случае должна быть польза.<br/>
+<br/>
+</p></div><p>
+Таким образом, мы написали лексер библиотеку комбинатора парсеров для нашего интерпретатора. В этой части, мы создадим структурные данные абстрактного синтаксического дерева (AST), и напишем парсер, используя нашу библиотеку комбинаторов, которые переводят список токенов, возвращенных лексером, в абстрактное синтаксическое дерево (AST). После того, как мы распарсим AST, запустить программу будет очень просто.
+
+</p><a name="habracut"/>
+<h4>Определяем AST</h4><p>
+Прежде, чем мы начнём написание нашего парсера, нам нужно определить структуры данных, которые наш парсер будет возвращать. Определим их при помощи классов. Каждый синтаксический элемент IMP будет иметь соответствующий класс. Объекты этого класса будут отображать ноды в AST.
+</p><p>
+В нашем IMP всего три структуры: арифметические выражения (используемые для вычисления чисел), логические выражения (используемые для вычисления условий для if и while высказываний), и состояния. Начнём с арифметических выражений, так, как оставшиеся два зависят от него.</p><p>
+Арифметическое выражение может принимать одну из трёх форм:
+</p><ul>
+<li> Буквенные числовые константы, такие как <code>42</code></li>
+<li>Переменные, такие как <code>x</code></li>
+<li>Бинарные операции, такие как <code>x + 42</code>. Они образованны из других арифметических выражений</li>
+</ul>
+<p>
+Мы также можем группировать выражения вместе скобками (как </p><code>(x+2)*3</code><p>). Это не сколько иной тип выражения, сколько иной способ разбора выражения.</p><p>
+Определим три класса для этих форм, плюс базовый класс для основных арифметических выражений. Пока классы не делают ничего кроме хранения информации. Метод </p><code>__repr__</code><p> позволит выводить на печать </p><code>AST </code><p>во время отладки. Все </p><code>AST</code><p> классы будут наследовать </p><code>Equality</code><p>, поэтому мы сможем проверять одинаковость двух </p><code>AST</code><p> объектов, что тоже пригодиться при тестировании.
+
+</p><pre><code class="python">from equality import *
+
+class Aexp(Equality):
+    pass
+
+class IntAexp(Aexp):
+    def __init__(self, i):
+        self.i = i
+
+    def __repr__(self):
+        return 'IntAexp(%d)' % self.i
+
+class VarAexp(Aexp):
+    def __init__(self, name):
+        self.name = name
+
+    def __repr__(self):
+        return 'VarAexp(%s)' % self.name
+
+class BinopAexp(Aexp):
+    def __init__(self, op, left, right):
+        self.op = op
+        self.left = left
+        self.right = right
+
+    def __repr__(self):
+        return 'BinopAexp(%s, %s, %s)' % (self.op, self.left, self.right)
+
+</code></pre><p>
+Логические выражения немного сложнее. Существует 4 типа логических выражений:
+</p><ul>
+<li>Выражения отношений (такие как <code>x &lt; 10</code>) </li>
+<li><code>And </code>выражения (такие как <code>x &lt; 10 and y &gt; 20</code>)</li>
+<li><code>Or </code>выражения </li>
+<li> <code>Not </code>выражения</li>
+</ul>
+<p>
+Левые и правые части выражений отношений — это арифметические выражения. Левые и правые части </p><code>and</code><p>, </p><code>or</code><p>, или </p><code>not</code><p> выражений — логические выражения. Подобное разграничение типов помогает нам избегать бессмысленные выражения вроде </p><code>x &lt; 10 and 30</code><p>.
+
+</p><pre><code class="python">class Bexp(Equality):
+    pass
+
+class RelopBexp(Bexp):
+    def __init__(self, op, left, right):
+        ...
+
+class AndBexp(Bexp):
+    def __init__(self, left, right):
+        ...
+class OrBexp(Bexp):
+    def __init__(self, left, right):
+        ...
+
+class NotBexp(Bexp):
+    def __init__(self, exp):
+        ...
+</code></pre><p>
+Утверждения (statements) могут содержать арифметические и логические выражения одновременно. Существует 4 типа выражений: присвоение, соединение, условия и циклы.
+
+</p><pre><code class="python">class Statement(Equality):
+    pass
+
+class AssignStatement(Statement):
+    def __init__(self, name, aexp):
+         ...
+
+class CompoundStatement(Statement):
+    def __init__(self, first, second):
+        ...
+
+class IfStatement(Statement):
+    def __init__(self, condition, true_stmt, false_stmt):
+        ...
+
+class WhileStatement(Statement):
+    def __init__(self, condition, body):
+        ...
+
+</code></pre>
+<h4>Примитивы</h4><p>
+Теперь мы имеем наши </p><code>AST </code><p>классы и подходящий набор комбинаторов — самое время написать наш парсер. При написании парсера, легче начать с базовых структур языка, постепенно переходя к более сложным вещам.
+</p><p>
+Первый парсер, который мы рассмотрим, это парсер </p><code>keyword</code><p>. Им является всего лишь специальная версия </p><code>Reserved</code><p>-комбинатора с использованием тэга </p><code>RESERVED</code><p>, которым помечены все ключевые слова. Запомните, </p><code>Reserved </code><p>соответствует одиночному токену, у которого значение и тэг такие же, как у переданных.
+
+</p><pre><code class="python">def keyword(kw):
+    return Reserved(kw, RESERVED)
+</code></pre>
+<code>keyword</code><p> является фактическим комбинатор, потому, что это функция, возвращающая парсер. Мы и будем его использовать напрямую в других парсерах.
+</p><p>
+Парсер </p><code>id</code><p> используется для сопоставления именам переменных. Он использует комбинатор </p><code>Tag</code><p>, который сопоставляет токен с указанным тэгом.
+
+</p><pre><code class="python">id = Tag(ID)
+</code></pre><p>
+Парсер </p><code>num</code><p> используется для сопоставления целых чисел. Он работает почти как и </p><code>id</code><p>, за исключением того, что мы использует комбинатор </p><code>Process </code><p>(точнее </p><code>^</code><p> оператор, который вызывает </p><code>Process</code><p>) для преобразования токена в конкретное целое число.
+
+</p><pre><code class="python">num = Tag(INT) ^ (lambda i: int(i))
+</code></pre>
+<h4>Разбор арифметических выражений</h4><p>
+Разбор арифметических выражений не прост, но нам необходимо парсить арифметические выражения, для того, чтобы разобрать логические выражения или утверждения, поэтому мы должны начать именно с них.
+</p><p>
+Сперва мы определим парсер </p><code>aexp_value</code><p>, который будет конвертировать значения, возвращенные </p><code>num </code><p>и </p><code>id </code><p>в фактические выражения.
+
+</p><pre><code class="python">def aexp_value():
+    return (num ^ (lambda i: IntAexp(i))) | \
+           (id  ^ (lambda v: VarAexp(v)))
+</code></pre><p>
+Мы использовали оператор </p><code>|</code><p>, который является сокращением для комбинатора </p><code>Alternate</code><p>. Это позволит разбирать выражения целых чисел первыми. Если они провалятся, будет произведена попытка разбора выражения с переменной.
+</p><p>
+Отметим, что мы определили </p><code>aexp_value </code><p>как функцию без аргументов вместо глобального значения, так же, как мы поступили и с </p><code>id</code><p> и </p><code>num</code><p>. Так же поступим и со всеми оставшимися парсерами. И сделали мы это потому, не хотим, чтобы код каждого парсера был вычислен сразу. Если бы мы определили каждый парсер как глобальный, каждый парсер не смог бы сослаться на другие парсеры, которые следуют далее в том же исходном файле, потому, как они ещё не были бы объявлены. Это сделало бы невозможным определить рекурсивные парсеры, и исходный код стал бы менее читабелен.
+</p><p>
+Далее, мы хотели бы в наших арифметических выражениях реализовать группировку со скобками. Хотя группировка выражения не требуют собственного класса </p><code>AST</code><p>, им необходим другой парсер, обрабатывающий их.
+
+</p><pre><code class="python">def process_group(parsed):
+    ((_, p), _) = parsed
+    return p
+
+def aexp_group():
+    return keyword('(') + Lazy(aexp) + keyword(')') ^ process_group
+
+</code></pre><p>
+Функция </p><code>process_group </code><p>используется с комбинатором </p><code>Process </code><p>(</p><code>^</code><p> оператор). Она просто отбрасывает токены скобок и возвращает выражение внутри. Фактически, </p><code>aexp_group </code><p>тоже является парсером. Запомните, оператор </p><code>+</code><p> это сокращение для комбинатора </p><code>Concat</code><p>. Так что она распарсит '(', следующую за арифметическим выражением (разобранным </p><code>aexp</code><p>, которое мы скоро определим), следующее за ')'. Необходимо избегать прямого вызова </p><code>aexp</code><p>, потому, как </p><code>aexp </code><p>вызывает </p><code>aexp_group</code><p>, что приведёт к бесконечной рекурсии. Используем комбинатор </p><code>Lazy</code><p>, который откладывает вызов aexp до тех пор, пока парсер не будет применён к каким-либо входным данным.
+</p><p>
+Далее, мы комбинируем </p><code>aexp_value </code><p> и </p><code>aexp_group </code><p> при помощи </p><code>aexp_term</code><p>. Выражение </p><code>aexp_term </code><p>— это любое простое самостоятельное выражение, в котором мы не должны заботиться о старшинстве операторов по отношению к другим выражениям.
+
+</p><pre><code class="python">def aexp_term():
+    return aexp_value() | aexp_group()
+</code></pre><p>
+Сейчас мы подходим к каверзной части: операторы и старшинство. Будет проще определить другой парсер для </p><code>aexp</code><p> и выбрасывать его совместно с </p><code>aexp_term</code><p>. Это приведёт выражение:
+</p><pre><code class="python">1 + 2 * 3
+</code></pre><p>
+к такому неверному разбору:
+</p><pre><code class="python">(1 + 2) * 3
+</code></pre><p>
+Парсер должен знать о старшинстве операторов, и он должен группировать друг с другом операторы с более высоким старшинством.
+</p><p>
+Мы определим несколько вспомогательных функций для того, чтобы выполнить эту работу.
+
+</p><pre><code class="python">def process_binop(op):
+    return lambda l, r: BinopAexp(op, l, r)
+</code></pre><p>
+Функция </p><code>process_binop</code><p> — это то, что создаёт объект </p><code>BinopAexp</code><p>. Эта функция принимает любой арифметический оператор и возвращает функцию, которая комбинирует пары выражений, используя этот оператор…
+</p><p>
+Функция </p><code>process_binop </code><p> должна использоваться с комбинатором </p><code>Exp </code><p>(</p><code>*</code><p> оператор). Комбинатор </p><code>Exp </code><p>разбирает список выражений с разделителем между каждой парой выражений. Левый оператор </p><code>Exp </code><p>— парсер, который сопоставляет индивидуальные элементы списка (в нашем случае, арифметических выражений). Правый оператор — это парсер, который сопоставит разделители (операторы). Неважно, какой разделитель сопоставлен, правый парсер вернёт функцию, которая, учитывая соответствие операторов, возвращает функцию объединения. Функция объединения принимает разобранные выражения слева и справа от разделителя, и возвращаете единое, объединённое выражение. Ещё не запутались? Мы быстренько пройдём использование </p><code>Exp</code><p>. Функция </p><code>process_binop </code><p>— это то, что возвратит правый парсер.</p><p>
+Далее, мы определим наши уровни старшинства и комбинатор, помогающий нам с ними справляться.
+</p><pre><code class="python">def any_operator_in_list(ops):
+    op_parsers = [keyword(op) for op in ops]
+    parser = reduce(lambda l, r: l | r, op_parsers)
+    return parser
+
+aexp_precedence_levels = [
+    ['*', '/'],
+    ['+', '-'],
+]
+</code></pre><p>
+Функция </p><code>any_operator_in_list </code><p>принимает список строк ключевых слов и возвращает соответствующий им парсер. Определим </p><code>aexp_precedence_levels</code><p>, содержащий список операторов для каждого уровня старшинства (начиная с более высокого).
+
+</p><pre><code class="python">def precedence(value_parser, precedence_levels, combine):
+    def op_parser(precedence_level):
+        return any_operator_in_list(precedence_level) ^ combine
+    parser = value_parser * op_parser(precedence_levels[0])
+    for precedence_level in precedence_levels[1:]:
+        parser = parser * op_parser(precedence_level)
+    return parser
+</code></pre>
+<code>precedence </code><p>— это фактическое содержание операции. Его первый аргумент, </p><code>value_parser</code><p>, это парсер, который может читать простые части выражения: числа, переменные и группы. Это будет </p><code>aexp_term</code><p>. Список </p><code>precedence_levels </code><p>содержит список операторов, по одному списку на каждый уровень. Для этого используем </p><code>aexp_precedence_levels</code><p>. </p><code>combine </code><p>будет принимать функцию, которая, переданная оператором, возвратит функцию для построения одного большого выражения из двух небольших. Это и будет </p><code>process_binop</code>
+<p>
+Внутри </p><code>precedence</code><p>, мы сначала определим </p><code>op_parser</code><p>, который, для данного уровня старшинства, читает только операторы с тем же уровнем и возвращает функцию, которая объединяет два выражения. </p><code>op_parser </code><p>может использоваться как правый аргумент </p><code>Exp</code><p>. Мы начинаем с вызова </p><code>Exp </code><p> с </p><code>op_parser </code><p> для наивысшего уровня старшинства, ибо эти операции должны группироваться первыми. Далее используем результирующий парсер как элемент парсера (левый аргумент </p><code>Exp</code><p>) на следующем уровне. После окончания цикла, результирующий парсер способен корректно разбирать арифметическое выражение.
+</p><p>
+Как это работает на практике? Давайте разберём.
+</p><pre><code class="python">E&lt;sub&gt;0&lt;/sub&gt; = value_parser
+E&lt;sub&gt;1&lt;/sub&gt; = E&lt;sub&gt;0&lt;/sub&gt; * op_parser(precedence_levels[0])
+E&lt;sub&gt;2&lt;/sub&gt; = E&lt;sub&gt;1&lt;/sub&gt; * op_parser(precedence_levels[1])
+</code></pre>
+<code>E<sub>0</sub></code><p> является тем же, что и </p><code>value_parser</code><p>. Он может парсить числа, переменные и группы, но не операторы. </p><code>E<sub>1</sub> </code><p> моет парсить выражения, содержащие всё, что может совпадать с </p><code>E<sub>0</sub></code><p>, разделённые операторами из первого уровня старшинства. Так </p><code>E<sub>1</sub> </code><p> может сопоставлять </p><code>a * b / c</code><p>, но должен вызвать ошибку как только столкнётся с оператором </p><code>+</code><p>. </p><code>E<sub>2</sub></code><p> может сопоставлять выражения, разделённые операторами следующего уровня старшинства. Так как мы имеем только 2 уровня старшинства, </p><code>E<sub>2</sub> </code><p> может сопоставлять любые арифметические выражения, которые мы поддерживаем.
+</p><p>
+Давайте выполним пример. Возьмём сложное арифметическое выражение, и понемногу заменим каждую часть её сопоставлением.
+
+</p><pre><code class="python">4 * a + b / 2 - (6 + c)
+E&lt;sub&gt;0(4)&lt;/sub&gt; * E&lt;sub&gt;0&lt;/sub&gt;(a) + E&lt;sub&gt;0&lt;/sub&gt;(b) / E&lt;sub&gt;0&lt;/sub&gt;(2) - E&lt;sub&gt;0&lt;/sub&gt;(6+c)
+E&lt;sub&gt;1&lt;/sub&gt;(4*a) + E&lt;sub&gt;1&lt;/sub&gt;(b/2) - E&lt;sub&gt;1&lt;/sub&gt;(6+c)
+E&lt;sub&gt;2&lt;/sub&gt;((4*a)+(b/2)-(6+c))
+</code></pre><p>
+Мы используем старшинство непосредственно для определения </p><code>aexp</code><p>:
+
+</p><pre><code class="python">def aexp():
+    return precedence(aexp_term(),
+                      aexp_precedence_levels,
+                      process_binop)
+</code></pre><p>
+Вероятно, мы можем определить старшинство менее абстрактно, но преимущество нашего подхода в том, что так мы применяем его в любой ситуации, имеющей проблему старшинства операторов. Мы повторно применим её для разбора логических выражений.
+</p><h4>Разбор логических выражений</h4><p>
+Мы уже можем перейти от арифметических выражений к логическим. Логические выражения обычно проще арифметических, так что нам не понадобятся новые инструменты для их разбора. Начнём с самых простых логических выражений:
+</p><pre><code class="python">def process_relop(parsed):
+    ((left, op), right) = parsed
+    return RelopBexp(op, left, right)
+
+def bexp_relop():
+    relops = ['&lt;', '&lt;=', '&gt;', '&gt;=', '=', '!=']
+    return aexp() + any_operator_in_list(relops) + aexp() ^ process_relop
+</code></pre><p>
+Функцию </p><code>process_relop</code><p> мы используем с комбинатором </p><code>Process</code><p>. Он принимает три соединённых значения и создаёт из них </p><code>RelopBexp</code><p>. В </p><code>bexp_relop </code><p> мы разбираем два арифметических выражения (</p><code>aexp</code><p>), разделённых оператором отношения. И мы используем нашего старичка — функцию </p><code>any_operator_in_list</code><p>, так что нам не нужно писать случай для каждого оператора. Так же нет необходимости использовать комбинаторы вроде </p><code>Exp </code><p> или </p><code>precedence</code><p>, так как выражения отношений не могут соединяться друг с другом в IMP так, как они делается других языках.
+</p><p>
+Далее, определим выражение </p><code>not</code><p>. Выражение </p><code>not </code><p> является унарным оператором с высоким старшинством. Это делает его более простым для разбора чем </p><code>and </code><p> и </p><code>or </code><p> выражения.
+</p><pre><code class="python">def bexp_not():
+    return keyword('not') + Lazy(bexp_term) ^ (lambda parsed: NotBexp(parsed[1]))
+</code></pre><p>
+Здесь мы соединили ключевое слово </p><code>not </code><p> с названием логического выражения (которое мы определим далее). Так как </p><code>bexp_not </code><p> будет использоваться для определения </p><code>bexp_term</code><p>, нам необходимо использовать комбинатор </p><code>Lazy </code><p> для избегания бесконечной рекурсии.
+
+</p><pre><code class="python">def bexp_group():
+    return keyword('(') + Lazy(bexp) + keyword(')') ^ process_group
+
+def bexp_term():
+    return bexp_not()   | \
+           bexp_relop() | \
+           bexp_group()
+</code></pre><p>
+Определяем </p><code>bexp_group</code><p> и </p><code>bexp_term</code><p> таким же образом, как и для арифметических эквивалентов. В этом нет ничего нового. </p><p>
+Далее, нам нужно определить выражения, которые включают операторы </p><code>and </code><p> и </p><code>or</code><p>. Эти операторы на самом деле работают как и арифметические операторы; и те и другие выполняются с лева на право, и </p><code>and </code><p> имеет высший уровень старшинства.
+</p><pre><code class="python">bexp_precedence_levels = [
+    ['and'],
+    ['or'],
+]
+
+def process_logic(op):
+    if op == 'and':
+        return lambda l, r: AndBexp(l, r)
+    elif op == 'or':
+        return lambda l, r: OrBexp(l, r)
+    else:
+        raise RuntimeError('unknown logic operator: ' + op)
+
+def bexp():
+    return precedence(bexp_term(),
+                      bexp_precedence_levels,
+                      process_logic)
+
+</code></pre><p>
+Так же как и </p><code>process_binop</code><p>, </p><code>process_logic </code><p> предназначен для использования с комбинатором </p><code>Exp</code><p>. Он принимает оператор и возвращает функцию, которая комбинирует два подвыражения в одно выражение, используя этот оператор. Мы подставляем это в соответствии со старшинством так же, как и в </p><code>aexp</code><p>. Написание общего кода здесь окупается, так как мы не должны повторять сложный код выражение обработки выражения.
+
+</p><h4>Разбор утверждений</h4><p>
+С окончанием </p><code>aexp</code><p> и </p><code>bexp</code><p>, мы можем начать разбор IMP утверждений. Начнём со скромного утверждения присваивания:
+</p><pre><code class="python">def assign_stmt():
+    def process(parsed):
+        ((name, _), exp) = parsed
+        return AssignStatement(name, exp)
+    return id + keyword(':=') + aexp() ^ process
+</code></pre>
+<p>
+Ничего особо интересного. Далее, мы посмотрим на </p><code>stmt_list</code><p>. Он будет разбирать серию утверждений, разделённых точкой с запятой.
+</p><pre><code class="python">def stmt_list():
+    separator = keyword(';') ^ (lambda x: lambda l, r: CompoundStatement(l, r))
+    return Exp(stmt(), separator)
+</code></pre>
+<p>
+Помните, нам нужно использовать комбинатор </p><code>EXP</code><p> здесь вместо чего-то более простого как </p><code>stmt() + keyword(';') + stmt()</code><p> для избегания левосторонней рекурсии.</p><p>
+Далее у нас утверждение </p><code>if</code><p>:
+</p><pre><code class="python">def if_stmt():
+    def process(parsed):
+        (((((_, condition), _), true_stmt), false_parsed), _) = parsed
+        if false_parsed:
+            (_, false_stmt) = false_parsed
+        else:
+            false_stmt = None
+        return IfStatement(condition, true_stmt, false_stmt)
+    return keyword('if') + bexp() + \
+           keyword('then') + Lazy(stmt_list) + \
+           Opt(keyword('else') + Lazy(stmt_list)) + \
+           keyword('end') ^ process
+</code></pre><p>
+Здесь сложность лишь в том, что пункт </p><code>else </code><p> необязательный. Это делает выполнение функции немного сложнее.</p><p>
+Наконец, у нас цикл </p><code>while</code><p>:
+</p><pre><code class="python">def while_stmt():
+    def process(parsed):
+        ((((_, condition), _), body), _) = parsed
+        return WhileStatement(condition, body)
+    return keyword('while') + bexp() + \
+           keyword('do') + Lazy(stmt_list) + \
+           keyword('end') ^ process
+</code></pre><p>
+Мы обернём это при помощи </p><code>stmt</code><p>:
+</p><pre><code class="python">def stmt():
+    return assign_stmt() | \
+           if_stmt()     | \
+           while_stmt()
+</code></pre><p>
+Вы можете заметить, что в обоих утверждения </p><code>if</code><p> и </p><code>while </code><p> использование </p><code>stmt_list </code><p> в теле лучше чем </p><code>stmt</code><p>. </p><code>stmt_list </code><p> в действительности является нашим верхним уровнем определения. Мы не можем иметь </p><code>stmt</code><p>, напрямую зависимый от </p><code>stmt_list</code><p>, так как это приведёт к левосторонней рекурсии парсера, и так как мы хотим иметь необязательные утверждения в телах </p><code>if</code><p> и </p><code>while</code><p>, мы напрямую используем </p><code>stmt_list</code><p>.
+</p><h4>Собираем всё вместе</h4><p>
+Теперь у нас есть парсер для каждой части языка. Нам нужно лишь сделать немного высокоуровневых определений:
+
+</p><pre><code class="python">def parser():
+    return Phrase(stmt_list())
+</code></pre>
+<code>parser </code><p> будет разбирать всю программу. Программа — это всего лишь список утверждений, но комбинатор </p><code>Phrase </code><p> гарантирует, что мы используем каждый токен в файле раньше преждевременного окончания из за мусорных (неверных) токенов в конце.
+
+</p><pre><code class="python">def imp_parse(tokens):
+    ast = parser()(tokens, 0)
+    return ast
+</code></pre><p>
+Функцию </p><code>imp_parse </code><p> клиент будет вызывать для разбора программы. Она принимает весь список токенов, вызывает parser, начинает с первого токена и возвращает результирующее Абстрактное Синтаксическое Дерево (AST).
+</p><p>
+Вот простая управляющая программа для проверки наших парсеров (в добавок к юнитестам):
+</p><pre><code class="python">import sys
+from imp_parser import *
+
+if __name__ == '__main__':
+    if len(sys.argv) != 3:
+        sys.stderr.write('usage: %s filename parsername' % sys.argv[0])
+        sys.exit(1)
+    filename = sys.argv[1]
+    file = open(filename)
+    characters = file.read()
+    file.close()
+    tokens = imp_lex(characters)
+    parser = globals()[sys.argv[2]]()
+    result = parser(tokens, 0)
+    print result
+</code></pre><p>
+Эта программа читает файл (первый аргумент) и разбирает его каким либо парсером из </p><b>imp_parse.py</b><p> (второй аргумент). Пример:
+
+</p><pre><code class="bash">$ echo '1 + 2 * 3' &gt;foo.imp
+$ python imp_parser_driver.py foo.imp aexp
+Result(BinopAexp(+, IntAexp(1), BinopAexp(*, IntAexp(2), IntAexp(3))), 5)
+</code></pre><p>
+Это должно предоставить хорошую песочницу для экспериментов.
+</p><h4>Заключение</h4><p>
+В этой статье мы написали библиотеку комбинатор с нуля и использовали его для написания парсера для </p><b>IMP</b><p>. В следующей и последней из этой серии статье мы напишем исполнитель (</p><i>Прим. перев.</i><p>: не смог подобрать лучший перевод слова </p><i>evaluator</i><p>) для нашего разобранного Абстрактного Синтаксического Дерева (</p><b>AST</b><p>).
+</p><p>
+Автор оригинальной статьи — </p><a href="http://www.jayconrod.com/posts/39/a-simple-interpreter-from-scratch-in-python-part-3">Jay Conrod</a>
+
+<b>P.S.</b><p> Вижу проблемы с тегом Sub. Есть предположение, что новичку ещё рано пользоваться таким тегом. Чем его заменить — не знаю. Оставлю до выяснения решения.
+
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

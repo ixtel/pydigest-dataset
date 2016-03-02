@@ -1,0 +1,1058 @@
+<html><body><div><article class="text">
+        
+
+        <header class="article-header">
+            <h1 class="page-title">PEP 0509 -- Add a private version to dict</h1>
+        </header>
+
+        
+
+ 
+  <table class="rfc2822 docutils field-list" frame="void" rules="none">
+   <col class="field-name"/>
+   
+   <col class="field-body"/>
+   
+   <tbody valign="top">
+    <tr class="field">
+     <th class="field-name">
+      PEP:
+     </th>
+     <td class="field-body">
+      509
+     </td>
+    </tr>
+    <tr class="field">
+     <th class="field-name">
+      Title:
+     </th>
+     <td class="field-body">
+      Add a private version to dict
+     </td>
+    </tr>
+    <tr class="field">
+     <th class="field-name">
+      Author:
+     </th>
+     <td class="field-body">
+      Victor Stinner &lt;victor.stinner at gmail.com&gt;
+     </td>
+    </tr>
+    <tr class="field">
+     <th class="field-name">
+      Status:
+     </th>
+     <td class="field-body">
+      Draft
+     </td>
+    </tr>
+    <tr class="field">
+     <th class="field-name">
+      Type:
+     </th>
+     <td class="field-body">
+      Standards Track
+     </td>
+    </tr>
+    <tr class="field">
+     <th class="field-name">
+      Created:
+     </th>
+     <td class="field-body">
+      4-January-2016
+     </td>
+    </tr>
+    <tr class="field">
+     <th class="field-name">
+      Python-Version:
+     </th>
+     <td class="field-body">
+      3.6
+     </td>
+    </tr>
+   </tbody>
+  </table>
+  <hr/>
+  
+  <div class="section" id="abstract">
+   
+   <p>
+    Add a new private version to builtin
+    <tt class="docutils literal">
+     dict
+    </tt>
+    type, incremented at each
+change, to implement fast guards on namespaces.
+   </p>
+  </div>
+  <div class="section" id="rationale">
+   
+   <p>
+    In Python, the builtin
+    <tt class="docutils literal">
+     dict
+    </tt>
+    type is used by many instructions. For
+example, the
+    <tt class="docutils literal">
+     LOAD_GLOBAL
+    </tt>
+    instruction searchs for a variable in the
+global namespace, or in the builtins namespace (two dict lookups).
+Python uses
+    <tt class="docutils literal">
+     dict
+    </tt>
+    for the builtins namespace, globals namespace, type
+namespaces, instance namespaces, etc. The local namespace (namespace of
+a function) is usually optimized to an array, but it can be a dict too.
+   </p>
+   <p>
+    Python is hard to optimize because almost everything is mutable: builtin
+functions, function code, global variables, local variables, ... can be
+modified at runtime. Implementing optimizations respecting the Python
+semantics requires to detect when "something changes": we will call
+these checks "guards".
+   </p>
+   <p>
+    The speedup of optimizations depends on the speed of guard checks. This
+PEP proposes to add a version to dictionaries to implement fast guards
+on namespaces.
+   </p>
+   <p>
+    Dictionary lookups can be skipped if the version does not change which
+is the common case for most namespaces. The performance of a guard does
+not depend on the number of watched dictionary entries, complexity of
+O(1), if the dictionary version does not change.
+   </p>
+   <p>
+    Example of optimization: copy the value of a global variable to function
+constants.  This optimization requires a guard on the global variable to
+check if it was modified. If the variable is modified, the variable must
+be loaded at runtime when the function is called, instead of using the
+constant.
+   </p>
+   <p>
+    See the
+    <a class="reference external" href="https://www.python.org/dev/peps/pep-0510/">
+     PEP 510 -- Specialized functions with guards
+    </a>
+    for the concrete usage of
+guards to specialize functions and for the rationale on Python static
+optimizers.
+   </p>
+  </div>
+  <div class="section" id="guard-example">
+   
+   <p>
+    Pseudo-code of an fast guard to check if a dictionary entry was modified
+(created, updated or deleted) using an hypothetical
+    <tt class="docutils literal">
+     dict_get_version(dict)
+    </tt>
+    function:
+   </p>
+   <pre class="literal-block">
+UNSET = object()
+
+class GuardDictKey:
+    def __init__(self, dict, key):
+        self.dict = dict
+        self.key = key
+        self.value = dict.get(key, UNSET)
+        self.version = dict_get_version(dict)
+
+    def check(self):
+        """Return True if the dictionary entry did not changed."""
+
+        # read the version field of the dict structure
+        version = dict_get_version(self.dict)
+        if version == self.version:
+            # Fast-path: dictionary lookup avoided
+            return True
+
+        # lookup in the dictionary
+        value = self.dict.get(self.key, UNSET)
+        if value is self.value:
+            # another key was modified:
+            # cache the new dictionary version
+            self.version = version
+            return True
+
+        # the key was modified
+        return False
+</pre>
+  </div>
+  <div class="section" id="usage-of-the-dict-version">
+   
+   <div class="section" id="specialized-functions-using-guards">
+    
+    <p>
+     The
+     <a class="reference external" href="https://www.python.org/dev/peps/pep-0510/">
+      PEP 510 -- Specialized functions with guards
+     </a>
+     proposes an API to support
+specialized functions with guards. It allows to implement static
+optimizers for Python without breaking the Python semantics.
+    </p>
+    <p>
+     Example of a static Python optimizer: the astoptimizer of the
+     <a class="reference external" href="http://faster-cpython.readthedocs.org/fat_python.html">
+      FAT
+Python
+     </a>
+     project
+implements many optimizations which require guards on namespaces.
+Examples:
+    </p>
+    <ul class="simple">
+     <li>
+      Call pure builtins: to replace
+      <tt class="docutils literal">
+       <span class="pre">
+        len("abc")
+       </span>
+      </tt>
+      with
+      <tt class="docutils literal">
+       3
+      </tt>
+      , guards on
+      <tt class="docutils literal">
+       <span class="pre">
+        builtins.__dict__['len']
+       </span>
+      </tt>
+      and
+      <tt class="docutils literal">
+       <span class="pre">
+        globals()['len']
+       </span>
+      </tt>
+      are required
+     </li>
+     <li>
+      Loop unrolling: to unroll the loop
+      <tt class="docutils literal">
+       for i in
+       <span class="pre">
+        range(...):
+       </span>
+       ...
+      </tt>
+      ,
+guards on
+      <tt class="docutils literal">
+       <span class="pre">
+        builtins.__dict__['range']
+       </span>
+      </tt>
+      and
+      <tt class="docutils literal">
+       <span class="pre">
+        globals()['range']
+       </span>
+      </tt>
+      are required
+     </li>
+    </ul>
+   </div>
+   <div class="section" id="pyjion">
+    
+    <p>
+     According of Brett Cannon, one of the two main developers of Pyjion,
+Pyjion can also benefit from dictionary version to implement
+optimizations.
+    </p>
+    <p>
+     Pyjion is a JIT compiler for Python based upon CoreCLR (Microsoft .NET
+Core runtime).
+    </p>
+   </div>
+   <div class="section" id="unladen-swallow">
+    
+    <p>
+     Even if dictionary version was not explicitly mentioned, optimization
+globals and builtins lookup was part of the Unladen Swallow plan:
+"Implement one of the several proposed schemes for speeding lookups of
+globals and builtins." Source:
+     <a class="reference external" href="https://code.google.com/p/unladen-swallow/wiki/ProjectPlan">
+      Unladen Swallow ProjectPlan
+     </a>
+     .
+    </p>
+    <p>
+     Unladen Swallow is a fork of CPython 2.6.1 adding a JIT compiler
+implemented with LLVM. The project stopped in 2011:
+     <a class="reference external" href="http://qinsb.blogspot.com.au/2011/03/unladen-swallow-retrospective.html">
+      Unladen Swallow
+Retrospective
+     </a>
+     .
+    </p>
+   </div>
+  </div>
+  <div class="section" id="changes">
+   
+   <p>
+    Add a
+    <tt class="docutils literal">
+     ma_version
+    </tt>
+    field to the
+    <tt class="docutils literal">
+     PyDictObject
+    </tt>
+    structure with the C
+type
+    <tt class="docutils literal">
+     PY_INT64_T
+    </tt>
+    , 64-bit unsigned integer. New empty dictionaries are
+initilized to version
+    <tt class="docutils literal">
+     0
+    </tt>
+    . The version is incremented at each change:
+   </p>
+   <ul class="simple">
+    <li>
+     <tt class="docutils literal">
+      clear()
+     </tt>
+     if the dict was non-empty
+    </li>
+    <li>
+     <tt class="docutils literal">
+      pop(key)
+     </tt>
+     if the key exists
+    </li>
+    <li>
+     <tt class="docutils literal">
+      popitem()
+     </tt>
+     if the dict is non-empty
+    </li>
+    <li>
+     <tt class="docutils literal">
+      setdefault(key, value)
+     </tt>
+     if the
+     <cite>
+      key
+     </cite>
+     does not exist
+    </li>
+    <li>
+     <tt class="docutils literal">
+      __detitem__(key)
+     </tt>
+     if the key exists
+    </li>
+    <li>
+     <tt class="docutils literal">
+      __setitem__(key, value)
+     </tt>
+     if the
+     <cite>
+      key
+     </cite>
+     doesn't exist or if the value
+is not
+     <tt class="docutils literal">
+      dict[key]
+     </tt>
+    </li>
+    <li>
+     <tt class="docutils literal">
+      <span class="pre">
+       update(...)
+      </span>
+     </tt>
+     if new values are different than existing values:
+values are compared by identity, not by their content; the version can
+be incremented multiple times
+    </li>
+   </ul>
+   <div class="note">
+    <p class="first admonition-title">
+     Note
+    </p>
+    <p class="last">
+     The
+     <tt class="docutils literal">
+      PyDictObject
+     </tt>
+     structure is not part of the stable ABI.
+    </p>
+   </div>
+   <p>
+    Example using an hypothetical
+    <tt class="docutils literal">
+     dict_get_version(dict)
+    </tt>
+    function:
+   </p>
+   <pre class="literal-block">
+&gt;&gt;&gt; d = {}
+&gt;&gt;&gt; dict_get_version(d)
+0
+&gt;&gt;&gt; d['key'] = 'value'
+&gt;&gt;&gt; dict_get_version(d)
+1
+&gt;&gt;&gt; d['key'] = 'new value'
+&gt;&gt;&gt; dict_get_version(d)
+2
+&gt;&gt;&gt; del d['key']
+&gt;&gt;&gt; dict_get_version(d)
+3
+</pre>
+   <p>
+    If a dictionary is created with items, the version is also incremented
+at each dictionary insertion. Example:
+   </p>
+   <pre class="literal-block">
+&gt;&gt;&gt; d=dict(x=7, y=33)
+&gt;&gt;&gt; dict_get_version(d)
+2
+</pre>
+   <p>
+    The version is not incremented if an existing key is set to the same
+value. For efficiency, values are compared by their identity:
+    <tt class="docutils literal">
+     new_value is old_value
+    </tt>
+    , not by their content:
+    <tt class="docutils literal">
+     new_value == old_value
+    </tt>
+    . Example:
+   </p>
+   <pre class="literal-block">
+&gt;&gt;&gt; d={}
+&gt;&gt;&gt; value = object()
+&gt;&gt;&gt; d['key'] = value
+&gt;&gt;&gt; dict_get_version(d)
+2
+&gt;&gt;&gt; d['key'] = value
+&gt;&gt;&gt; dict_get_version(d)
+2
+</pre>
+   <div class="note">
+    <p class="first admonition-title">
+     Note
+    </p>
+    <p class="last">
+     CPython uses some singleton like integers in the range [-5; 257],
+empty tuple, empty strings, Unicode strings of a single character in
+the range [U+0000; U+00FF], etc. When a key is set twice to the same
+singleton, the version is not modified.
+    </p>
+   </div>
+  </div>
+  <div class="section" id="implementation">
+   
+   <p>
+    The
+    <a class="reference external" href="https://bugs.python.org/issue26058">
+     issue #26058: PEP 509: Add ma_version to PyDictObject
+    </a>
+    contains a patch implementing
+this PEP.
+   </p>
+   <p>
+    On pybench and timeit microbenchmarks, the patch does not seem to add
+any overhead on dictionary operations.
+   </p>
+   <p>
+    When the version does not change,
+    <tt class="docutils literal">
+     PyDict_GetItem()
+    </tt>
+    takes 14.8 ns for
+a dictionary lookup, whereas a guard check only takes 3.8 ns. Moreover,
+a guard can watch for multiple keys. For example, for an optimization
+using 10 global variables in a function, 10 dictionary lookups costs 148
+ns, whereas the guard still only costs 3.8 ns when the version does not
+change (39x as fast).
+   </p>
+  </div>
+  <div class="section" id="integer-overflow">
+   
+   <p>
+    The implementation uses the C unsigned integer type
+    <tt class="docutils literal">
+     PY_UINT64_T
+    </tt>
+    to
+store the version, a 64 bits unsigned integer. The C code uses
+    <tt class="docutils literal">
+     version++
+    </tt>
+    . On integer overflow, the version is wrapped to
+    <tt class="docutils literal">
+     0
+    </tt>
+    (and
+then continue to be incremented) according to the C standard.
+   </p>
+   <p>
+    After an integer overflow, a guard can succeed whereas the watched
+dictionary key was modified. The bug occurs if the dictionary is
+modified at least
+    <tt class="docutils literal">
+     2 ** 64
+    </tt>
+    times between two checks of the guard and
+if the new version (theorical value with no integer overflow) is equal
+to the old version modulo
+    <tt class="docutils literal">
+     2 ** 64
+    </tt>
+    .
+   </p>
+   <p>
+    If a dictionary is modified each nanosecond, an overflow takes longer
+than 584 years. Using a 32-bit version, the overflow occurs only after 4
+seconds. That's why a 64-bit unsigned type is also used on 32-bit
+systems. A dictionary lookup at the C level takes 14.8 ns.
+   </p>
+   <p>
+    A risk of a bug every 584 years is acceptable.
+   </p>
+  </div>
+  <div class="section" id="alternatives">
+   
+   <div class="section" id="expose-the-version-at-python-level-as-a-read-only-version-property">
+    
+    <p>
+     The first version of the PEP proposed to expose the dictionary version
+as a read-only
+     <tt class="docutils literal">
+      __version__
+     </tt>
+     property at Python level, and also to add
+the property to
+     <tt class="docutils literal">
+      collections.UserDict
+     </tt>
+     (since this type must mimick
+the
+     <tt class="docutils literal">
+      dict
+     </tt>
+     API).
+    </p>
+    <p>
+     There are multiple issues:
+    </p>
+    <ul>
+     <li>
+      <p class="first">
+       To be consistent and avoid bad surprises, the version must be added to
+all mapping types. Implementing a new mapping type would require extra
+work for no benefit, since the version is only required on the
+       <tt class="docutils literal">
+        dict
+       </tt>
+       type in practice.
+      </p>
+     </li>
+     <li>
+      <p class="first">
+       All Python implementations must implement this new property, it gives
+more work to other implementations, whereas they may not use the
+dictionary version at all.
+      </p>
+     </li>
+     <li>
+      <p class="first">
+       The
+       <tt class="docutils literal">
+        __version__
+       </tt>
+       can be wrapped on integer overflow. It is error
+prone: using
+       <tt class="docutils literal">
+        dict.__version__ &lt;= guard_version
+       </tt>
+       is wrong,
+       <tt class="docutils literal">
+        dict.__version__ == guard_version
+       </tt>
+       must be used instead to reduce
+the risk of bug on integer overflow (even if the integer overflow is
+unlikely in practice).
+      </p>
+     </li>
+     <li>
+      <p class="first">
+       Exposing the dictionary version at Python level can lead the
+false assumption on performances. Checking
+       <tt class="docutils literal">
+        dict.__version__
+       </tt>
+       at
+the Python level is not faster than a dictionary lookup. A dictionary
+lookup has a cost of 48.7 ns and checking a guard has a cost of 47.5
+ns, the difference is only 1.2 ns (3%):
+      </p>
+      <pre class="literal-block">
+$ ./python -m timeit -s 'd = {str(i):i for i in range(100)}' 'd["33"] == 33'
+10000000 loops, best of 3: 0.0487 usec per loop
+$ ./python -m timeit -s 'd = {str(i):i for i in range(100)}' 'd.__version__ == 100'
+10000000 loops, best of 3: 0.0475 usec per loop
+</pre>
+     </li>
+    </ul>
+    <p>
+     Bikeshedding on the property name:
+    </p>
+    <ul class="simple">
+     <li>
+      <tt class="docutils literal">
+       __cache_token__
+      </tt>
+      : name proposed by Nick Coghlan, name coming from
+      <a class="reference external" href="https://docs.python.org/3/library/abc.html#abc.get_cache_token">
+       abc.get_cache_token()
+      </a>
+      .
+     </li>
+     <li>
+      <tt class="docutils literal">
+       __version__
+      </tt>
+     </li>
+     <li>
+      <tt class="docutils literal">
+       __timestamp__
+      </tt>
+     </li>
+    </ul>
+   </div>
+   <div class="section" id="add-a-version-to-each-dict-entry">
+    
+    <p>
+     A single version per dictionary requires to keep a strong reference to
+the value which can keep the value alive longer than expected. If we add
+also a version per dictionary entry, the guard can only store the entry
+version to avoid the strong reference to the value (only strong
+references to the dictionary and to the key are needed).
+    </p>
+    <p>
+     Changes: add a
+     <tt class="docutils literal">
+      me_version
+     </tt>
+     field to the
+     <tt class="docutils literal">
+      PyDictKeyEntry
+     </tt>
+     structure,
+the field has the C type
+     <tt class="docutils literal">
+      PY_INT64_T
+     </tt>
+     . When a key is created or
+modified, the entry version is set to the dictionary version which is
+incremented at any change (create, modify, delete).
+    </p>
+    <p>
+     Pseudo-code of an fast guard to check if a dictionary key was modified
+using hypothetical
+     <tt class="docutils literal">
+      dict_get_version(dict)
+     </tt>
+     <tt class="docutils literal">
+      dict_get_entry_version(dict)
+     </tt>
+     functions:
+    </p>
+    <pre class="literal-block">
+UNSET = object()
+
+class GuardDictKey:
+    def __init__(self, dict, key):
+        self.dict = dict
+        self.key = key
+        self.dict_version = dict_get_version(dict)
+        self.entry_version = dict_get_entry_version(dict, key)
+
+    def check(self):
+        """Return True if the dictionary entry did not changed."""
+
+        # read the version field of the dict structure
+        dict_version = dict_get_version(self.dict)
+        if dict_version == self.version:
+            # Fast-path: dictionary lookup avoided
+            return True
+
+        # lookup in the dictionary
+        entry_version = get_dict_key_version(dict, key)
+        if entry_version == self.entry_version:
+            # another key was modified:
+            # cache the new dictionary version
+            self.dict_version = dict_version
+            return True
+
+        # the key was modified
+        return False
+</pre>
+    <p>
+     The main drawback of this option is the impact on the memory footprint.
+It increases the size of each dictionary entry, so the overhead depends
+on the number of buckets (dictionary entries, used or unused yet). For
+example, it increases the size of each dictionary entry by 8 bytes on
+64-bit system.
+    </p>
+    <p>
+     In Python, the memory footprint matters and the trend is to reduce it.
+Examples:
+    </p>
+    
+   </div>
+   <div class="section" id="add-a-new-dict-subtype">
+    
+    <p>
+     Add a new
+     <tt class="docutils literal">
+      verdict
+     </tt>
+     type, subtype of
+     <tt class="docutils literal">
+      dict
+     </tt>
+     . When guards are needed,
+use the
+     <tt class="docutils literal">
+      verdict
+     </tt>
+     for namespaces (module namespace, type namespace,
+instance namespace, etc.) instead of
+     <tt class="docutils literal">
+      dict
+     </tt>
+     .
+    </p>
+    <p>
+     Leave the
+     <tt class="docutils literal">
+      dict
+     </tt>
+     type unchanged to not add any overhead (memory
+footprint) when guards are not needed.
+    </p>
+    <p>
+     Technical issue: a lot of C code in the wild, including CPython core,
+expecting the exact
+     <tt class="docutils literal">
+      dict
+     </tt>
+     type. Issues:
+    </p>
+    <ul class="simple">
+     <li>
+      <tt class="docutils literal">
+       exec()
+      </tt>
+      requires a
+      <tt class="docutils literal">
+       dict
+      </tt>
+      for globals and locals. A lot of code
+use
+      <tt class="docutils literal">
+       <span class="pre">
+        globals={}
+       </span>
+      </tt>
+      . It is not possible to cast the
+      <tt class="docutils literal">
+       dict
+      </tt>
+      to a
+      <tt class="docutils literal">
+       dict
+      </tt>
+      subtype because the caller expects the
+      <tt class="docutils literal">
+       globals
+      </tt>
+      parameter
+to be modified (
+      <tt class="docutils literal">
+       dict
+      </tt>
+      is mutable).
+     </li>
+     <li>
+      Functions call directly
+      <tt class="docutils literal">
+       PyDict_xxx()
+      </tt>
+      functions, instead of calling
+      <tt class="docutils literal">
+       PyObject_xxx()
+      </tt>
+      if the object is a
+      <tt class="docutils literal">
+       dict
+      </tt>
+      subtype
+     </li>
+     <li>
+      <tt class="docutils literal">
+       PyDict_CheckExact()
+      </tt>
+      check fails on
+      <tt class="docutils literal">
+       dict
+      </tt>
+      subtype, whereas some
+functions require the exact
+      <tt class="docutils literal">
+       dict
+      </tt>
+      type.
+     </li>
+     <li>
+      <tt class="docutils literal">
+       Python/ceval.c
+      </tt>
+      does not completly supports dict subtypes for
+namespaces
+     </li>
+    </ul>
+    <p>
+     The
+     <tt class="docutils literal">
+      exec()
+     </tt>
+     issue is a blocker issue.
+    </p>
+    <p>
+     Other issues:
+    </p>
+    <ul class="simple">
+     <li>
+      The garbage collector has a special code to "untrack"
+      <tt class="docutils literal">
+       dict
+      </tt>
+      instances. If a
+      <tt class="docutils literal">
+       dict
+      </tt>
+      subtype is used for namespaces, the garbage
+collector can be unable to break some reference cycles.
+     </li>
+     <li>
+      Some functions have a fast-path for
+      <tt class="docutils literal">
+       dict
+      </tt>
+      which would not be taken
+for
+      <tt class="docutils literal">
+       dict
+      </tt>
+      subtypes, and so it would make Python a little bit
+slower.
+     </li>
+    </ul>
+   </div>
+  </div>
+  <div class="section" id="prior-art">
+   
+   <div class="section" id="method-cache-and-type-version-tag">
+    
+    <p>
+     In 2007, Armin Rigo wrote a patch to to implement a cache of methods. It
+was merged into Python 2.6.  The patch adds a "type attribute cache
+version tag" (
+     <tt class="docutils literal">
+      tp_version_tag
+     </tt>
+     ) and a "valid version tag" flag to
+types (the
+     <tt class="docutils literal">
+      PyTypeObject
+     </tt>
+     structure).
+    </p>
+    <p>
+     The type version tag is not available at the Python level.
+    </p>
+    <p>
+     The version tag has the C type
+     <tt class="docutils literal">
+      unsigned int
+     </tt>
+     . The cache is a global
+hash table of 4096 entries, shared by all types. The cache is global to
+"make it fast, have a deterministic and low memory footprint, and be
+easy to invalidate". Each cache entry has a version tag. A global
+version tag is used to create the next version tag, it also has the C
+type
+     <tt class="docutils literal">
+      unsigned int
+     </tt>
+     .
+    </p>
+    <p>
+     By default, a type has its "valid version tag" flag cleared to indicate
+that the version tag is invalid. When the first method of the type is
+cached, the version tag and the "valid version tag" flag are set. When a
+type is modified, the "valid version tag" flag of the type and its
+subclasses is cleared. Later, when a cache entry of these types is used,
+the entry is removed because its version tag is outdated.
+    </p>
+    <p>
+     On integer overflow, the whole cache is cleared and the global version
+tag is reset to
+     <tt class="docutils literal">
+      0
+     </tt>
+     .
+    </p>
+    <p>
+     See
+     <a class="reference external" href="https://bugs.python.org/issue1685986">
+      Method cache (issue #1685986)
+     </a>
+     and
+     <a class="reference external" href="https://bugs.python.org/issue1700288">
+      Armin's method cache
+optimization updated for Python 2.6 (issue #1700288)
+     </a>
+     .
+    </p>
+   </div>
+   <div class="section" id="globals-builtins-cache">
+    
+    <p>
+     In 2010, Antoine Pitrou proposed a
+     <a class="reference external" href="http://bugs.python.org/issue10401">
+      Globals / builtins cache (issue
+#10401)
+     </a>
+     which adds a private
+     <tt class="docutils literal">
+      ma_version
+     </tt>
+     field to the
+     <tt class="docutils literal">
+      PyDictObject
+     </tt>
+     structure (
+     <tt class="docutils literal">
+      dict
+     </tt>
+     type),
+the field has the C type
+     <tt class="docutils literal">
+      Py_ssize_t
+     </tt>
+     .
+    </p>
+    <p>
+     The patch adds a "global and builtin cache" to functions and frames, and
+changes
+     <tt class="docutils literal">
+      LOAD_GLOBAL
+     </tt>
+     and
+     <tt class="docutils literal">
+      STORE_GLOBAL
+     </tt>
+     instructions to use the
+cache.
+    </p>
+    <p>
+     The change on the
+     <tt class="docutils literal">
+      PyDictObject
+     </tt>
+     structure is very similar to this
+PEP.
+    </p>
+   </div>
+   
+   <div class="section" id="guard-against-changing-dict-during-iteration">
+    
+    <p>
+     In 2013, Serhiy Storchaka proposed
+     <a class="reference external" href="https://bugs.python.org/issue19332">
+      Guard against changing dict during
+iteration (issue #19332)
+     </a>
+     which
+adds a
+     <tt class="docutils literal">
+      ma_count
+     </tt>
+     field to the
+     <tt class="docutils literal">
+      PyDictObject
+     </tt>
+     structure (
+     <tt class="docutils literal">
+      dict
+     </tt>
+     type), the field has the C type
+     <tt class="docutils literal">
+      size_t
+     </tt>
+     .  This field is incremented
+when the dictionary is modified, and so is very similar to the proposed
+dictionary version.
+    </p>
+    <p>
+     Sadly, the dictionary version proposed in this PEP doesn't help to
+detect dictionary mutation. The dictionary version changes when values
+are replaced, whereas modifying dictionary values while iterating on
+dictionary keys is legit in Python.
+    </p>
+   </div>
+   <div class="section" id="pysizer">
+    
+    <p>
+     <a class="reference external" href="http://pysizer.8325.org/">
+      PySizer
+     </a>
+     : a memory profiler for Python,
+Google Summer of Code 2005 project by Nick Smallbone.
+    </p>
+    <p>
+     This project has a patch for CPython 2.4 which adds
+     <tt class="docutils literal">
+      key_time
+     </tt>
+     and
+     <tt class="docutils literal">
+      value_time
+     </tt>
+     fields to dictionary entries. It uses a global
+process-wide counter for dictionaries, incremented each time that a
+dictionary is modified. The times are used to decide when child objects
+first appeared in their parent objects.
+    </p>
+   </div>
+  </div>
+  
+  <div class="section" id="copyright">
+   
+   <p>
+    This document has been placed in the public domain.
+   </p>
+  </div>
+ 
+Source: <a href="https://hg.python.org/peps/file/tip/pep-0509.txt">https://hg.python.org/peps/file/tip/pep-0509.txt</a>
+
+    </article>
+
+
+                </div></body></html>

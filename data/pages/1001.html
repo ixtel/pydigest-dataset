@@ -1,0 +1,676 @@
+<html><body><div><section class="post-content">
+            <p>As my career evolves, I'm dealing more and more with restful APIs. While endpoint caching made a lot of sense when rendering rich Jinja templates output, (and still does for API) it is not as efficient when your client queries your objects database one by one and through listings.</p>
+
+<h1 id="objectlayercaching">Object layer caching</h1>
+
+<p>Endpoint caching would be caching the response of a controller. We do that a lot at SodaHead when it comes to logged out pages. The trick is to use a middleware to store dynamic data into the session to keep it dynamic. </p>
+
+<p>Object layer caching, on the other hand, would be the caching of your ORM objects. <a href="http://docs.sqlalchemy.org/en/latest/orm/examples.html#module-examples.dogpile_caching">SQLAlchemy recommend dogpile.cache</a> for that.</p>
+
+<blockquote>
+  <p>There are only two hard things in Computer Science: cache invalidation, naming things, and off-by-one error.</p>
+  
+  <p>-- <cite>Some Genius + Phil Karlton</cite></p>
+</blockquote>
+
+<p>Caching is tricky and very simple at the same time. Caching one object is easy: serializing an object and storing it in memcached is pretty simple. Invalidation of this object and its dependancies is not that easy. The way I define caching is like a large safe road but allowing you to wander out of it. I'll provide simple safe solutions that will help you gain in performance while being low maintenance. For more complex cases you'll be able to still cache query results but will have to manually invalidate those caches.</p>
+
+<h2 id="usecases">Use cases</h2>
+
+<p>I see two major cases for caching: </p>
+
+<ul>
+<li>pulling one object from the database through its primary key </li>
+<li>pulling a list of (related) objects.</li>
+</ul>
+
+<h3 id="singleobject">Single object</h3>
+
+<p>SQLAchemy provides query.get to simply retrieve an object using its primary key, so we will replicate that behavior.</p>
+
+<pre><code class="language-python"># pulling one User object
+user = User.query.get(1)  
+# pulling one User object from cache
+user = User.cache.get(1)  
+</code></pre>
+
+<p>For convenience, you can even provide a <code>get_or_404</code> method: do it yourself, it's easy.</p>
+
+<h3 id="listingofobjects">Listing of objects</h3>
+
+<p>For this specific case, we'll go with email addresses, a 1..n relationship (meaning one user can have multiple email addresses, but an address object can only have one user)</p>
+
+<pre><code class="language-python"># user is the object we pulled earlier (either from cache or not)
+email_addresses = EmailAddress.cache.filter(user_id=1)  
+</code></pre>
+
+<p>You can even define a property on the User object itself to handle it:</p>
+
+<pre><code class="language-python">class User(db.Model...):  
+    ...
+    @property
+    def cached_email_addresses(self):
+        return EmailAddress.cache.filter(user_id=self.id)
+</code></pre>
+
+<p>And voilà, you can now call it from the object too (cached or not, btw)</p>
+
+<pre><code class="language-python">email_addresses = user.cached_email_addresses  
+</code></pre>
+
+<p><strong>Note</strong>: I cannot stress it enough, caching is tricky. The filter method is purposely simple and will only accept one column which should belong to the object.</p>
+
+<p>For listings, I picked a way of caching that you might not be familiar with. Listing caches are just a list of primary keys and rely on single object cache pulling. The logic is approximately the following (<em>but optimized to pull batches of objects from cache</em>):</p>
+
+<pre><code>Retrieve list of IDs from cache
+if no IDs cached:
+    pull list of IDs from database
+    store list of IDs in cache
+for every ID in list of IDs:
+    yield object with pk == ID retrieved from cache
+</code></pre>
+
+<p>Storing object IDs is incredibly much smaller. The benefit is that a single object invalidation will only impact a small part of the listing it is related to. Listing calls will warm up single object caches and this technique allows some basic query features like offset, limit and order_by (only <code>ASC</code>/<code>DESC</code>, not a real column <code>order_by</code> ) without the need to invalidate the cache. This will allow better performance as the less you request, the less will be retrieved and instanciated from your cache backend. Overall, that should cover at least 50% of the cases (absolutely no study to back-up this number though).</p>
+
+<h2 id="flaskmodels">Flask Models</h2>
+
+<p>Flask-SQLAlchemy inverts the logic a little, associating the query on the model itself which can be unsettling at first. The Model class provided by the Flask-SQLAlchemy library allows you to pass your own custom query object as <code>query_class</code> property, we'll use our callable here:</p>
+
+<pre><code class="language-python">from caching import CacheableMixin, query_callable, regions
+
+class User(db.Model, CacheableMixin):  
+   cache_label = "default" # region's label to use
+   cache_regions = regions # regions to store cache
+   # Query handeling dogpile caching
+   query_class = query_callable(regions)
+
+   id = db.Column(db.Integer, primary_key=True)
+   username = db.Column(db.String(80), unique=True)
+   email = db.Column(db.String(120), unique=True)
+   views = db.Column(db.Integer, default=0)
+
+   def __init__(self, username, email):
+       self.username = username
+       self.email = email
+
+   def __repr__(self):
+       return '&lt;User %r&gt;' % self.username
+</code></pre>
+
+<h2 id="thecachinglibrary">The Caching Library</h2>
+
+<p>Here is where the magic lives. Every model with caching capability will inherit the <code>CacheableMixin</code> class. The mixin will also add event listener to smart flush caches on update.  </p>
+
+<pre><code class="language-python"> # caching.py
+ import functools
+ import hashlib
+
+ from flask.ext.sqlalchemy import BaseQuery
+ from sqlalchemy import event, select
+ from sqlalchemy.orm.interfaces import MapperOption
+ from sqlalchemy.orm.attributes import get_history
+ from sqlalchemy.ext.declarative import declared_attr
+ from dogpile.cache.region import make_region
+ from dogpile.cache.api import NO_VALUE
+
+
+ def md5_key_mangler(key):
+     """
+     Encodes SELECT queries (key) into md5 hashes
+     """
+     if key.startswith('SELECT '):
+         key = hashlib.md5(key.encode('ascii')).hexdigest()
+     return key
+
+
+ def memoize(obj):
+     """
+     Local cache of the function's return value
+     """
+     cache = obj.cache = {}
+
+     @functools.wraps(obj)
+     def memoizer(*args, **kwargs):
+         key = str(args) + str(kwargs)
+         if key not in cache:
+             cache[key] = obj(*args, **kwargs)
+         return cache[key]
+     return memoizer
+
+ # if your app runs on multiple machine behind a
+ # load balancer, I'd recommend the memcache backend.
+ cache_config = {
+     'backend': 'dogpile.cache.memory',
+     'expiration_time': 3600, # 1 hour
+ }
+
+ regions = dict(
+     default=make_region(key_mangler=md5_key_mangler).configure(**cache_config)
+ )
+
+
+ class CachingQuery(BaseQuery):
+     """
+     A Query subclass which optionally loads full results from a dogpile
+     cache region.
+     """
+
+     def __init__(self, regions, entities, *args, **kw):
+         self.cache_regions = regions
+         BaseQuery.__init__(self, entities=entities, *args, **kw)
+
+     def __iter__(self):
+         """
+         override __iter__ to pull results from dogpile
+         if particular attributes have been configured.
+         """
+         if hasattr(self, '_cache_region'):
+             return self.get_value(createfunc=lambda: list(BaseQuery.__iter__(self)))
+         else:
+             return BaseQuery.__iter__(self)
+
+     def _get_cache_plus_key(self):
+         """
+         Return a cache region plus key.
+         """
+
+         dogpile_region = self.cache_regions[self._cache_region.region]
+         if self._cache_region.cache_key:
+             key = self._cache_region.cache_key
+         else:
+             key = _key_from_query(self)
+         return dogpile_region, key
+
+     def invalidate(self):
+         """
+         Invalidate the cache value represented by this Query.
+         """
+
+         dogpile_region, cache_key = self._get_cache_plus_key()
+         dogpile_region.delete(cache_key)
+
+     def get_value(self, merge=True, createfunc=None,
+                     expiration_time=None, ignore_expiration=False):
+         """
+         Return the value from the cache for this query.
+
+         Raise KeyError if no value present and no
+         createfunc specified.
+         """
+         dogpile_region, cache_key = self._get_cache_plus_key()
+
+         assert not ignore_expiration or not createfunc, \
+                 "Can't ignore expiration and also provide createfunc"
+
+         if ignore_expiration or not createfunc:
+             cached_value = dogpile_region.get(cache_key,
+                                 expiration_time=expiration_time,
+                                 ignore_expiration=ignore_expiration)
+         else:
+             cached_value = dogpile_region.get_or_create(
+                                 cache_key,
+                                 createfunc,
+                                 expiration_time=expiration_time)
+
+         if cached_value is NO_VALUE:
+             raise KeyError(cache_key)
+         if merge:
+             cached_value = self.merge_result(cached_value, load=False)
+
+         return cached_value
+
+
+     def set_value(self, value):
+         """
+         Set the value in the cache for this query.
+         """
+
+         dogpile_region, cache_key = self._get_cache_plus_key()
+         dogpile_region.set(cache_key, value)
+
+
+ def query_callable(regions, query_cls=CachingQuery):
+   return functools.partial(query_cls, regions)
+
+
+ def _key_from_query(query, qualifier=None):
+     """
+     Given a Query, create a cache key.
+     """
+
+     stmt = query.with_labels().statement
+     compiled = stmt.compile()
+     params = compiled.params
+
+     return " ".join(
+                     [str(compiled)] +
+                     [str(params[k]) for k in sorted(params)])
+
+
+ class FromCache(MapperOption):
+     """Specifies that a Query should load results from a cache."""
+
+     propagate_to_loaders = False
+
+     def __init__(self, region="default", cache_key=None):
+         """Construct a new FromCache.
+
+         :param region: the cache region.  Should be a
+         region configured in the dictionary of dogpile
+         regions.
+
+         :param cache_key: optional.  A string cache key
+         that will serve as the key to the query.   Use this
+         if your query has a huge amount of parameters (such
+         as when using in_()) which correspond more simply to
+         some other identifier.
+
+         """
+         self.region = region
+         self.cache_key = cache_key
+
+     def process_query(self, query):
+         """Process a Query during normal loading operation."""
+         query._cache_region = self
+
+
+ class Cache(object):
+     def __init__(self, model, regions, label):
+         self.model = model
+         self.regions = regions
+         self.label = label
+         # allow custom pk or default to 'id'
+         self.pk = getattr(model, 'cache_pk', 'id')
+
+
+     def get(self, pk):
+         """
+         Equivalent to the Model.query.get(pk) but using cache
+         """
+         return self.model.query.options(self.from_cache(pk=pk)).get(pk)
+
+
+     def filter(self, order_by='asc', offset=None, limit=None, **kwargs):
+         """
+         Retrieve all the objects ids then pull them independently from cache.
+         kwargs accepts one attribute filter, mainly for relationship pulling.
+         offset and limit allow pagination, order by for sorting (asc/desc).
+         """
+         query_kwargs = {}
+         if kwargs:
+             if len(kwargs) &gt; 1:
+                 raise TypeError('filter accept only one attribute for filtering')
+             key, value = kwargs.items()[0]
+             if key not in self._columns():
+                 raise TypeError('%s does not have an attribute %s' % self, key)
+             query_kwargs[key] = value
+
+         cache_key = self._cache_key(**kwargs)
+         pks = self.regions[self.label].get(cache_key)
+
+         if pks is NO_VALUE:
+             pks = [o.id for o in self.model.query.filter_by(**kwargs)\
+                 .with_entities(getattr(self.model, self.pk))]
+             self.regions[self.label].set(cache_key, pks)
+
+         if order_by == 'desc':
+             pks.reverse()
+
+         if offset is not None:
+             pks = pks[pks:]
+
+         if limit is not None:
+             pks = pks[:limit]
+
+         keys = [self._cache_key(id) for id in pks]
+         for pos, obj in enumerate(self.regions[self.label].get_multi(keys)):
+             if obj is NO_VALUE:
+                 yield self.get(pks[pos])
+             else:
+                 yield obj[0]
+
+
+     def flush(self, key):
+         """
+         flush the given key from dogpile.cache
+         """
+         self.regions[self.label].delete(key)
+
+
+     @memoize
+     def _columns(self):
+         return [c.name for c in self.model.__table__.columns if c.name != self.pk]
+
+
+     @memoize
+     def from_cache(self, cache_key=None, pk=None):
+         """
+         build the from cache option object the the given object
+         """
+         if pk:
+             cache_key = self._cache_key(pk)
+         # if cache_key is none, the mangler will generate a MD5 from the query
+         return FromCache(self.label, cache_key)
+
+
+     @memoize
+     def _cache_key(self, pk="all", **kwargs):
+         """
+         Generate a key as query
+         format: '&lt;tablename&gt;.&lt;column&gt;[&lt;value&gt;]'
+
+         'user.id[all]': all users
+         'address.user_id=4[all]': all address linked to user id 4
+         'user.id[4]': user with id=4
+         """
+         q_filter = "".join("%s=%s" % (k, v) for k, v in kwargs.items()) or self.pk
+         return "%s.%s[%s]" % (self.model.__tablename__, q_filter, pk)
+
+
+     def _flush_all(self, obj):
+         for column in self._columns():
+             added, unchanged, deleted = get_history(obj, column)
+             for value in list(deleted) + list(added):
+                 self.flush(self._cache_key(**{column: value}))
+         # flush "all" listing
+         self.flush(self._cache_key())
+         # flush the object
+         self.flush(self._cache_key(getattr(obj, self.pk)))
+
+
+ class CacheableMixin(object):
+
+     @declared_attr
+     def cache(cls):
+         """
+         Add the cache features to the model
+         """
+         return Cache(cls, cls.cache_regions, cls.cache_label)
+
+
+     @staticmethod
+     def _flush_event(mapper, connection, target):
+         """
+         Called on object modification to flush cache of dependencies
+         """
+         target.cache._flush_all(target)
+
+
+     @classmethod
+     def __declare_last__(cls):
+         """
+         Auto clean the caches, including listings possibly associated with
+         this instance, on delete, update and insert.
+         """
+         event.listen(cls, 'before_delete', cls._flush_event)
+         event.listen(cls, 'before_update', cls._flush_event)
+         event.listen(cls, 'before_insert', cls._flush_event)
+</code></pre>
+
+<h2 id="cachingspecificfilters">Caching Specific Filters</h2>
+
+<p>The default filtering is limited to one attribute, this is to guarantee cache flush on property update. Each time you update a property of an object, the corresponding listing cache will be flushed. If you need more specific filtering but still would like to cache the result, you can resort to basic dogpile caching:</p>
+
+<pre><code class="language-python">users = User.query.\  
+     options(User.cache.from_cache("user_examples")).\
+     filter(User.email.endswith('@example.com')).\
+     all()
+</code></pre>
+
+<p>Results would then be stored in dogpile cache backend as "user_examples". To flush that record:</p>
+
+<pre><code class="language-python">User.cache.flush("user_examples")  
+</code></pre>
+
+<h2 id="performance">Performance</h2>
+
+<p>So, is it faster ? Overall the gain is at least 2x faster then SQLite, either retrieval of single objects or list of objects.</p>
+
+<h3 id="singleobject">Single Object</h3>
+
+<p><strong>SQLite</strong></p>
+
+<pre><code> Brices-MacBook-Air:app briceleroy$ ab -n 5000 -c 50 http://127.0.0.1:5000/1/
+ This is ApacheBench, Version 2.3 &lt;$Revision: 655654 $&gt;
+ Copyright 1996 Adam Twiss, Zeus Technology Ltd, http://www.zeustech.net/
+ Licensed to The Apache Software Foundation, http://www.apache.org/
+
+ Benchmarking 127.0.0.1 (be patient)
+ Completed 500 requests
+ Completed 1000 requests
+ Completed 1500 requests
+ Completed 2000 requests
+ Completed 2500 requests
+ Completed 3000 requests
+ Completed 3500 requests
+ Completed 4000 requests
+ Completed 4500 requests
+ Completed 5000 requests
+ Finished 5000 requests
+
+
+ Server Software:        Werkzeug/0.9.6
+ Server Hostname:        127.0.0.1
+ Server Port:            5000
+
+ Document Path:          /1/
+ Document Length:        89 bytes
+
+ Concurrency Level:      50
+ Time taken for tests:   15.413 seconds
+ Complete requests:      5000
+ Failed requests:        0
+ Write errors:           0
+ Total transferred:      1210000 bytes
+ HTML transferred:       445000 bytes
+ Requests per second:    324.40 [#/sec] (mean)
+ Time per request:       154.129 [ms] (mean)
+ Time per request:       3.083 [ms] (mean, across all concurrent requests)
+ Transfer rate:          76.67 [Kbytes/sec] received
+
+ Connection Times (ms)
+               min  mean[+/-sd] median   max
+ Connect:        0    0   0.2      0       2
+ Processing:    14  153  10.2    151     196
+ Waiting:       13  153  10.2    151     193
+ Total:         16  153  10.2    151     196
+
+ Percentage of the requests served within a certain time (ms)
+   50%    151
+   66%    155
+   75%    158
+   80%    160
+   90%    163
+   95%    168
+   98%    175
+   99%    181
+  100%    196 (longest request)
+</code></pre>
+
+<p><strong>Dogpile memory</strong></p>
+
+<pre><code> Brices-MacBook-Air:app briceleroy$ ab -n 5000 -c 50 http://127.0.0.1:5000/1/
+ This is ApacheBench, Version 2.3 &lt;$Revision: 655654 $&gt;
+ Copyright 1996 Adam Twiss, Zeus Technology Ltd, http://www.zeustech.net/
+ Licensed to The Apache Software Foundation, http://www.apache.org/
+
+ Benchmarking 127.0.0.1 (be patient)
+ Completed 500 requests
+ Completed 1000 requests
+ Completed 1500 requests
+ Completed 2000 requests
+ Completed 2500 requests
+ Completed 3000 requests
+ Completed 3500 requests
+ Completed 4000 requests
+ Completed 4500 requests
+ Completed 5000 requests
+ Finished 5000 requests
+
+
+ Server Software:        Werkzeug/0.9.6
+ Server Hostname:        127.0.0.1
+ Server Port:            5000
+
+ Document Path:          /1/
+ Document Length:        89 bytes
+
+ Concurrency Level:      50
+ Time taken for tests:   7.988 seconds
+ Complete requests:      5000
+ Failed requests:        0
+ Write errors:           0
+ Total transferred:      1210000 bytes
+ HTML transferred:       445000 bytes
+ Requests per second:    625.93 [#/sec] (mean)
+ Time per request:       79.881 [ms] (mean)
+ Time per request:       1.598 [ms] (mean, across all concurrent requests)
+ Transfer rate:          147.93 [Kbytes/sec] received
+
+ Connection Times (ms)
+               min  mean[+/-sd] median   max
+ Connect:        0    0   0.1      0       1
+ Processing:     4   79   8.2     76     111
+ Waiting:        3   79   8.2     76     111
+ Total:          5   79   8.2     76     111
+
+ Percentage of the requests served within a certain time (ms)
+   50%     76
+   66%     79
+   75%     82
+   80%     84
+   90%     90
+   95%     97
+   98%    103
+   99%    106
+  100%    111 (longest request)
+</code></pre>
+
+<h3 id="listingofobjects">Listing of Objects</h3>
+
+<p><strong>SQLite</strong></p>
+
+<pre><code> Brices-MacBook-Air:app briceleroy$ ab -n 5000 -c 50 http://127.0.0.1:5000/
+ This is ApacheBench, Version 2.3 &lt;$Revision: 655654 $&gt;
+ Copyright 1996 Adam Twiss, Zeus Technology Ltd, http://www.zeustech.net/
+ Licensed to The Apache Software Foundation, http://www.apache.org/
+
+ Benchmarking 127.0.0.1 (be patient)
+ Completed 500 requests
+ Completed 1000 requests
+ Completed 1500 requests
+ Completed 2000 requests
+ Completed 2500 requests
+ Completed 3000 requests
+ Completed 3500 requests
+ Completed 4000 requests
+ Completed 4500 requests
+ Completed 5000 requests
+ Finished 5000 requests
+
+
+ Server Software:        Werkzeug/0.9.6
+ Server Hostname:        127.0.0.1
+ Server Port:            5000
+
+ Document Path:          /
+ Document Length:        5247 bytes
+
+ Concurrency Level:      50
+ Time taken for tests:   24.206 seconds
+ Complete requests:      5000
+ Failed requests:        0
+ Write errors:           0
+ Total transferred:      27010000 bytes
+ HTML transferred:       26235000 bytes
+ Requests per second:    206.56 [#/sec] (mean)
+ Time per request:       242.059 [ms] (mean)
+ Time per request:       4.841 [ms] (mean, across all concurrent requests)
+ Transfer rate:          1089.69 [Kbytes/sec] received
+
+ Connection Times (ms)
+               min  mean[+/-sd] median   max
+ Connect:        0    0   0.6      0      10
+ Processing:    17  240  27.1    237     519
+ Waiting:       17  240  27.0    236     519
+ Total:         27  241  26.8    237     520
+
+ Percentage of the requests served within a certain time (ms)
+   50%    237
+   66%    244
+   75%    247
+   80%    250
+   90%    257
+   95%    267
+   98%    310
+   99%    342
+  100%    520 (longest request)
+</code></pre>
+
+<p><strong>dogpile memory</strong></p>
+
+<pre><code> Brices-MacBook-Air:app briceleroy$ ab -n 5000 -c 50 http://127.0.0.1:5000/
+ This is ApacheBench, Version 2.3 &lt;$Revision: 655654 $&gt;
+ Copyright 1996 Adam Twiss, Zeus Technology Ltd, http://www.zeustech.net/
+ Licensed to The Apache Software Foundation, http://www.apache.org/
+
+ Benchmarking 127.0.0.1 (be patient)
+ Completed 500 requests
+ Completed 1000 requests
+ Completed 1500 requests
+ Completed 2000 requests
+ Completed 2500 requests
+ Completed 3000 requests
+ Completed 3500 requests
+ Completed 4000 requests
+ Completed 4500 requests
+ Completed 5000 requests
+ Finished 5000 requests
+
+
+ Server Software:        Werkzeug/0.9.6
+ Server Hostname:        127.0.0.1
+ Server Port:            5000
+
+ Document Path:          /
+ Document Length:        5247 bytes
+
+ Concurrency Level:      50
+ Time taken for tests:   9.678 seconds
+ Complete requests:      5000
+ Failed requests:        0
+ Write errors:           0
+ Total transferred:      27010000 bytes
+ HTML transferred:       26235000 bytes
+ Requests per second:    516.62 [#/sec] (mean)
+ Time per request:       96.784 [ms] (mean)
+ Time per request:       1.936 [ms] (mean, across all concurrent requests)
+ Transfer rate:          2725.35 [Kbytes/sec] received
+
+ Connection Times (ms)
+               min  mean[+/-sd] median   max
+ Connect:        0    0   0.1      0       1
+ Processing:     3   96  14.3     91     167
+ Waiting:        3   96  14.3     91     167
+ Total:          4   96  14.3     91     168
+
+ Percentage of the requests served within a certain time (ms)
+   50%     91
+   66%     93
+   75%     97
+   80%    102
+   90%    113
+   95%    125
+   98%    138
+   99%    159
+  100%    168 (longest request)
+</code></pre>
+
+<h2 id="gist">Gist</h2>
+
+<p>If you want, there is a gist with the app and the library on <a href="https://gist.github.com/debrice/f26e5ff9756cde90470f">github</a>.</p>
+
+<p>Comments on <a href="https://news.ycombinator.com/item?id=8000334">Hacker News</a> or <a href="http://redd.it/29zjzw">Reddit</a></p>
+        </section>
+
+        </div></body></html>

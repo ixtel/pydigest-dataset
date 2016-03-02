@@ -1,0 +1,123 @@
+<html><body><div><div class="content html_format"><p>
+      В существующем проекте есть долгоиграющие fab-задачки — получения дампов с удаленных серверов, агрегация данных, етс. Запускаешь задачу, отвлекаешься в соседнее окошко, через N минут(а то и через час) вспоминаешь, проверяешь… неэффективно. </p><p>
+Захотелось сделать всплывающие уведомления на десктоп по завершении задачи, а тут и статья про </p><a href="/post/47892/">notify-send</a><p> подвернулась. Решил сделать декоратор на fab-функции — самое ему место. 
+</p><a name="habracut"/><p>
+Для начала пишем простую функцию уведомления
+</p><pre><code class="python">from django.conf import settings as django_settings
+from fabric.operations import local
+
+def _notify(message):
+    if django_settings.FAB_NOTIFY_TASK_ENDS:
+        local(u'notify-send --expire-time=10000 "Fabric notify" "{}"'.format(message))
+</code></pre><p>
+Да, у меня джанга и настройку «показывать ли подсказки» вынеcем в настройки. 
+</p><p>
+Использование _notify тоже простое:
+</p><pre><code class="python">from fab_utils import _notify
+
+def mongo_get_from_remote(server='', date='', collection=''):
+    u"""Загрузить базы монго c удаленного сервера"""
+    ...
+    _notify(u"Базы загружены")
+</code></pre><p>
+Но в каждой функции писать вызов в конце… как-то не «сухо» (DRY рулит). Напишем декоратор
+</p><pre><code class="python">def notified(wrapped):
+    def internal(*args, **kwargs):
+        res = wrapped(*args, **kwargs)
+        params = [unicode(a) for a in args]
+        params.extend([u'{}={}'.format(k, v) for k, v in kwargs.iteritems()])
+        params = [_limit_str(p) for p in params]
+        message = "{}({}) ended!!!".format(wrapped.__name__, ', '.join(params))
+        _notify(message)
+        return res
+    return internal
+</code></pre>
+<p>
+И тогда использование такое
+</p><pre><code class="python">from fab_utils import notified
+
+@notified
+def mongo_get_from_remote(server='', date='', collection=''):
+    u"""Загрузить базы монго c удаленного сервера"""
+    ...
+</code></pre>
+<p>
+Все бы хорошо, но перестала выводится справка по команде :(
+</p><pre><code class="bash">wad@wad-vaio:~/aggregator (develop)$ bin/fab.sh -d mongo_get_from_remote
+Displaying detailed information for task 'mongo_get_from_remote':
+
+    No docstring provided
+    Arguments:
+</code></pre>
+<p>
+Что же делать? надо переопределить докстринг! 
+</p><pre><code class="python">def notified(wrapped):
+    def internal(*args, **kwargs):
+        ...
+        return res
+    internal.__doc__ = wrapped.__doc__
+    return internal
+</code></pre>
+<pre><code class="bash">wad@wad-vaio:~/aggregator (develop!)$ bin/fab.sh -d mongo_get_from_remote
+Displaying detailed information for task 'mongo_get_from_remote':
+
+    Загрузить базы монго c удаленного сервера
+    Arguments:
+</code></pre><p>
+Уже лучше, но где же аргументы? За ними пришлось лезть в кишочки fabric — как он их определяет?
+</p><p>
+В файле env/local/lib/python2.7/site-packages/fabric/main.py:466 нашлось
+</p><pre><code class="python">def display_command(name):
+    """
+    Print command function's docstring, then exit. Invoked with -d/--display.
+    """
+    ...
+    if hasattr(command, '__details__'):
+        task_details = command.__details__()
+    else:
+        task_details = get_task_details(command)
+    ...
+</code></pre><p>
+Ага, если у функции есть __details__ то он вызовется для определения аргументов. Отлично! 
+</p><p>
+Итоговый код декоратора таков
+</p><pre><code class="python">from fabric.tasks import get_task_details
+
+def notified(wrapped):
+
+    def internal(*args, **kwargs):
+        res = wrapped(*args, **kwargs)
+        params = [unicode(a) for a in args]
+        params.extend([u'{}={}'.format(k, v) for k, v in kwargs.iteritems()])
+        params = [_limit_str(p) for p in params]
+        message = "{}({}) ended!!!".format(wrapped.__name__, ', '.join(params))
+        _notify(message)
+        return res
+
+    def _details():
+        return get_task_details(wrapped)
+
+    internal.__doc__ = wrapped.__doc__
+    internal.__details__ = _details
+    return internal
+
+</code></pre>
+<p>
+И описание fab-задачки на месте
+</p><pre><code class="bash">wad@wad-vaio:~/aggregator (develop!)$ bin/fab.sh -d mongo_get_from_remote
+Displaying detailed information for task 'mongo_get_from_remote':
+
+    Загрузить базы монго c удаленного сервера
+    Arguments: server='', date='', collection=''
+
+</code></pre>
+<p>
+Люблю python :)
+</p><habracut/>
+
+      
+      <p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

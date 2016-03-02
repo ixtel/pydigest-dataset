@@ -1,0 +1,308 @@
+<html><body><div><div class="post-text" itemprop="text">
+<p>As I mentioned to David Wolever, there's more to this than meets the eye; both methods dispatch to <code>is</code>; you can prove this by doing</p>
+
+<pre><code>min(Timer("x == x", setup="x = 'a' * 1000000").repeat(10, 10000))
+#&gt;&gt;&gt; 0.00045456900261342525
+
+min(Timer("x == y", setup="x = 'a' * 1000000; y = 'a' * 1000000").repeat(10, 10000))
+#&gt;&gt;&gt; 0.5256857610074803
+</code></pre>
+
+<p>The first can only be so fast because it checks by identity.</p>
+
+<p>To find out why one would take longer than the other, let's trace through execution.</p>
+
+<p>They both start in <code>ceval.c</code>, from <code>COMPARE_OP</code> since that is the bytecode involved</p>
+
+<pre><code>TARGET(COMPARE_OP) {
+    PyObject *right = POP();
+    PyObject *left = TOP();
+    PyObject *res = cmp_outcome(oparg, left, right);
+    Py_DECREF(left);
+    Py_DECREF(right);
+    SET_TOP(res);
+    if (res == NULL)
+        goto error;
+    PREDICT(POP_JUMP_IF_FALSE);
+    PREDICT(POP_JUMP_IF_TRUE);
+    DISPATCH();
+}
+</code></pre>
+
+<p>This pops the values from the stack (technically it only pops one)</p>
+
+<pre><code>PyObject *right = POP();
+PyObject *left = TOP();
+</code></pre>
+
+<p>and runs the compare:</p>
+
+<pre><code>PyObject *res = cmp_outcome(oparg, left, right);
+</code></pre>
+
+<p><code>cmp_outcome</code> is this:</p>
+
+<pre><code>static PyObject *
+cmp_outcome(int op, PyObject *v, PyObject *w)
+{
+    int res = 0;
+    switch (op) {
+    case PyCmp_IS: ...
+    case PyCmp_IS_NOT: ...
+    case PyCmp_IN:
+        res = PySequence_Contains(w, v);
+        if (res &lt; 0)
+            return NULL;
+        break;
+    case PyCmp_NOT_IN: ...
+    case PyCmp_EXC_MATCH: ...
+    default:
+        return PyObject_RichCompare(v, w, op);
+    }
+    v = res ? Py_True : Py_False;
+    Py_INCREF(v);
+    return v;
+}
+</code></pre>
+
+<p>This is where the paths split. The <code>PyCmp_IN</code> branch does</p>
+
+<pre><code>int
+PySequence_Contains(PyObject *seq, PyObject *ob)
+{
+    Py_ssize_t result;
+    PySequenceMethods *sqm = seq-&gt;ob_type-&gt;tp_as_sequence;
+    if (sqm != NULL &amp;&amp; sqm-&gt;sq_contains != NULL)
+        return (*sqm-&gt;sq_contains)(seq, ob);
+    result = _PySequence_IterSearch(seq, ob, PY_ITERSEARCH_CONTAINS);
+    return Py_SAFE_DOWNCAST(result, Py_ssize_t, int);
+}
+</code></pre>
+
+<p>Note that a tuple is defined as</p>
+
+<pre><code>static PySequenceMethods tuple_as_sequence = {
+    ...
+    (objobjproc)tuplecontains,                  /* sq_contains */
+};
+
+PyTypeObject PyTuple_Type = {
+    ...
+    &amp;tuple_as_sequence,                         /* tp_as_sequence */
+    ...
+};
+</code></pre>
+
+<p>So the branch</p>
+
+<pre><code>if (sqm != NULL &amp;&amp; sqm-&gt;sq_contains != NULL)
+</code></pre>
+
+<p>will be taken and <code>*sqm-&gt;sq_contains</code>, which is the function <code>(objobjproc)tuplecontains</code>, will be taken.</p>
+
+<p>This does</p>
+
+<pre><code>static int
+tuplecontains(PyTupleObject *a, PyObject *el)
+{
+    Py_ssize_t i;
+    int cmp;
+
+    for (i = 0, cmp = 0 ; cmp == 0 &amp;&amp; i &lt; Py_SIZE(a); ++i)
+        cmp = PyObject_RichCompareBool(el, PyTuple_GET_ITEM(a, i),
+                                           Py_EQ);
+    return cmp;
+}
+</code></pre>
+
+<p>...Wait, wasn't that <code>PyObject_RichCompareBool</code> what the other branch took? Nope, that was <code>PyObject_RichCompare</code>.</p>
+
+<p>That code path was short so it likely just comes down to the speed of these two. Let's compare.</p>
+
+<pre><code>int
+PyObject_RichCompareBool(PyObject *v, PyObject *w, int op)
+{
+    PyObject *res;
+    int ok;
+
+    /* Quick result when objects are the same.
+       Guarantees that identity implies equality. */
+    if (v == w) {
+        if (op == Py_EQ)
+            return 1;
+        else if (op == Py_NE)
+            return 0;
+    }
+
+    ...
+}
+</code></pre>
+
+<p>The code path in <code>PyObject_RichCompareBool</code> pretty much immediately terminates. For <code>PyObject_RichCompare</code>, it does</p>
+
+<pre><code>PyObject *
+PyObject_RichCompare(PyObject *v, PyObject *w, int op)
+{
+    PyObject *res;
+
+    assert(Py_LT &lt;= op &amp;&amp; op &lt;= Py_GE);
+    if (v == NULL || w == NULL) { ... }
+    if (Py_EnterRecursiveCall(" in comparison"))
+        return NULL;
+    res = do_richcompare(v, w, op);
+    Py_LeaveRecursiveCall();
+    return res;
+}
+</code></pre>
+
+<p>The <code>Py_EnterRecursiveCall</code>/<code>Py_LeaveRecursiveCall</code> combo are not taken in the previous path, but these are relatively quick macros that'll short-circuit after incrementing and decrementing some globals.</p>
+
+<p><code>do_richcompare</code> does:</p>
+
+<pre><code>static PyObject *
+do_richcompare(PyObject *v, PyObject *w, int op)
+{
+    richcmpfunc f;
+    PyObject *res;
+    int checked_reverse_op = 0;
+
+    if (v-&gt;ob_type != w-&gt;ob_type &amp;&amp; ...) { ... }
+    if ((f = v-&gt;ob_type-&gt;tp_richcompare) != NULL) {
+        res = (*f)(v, w, op);
+        if (res != Py_NotImplemented)
+            return res;
+        ...
+    }
+    ...
+}
+</code></pre>
+
+<p>This does some quick checks to call <code>v-&gt;ob_type-&gt;tp_richcompare</code> which is</p>
+
+<pre><code>PyTypeObject PyUnicode_Type = {
+    ...
+    PyUnicode_RichCompare,      /* tp_richcompare */
+    ...
+};
+</code></pre>
+
+<p>which does</p>
+
+<pre><code>PyObject *
+PyUnicode_RichCompare(PyObject *left, PyObject *right, int op)
+{
+    int result;
+    PyObject *v;
+
+    if (!PyUnicode_Check(left) || !PyUnicode_Check(right))
+        Py_RETURN_NOTIMPLEMENTED;
+
+    if (PyUnicode_READY(left) == -1 ||
+        PyUnicode_READY(right) == -1)
+        return NULL;
+
+    if (left == right) {
+        switch (op) {
+        case Py_EQ:
+        case Py_LE:
+        case Py_GE:
+            /* a string is equal to itself */
+            v = Py_True;
+            break;
+        case Py_NE:
+        case Py_LT:
+        case Py_GT:
+            v = Py_False;
+            break;
+        default:
+            ...
+        }
+    }
+    else if (...) { ... }
+    else { ...}
+    Py_INCREF(v);
+    return v;
+}
+</code></pre>
+
+<p>Namely, this shortcuts on <code>left == right</code>... but only after doing </p>
+
+<pre><code>    if (!PyUnicode_Check(left) || !PyUnicode_Check(right))
+
+    if (PyUnicode_READY(left) == -1 ||
+        PyUnicode_READY(right) == -1)
+</code></pre>
+
+<p>All in all the paths then look something like this (manually recursively inlining, unrolling and pruning known branches)</p>
+
+<pre><code>POP()                           # Stack stuff
+TOP()                           #
+                                #
+case PyCmp_IN:                  # Dispatch on operation
+                                #
+sqm != NULL                     # Dispatch to builtin op
+sqm-&gt;sq_contains != NULL        #
+*sqm-&gt;sq_contains               #
+                                #
+cmp == 0                        # Do comparison in loop
+i &lt; Py_SIZE(a)                  #
+v == w                          #
+op == Py_EQ                     #
+++i                             # 
+cmp == 0                        #
+                                #
+res &lt; 0                         # Convert to Python-space
+res ? Py_True : Py_False        #
+Py_INCREF(v)                    #
+                                #
+Py_DECREF(left)                 # Stack stuff
+Py_DECREF(right)                #
+SET_TOP(res)                    #
+res == NULL                     #
+DISPATCH()                      #
+</code></pre>
+
+<p>vs</p>
+
+<pre><code>POP()                           # Stack stuff
+TOP()                           #
+                                #
+default:                        # Dispatch on operation
+                                #
+Py_LT &lt;= op                     # Checking operation
+op &lt;= Py_GE                     #
+v == NULL                       #
+w == NULL                       #
+Py_EnterRecursiveCall(...)      # Recursive check
+                                #
+v-&gt;ob_type != w-&gt;ob_type        # More operation checks
+f = v-&gt;ob_type-&gt;tp_richcompare  # Dispatch to builtin op
+f != NULL                       #
+                                #
+!PyUnicode_Check(left)          # ...More checks
+!PyUnicode_Check(right))        #
+PyUnicode_READY(left) == -1     #
+PyUnicode_READY(right) == -1    #
+left == right                   # Finally, doing comparison
+case Py_EQ:                     # Immediately short circuit
+Py_INCREF(v);                   #
+                                #
+res != Py_NotImplemented        #
+                                #
+Py_LeaveRecursiveCall()         # Recursive check
+                                #
+Py_DECREF(left)                 # Stack stuff
+Py_DECREF(right)                #
+SET_TOP(res)                    #
+res == NULL                     #
+DISPATCH()                      #
+</code></pre>
+
+<p>Now, <code>PyUnicode_Check</code> and <code>PyUnicode_READY</code> are pretty cheap since they only check a couple of fields, but it should be obvious that the top one is a smaller code path, it has fewer function calls, only one switch
+statement and is just a bit thinner.</p>
+
+<h3>TL;DR:</h3>
+
+<p>Both dispatch to <code>if (left_pointer == right_pointer)</code>; the difference is just how much work they do to get there. <code>in</code> just does less.</p>
+    </div>
+    </div></body></html>

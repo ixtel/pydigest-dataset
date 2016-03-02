@@ -1,0 +1,113 @@
+<html><body><div><div>
+			<p>Полезность <a href="https://docs.djangoproject.com/en/1.7/ref/contrib/admin/actions/">admin actions</a>
+в django трудно переоценить. До версии 1.1 этого механизма в django не было и
+как только не приходилось извращаться даже для самых элементарных задач вроде
+удаления группы записей.</p>
+<p>Обычно admin action просто молча выполняет операцию над группой записей и
+пользователь возвращается обратно к списку объектов.  Однако есть мало
+известная, хотя и документированная, возможность не бросать пользователя в
+changelist, а вернуть какой-нибудь <code>HttpResponse</code>.  К примеру перед обработкой
+переданных записей мы можем вывести форму с дополнительным вопросом о
+параметрах обработки.</p>
+<p>Документация в качестве примера
+<a href="https://docs.djangoproject.com/en/1.7/ref/contrib/admin/actions/#actions-that-provide-intermediate-pages">предлагает</a>
+возвращать <code>HttpResponseRedirect</code> и передавать список обрабатываемых объектов в
+виде GET-параметра полноценной view для последующей самостоятельной работы.
+Однако, ничего не мешает использовать в качестве этой view-функции прамо наш
+action.</p>
+<p>Допустим у нас есть магазин, в котором товары разбиты по категориям:</p>
+<div class="highlight"><pre><span class="k">class</span> <span class="nc">Category</span><span class="p">(</span><span class="n">models</span><span class="o">.</span><span class="n">Model</span><span class="p">):</span>
+    <span class="n">name</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">CharField</span><span class="p">(</span><span class="s">u'Наименование'</span><span class="p">,</span> <span class="n">max_length</span><span class="o">=</span><span class="mi">100</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">__unicode__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">name</span>
+
+<span class="k">class</span> <span class="nc">Product</span><span class="p">(</span><span class="n">models</span><span class="o">.</span><span class="n">Model</span><span class="p">):</span>
+    <span class="n">category</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">ForeignKey</span><span class="p">(</span><span class="n">Category</span><span class="p">,</span> <span class="n">verbose_name</span><span class="o">=</span><span class="s">u'Категория'</span><span class="p">)</span>
+    <span class="n">name</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">CharField</span><span class="p">(</span><span class="s">u'Наименование'</span><span class="p">,</span> <span class="n">max_length</span><span class="o">=</span><span class="mi">100</span><span class="p">)</span>
+    <span class="n">price</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">DecimalField</span><span class="p">(</span><span class="s">u'Цена'</span><span class="p">,</span> <span class="n">max_digits</span><span class="o">=</span><span class="mi">15</span><span class="p">,</span> <span class="n">decimal_places</span><span class="o">=</span><span class="mi">2</span><span class="p">)</span>
+</pre></div>
+
+
+<p>Время от времени пользователю хочется перенести пачку товаров из одной
+категории в другую (к примеру разбили "Картплоттеры" на "Плоттеры Garmin" и
+"Плоттеры Raymarine" и надо раскидать товары "согласно вновь утверждённому
+плану"). Чтобы человек не мучался, выставляя каждому такому товару новую
+категорию, мы и напишем нехитрый action.</p>
+<div class="highlight"><pre><span class="k">class</span> <span class="nc">CategoryForm</span><span class="p">(</span><span class="n">forms</span><span class="o">.</span><span class="n">Form</span><span class="p">):</span>
+    <span class="n">category</span> <span class="o">=</span> <span class="n">forms</span><span class="o">.</span><span class="n">ModelChoiceField</span><span class="p">(</span><span class="n">queryset</span><span class="o">=</span><span class="n">Category</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">all</span><span class="p">())</span>
+
+<span class="k">class</span> <span class="nc">ProductAdmin</span><span class="p">(</span><span class="n">admin</span><span class="o">.</span><span class="n">ModelAdmin</span><span class="p">):</span>
+    <span class="n">list_display</span> <span class="o">=</span> <span class="p">(</span><span class="s">'name'</span><span class="p">,</span> <span class="s">'category'</span><span class="p">,</span> <span class="s">'price'</span><span class="p">,</span> <span class="p">)</span>
+    <span class="n">actions</span> <span class="o">=</span> <span class="p">[</span><span class="s">'set_category_action'</span><span class="p">]</span>
+
+    <span class="k">def</span> <span class="nf">set_category_action</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">request</span><span class="p">,</span> <span class="n">queryset</span><span class="p">):</span>
+        <span class="k">if</span> <span class="s">'do_action'</span> <span class="ow">in</span> <span class="n">request</span><span class="o">.</span><span class="n">POST</span><span class="p">:</span>
+            <span class="n">form</span> <span class="o">=</span> <span class="n">CategoryForm</span><span class="p">(</span><span class="n">request</span><span class="o">.</span><span class="n">POST</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">form</span><span class="o">.</span><span class="n">is_valid</span><span class="p">():</span>
+                <span class="n">category</span> <span class="o">=</span> <span class="n">form</span><span class="o">.</span><span class="n">cleaned_data</span><span class="p">[</span><span class="s">'category'</span><span class="p">]</span>
+                <span class="n">updated</span> <span class="o">=</span> <span class="n">queryset</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">category</span><span class="o">=</span><span class="n">category</span><span class="p">)</span>
+                <span class="n">messages</span><span class="o">.</span><span class="n">success</span><span class="p">(</span><span class="n">request</span><span class="p">,</span>
+                                 <span class="s">'{} товаров перемещено в категорию {}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span>
+                                                    <span class="n">updated</span><span class="p">,</span> <span class="n">category</span><span class="p">))</span>
+                <span class="c"># Ничего не возвращаем, это вернет нас на список товаров</span>
+                <span class="k">return</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">form</span> <span class="o">=</span> <span class="n">CategoryForm</span><span class="p">()</span>
+        <span class="k">return</span> <span class="n">render</span><span class="p">(</span><span class="n">request</span><span class="p">,</span>
+            <span class="s">'admin/shop/set_category.html'</span><span class="p">,</span>
+            <span class="p">{</span><span class="s">'title'</span><span class="p">:</span> <span class="s">u'Укажите категорию, в которую надо переместить товары'</span><span class="p">,</span>
+             <span class="s">'objects'</span><span class="p">:</span> <span class="n">queryset</span><span class="p">,</span>
+             <span class="s">'form'</span><span class="p">:</span> <span class="n">form</span><span class="p">})</span>
+    <span class="n">set_category_action</span><span class="o">.</span><span class="n">short_description</span> <span class="o">=</span> <span class="s">u'Переместить в категорию'</span>
+</pre></div>
+
+
+<p>Поддерживающий это дело <code>set_category.html</code> прост. Через hidden-поля <code>action</code>
+и <code>_selected_action</code> мы заставляем админку опять вызвать наш action, но на
+этот раз в POST попадают две дополнительные переменные: <code>do_action</code> (флажок,
+что мы пришли из формы) и <code>category</code> (та категория, которую надо назначить).</p>
+<div class="highlight"><pre><span class="cp">{%</span> <span class="k">extends</span> <span class="s2">"admin/base_site.html"</span> <span class="cp">%}</span>
+
+<span class="cp">{%</span> <span class="k">block</span> <span class="nv">content</span> <span class="cp">%}</span>
+
+    <span class="nt">&lt;form</span> <span class="na">action=</span><span class="s">""</span> <span class="na">method=</span><span class="s">"post"</span><span class="nt">&gt;</span>
+
+        <span class="cp">{%</span> <span class="k">csrf_token</span> <span class="cp">%}</span>
+        <span class="nt">&lt;input</span> <span class="na">type=</span><span class="s">"hidden"</span> <span class="na">name=</span><span class="s">"action"</span> <span class="na">value=</span><span class="s">"set_category_action"</span><span class="nt">&gt;</span>
+        <span class="nt">&lt;input</span> <span class="na">type=</span><span class="s">"hidden"</span> <span class="na">name=</span><span class="s">"do_action"</span> <span class="na">value=</span><span class="s">"yes"</span><span class="nt">&gt;</span>
+
+        <span class="nt">&lt;div&gt;</span>
+            <span class="cp">{{</span> <span class="nv">form.category</span> <span class="cp">}}</span>
+            <span class="nt">&lt;input</span> <span class="na">type=</span><span class="s">"submit"</span> <span class="na">class=</span><span class="s">"default"</span> <span class="na">style=</span><span class="s">"float: none"</span> <span class="na">value=</span><span class="s">"Переместить"</span><span class="nt">&gt;</span>
+            <span class="cp">{{</span> <span class="nv">form.category.errors</span> <span class="cp">}}</span>
+        <span class="nt">&lt;/div&gt;</span>
+
+        <span class="nt">&lt;h2&gt;</span>Товары для перемещения<span class="nt">&lt;/h2&gt;</span>
+
+        <span class="nt">&lt;ul&gt;</span>
+            <span class="cp">{%</span> <span class="k">for</span> <span class="nv">object</span> <span class="k">in</span> <span class="nv">objects</span> <span class="cp">%}</span>
+                <span class="nt">&lt;li&gt;</span>
+                    <span class="nt">&lt;a</span> <span class="na">href=</span><span class="s">"</span><span class="cp">{{</span> <span class="nv">object.pk</span> <span class="cp">}}</span><span class="s">/"</span><span class="nt">&gt;</span><span class="cp">{{</span> <span class="nv">object.name</span> <span class="cp">}}</span><span class="nt">&lt;/a&gt;</span> - <span class="cp">{{</span> <span class="nv">object.category</span> <span class="cp">}}</span>
+                    <span class="nt">&lt;input</span> <span class="na">type=</span><span class="s">"hidden"</span> <span class="na">name=</span><span class="s">"_selected_action"</span> <span class="na">value=</span><span class="s">"</span><span class="cp">{{</span> <span class="nv">object.pk</span> <span class="cp">}}</span><span class="s">"</span><span class="nt">&gt;</span>
+                <span class="nt">&lt;/li&gt;</span>
+            <span class="cp">{%</span> <span class="k">endfor</span> <span class="cp">%}</span>
+        <span class="nt">&lt;/ul&gt;</span>
+
+    <span class="nt">&lt;/form&gt;</span>
+
+<span class="cp">{%</span> <span class="k">endblock</span> <span class="cp">%}</span>
+</pre></div>
+
+
+<p>В итоге всё это построение выглядит и работает примерно так:</p>
+<p><img alt="Admin action с промежуточной формой" src="http://djangonaut.ru/images/admin-action-with-intermediate-page.gif"/></p>
+<p>Вот таким простым образом мы избавились от необходимости:</p>
+<ul>
+<li>писать где-то в приложении лишний view с проверкой прав;</li>
+<li>самостоятельно выдергивать в нем список объектов;</li>
+<li>придумывать url и делать редирект обратно на change list.</li>
+</ul>
+		</div>
+
+	</div></body></html>

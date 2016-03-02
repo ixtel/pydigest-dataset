@@ -1,0 +1,558 @@
+<html><body><div><section class="post-content"><center>
+  <br/> <a href="/wp-content/uploads/sites/2/2015/12/40_examples.svg"><img src="/wp-content/uploads/sites/2/2015/12/40_examples.svg" alt="40_examples" class="alignnone size-medium wp-image-980"/></a>
+
+  <p>
+    Fake Kanji characters generated from a LSTM-Mixture Density Network in SVG Format using <code>sketch-rnn</code>. Code available on <a href="https://www.github.com/hardmaru/sketch-rnn/">github</a>.
+  </p>
+
+  <p>
+    <em>Note: Kanji (漢字) is the Japanese pronunciation for Chinese Characters, and I use these two terms interchangeably depending on the context.</em>
+  </p>
+
+
+
+  <p>
+    <a href="http://otoro.net/kanji"><img src="/wp-content/uploads/sites/2/2015/12/random_radicals_400x400_10fps.gif" alt="random_radicals_400x400_10fps"/></a><br/> <strong>Update 6-Jan-2016:</strong> Created a <a href="http://otoro.net/kanji">web browser demo</a> of Fake Kanji Generation.
+  </p>
+
+  <blockquote class="twitter-tweet" lang="en">
+    <p lang="en" dir="ltr">
+      "I ain't got no wood for her"
+<a href="https://twitter.com/hashtag/FakeKanji?src=hash">#FakeKanji</a> <a href="https://twitter.com/hashtag/%E5%89%B5%E4%BD%9C%E6%BC%A2%E5%AD%97?src=hash">#創作漢字</a> <a href="https://t.co/cdiPbYu8Au">pic.twitter.com/cdiPbYu8Au</a>
+    </p>
+
+    <p>
+      — neokanji (@neokanji) <a href="https://twitter.com/neokanji/status/684933283637936128">January 7, 2016</a>
+    </p>
+  </blockquote>
+
+  <p>
+  </p>
+
+  <p>
+    <strong>Update 7-Jan-2016:</strong> Created @<a href="https://twitter.com/neokanji">neokanji</a>, a <a href="https://twitter.com/neokanji">tweet bot</a> using our <a href="https://github.com/hardmaru/sketch-rnn">Fake Kanji Generating Machine</a>. Curated by myself, @<a href="https://twitter.com/hardmaru">hardmaru</a>.
+  </p>
+
+</center>
+
+<h2>
+    Introduction
+  </h2>
+
+<p>
+    This is the third post in a series of blog posts logging my experiments with with TensorFlow. For a better understanding, feel free to read the first post on <a href="/2015/12/12/handwriting-generation-demo-in-tensorflow/">Mixture Density Networks</a> (MDNs), and the <a href="/2015/12/12/handwriting-generation-demo-in-tensorflow/">second post</a> on Long Short Term Memory networks combined with MDNs to generate fake <a href="/2015/12/12/handwriting-generation-demo-in-tensorflow/">handwriting examples</a> as in Alex Graves’ legendary <a href="http://arxiv.org/abs/1308.0850">sequence-generating paper</a>.
+  </p>
+
+<p>
+    We will be modifying and extending Graves’ approach to get LSTM + MDN to generate fake Chinese characters in vector format. The main difference in approach is to model an addition <em>end of content</em> state in addition to the existing <em>end of stroke</em> state, and applying selective gradient boosting on these less likely pen-states.
+  </p>
+
+<h2>
+    Motivation
+  </h2>
+
+<p>
+    As a child growing up in a mostly English speaking country, my parents would force me to attend these dreadful Saturday morning classes where I was to be taught Chinese. There would be these <em>dictation</em> tests where the students have to write out full passages of memorised Chinese text from a textbook, usually indirectly exposing us to <a href="https://en.wikipedia.org/wiki/Confucianism">Confucian</a> moral values. We would have to spend a lot of time during the weeknights memorising passages to prepare for the test on the following Saturday. A score less than perfection is frowned upon. This would go on for years. I still have nightmares about those dictation tests. I think that’s how most children learn Chinese as well via this rote learning method around the world. Maybe in some sense, Chinese language education resembles how LSTM’s are trained to reproduce sequences from training examples.
+  </p>
+
+<p>
+    </p><center>
+      <br/>
+
+      <div id="attachment_1053" class="wp-caption alignnone">
+        <a href="http://www.buckeroomama.com/2012_11_01_archive.html"><img src="/wp-content/uploads/sites/2/2015/12/learning_chinese.jpg" alt="Example of child learning Chinese characters found randomly on the Internet."/></a>
+
+        <p class="wp-caption-text">
+          Example of a child’s struggles at learning Chinese characters<br/> (source: <a href="http://www.buckeroomama.com/2012_11_01_archive.html">random link</a> found on the web)
+        </p>
+      </div>
+
+      <br/>
+    </center>
+  
+
+<p>
+    From personal experience, being able to write Chinese characters is very different than being able to read Chinese characters. Kanji <a href="http://www.tofugu.com/2010/08/27/kanji-amnesia-and-why-its-okay-to-forget-kanji/">writing proficiency</a> has been on the decline for decades. It has been a phenomenon in the past few decades now, starting in Japan, and now probably the rest of Asia where most people type Asian text via a phonetics-based input method (kana input for Japanese and pinyin for Chinese), and then visually choose the desired character from a bunch of likely candidates from the screen. The problem arises when people sit down and write a New Year’s Card to be mailed by post to their old Sensei and suddenly realise they forgot how to write Kanji. I am also guilty of this – even though I read a lot of Chinese and Japanese content in my everyday life, I struggle to write Chinese characters. What we notice is that while we can definitely read and recognise the characters we are able to write, the converse is certainly not true.
+  </p>
+
+<p>
+    Similarly in Machine Learning, many problems start off being classification tasks. What is this digit? Is this picture a dog, or a house? Is this transaction a fraud? Should we lend money to this dude applying for a mortgage? Man or Woman? <a href="https://how-old.net/">How old is she</a>?
+  </p>
+
+<p>
+    While these tasks are very useful, I think a more interesting task is to generate data, which I view as an extension to classifying data. Like how being able to write a Chinese character demonstrate more understanding than merely knowing how to read that character, I think being able to generate content is also key to understanding that content. Being able generate a picture of a 22 year old attractive lady is much more impressive than merely being able to estimate that the this woman is likely around 22 years of age.
+  </p>
+
+<p>
+    An example of a generative task is the <a href="http://arxiv.org/abs/1409.3215">translation machines</a> developed to translate English into another language in real time. Generative art and music has been increasingly popular. Recently, there has been work on using techniques such as generative adversarial networks (GANs) to generate bitmap pictures of fake images that look like real ones, like fake <a href="https://github.com/aleju/cat-generator">cats</a>, fake <a href="http://www.futurehousenow.com/computers-learn-to-create-photos-of-bedrooms-and-faces-on-demand/">faces</a>, fake bedrooms and even fake <a href="https://github.com/mattya/chainer-DCGAN">anime characters</a>, and to me, those problems are a lot more exciting to work on, and a natural extension to classification problems.
+  </p>
+
+<p>
+    What interests me more though, is the ability to generate vectorised content. I think a lot of useful content are best represented in vector format, as opposed to rasterised bitmap images. For example, digitised pen sketches, CAD designs, geo-location tag data like where we bike on Strava, scientific experimental data, and of course handwriting, are better expressed as vectorised data.
+  </p>
+
+<p>
+    </p><center>
+      <br/>
+
+      <div id="strokes_matter" class="wp-caption center">
+        <a href="http://kanjivg.tagaini.net/viewer.html?kanji=%E9%9B%A3"><img src="/wp-content/uploads/sites/2/2015/12/strokes_matter.svg" alt="Example of stroke order from KanjiVG" class="alignnone size-medium wp-image-986"/></a>
+
+        <p class="wp-caption-text">
+          Examples from KanjiVG Stroke Order Database.
+        </p>
+      </div>
+
+      <br/>
+    </center>
+  
+
+<p>
+    I think fonts and handwriting is best expressed with vectors, rather than bitmaps. As someone interested in design, I’m a bit of a font geek, and I really appreciate well designed, beautiful TrueType fonts, which look stunning regardless of the size they are displayed. I think pen strokes recorded from digitised writing are much more naturally suited to be represented as vector data, and I’m a big fan of online handwriting data compared to offline data whenever they are made available.
+  </p>
+
+<p>
+    In this blog post, I will describe how to train a recurrent neural network to generate fake, but plausible Chinese characters, in vector .svg format. For the training, we will expose the network to real examples of Chinese characters from a <a href="http://kanjivg.tagaini.net/">stroke-order database</a> of Kanji, so the network will also need to write made-up Chinese characters with a plausible stroke order as well.
+  </p>
+
+<p>
+    </p><center>
+      <br/>
+
+      <div id="attachment_984" class="wp-caption center">
+        <a href="http://www.ageekinjapan.com/learning-japanese/"><img src="/wp-content/uploads/sites/2/2015/12/bimoji-300x290.jpg" alt="Game to write Kanji with perfection." class="size-medium wp-image-984" srcset="    /wp-content/uploads/sites/2/2015/12/bimoji-300x290.jpg 300w,     /wp-content/uploads/sites/2/2015/12/bimoji.jpg 558w"/></a>
+
+        <p class="wp-caption-text">
+          Game that teaches you to write perfect Kanji.
+        </p>
+      </div>
+
+      <br/>
+    </center>
+  
+
+<p>
+    Stroke order is very important to Japanese culture, in a society where the process matters just as much as the end result. Some calligraphists take stroke order very seriously, and will probably explode if they see someone writing a Kanji with incorrect stroke order. Japanese companies even created video games to allow one to learn correct stroke order of Kanji, like the one pictured above. Only vectorised data can really model this stroke order, and capture the pure essence of Kanji, and probably some part of Asian culture. Rasterised Kanji data is the equivalent of watching the English dub of a popular Anime, two years after it got released in Tokyo, in low quality RealMedia streaming file format. As such, we will want our generative recurrent neural net to learn to write Kanji characters obeying, and respecting the proper stroke order to maintain order in the universe.
+  </p>
+
+<h2>
+    Background
+  </h2>
+
+<p>
+    Our generative prediction model will follow the same framework outlined in Graves’ paper where he demonstrated both generative text, and generative handwriting. Karpathy’s <a href="http://karpathy.github.io/2015/05/21/rnn-effectiveness/">post</a> and <code>char-rnn</code> <a href="https://github.com/karpathy/char-rnn">implementation</a> has some fantastic examples on how this framework is used to generate data that is represented as text.
+  </p>
+
+<p>
+    </p><center>
+      <br/>
+
+      <div id="state_diagram" class="wp-caption center">
+        <a href="/wp-content/uploads/sites/2/2015/12/state_diagram.svg"><img src="/wp-content/uploads/sites/2/2015/12/state_diagram.svg" alt="state_diagram" class="alignnone size-medium wp-image-983"/></a>
+
+        <p class="wp-caption-text">
+          Generative Sequence Model Framework<br/>
+        </p>
+      </div>
+
+      <br/>
+    </center>
+  
+
+<p>
+    In the text-generation example, assuming we have a model that has been pre-trained already, we feed in an initial random character into the model that with an initially empty state. The model will use the state’s information along with the current input, to generate a probability distribution for the next character. That distribution will be sampled randomly (possibly we distort the sampling process by applying <a href="https://webdocs.cs.ualberta.ca/~sutton/book/ebook/node17.html">temperature</a>), to obtain a prediction for the next character. The sampled character will be placed back as the next input, as well as the current internal state of the model.
+  </p>
+
+<p>
+    A simple model that fits this framework is the basic <a href="http://nbviewer.ipython.org/gist/yoavg/d76121dfde2618422139">N-GRAM</a> character modelling method. In N-GRAM, all we do is keep a record of frequencies of the previous N characters and use the historical table of frequencies as the probability distribution we can draw to generate the next character.
+  </p>
+
+<p>
+    This framework can also be represented by a recurrent neural network, where the states are the hidden states of recurrent LSTM nodes, and the output values of the network can be converted into a discrete probability distribution via applying softmax layer to the outputs. To train the weights of the neural network, we need a way to compare the predicted distribution, to the actual distribution of the training data. What is usually done is that cross-entropy loss function is usually applied, to compare the model’s predicted probabilities after the softmax layer, with the actual data of the entire sequence generated.
+  </p>
+
+<p>
+    This has been done in Graves’ sequence generation paper and implemented as <code>char-rnn</code> by Karpathy. <code>char-rnn</code> has been used successfully to generate not only Shakespeare’s text, but also bizarre examples such as Linux source code, LaTeX documents, wikipedia formatted xml articles, and music scores.
+  </p>
+
+<h2>
+    sketch-rnn, the char-rnn for svg training data
+  </h2>
+
+<p>
+    I wanted to create a <code>char-rnn</code> like tool, but for learning to draw sketches, rather than learning to generate character sequences. SVG data is readily available on the web, although obviously not as easy to obtain as text data. In the end, I created a tool called <code>sketch-rnn</code> that would attempt to learn some structure from a large collection of related .svg files, and be able to generate and dream up new vectorised drawings that is similar to the training set. Just as how <code>char-rnn</code> can take Donald Trump quotes to generate hypothetical <a href="https://twitter.com/RoboTrumpDNN">Donald Trump wisdom</a>, I wanted to be able to feed in a large collection of .svg pictures of cats and have an algorithm come up with new vectorised pictures of cats. It was difficult to obtain .svg pictures of cats in sufficient quantities, while it was quite easy to obtain .svg files for Chinese characters, so in the end this turned into an experiment to generate fake Kanji.
+  </p>
+
+<p>
+    <code>sketch-rnn</code> follows the same principle of the previous handwriting generation demo <a href="/2015/12/12/handwriting-generation-demo-in-tensorflow/">blog post</a>. Each drawing is modelled by a pen-stroke-like data, where each step of data contains an offset in x, and y axis, as well as whether the pen is on the paper or off the paper, and a small line is drawn from the previous step to the current step if the pen is down. The neural network will have to come up with a probability distribution for the next step. Unlike the character generation example where the pdf is just a pile of discrete probabilities for each possible character, we need a continuous distribution for the offsets in x and y direction, along with a probability that the pen will be lifted above the paper in the next step (this is called the end-of-stroke probability). The distribution used will be a <a href="https://en.wikipedia.org/wiki/Mixture_model">Mixture Gaussian Distribution</a> to estimate the pdf of the next offsets to x and y pen locations. This is the method, called <a href="/2015/06/14/mixture-density-networks/">Mixture Density Networks</a>, used to generate fake handwriting in the previous <a href="/2015/11/24/mixture-density-networks-with-tensorflow/">blog post</a>.
+  </p>
+
+<p>
+    </p><center>
+      <br/>
+
+      <div id="mdn_diagram" class="wp-caption center">
+        <a href="/wp-content/uploads/sites/2/2015/12/mdn_diagram.svg"><img src="/wp-content/uploads/sites/2/2015/12/mdn_diagram.svg" alt="Example of Mixture 2D Gaussian Densities" class="alignnone size-medium wp-image-982"/></a>
+
+        <p class="wp-caption-text">
+          Example of Mixture 2D Gaussian Densities<br/>
+        </p>
+      </div>
+
+      <br/>
+    </center>
+  
+
+<p>
+    Above is an example of the Mixture Gaussian Densities we use to draw strokes of Chinese characters. As it is drawing the strokes shown via the black dots with connected lines, the LSTM+MDN algorithm will continually estimate the probability distribution of where the next dot will take place. The distribution is modelled as a mixture gaussian distribution. What this means is the next location is comprised of a mixture of many different locations (you see in the different shaded red ellipse shapes), and each location itself is a 2-dimensional joint gaussian distribution for the x and y offsets each with its own 2×2 covariance matrix.
+  </p>
+
+<p>
+    What we need to do in addition to the stroke location distribution and end-of-stroke probability, is to model also the probability that we have finished writing this Chinese character, or, that we are finished drawing this sketch entirely (we will call this the <em>end-of-char</em>, or <em>end-of-content</em>, ‘eoc’ probability). Originally, I just added another similar variable as the <em>end-of-stroke</em> probability as a seperate random variable to model up, but I found that this didn’t work well in practice. We know that whenever we have an <em>end-of-char</em> event, that event will also be an <em>end-of-stroke</em> event, so there is some mutual information value that we are discounting.
+  </p>
+
+<p>
+    It took me a while to figure out a better way to model both signals, and in the end what I did was I modelled the state of the pen, as a set of discrete states, which can be modelled in the neural network as a softmax layer. The pen-state can be one of (end-of-stroke, end-of-char, or pen-is-down), and for each step, the model will have to assign probabilities to these three states. This seems like a very elegant approach, and is similar to using char-rnn to model the 3 pen states, in addition to using a mixture distribution to model the offsets of x and y.
+  </p>
+
+<h2>
+    Processing Training Data
+  </h2>
+
+<p>
+    I used the <a href="http://kanjivg.tagaini.net/">KanjiVG</a> database created by these really nice people who created a fantastic <a href="http://www.tagaini.net/">open source Japanese language learning tool</a>. As mentioned earlier, the stroke orders matter when writing a Kanji, and even if one writes a Kanji in an incorrect stroke order and arrives at a final character that resembles the correct character, it is still an incorrect Kanji. The KanjiVG github repo contains around 11000 Kanji .svg files, and the <code>path</code> elements of each .svg files are ordered in such a way to respect the official Japanese Kanji stroke order. As an aside, there are minor differences between some Japanese Kanji stroke order and Chinese character stroke orders, and this probably adds to existing <a href="http://qz.com/555544/japan-is-using-the-south-china-sea-as-a-selling-point-to-peddle-military-hardware-in-asia/">geopolitical tensions</a> near the South China Sea.
+  </p>
+
+<p>
+    In <code>sketch-rnn</code>, the <code>SketchLoader</code> class will read in all the .svg files located inside the data subdirectory, and then slice and dice up all the line and path elements into smaller lines that is more fitting to train our data on. Please refer to the code for the specifics on the granuarity and path-to-lines conversion, as it can all be customised.
+  </p>
+
+<p>
+    Below are some training examples of training characters extracted from KanjiVG:
+  </p>
+
+<p>
+    </p><center>
+      <br/> <a href="http://kanjivg.tagaini.net/"><img src="/wp-content/uploads/sites/2/2015/12/training.svg" alt="Sample Kanji from KanjiVG Stroke database." class="alignnone size-medium wp-image-985"/></a><br/> <em>Training examples from KanjiVG dataset.<br/> Different colours show different strokes of each character.</em><br/>
+    </center>
+  
+
+<p>
+    The SketchLoader object will then dump all the lines extracted from the .svg files into an array of stroke arrays into a cPickle binary file for future training use. It will also generate the minibatch sets used for the training process later.
+  </p>
+
+<h2>
+    Boosting Gradients for Less Likely Events
+  </h2>
+
+<p>
+    The initial results were a bit dissapointing, because the pen would just ramble on and not move to the next character, despite generating realistic shapes of individual strokes. What I noticed is that the algorithm generally underestimated, or simply ignored the end-of-character probability in the process of minimizing the log likehood loss function, and I think this is because the end-of-char events don’t happen often, and occurs in the order of 1 out of 100 steps.
+  </p>
+
+<p>
+    This problem did not occur in Graves’ handwriting generation problem. In the English handwriting training data, we didn’t have to model the end-of-training signal, and can have the computer ramble on until the end of time. In this problem, we actually need to train the algorithm to know exactly when to stop writing after it thinks it has finished writing a complete Chinese character.
+  </p>
+
+<p>
+    Example of an initial training result where the computer rambles on, if the boosting method outlined in this section hasn’t been applied:
+  </p>
+
+<p>
+    </p><center>
+      <br/>
+
+      <div id="rambling" class="wp-caption center">
+        <a href="/wp-content/uploads/sites/2/2015/12/rambling.svg"><img src="/wp-content/uploads/sites/2/2015/12/rambling.svg" alt="Example of rambling.  Computer doesn't know when to stop." class="alignnone size-medium wp-image-987"/></a>
+
+        <p class="wp-caption-text">
+          Example of not knowing when to stop.<br/>
+        </p>
+      </div>
+
+      <br/>
+    </center>
+  
+
+<p>
+    The way I got around this problem was to devise a way to increase the error, and hence the gradients of the datapoints that occur when the end-of-char signal occurs, and modified the loss function accordingly to include these increased weightings.
+  </p>
+
+<p>
+    Generative Model:<br/>
+
+    </p><center>
+      <br/> <img src="/wp-content/ql-cache/quicklatex.com-348df1e8e6d8b5f7910564d987cda495_l3.png" class="ql-img-inline-formula quicklatex-auto-format" alt=" P(X=x,Y=y,M=m) = P(X=x,Y=y) P(M=m) " title="Rendered by QuickLaTeX.com"/>
+
+      <p>
+        <img src="/wp-content/ql-cache/quicklatex.com-a612ceaff255d2782267ea91e92778e1_l3.png" class="ql-img-inline-formula quicklatex-auto-format" alt=" P(X=x,Y=y) = \sum_{k=0}^{K-1} \Pi_{k} \Phi(x, y, \mu_{x},\mu_{y}, \sigma_{x},\sigma_{y}, \rho) " title="Rendered by QuickLaTeX.com"/>
+      </p>
+
+      <p>
+        <img src="/wp-content/ql-cache/quicklatex.com-515b30f7268cf0d2b4e0f2c5b363ace1_l3.png" class="ql-img-inline-formula quicklatex-auto-format" alt=" P(M=m) = z_{m} = \begin{cases} p_{stay} &amp; \text{pen stays on the paper} \\ p_{eos} &amp; \text{pen is to be lifted up} \\ p_{eoc} &amp; \text{stop drawing after this point} \end{cases} " title="Rendered by QuickLaTeX.com"/><br/>
+      </p>
+
+    </center>
+
+      <p>
+        Where <img src="/wp-content/ql-cache/quicklatex.com-a8079913a5bd6a75f28547e98b171e65_l3.png" class="ql-img-inline-formula quicklatex-auto-format" alt="x, y, m" title="Rendered by QuickLaTeX.com"/> denotes random values of x-offsets, y-offsets, and pen-state for the next step of the sketch. <img src="/wp-content/ql-cache/quicklatex.com-40ca3e51a9803f260de25590c47d925e_l3.png" class="ql-img-inline-formula quicklatex-auto-format" alt="x, y" title="Rendered by QuickLaTeX.com"/> is modelled with a mixture 2D gaussian distribution from the MDN output, while <img src="/wp-content/ql-cache/quicklatex.com-6b41df788161942c6f98604d37de8098_l3.png" class="ql-img-inline-formula quicklatex-auto-format" alt="m" title="Rendered by QuickLaTeX.com"/> will be modelled as a softmax one-hot output <img src="/wp-content/ql-cache/quicklatex.com-994d5f335337c1132e98131bbdcd4c86_l3.png" class="ql-img-inline-formula quicklatex-auto-format" alt="z_{m}" title="Rendered by QuickLaTeX.com"/>.
+      </p>
+
+      <p>
+        Gradient-boosted Loss Function for each step:
+      </p>
+
+      <p>
+        </p><center>
+          <br/> <img src="/wp-content/ql-cache/quicklatex.com-4f2949563e1181dddab695878fc0a1ec_l3.png" class="ql-img-inline-formula quicklatex-auto-format" alt=" Loss(x, y, m) = - Log \left( \sum_{k=0}^{K-1} \Pi_{k} \Phi(x, y, \mu_{x},\mu_{y}, \sigma_{x},\sigma_{y}, \rho) \right) - w(m) Log \left( z_{m} \right) " title="Rendered by QuickLaTeX.com"/>
+
+          <p>
+            <img src="/wp-content/ql-cache/quicklatex.com-bb7cb9f11047b07739f0c15b425ddc5d_l3.png" class="ql-img-inline-formula quicklatex-auto-format" alt=" w(m) = \begin{cases} 1 &amp; \text{pen stays on the paper} \\ 10 &amp; \text{pen is to be lifted up} \\ 100 &amp; \text{stop drawing after this point} \end{cases} " title="Rendered by QuickLaTeX.com"/>
+          </p>
+
+          <p>
+            <img src="/wp-content/ql-cache/quicklatex.com-567ca93fadb19542a6d92a236f50572f_l3.png" class="ql-img-inline-formula quicklatex-auto-format" alt="w(m)" title="Rendered by QuickLaTeX.com"/> attempts to boost the loss function for less likely events in the data.<br/>
+          </p>
+
+        </center>
+
+          <p>
+            I chose a factor of 10 for end-of-stroke points and 100 for end-of-character points, to complement the default unit factor for pen-down points, so that the weighting can somewhat complement the lower probability of those signal events. I found that this method is very effective, and when combined with some example diversity and shuffling tricks I will describe in the next session, the end results improved substantially.
+          </p>
+
+          <p>
+            I’m pretty sure someone has thought of this weighted boosting method before for improbable events, as it is quite an obvious approach. I looked it up on the web and couldn’t find anything though (the closest was <a href="http://statisticalhorizons.com/logistic-regression-for-rare-events">this</a>). If you can’t find it, well, you heard of it here first.
+          </p>
+
+          <h2>
+            Diversify Examples – Shuffled Minibatch Creation, Randomised Scaling
+          </h2>
+
+          <p>
+            At the beginning of each epoch, we shuffle the order of the characters in the training data. The stroke order database was created in such a way such that similar groups of characters were next to each other, and I wanted each batch to be comprised of a better representive set of training examples in the Chinese language. I want to increase the diversity in mini batches, otherwise the algorithm will just be spending its time only learning “fish-kanji” （<a href="http://kanjivg.tagaini.net/viewer.html?kanji=%E9%AD%9A">魚</a>、<a href="http://kanjivg.tagaini.net/viewer.html?kanji=%E9%AF%9B">鯛</a>、<a href="http://kanjivg.tagaini.net/viewer.html?kanji=%E9%AE%AA">鮪</a>） for a very long time, have the gradients all distort it’s perception of the universe and think everything is a fish, and then suddenly relearn bird-kanji for a while（<a href="http://kanjivg.tagaini.net/viewer.html?kanji=%E9%B3%A5">鳥</a>）and get its mind all messed up. It’ll probably get messed up and confused regardless when I tries to learn the Ultimate Character: <a href="http://kanjivg.tagaini.net/viewer.html?kanji=%E9%AC%B1">鬱</a>
+          </p>
+
+          <p>
+            One limitation as well is that the stroke order dataset only had around 10000 examples of Kanji writing, and I felt we needed to manufacture more artificial data for the training. So I took a trick I learned from distorting MNIST training examples to create more training data. Each minibatch is randomly scaled to anywhere between +/- 30% of original size. The structure of the data, as everything is just an offset in space, makes this scaling very easy to do, by just multiplying the entire matrix by one factor. I do this distortion on the fly rather than precomputing extra examples and storing them, and just increase the epoch count. What I could possibly do as well is to distort the x and y axis by different scaling factors, which I haven’t done yet at the time of writing, but it’s really easy to modify the tool to do that with just an extra line of code.
+          </p>
+
+          <p>
+            Finally, each minibatch starts with the beginning of a character, not starting in the middle, as I want the algorithm to be exposed to learn full structures. I don’t want the algo to start training in the middle of a basic pattern, like （<a href="http://kanjivg.tagaini.net/viewer.html?kanji=口">口</a>、<a href="http://kanjivg.tagaini.net/viewer.html?kanji=木">木</a>、<a href="http://kanjivg.tagaini.net/viewer.html?kanji=山">山</a>）. So the next batch will just skip to the start of the next character sample. As a consequence, each epoch may not have the exact same number of minibatches due to this skipping, but should be close.
+          </p>
+
+          <h2>
+            Fine Tuning
+          </h2>
+
+          <p>
+            The beginning of the experiment was quite frustrating, as I only got gibberish, and the algorithm rambles on and on to write a giant web of lines like a crazy mad man. It took me a while to come up with the idea of using softmax to model both end-of-stroke and end-of-character, and also a lot of caffine to come up with the gradient boosting idea.
+          </p>
+
+          <p>
+            The tricks we used, boosting grads for less likely events, and diversifying training examples have improved the quality of results. That being said though, the final results still contain some bad results occasionally. As a final filter, I threw out results that exceeded the size of the writing area and had them start over until they get it all within a specified box area.
+          </p>
+
+          <h2>
+            Model Setup
+          </h2>
+
+          <p>
+            I included in <code>sketch-rnn</code> github repo a smaller pre-trained net so if you like, you can try to run <code>sketch-rnn</code> on your machine by just running <code>python sample.py</code>.
+          </p>
+
+          <p>
+            The smaller pre-trained net generates 24 gaussian mixture distributions for each time step, and uses 2 layers of 256 LSTM nodes, with dropout keep probability of 80% employed at the outputs of each layer.
+          </p>
+
+          <p>
+            I scaled the data down in size by a factor of 15. This is an interesting problem, as the typical training examples have sizes around 80 to 160 units on each axis. I found a good rule of thumb is to scale the data down so that the average dimension of the data is in the order of 10×10, and typically for Chinese characters, the offsets of each successful step is in the order of 1×1 size.
+          </p>
+
+          <p>
+            Using minibatches of 50-100 examples seemed to work well. I tried to have a relatively larger initial learning rate, and have that learning rate decrease proportionally by 1% after each subsequent epoch. Sometimes having a learning rate too large will crash the training, and the part of the training that crashes is to do with the estimation of end-of-character likelihood. It is a bit tricky when we need to estimate the probability of unlikely events using the gradient boosting method above, and that may lead to numerical instability.
+          </p>
+
+          <h2>
+            Example Results
+          </h2>
+
+          <p>
+            </p><center>
+              <br/> <a href="/wp-content/uploads/sites/2/2015/12/80_examples.svg"><img src="/wp-content/uploads/sites/2/2015/12/80_examples.svg" alt="Fake Kanji generated via sample.py in sketch-rnn." class="alignnone size-medium wp-image-981"/></a><br/> Fake Kanji generated using sketch-rnn.<br/>
+            </center>
+          
+
+          <p>
+            I’m quite happy with the results. <code>sketch-rnn</code> was able to generate a variety of Kanji that does not exist, but resembles somewhat the way Kanji are supposed to be writen. Many radicals and basic parts of Kanji are placed and configured in locations that makes sense in terms of forming the structure of a Kanji. It seems to resemble a child struggling to pass a Chinese dictation test and trying to wing it by desperately making up answers.
+          </p>
+
+          <h3>
+            Some Interesting Examples
+          </h3>
+
+          <table>
+          <tr>
+
+          <th>
+            <center>
+              <br/> <a href="/wp-content/uploads/sites/2/2015/12/six_stoned_chicks.svg"><img src="/wp-content/uploads/sites/2/2015/12/six_stoned_chicks.svg" alt="six stoned chicks" class="alignnone size-medium wp-image-1005"/></a><br/> six stoned ladies<br/>
+            </center>
+          </th>
+
+          <th>
+            <center>
+              <br/> <a href="/wp-content/uploads/sites/2/2015/12/lonely_ghost.svg"><img src="/wp-content/uploads/sites/2/2015/12/lonely_ghost.svg" alt="lonely ghost" class="alignnone size-medium wp-image-1001"/></a><br/> lonely ghost<br/>
+            </center>
+          </th>
+
+          <th>
+            <center>
+              <br/> <a href="/wp-content/uploads/sites/2/2015/12/wooden_food.svg"><img src="/wp-content/uploads/sites/2/2015/12/wooden_food.svg" alt="wooden food" class="alignnone size-medium wp-image-1009"/></a><br/> wooden food<br/>
+            </center>
+          </th>
+
+          <th>
+            <center>
+              <br/> <a href="/wp-content/uploads/sites/2/2015/12/urban_sheep.svg"><img src="/wp-content/uploads/sites/2/2015/12/urban_sheep.svg" alt="urban sheep" class="alignnone size-medium wp-image-1007"/></a><br/> urban sheep<br/>
+            </center>
+          </th>
+
+          </tr>
+          <tr>
+
+          <th>
+            <center>
+              <br/> <a href="/wp-content/uploads/sites/2/2015/12/wood_pecker.svg"><img src="/wp-content/uploads/sites/2/2015/12/wood_pecker.svg" alt="wood pecker" class="alignnone size-medium wp-image-1008"/></a><br/> wood pecker<br/>
+            </center>
+          </th>
+
+          <th>
+            <center>
+              <br/> <a href="/wp-content/uploads/sites/2/2015/12/stop_eating_lambs.svg"><img src="/wp-content/uploads/sites/2/2015/12/stop_eating_lambs.svg" alt="stop eating lambs" class="alignnone size-medium wp-image-1006"/></a><br/> stop eating lambs<br/>
+            </center>
+          </th>
+
+          <th>
+            <center>
+              <br/> <a href="/wp-content/uploads/sites/2/2015/12/birding.svg"><img src="/wp-content/uploads/sites/2/2015/12/birding.svg" alt="birding" class="alignnone size-medium wp-image-1013"/></a><br/> bird hunting<br/>
+            </center>
+          </th>
+
+          <th>
+            <center>
+              <br/> <a href="/wp-content/uploads/sites/2/2015/12/educated_horse.svg"><img src="/wp-content/uploads/sites/2/2015/12/educated_horse.svg" alt="educated horse" class="alignnone size-medium wp-image-1014"/></a><br/> educated horse<br/>
+            </center>
+          </th>
+
+          </tr>
+          <tr>
+
+          <th>
+            <center>
+              <br/> <a href="/wp-content/uploads/sites/2/2015/12/listening_bird.svg"><img src="/wp-content/uploads/sites/2/2015/12/listening_bird.svg" alt="listening bird" class="alignnone size-medium wp-image-1015"/></a><br/> listening bird<br/>
+            </center>
+          </th>
+
+          <th>
+            <center>
+              <br/> <a href="/wp-content/uploads/sites/2/2015/12/listerine.svg"><img src="/wp-content/uploads/sites/2/2015/12/listerine.svg" alt="listerine" class="alignnone size-medium wp-image-1016"/></a><br/> listerine<br/>
+            </center>
+          </th>
+
+          <th>
+            <center>
+              <br/> <a href="/wp-content/uploads/sites/2/2015/12/new_type_of_house.svg"><img src="/wp-content/uploads/sites/2/2015/12/new_type_of_house.svg" alt="new type of wooden house" class="alignnone size-medium wp-image-1004"/></a><br/> new type of wooden house<br/>
+            </center>
+          </th>
+
+          <th>
+            <center>
+              <br/> <a href="/wp-content/uploads/sites/2/2015/12/lucky_horse.svg"><img src="/wp-content/uploads/sites/2/2015/12/lucky_horse.svg" alt="lucky horse" class="alignnone size-medium wp-image-1002"/></a><br/> lucky horse<br/>
+            </center>
+          </th>
+
+          </tr>
+          </table>
+
+          <p>
+            Other notable examples below I couldn’t really describe, could you?
+          </p>
+
+          <p>
+            <a href="/wp-content/uploads/sites/2/2015/12/notable1.svg"><img src="/wp-content/uploads/sites/2/2015/12/notable1.svg" alt="notable1" class="alignnone size-medium wp-image-988"/></a><a href="/wp-content/uploads/sites/2/2015/12/notable2.svg"><img src="/wp-content/uploads/sites/2/2015/12/notable2.svg" alt="notable2" class="alignnone size-medium wp-image-989"/></a><a href="/wp-content/uploads/sites/2/2015/12/notable3.svg"><img src="/wp-content/uploads/sites/2/2015/12/notable3.svg" alt="notable3" class="alignnone size-medium wp-image-990"/></a><a href="/wp-content/uploads/sites/2/2015/12/notable4.svg"><img src="/wp-content/uploads/sites/2/2015/12/notable4.svg" alt="notable4" class="alignnone size-medium wp-image-991"/></a>
+          </p>
+
+          <p>
+            <a href="/wp-content/uploads/sites/2/2015/12/notable5.svg"><img src="/wp-content/uploads/sites/2/2015/12/notable5.svg" alt="notable5" class="alignnone size-medium wp-image-992"/></a><a href="/wp-content/uploads/sites/2/2015/12/notable6.svg"><img src="/wp-content/uploads/sites/2/2015/12/notable6.svg" alt="notable6" class="alignnone size-medium wp-image-993"/></a><a href="/wp-content/uploads/sites/2/2015/12/notable7.svg"><img src="/wp-content/uploads/sites/2/2015/12/notable7.svg" alt="notable7" class="alignnone size-medium wp-image-994"/></a><a href="/wp-content/uploads/sites/2/2015/12/notable8.svg"><img src="/wp-content/uploads/sites/2/2015/12/notable8.svg" alt="notable8" class="alignnone size-medium wp-image-995"/></a>
+          </p>
+
+          <p>
+            <a href="/wp-content/uploads/sites/2/2015/12/notable9.svg"><img src="/wp-content/uploads/sites/2/2015/12/notable9.svg" alt="notable9" class="alignnone size-medium wp-image-996"/></a><a href="/wp-content/uploads/sites/2/2015/12/notable12.svg"><img src="/wp-content/uploads/sites/2/2015/12/notable12.svg" alt="notable12" class="alignnone size-medium wp-image-998"/></a><a href="/wp-content/uploads/sites/2/2015/12/notable13.svg"><img src="/wp-content/uploads/sites/2/2015/12/notable13.svg" alt="notable13" class="alignnone size-medium wp-image-999"/></a><a href="/wp-content/uploads/sites/2/2015/12/notable14.svg"><img src="/wp-content/uploads/sites/2/2015/12/notable14.svg" alt="notable14" class="alignnone size-medium wp-image-1000"/></a>
+          </p>
+
+          <p>
+            Some examples reminds me of some Cantonese <a href="https://en.wikipedia.org/wiki/Cantonese_profanity">profanity</a> converted to <em>new</em> Chinese characters (like 𨳊 or 撚).
+          </p>
+
+          <h2>
+            Future Work
+          </h2>
+
+          <h3>
+            Cursive Chinese Writing
+          </h3>
+
+          <p>
+            I have also looked at this online handwriting database by <a href="http://www.nlpr.ia.ac.cn/databases/handwriting/Online_database.html">CASIA</a>. It will be really easy to apply this algorithm on that data and possibly train the recurrent net to generate fake cursive Chinese handwriting. Personally I don’t find that as interesting as this stroke-based dataset, because I wanted to see if the algorithm can generate distinct structures inside Chinese characters, rather than squigly handwritten characters that have already been done with the previous handwriting example.
+          </p>
+
+          <p>
+            </p><center>
+              <br/> 廣 -&gt; 広 -&gt; 广<br/>
+            </center>
+          
+
+          <p>
+            As an additional rant, as a designer, I’m not a big fan of post 1956 <a href="https://en.wikipedia.org/wiki/Simplified_Chinese_characters">Simplied Chinese</a> as I feel that the PRC has done too much to simplify Chinese in an Orwellian <em>New Speak</em> sense of the language. Compare original beautiful traditional Chinese characters, their accepted simplied form pre-1900 for handwriting across Asia, and post-1956 Simplied Chinese forms in the above example.
+          </p>
+
+          <h3>
+            Sketches of everyday things
+          </h3>
+
+          <p>
+            It would be interesting to also expose <code>sketch-rnn</code> to this <a href="http://cybertron.cg.tu-berlin.de/eitz/projects/classifysketch/">TU Berlin sketch data</a> from (Mathias Eitz, James Hays and Marc Alexa, 2012) and see what it draws after learning from the data. I have a feeling it won’t work that well though, since the sketches are quite diverse and may not contain similar statistical structures. If we had example sketches of 10000 Houses, all with similar number of strokes, complexity, and dimensions, it might work well. But if we have a database of Tables, Rabbits, Fish, Apples, and Buildings I think it will be too much for this model to handle. One interesting thing can be to take existing algorithms that convert rasterised images into vectorised .svg format and run <code>sketch-rnn</code> on them.
+          </p>
+
+          <p>
+            </p><center>
+              <br/>
+
+              <div id="six_stoned_chicks" class="wp-caption center">
+                <a href="http://cybertron.cg.tu-berlin.de/eitz/projects/classifysketch/"><img src="/wp-content/uploads/sites/2/2015/12/elephant.svg" alt="Elephant from Berlin Sketch Database" class="alignnone size-medium wp-image-1011"/></a>
+
+                <p class="wp-caption-text">
+                  Elephant from TU Berlin Sketch Database
+                </p>
+              </div>
+
+              <br/>
+            </center>
+          
+
+          <h3>
+            Extension to method
+          </h3>
+
+          <p>
+            In the future I would also want to work on more powerful approaches to understanding patterns beyond LSTM + MDN, which is just an extension of LSTM + Softmax. Recent work on <a href="http://vdumoulin.github.io/morphing_faces/">Variational Autoencoder</a>, <a href="http://arxiv.org/abs/1502.02761">Generative Moment Matching Nets</a>, or the much hyped <a href="http://www.sciencemag.org/content/350/6266/1332.abstract">BPL</a> could be a lot more expressive and powerful. I’m also thinking of GAN approaches may work on recurrent nets, although my feeling is it will be very difficult to train LSTM GAN’s.
+          </p>
+
+          <p>
+            I’m also thinking of ways to get more generative power with smaller nets. Eventually I want to be able to use these trained nets inside the web browser and have client-side JS run generative demos that may interact with a user’s sketching activity in real time, which I think would be super cool. If anyone has any ideas on how to compress LSTM nets effectively into small JSON files, let’s discuss.
+          </p>
+
+</section>
+
+    
+  
+  </div></body></html>

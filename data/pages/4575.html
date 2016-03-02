@@ -1,0 +1,64 @@
+<html><body><div><div class="post-text" itemprop="text">
+
+<p>I developed a python program that does heavy numerical calculations. I run it on a linux machine with 32 Xeon CPUs, 64GB RAM, and Ubuntu 14.04 64-bit. I launch multiple python instances with different model parameters in parallel to use multiple processes without having to worry about the global interpreter lock (GIL). When I monitor the cpu utilization using <code>htop</code>, I see that all cores are used, however most of the time by kernel. Generally, the kernel time is more than twice the user time. I'm afraid that there is a lot of overhead going on on the system level, but I'm not able to find the cause for this.</p>
+
+<p><strong>How would one reduce the high kernel CPU usage?</strong></p>
+
+<p>Here are some observation I made:</p>
+
+<ul>
+<li>This effect appears independent of whether I run 10 jobs or 50. If there are fewer jobs than cores, not all cores are used, but the ones that are used still have a high CPU usage by the kernel</li>
+<li>I implemented the inner loop using <a href="http://numba.pydata.org" rel="nofollow">numba</a>, but the problem is not related to this, since removing the numba part does not resolve the problem</li>
+<li>I also though that it might be related to using python2 similar to the <a href="http://stackoverflow.com/q/27810561/932593">problem mentioned in this SO question</a> but switching from python2 to python3 did not change much</li>
+<li>I measured the total number of context switches performed by the OS, which is about 10000 per second. I'm not sure whether this is a large number</li>
+<li>I tried increasing the python time slices by setting <code>sys.setcheckinterval(10000)</code> (for python2) and <code>sys.setswitchinterval(10)</code> (for python3) but none of this helped</li>
+<li>I tried influencing the task scheduler by running <code>schedtool -B PID</code> but this didn't help</li>
+</ul>
+
+<p><strong>Edit:</strong>
+Here is a screenshot of <code>htop</code>:
+<img src="http://i.stack.imgur.com/PtFZ9.png" alt="enter image description here"/></p>
+
+<p>I also ran <code>perf record -a -g</code> and this is the report by <code>perf report -g graph</code>:</p>
+
+<pre><code>Samples: 1M of event 'cycles', Event count (approx.): 1114297095227                                   
+-  95.25%          python3  [kernel.kallsyms]                           [k] _raw_spin_lock_irqsave   ◆
+   - _raw_spin_lock_irqsave                                                                          ▒
+      - 95.01% extract_buf                                                                           ▒
+           extract_entropy_user                                                                      ▒
+           urandom_read                                                                              ▒
+           vfs_read                                                                                  ▒
+           sys_read                                                                                  ▒
+           system_call_fastpath                                                                      ▒
+           __GI___libc_read                                                                          ▒
+-   2.06%          python3  [kernel.kallsyms]                           [k] sha_transform            ▒
+   - sha_transform                                                                                   ▒
+      - 2.06% extract_buf                                                                            ▒
+           extract_entropy_user                                                                      ▒
+           urandom_read                                                                              ▒
+           vfs_read                                                                                  ▒
+           sys_read                                                                                  ▒
+           system_call_fastpath                                                                      ▒
+           __GI___libc_read                                                                          ▒
+-   0.74%          python3  [kernel.kallsyms]                           [k] _mix_pool_bytes          ▒
+   - _mix_pool_bytes                                                                                 ▒
+      - 0.74% __mix_pool_bytes                                                                       ▒
+           extract_buf                                                                               ▒
+           extract_entropy_user                                                                      ▒
+           urandom_read                                                                              ▒
+           vfs_read                                                                                  ▒
+           sys_read                                                                                  ▒
+           system_call_fastpath                                                                      ▒
+           __GI___libc_read                                                                          ▒
+    0.44%          python3  [kernel.kallsyms]                           [k] extract_buf              ▒
+    0.15%          python3  python3.4                                   [.] 0x000000000004b055       ▒
+    0.10%          python3  [kernel.kallsyms]                           [k] memset                   ▒
+    0.09%          python3  [kernel.kallsyms]                           [k] copy_user_generic_string ▒
+    0.07%          python3  multiarray.cpython-34m-x86_64-linux-gnu.so  [.] 0x00000000000b4134       ▒
+    0.06%          python3  [kernel.kallsyms]                           [k] _raw_spin_unlock_irqresto▒
+    0.06%          python3  python3.4                                   [.] PyEval_EvalFrameEx       
+</code></pre>
+
+<p>It seems as if most of the time is spent calling <code>_raw_spin_lock_irqsave</code>. I have no idea what this means, though.</p>
+    </div>
+    </div></body></html>

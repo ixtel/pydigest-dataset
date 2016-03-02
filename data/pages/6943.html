@@ -1,0 +1,229 @@
+<html><body><div><div class="post-content">
+      <p>I remember the first time I laid eyes on the beast: Summer, 2012. The air conditioning at Yelp HQ hummed imperceptibly as I reviewed code for a colleague. This wasn’t my first rodeo, but I was new to Yelp and to working in a large Python codebase. I painstakingly scanned the code for lurking bugs, but couldn’t find any. “Ship it!” I declared electronically, freeing my colleague to deploy his changes.</p>
+
+<p>It is chilling to think that on that day, I looked the beast squarely in the eyes and never realized it. Cunning camouflage allowed it to slip past me and into production.</p>
+
+<h2 id="hunt-the-wumpus">Hunt the Wumpus</h2>
+<p>So what is this horrific beast? I will show you, and you still might not spot it! Imagine you are that starry-eyed engineer from the Summer of ‘12 and you’re reviewing production code that looks something like this:</p>
+
+<noscript><pre>def restart_server(server):
+    """Safely restart a server by removing it from the load balancer,
+    temporarily silencing its monitoring, telling its mom it will be home
+    before dark, etc.
+
+    (The implementation doesn't matter so we'll leave it out, but assume it
+    makes remote API calls and invokes system commands and generally
+    performs expensive operations.)
+    """
+    pass
+
+def restart_servers_in_datacenter(servers, datacenter):
+    for server in servers:
+        if server.endswith("-%s" % datacenter):
+            restart_server(server)</pre></noscript>
+
+
+<p>This feature even comes with a unit test:</p>
+
+<noscript><pre>import mock
+
+module_under_test = __name__
+
+def test_restart_servers_in_datacenter_with_match():
+    servers = set(["web1-sfo", "web2-phx", "web3-jfk"])
+    with mock.patch("%s.restart_server" % module_under_test) as mock_restart:
+        restart_servers_in_datacenter(servers, "sfo")
+        mock_restart.assert_called_once()</pre></noscript>
+
+
+<p>The main idea is that restarting actual servers whenever someone runs the test suite is not a great strategy. So instead of calling the real <code>restart_server()</code>, we use <code>mock.patch()</code> from the <a href="http://www.voidspace.org.uk/python/mock/">Python Mock library</a> to swap in a <a href="http://en.wikipedia.org/wiki/Test_double">test double</a>. The fake <code>restart_server()</code>, which we call <code>mock_restart</code>, is a <a href="http://www.voidspace.org.uk/python/mock/magicmock.html#mock.MagicMock"><code>MagicMock</code></a> which remembers how it has been called and provides convenience methods like <a href="http://www.voidspace.org.uk/python/mock/mock.html#mock.Mock.assert_called_once_with"><code>assert_called_once_with</code></a> to validate its experiences.</p>
+
+<p>The code review includes output showing that this test passes. You can paste the code above into a file and run it with <a href="http://pytest.org/latest/">py.test</a> if you don’t trust me:</p>
+
+<noscript><pre>$ py.test beast.py
+============================================================================
+test session starts
+============================================================================
+platform linux2 -- Python 2.6.7 -- py-1.4.20 -- pytest-2.5.2
+collected 1 items
+
+beast.py .
+
+============================================================================
+1 passed in 0.01 seconds
+============================================================================</pre></noscript>
+
+
+<p>Did you spot the beast?</p>
+
+<h2 id="it-is-pitch-black">It is Pitch Black</h2>
+<p>Here’s a clue: the test will happily continue to pass if you change the assertion to:</p>
+
+<p><code>mock_restart.assert_two_wrongs_dont_make_a_right()</code></p>
+
+<p>Or:</p>
+
+<p><code>mock_restart.assert_two_plus_two_equals(5)</code></p>
+
+<p>Or even:</p>
+
+<p><code>mock_restart.ASDFASDFASDFASDFASDFASDFASDF()</code></p>
+
+<p>What’s going on here?</p>
+
+<p>Remember that a mock’s job is to say, “You got it, boss” whenever anyone calls it. It will do real work, like raising an exception, when one of its convenience methods is called, like <code>assert_called_once_with</code>. But it won’t do real work when you call a method that only resembles a convenience method, such as <code>assert_called_once</code> (no <code>_with</code>!).</p>
+
+<h2 id="you-are-likely-to-be-eaten-by-a-grue">You Are Likely to be Eaten by a Grue</h2>
+<p>More troubling, the test passes even if you remove the call to <code>restart_server()</code> from the code-under-test entirely!</p>
+
+<noscript><pre>def restart_servers_in_datacenter(servers, datacenter):
+    pass</pre></noscript>
+
+
+<p>This should make your blood run cold. Our test looks reasonable, emits a green “1 test passed,” but doesn’t test anything!</p>
+
+<p>Production code with no test coverage is pretty bad, but this test actually has negative value. Someone spent energy writing it. More engineers will spend energy reading it. Future maintainers, not realizing that they are bedding down with the beast, will add features based on this test and these new features will also be untested. Unwary newcomers will see the useful-looking but ultimately poisonous <code>assert_called_once()</code> and spread it to other modules.</p>
+
+<h2 id="kill-the-beast">Kill The Beast</h2>
+<p>Now that we know the beast and how it ticks, how can we defeat it?</p>
+
+<h3 id="fear-of-commitment">Fear of Commitment</h3>
+<p>Fellow Yelpers Cheng C. and Nicholas N. added a check to our pre-commit hooks that uses the <a href="https://docs.python.org/2/library/compiler.html">compiler module</a> to walk the <a href="http://en.wikipedia.org/wiki/Abstract_syntax_tree">AST</a> looking for <code>assert_called_once</code> and a few other disguises commonly used by the beast. If the beast’s signature is detected, the commit is rejected.[1]</p>
+
+<p>This band-aid was cheap to implement and provides a final, automated chance to slay the beast before it can sneak into the master branch. Blacklists are a crude instrument, however, so this hook is not a perfect defense.</p>
+
+<h3 id="you-can-go-your-own-way">You Can Go Your Own Way</h3>
+<p>After my colleague Keith M.’s first encounter with the beast (pointed out to him by battle-hardened Autumn 2014 me in a code review), he vowed to avoid the <code>Mock</code> convenience methods entirely:</p>
+
+<p><em>I’ve switched to an idiom of checking mock objects that should be a lot more resilient to the fact that they are pernicious liars.</em></p>
+
+<p>So instead of:</p>
+
+<p><code>mock_restart.assert_called_once_with("web1-sfo")</code></p>
+
+<p>Keith writes:</p>
+
+<p><code>assert mock_restart.call_count == 1</code></p>
+
+<p>assert mock_restart.call_args == mock.call(“web1-sfo”)</p>
+
+<p>His rationale:</p>
+
+<p><em>The helper method saves a line, but calling things on mocks and expecting them to have side effects (like raising an error) is just asking to get bit by typos and misspellings. Meanwhile, it’s much harder for a mock to accidentally end up with very specific values occupying a random attribute.</em></p>
+
+<h3 id="glasses-for-your-subaru">Glasses for Your Subaru?</h3>
+<p>The authors of Mock are aware of the beast and have built a defense into the library – autospec:</p>
+
+<p>If you use a class or instance as the spec for a mock then you can only access attributes on the mock that exist on the real class.</p>
+
+<p>If we change our test to use the autospec defense:</p>
+
+<noscript><pre>with mock.patch("%s.restart_server" % module_under_test, autospec=True) as mock_restart:
+    restart_servers_in_datacenter(servers, "sfo")
+    mock_restart.assert_called_once()</pre></noscript>
+
+
+<p>Then the beast is exposed!</p>
+
+<noscript><pre>$ py.test beast.py
+============================================================================
+test session starts
+============================================================================
+platform linux2 -- Python 2.6.7 -- py-1.4.20 -- pytest-2.5.2
+collected 1 items
+
+beast.py F
+
+============================================================================
+FAILURES
+============================================================================
+_________________________________________________________________
+test_restart_servers_in_datacenter_with_match
+_________________________________________________________________
+
+E           AttributeError: 'function' object has no attribute 'assert_called_once'
+
+beast.py:22: AttributeError
+============================================================================
+1 failed in 0.01 seconds
+============================================================================</pre></noscript>
+
+
+<p><code>autospec</code> is very effective… if you remember to use it. It’s not on by default due to “ <a href="http://www.voidspace.org.uk/python/mock/helpers.html#auto-speccing">caveats and limitations</a>”, so the beast relies on the uninitiated and forgetful to avoid being trapped by <code>autospec</code>.</p>
+
+<h2 id="test-driven-defense">Test-Driven Defense</h2>
+<p>The best defense against the beast is not a blacklist or a workaround or a clever library feature. It is a change in how you write software.</p>
+
+<p>When I see a test containing a bogus method like <code>assert_called_once</code>, it tells me that the author never verified that the test could fail. A test that cannot fail is no test at all.</p>
+
+<p>The easiest way to insure that your test can fail is to write the test first, watch it fail, then write production code until the test passes. This is <a href="http://en.wikipedia.org/wiki/Test-driven_development">Test-Driven Development (TDD)</a> and in addition to being a relatively foolproof means of defeating the beast, it is the best way I know to write well-tested, well-factored, maintainable software.</p>
+
+<p>TDD is what allowed me to outsmart the beast the first time. While adding a feature, I had copied from an existing, beast-infiltrated test. But because I had written the test first, I knew something was amiss when the test suite cheerfully passed. Suspicion and <code>ipdb</code> soon laid bare the beast’s tricks, and now I pass my experiences on to you.</p>
+
+<p>So go, my friends, into the great wilderness of software. May your test suite remain faithful, honest, and beast-free.</p>
+
+<p>[1] You can see this hook at <a href="https://gist.github.com/mrtyler/995fcb4282a9d15de625">https://gist.github.com/mrtyler/995fcb4282a9d15de625</a>.</p>
+
+<noscript><pre>#!/usr/bin/python
+
+import compiler
+import compiler.ast
+import optparse
+import sys
+
+class MockChecker(object):
+    def __init__(self):
+        self.errors = 0
+        self.current_filename = ""
+        self.non_existent_methods = [
+            'assert_calls',
+            'assert_not_called',
+            'assert_called',
+            'assert_called_once',
+            'not_called',
+            'called_once',
+            'called_once_with',
+        ]
+
+    def check_files(self, files):
+        for file in files:
+           self.check_file(file)
+
+    def check_file(self, filename):
+        self.current_filename = filename
+        try:
+            ast = compiler.parseFile(filename)
+        except SyntaxError, error:
+            print &gt;&gt;sys.stderr, "SyntaxError on file %s:%d" % (filename, error.lineno)
+            return
+        compiler.walk(ast, self)
+
+    def visitGetattr(self, node):
+        if node.attrname in self.non_existent_methods:
+            print &gt;&gt;sys.stderr, "%s:%d: you may have called a nonexistent method on mock" % (self.current_filename, node.lineno)
+            self.errors += 1
+
+def main():
+    parser = optparse.OptionParser(usage="%prog [options] file [files]", description="Checks that the test file does not contain non-existent mock methods")
+    (opts, files) = parser.parse_args()
+    if len(files) == 0:
+        parser.error("No filenames provided")
+
+    checker = MockChecker()
+    checker.check_files(files)
+    return 1 if checker.errors else 0
+
+if __name__ == '__main__':
+    sys.exit(main())</pre></noscript>
+
+
+
+
+      
+
+
+      
+
+      <p class="back-to-blog"><a href="/">Back to blog</a></p>
+    </div>
+  </div></body></html>

@@ -1,0 +1,204 @@
+<html><body><div><div id="content-container">
+	    
+	    
+
+
+
+<h1>The Python Concurrency Story, Part 1</h1>
+<p class="originally">Originally published in the <a href="/python-newsletter/">Advanced Python Newsletter</a></p>
+
+
+<p>One great thing about writing software for a living is that it keeps
+me humble. I used to think I was pretty smart, and was getting a
+little smug about it. Until I started writing code every day. It's
+like there is a Tiny God Of Heisenbugs, lurking and waiting for me to
+start thinking too highly of myself... until I slip in a bug that
+takes me three hours to figure out. And then, one line of code to
+fix.</p>
+
+<p>Of course, for a lot of us, an ongoing source of humility is
+concurrency. From now on, as pro software engineers, we have to think
+about and understand concurrency very well, whether we like it or
+not. This requires developing the mental models to reason about it
+clearly, then mastering the software tools we have to finish the
+job. And, ideally, learning to encounter fewer of those
+three-hour-one-line bugs over time.</p>
+
+<p>While the underlying principles are universal, the details of how
+we implement software depend a lot on the language we use. Each
+language has its own abstractions, syntax, and library support for
+implementing concurrent systems. This is the language's
+<strong>concurrency story</strong>... its world view, in a sense, of how to
+deal with many things happening all at once. And in the 21st
+century, your understanding of that story gives you an important
+advantage.</p>
+
+<p>The language with the most expressive concurrency story is probably
+C.<sup><a href="#note_1">1</a></sup> It lets you implement
+concurrent systems that truly push the limit of what is physically
+possible with a computer.  You have things like the
+<code>clone()</code> system call on Linux, which is so low-level it
+is actually used to <em>implement threads</em>. Take that, virtual machines!</p>
+
+<p>Higher-level languages generally don't give you that level of
+freedom, in return for making many other things much, much
+easier. Stock PHP, for example, doesn't let you create threads at all;
+and fanning out at the process level is a lot of work. We're coding in
+Python, not PHP - thank heavens - which has a very fascinating
+concurrency story all of its own. By fully understanding it, you will
+be among the top 1% of Python programmers in the world.</p>
+
+<p>To get there, it helps to be really clear on the concurrency
+primitives modern operating systems give Python to work
+with. Understanding that will not only make you a better programmer in
+Python, it will make you a better developer in <em>every language for
+the rest of your life.</em></p>
+
+<p>How cool is that! Are you excited? I'm excited. Let's get
+started!</p>
+
+<p>(By the way, the most exciting part is a ways down -
+where we talk about when <em>threads are not really
+threads</em>. You'll see what I mean when you get there.)</p>
+
+<h2>Processes and Threads</h2>
+
+<p>Let's start with the basics. Modern operating systems provide two
+ways to organize a thread of execution. A process is simply a running
+program. A thread is a unit of activity within a process. This gives
+us the two basic first choices for how to implement a concurrent
+system: we can do it as N processes, or N threads.</p>
+
+<p>If you peer deep under the hood, threads and processes actually
+have a lot of similarities. In fact, in Linux, the aforementioned
+<code>clone()</code> system call is used to create both processes and
+threads; the function is just invoked with different options for
+each.</p>
+
+<p>The main difference in practice is in what they share, and don't
+share. If a process creates two child processes, they each have their
+own memory; it is not shared. (By default - there are options to
+change this.) In contrast, a new thread will not only share the memory
+of its parent process, but also share file descriptors, the filesystem
+context, and signal handling.</p>
+
+<p>There are some real benefits to using multiple threads instead of
+multiple processes. Threads are much more lightweight, memory-wise. A
+daemon spawning 10 child processes that don't share memory, versus
+another spawning 10 threads that do, is obviously going to have a larger
+footprint. In addition, communication and synchronization between threads is
+streamlined compared to processes. Any communication between two
+process requires an IPC call, by definition, thus incurring the
+expense of trapping into the kernel. To share memory between processes
+is possible, but takes more work than with threads<sup><a href="#note_2">2</a></sup>.</p>
+
+<h2>The Tragedy of Threads</h2>
+
+<p>In short, of the two concurrency models - multiple threads versus
+multiple processes - threads let you write higher performance
+applications, in theory.</p>
+
+<p>Uh oh. Did I just say "in theory"? Yes I
+did. And that leads us into the downside: writing bug-free
+multithreaded code is <em>hard</em>. You will encounter a wide range
+of subtle, baffling bugs that are easy to reproduce if you are
+lucky... and hard to reproduce if you are not. Race conditions,
+deadlocks, live locks, and more.</p>
+
+<p>The cost of this is development time. Safe thread programming
+involves disciplined use of synchronization primitives like locks and
+mutexes. As a good software engineer, using these is a skill set that
+you will need to develop at some point, if you have not already. But
+it is always nice when you don't have to go down that path.</p>
+
+<p><em>(Wait, was that foreshadowing? I think it was...)</em></p>
+
+<p>Aside from all of this, there is another factor to consider - one
+that is specific to Python's concurrency story. The fact is, a Python
+thread isn't exactly what it appears to be.</p>
+
+<h2>When Threads Aren't Really Threads</h2>
+
+<p>The threads we are talking about above are actually <em>OS
+threads</em>. This is what you get, when writing an application in C,
+if you call <code>pthread_create</code> (OS X, Linux) or
+<code>CreateThread</code> (Windows). It is a real thread allocated and
+managed by the operating system kernel. But when you create a thread
+in a high level language, like Python, that isn't necessarily what you
+get - at least, not exactly.</p>
+
+<p>In modern Python, you start a thread by creating an instance of
+<code>threading.Thread</code>, then invoking its <code>start()</code>
+method. A started thread indeed allocates a separate
+OS thread (on most platforms<sup><a href="#note_3">3</a></sup>.)
+The difference: two OS threads can run at the same time - fully
+utilizing separate cores or CPUS. But generally speaking, two Python
+threads cannot run at the same time.</p>
+
+<p>This is due to the <em>global interpreter lock</em>, a.k.a. the
+GIL. This is a mechanism within the standard Python implementation
+allowing only one thread to run Python bytecode at a time<sup><a href="#note_4">4</a></sup>. Even when running on a 128-core beast of a
+machine, in a typical multithreaded Python program, at any given
+moment, only one of them can be used.<sup><a href="#note_5">5</a></sup></p>
+
+<p>While it seems bad at first, it turns out that <strong>for most
+engineering domains, the GIL is not a significant restriction at
+all.</strong> From a pure CPU-performance perspective<sup><a href="#note_6">6</a></sup>, Python threads are indeed somewhat hobbled
+compared to OS threads.  But Python <em>processes</em> are wholly
+unaffected by the lock, which is our outlet and our salvation for
+CPU-bound tasks.  That's what we discuss in
+<a href="/python-concurrency-story-pt2/">part 2</a>.</p>
+
+<section id="footnotes">
+    <ol>
+	<li id="note_1"><p>Actually, assembly is even more
+	expressive. Few of us have to go that low level these days, however,
+	and C's concurrency story is almost as powerful in the situations you
+	are likely to encounter.</p>
+	</li>
+
+	<li id="note_2"><p>On modern Linux, the best way I know is to
+	use <code>mmap()</code>, though <a href="http://menehune.opt.wfu.edu/Kokua/More_SGI/007-2478-008/sgi_html/ch03.html">several other
+	mechanisms</a> are possible.</p>
+	</li>
+
+	<li id="note_3"><p>The exception being some OS whose kernel
+	does not support threads. You probably don't have to worry about
+	this. I hope.</p>
+	</li>
+	
+	<li id="note_4">Putting in the GIL was a very good decision.
+	Doing so made the interpreter orders of
+	magnitude easier to implement, while maintaining performance
+	in the common, single-threaded case. Remember that Python is
+	brought to you by volunteers.
+	</li>
+
+	<li id="note_5"><p>Actually, this is only about 98%
+	true. There are ways around it, depending on how dedicated you
+	are. Extension modules (in C or C++) can be designed to temporarily
+	release the GIL. Packages like numpy are NOT limited to a single core,
+	for this reason.</p>
+
+	<p>Also, alternative Python interpreters (Jython, IronPython, PyPy)
+	have at least experimental branches without a GIL. For over 99% of the
+	pure Python code that YOU will actually write, however, only one of
+	those cores can be fully utilized.
+	</p>
+	</li>
+
+	<li id="note_6"><p>Of course, there are some very useful
+	programming patterns for threads that are not even close to
+	CPU-bound, so the GIL isn't even a consideration. A good
+	example is to make a responsive UI: your main thread can be
+	working on something hard and fast, while a secondary thread
+	is listening for user input, to stop the computation or
+	perform some other action. </p>
+	</li>
+    </ol>
+</section>
+
+
+	</div> 
+
+    </div></body></html>

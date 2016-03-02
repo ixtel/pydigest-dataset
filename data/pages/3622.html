@@ -1,0 +1,75 @@
+<html><body><div><div class="entry-content">
+				<p><a href="http://numba.pydata.org/" target="_blank">Numba</a> is an open-source just-in-time (JIT) Python compiler that generates native machine code for X86 CPU and CUDA GPU from annotated Python Code. (Mark Harris introduced Numba in the post <a href="http://devblogs.nvidia.com/parallelforall/numbapro-high-performance-python-cuda-acceleration/">“NumbaPro: High-Performance Python with CUDA Acceleration”</a>.) Numba specializes in Python code that makes heavy use of NumPy arrays and loops. In addition to JIT compiling NumPy array code for the CPU or GPU, Numba exposes “CUDA Python”: the CUDA programming model for NVIDIA GPUs in Python syntax.</p>
+<p>By speeding up Python, we extend its ability from a glue language to a complete programming environment that can execute numeric code efficiently.</p>
+<h2>From Prototype to Full Dataset with @cuda.jit</h2>
+<p>When doing exploratory programming, the interactivity of <a href="http://ipython.org/notebook.html">IPython Notebook</a> and a comprehensive collection of scientific libraries (e.g. SciPy, Scikit-Learn, Theano, etc.) allow data scientists to process and visualize their data quickly. There are times when a fast implementation of what you need isn’t in a library, and you have to implement something new. Numba helps by letting you write pure Python code and run it with speed comparable to a compiled language, like C++. Your development cycle shortens when your prototype Python code can scale to process the full dataset in a reasonable amount of time.</p>
+<figure id="attachment_4952" aria-labelledby="figcaption_attachment_4952" class="wp-caption aligncenter"><img src="/wp-content/uploads/2015/03/DkS-624x640.png" alt="Densest-k-Subgraph" class="size-large wp-image-4952" srcset="https://devblogs.nvidia.com/parallelforall/wp-content/uploads/2015/03/DkS-624x640.png 624w, https://devblogs.nvidia.com/parallelforall/wp-content/uploads/2015/03/DkS.png 1144w" sizes="(max-width: 600px) 100vw, 600px"/><figcaption id="figcaption_attachment_4952" class="wp-caption-text">Figure 1: The DkS result of the  <a href="http://webdatacommons.org/hyperlinkgraph/#toc2" target="_blank">2012 Web Data Commons pay-level domain hyperlink graph</a>.</figcaption></figure>
+<p>Working with Dr. Alex Dimakis and his team at UT Austin, we implemented their densest-k-subgraph (DkS) algorithm [1].  Our goal was to extract the densest domain from the <a href="http://webdatacommons.org/hyperlinkgraph/#toc2" target="_blank">2012 WebDataCommon pay-level-domain hyperlink graph</a> using one NVIDIA Tesla K20 GPU accelerator. We developed the entire application using NumPy for array operations, Numba to JIT compile Python to CUDA, NumbaPro for GPU sorting and cuBLAS routines, and Bokeh for plotting the results.<span id="more-4951"/></p>
+<p>Figure 1 shows an example of the DkS result of the 2012 paylevel domain (plot created with Bokeh).</p>
+<p>Part of the DkS code is an eigen-decomposition on the hyperlink graph to produce a low-rank approximation, which is equivalent to a PageRank.  We chose the random walk algorithm by Sarma, Atish Das, et al. [2] due to its low communication overhead. Our previous attempt used power iteration and cuBLAS for matrix-vector multiplication, but the high demand on global memory traffic made it impossible to scale to the full graph.</p>
+<h2>Random Walk Densest-K-Subgraph Algorithm</h2>
+<p>The random walk algorithm works as follows: Initially, every node has a fixed number of <em>coupons</em>. At each round, coupons from each node are transferred to a randomly chosen connected node or are discarded with a small probability.  The algorithm runs as long as there are coupons.</p>
+<p>To perform the random selection on the GPU, we implemented the following simple 64-bit <a href="http://xorshift.di.unimi.it/" target="_blank">xorshift*</a>.</p>
+<pre class="prettyprint">@cuda.jit("(uint64[:], uint64)", device=True)
+def cuda_xorshiftstar(states, id):
+    x = states[id]
+    x ^= x &gt;&gt; 12
+    x ^= x &lt;&lt; 25
+    x ^= x &gt;&gt; 27
+    states[id] = x
+    return uint64(x) * uint64(2685821657736338717)</pre>
+<p>The <code>@cuda.jit</code> decorator tells Numba to compile <code>cuda_xorshiftstar</code> as a CUDA <code>__device__</code> function. The function can then be called in the actual CUDA random walk kernel. The majority of the work is in the following <code>cuda_random_walk_per_node</code> <code>__device__</code> function.</p>
+<pre class="prettyprint">@cuda.jit(device=True)
+def cuda_random_walk_per_node(curnode, visits, colidx, edges, resetprob,
+                              randstates):
+    tid = cuda.threadIdx.x
+    randnum = cuda_xorshiftstar_float(randstates, tid)
+    if randnum &gt;= resetprob:
+        base = colidx[curnode]
+        offset = colidx[curnode + 1]
+        # If the edge list is non-empty
+        if offset - base &gt; 0:
+            # Pick a random destination
+            randint = cuda_xorshiftstar(randstates, tid)
+            randdestid = (uint64(randint % uint64(offset - base)) +
+                          uint64(base))
+            dest = edges[randdestid]
+        else:
+            # Random restart
+            randint = cuda_xorshiftstar(randstates, tid)
+            randdestid = randint % uint64(visits.size)
+            dest = randdestid
+
+        # Increment visit count
+        cuda.atomic.add(visits, dest, 1)
+</pre>
+<p>This function forwards each coupon to a randomly chosen connected node.  If the current node has no outgoing edges, the coupon is forwarded to a random node.</p>
+<p>Our GPU PageRank implementation completed in just 163 seconds on the full graph of 623 million edges and 43 million nodes using a single NVIDIA Tesla K20 GPU accelerator. Our equivalent Numba CPU-JIT version took at least 5 times longer on a smaller graph.</p>
+<h2>Visualizing the Code</h2>
+<p>During development, the ability to visualize what the algorithm is doing can help you understand the run-time code behavior and discover performance bottlenecks.  Initially, the PageRank ran 7x slower than the final version. Since the algorithm works by randomly sending “visitors” to connected nodes, an inefficient work distribution can cause severe warp divergence.  We plotted the visits per node as a heat map with <a href="http://bokeh.pydata.org/" target="_blank">Bokeh</a>, as shown in Figure 2.</p>
+<figure id="attachment_4954" aria-labelledby="figcaption_attachment_4954" class="wp-caption aligncenter"><img src="/wp-content/uploads/2015/03/pagerank_unopt-624x365.png" alt="Fig 2. PageRank Heat Map: Unoptimized" class="size-large wp-image-4954" srcset="https://devblogs.nvidia.com/parallelforall/wp-content/uploads/2015/03/pagerank_unopt-300x175.png 300w, https://devblogs.nvidia.com/parallelforall/wp-content/uploads/2015/03/pagerank_unopt-624x365.png 624w, https://devblogs.nvidia.com/parallelforall/wp-content/uploads/2015/03/pagerank_unopt-500x292.png 500w" sizes="(max-width: 600px) 100vw, 600px"/><figcaption id="figcaption_attachment_4954" class="wp-caption-text">Fig 2. PageRank Heat Map: Unoptimized</figcaption></figure>
+<p>From the plot, we could see that the work was randomly distributed, resulting in severe load imbalance and high thread divergence. Figure 3 clearly shows the effect of our optimizations.</p>
+<figure id="attachment_4953" aria-labelledby="figcaption_attachment_4953" class="wp-caption aligncenter"><img src="/wp-content/uploads/2015/03/pagerank_opt-624x361.png" alt="Fig 3: PageRank Heat Map: Optimized" class="size-large wp-image-4953" srcset="https://devblogs.nvidia.com/parallelforall/wp-content/uploads/2015/03/pagerank_opt-300x174.png 300w, https://devblogs.nvidia.com/parallelforall/wp-content/uploads/2015/03/pagerank_opt-624x361.png 624w, https://devblogs.nvidia.com/parallelforall/wp-content/uploads/2015/03/pagerank_opt-500x290.png 500w, https://devblogs.nvidia.com/parallelforall/wp-content/uploads/2015/03/pagerank_opt.png 700w" sizes="(max-width: 600px) 100vw, 600px"/><figcaption id="figcaption_attachment_4953" class="wp-caption-text">Fig 3: PageRank Heat Map: Optimized</figcaption></figure>
+<p>We implemented two main optimizations. First, we applied reference indirection. The original code randomly distributed coupons to nodes, and each thread handled one node. To improve this, we created an indirection table that maps each thread’s index <code>threadIdx</code> to node indices, instead of directly using <code>threadIdx</code> as the node index. We sorted the table entries in descending order of coupon count. This ensured that nodes of similar coupon count were next to each other. This reduced warp divergence, but the improvement was limited.</p>
+<p>The optimization that made the difference was changing the work distribution and scheduling. Instead of assigning each thread to handle one node, we assigned blocks so that each block dynamically scheduled threads to work on each coupon. This added the following small boilerplate code to the kernel.</p>
+<pre class="prettyprint">tid = cuda.threadIdx.x
+while coupon_count &gt; 0:
+    if tid &lt; coupon_count:
+        do_work(...)
+    coupon_count -= min(coupon_count, cuda.blockDim.x)
+</pre>
+<p>We kept the reference redirection because the sorted array of coupons allows us to easily determine the last <code>blockIdx</code> that has nonzero coupons. As a result, the grid size can be adjusted at each round to launch exactly as many blocks as there are active nodes (nodes with non-zero coupon count). This resolved the warp divergence problem and avoided launching unnecessary blocks, increasing overall device utilization.</p>
+<p>As a bonus, here's <a href="http://nbviewer.ipython.org/gist/sklam/9a40404db12c5ec34709" target="_blank">another example</a> of interactive development. It contains code we used during the development of a customized spring-layout algorithm to visualize the DkS graph. This allowed us to quickly discover bugs and fine tune parameters for the algorithm. This example uses Numba to JIT compile part of the layout physics to make the animation more fluid (it does not use the GPU, however).</p>
+<h2>Learn more at the GPU Technology Conference</h2>
+<p>If you would like to learn more about the Densest k-Subgraph application and CUDA Python programming, come see my talk "Implementing Graph Analytics with Python and Numba" on Tuesday, March 17 2015 at 3:30pm at Room 210C of the San Jose Convention Center.</p>
+<p>Readers of Parallel Forall can use the discount code GM15PFAB to get 20% off any conference pass! Don’t miss out and register now!</p>
+<h2>References</h2>
+<p>[1] Papailiopoulos, Dimitris, et al. "Finding dense subgraphs via low-rank bilinear optimization." Proceedings of the 31st International Conference on Machine Learning (ICML-14). 2014.</p>
+<p>[2] Sarma, Atish Das, et al. "Fast distributed PageRank computation." Theoretical Computer Science 561 (2015): 113-121.</p>
+
+
+<p class="parallel-forall-signature">&amp;parallel;∀</p>
+			
+						
+							</div>
+			</div></body></html>

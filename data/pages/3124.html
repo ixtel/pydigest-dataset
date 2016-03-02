@@ -1,0 +1,75 @@
+<html><body><div><div itemprop="articleBody"><p>I was playing these days with greenlets and I finally managed to find some time to make and coroutine implementation for cogen that uses the seamless stack switching of greenlets instead of the usual generator yield-based switching.</p><p>The best part about this is that cogen could support any sort of old code that uses the usual file or socket apis in the standard python library.</p><p>Unfortunately greenlets don't work with python 2.6 right now; let me shamelessly quote this very <em>nice</em> reply I got from one of py.lib's (greenlets are part of py.lib) maintainers:</p><blockquote>"I mean come on - it's open source, if it works for me on 2.5 why I would bother too much?"</blockquote><p>For the love of god, is this the right attitude to run a project these days?! I mean come on ...</p><p>Anyhow, nevermind that.</p><p>So back to those coroutines using greenlets - I named them <em>corolets -</em> feels like a good namegiven the fact the the regular generator stuff is named with coroutine and there's some need for distinction. I also added some socket wrappers in a module <em>socketlets</em> (not very inspired). It has a <em>Socket</em> class that provides regular blocking interface and makes use of the good old _fileobject class from the socket module in stdlib for the makefile stuff.</p><p>I got those 2 pieces in <a class="reference external" href="http://code.google.com/p/cogen/source/browse/trunk/cogen/magic/corolets.py">cogen.magic.corolets</a> and <a class="reference external" href="http://code.google.com/p/cogen/source/browse/trunk/cogen/magic/socketlets.py">cogen.magic.socketlets</a>. For those who didn't understood much here's an example:</p><div class="highlight"><pre><span/><span class="kn">import</span> <span class="nn">sys</span>
+
+<span class="kn">from</span> <span class="nn">cogen.core</span> <span class="kn">import</span> <span class="n">schedulers</span>
+<span class="kn">from</span> <span class="nn">cogen.magic.corolets</span> <span class="kn">import</span> <span class="n">corolet</span><span class="p">,</span> <span class="n">yield_</span>
+<span class="kn">from</span> <span class="nn">cogen.magic</span> <span class="kn">import</span> <span class="n">socketlets</span>
+
+<span class="nd">@corolet</span>
+<span class="k">def</span> <span class="nf">server</span><span class="p">():</span>
+    <span class="n">srv</span> <span class="o">=</span> <span class="n">socketlets</span><span class="o">.</span><span class="n">Socket</span><span class="p">()</span>
+    <span class="n">adr</span> <span class="o">=</span> <span class="p">(</span><span class="s1">'0.0.0.0'</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">)</span><span class="o">&gt;</span><span class="mi">1</span> <span class="ow">and</span> <span class="nb">int</span><span class="p">(</span><span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">])</span> <span class="ow">or</span> <span class="mi">1200</span><span class="p">)</span>
+    <span class="n">srv</span><span class="o">.</span><span class="n">bind</span><span class="p">(</span><span class="n">adr</span><span class="p">)</span>
+    <span class="n">srv</span><span class="o">.</span><span class="n">listen</span><span class="p">(</span><span class="mi">64</span><span class="p">)</span>
+    <span class="k">while</span> <span class="mi">1</span><span class="p">:</span>
+        <span class="k">print</span> <span class="s2">"Listening on"</span><span class="p">,</span> <span class="n">adr</span>
+        <span class="n">conn</span><span class="p">,</span> <span class="n">addr</span> <span class="o">=</span> <span class="n">srv</span><span class="o">.</span><span class="n">accept</span><span class="p">()</span>
+        <span class="k">print</span> <span class="s2">"Connection from </span><span class="si">%s</span><span class="s2">:</span><span class="si">%s</span><span class="s2">"</span> <span class="o">%</span> <span class="n">addr</span>
+        <span class="n">m</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">handler</span><span class="p">,</span> <span class="n">args</span><span class="o">=</span><span class="p">(</span><span class="n">conn</span><span class="p">,</span> <span class="n">addr</span><span class="p">))</span>
+
+<span class="nd">@corolet</span>
+<span class="k">def</span> <span class="nf">handler</span><span class="p">(</span><span class="n">sock</span><span class="p">,</span> <span class="n">addr</span><span class="p">):</span>
+    <span class="n">fh</span> <span class="o">=</span> <span class="n">sock</span><span class="o">.</span><span class="n">makefile</span><span class="p">()</span>
+    <span class="n">fh</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">"WELCOME TO ECHO SERVER!</span><span class="se">\r\n</span><span class="s2">"</span><span class="p">)</span>
+    <span class="n">fh</span><span class="o">.</span><span class="n">flush</span><span class="p">()</span>
+
+    <span class="k">while</span> <span class="mi">1</span><span class="p">:</span>
+        <span class="n">line</span> <span class="o">=</span> <span class="n">fh</span><span class="o">.</span><span class="n">readline</span><span class="p">(</span><span class="mi">1024</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">line</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span> <span class="o">==</span> <span class="s1">'exit'</span><span class="p">:</span>
+            <span class="n">fh</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">"GOOD BYE"</span><span class="p">)</span>
+            <span class="n">fh</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+            <span class="n">sock</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+            <span class="k">return</span>
+        <span class="n">fh</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">line</span><span class="p">)</span>
+        <span class="n">fh</span><span class="o">.</span><span class="n">flush</span><span class="p">()</span>
+
+<span class="n">m</span> <span class="o">=</span> <span class="n">schedulers</span><span class="o">.</span><span class="n">Scheduler</span><span class="p">()</span>
+<span class="n">m</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">server</span><span class="p">)</span>
+<span class="n">m</span><span class="o">.</span><span class="n">run</span><span class="p">()</span>
+</pre></div><p>Compare that to the regular generator based example (don't miss those yields):</p><div class="highlight"><pre><span/><span class="kn">import</span> <span class="nn">sys</span>
+
+<span class="kn">from</span> <span class="nn">cogen.core</span> <span class="kn">import</span> <span class="n">sockets</span>
+<span class="kn">from</span> <span class="nn">cogen.core</span> <span class="kn">import</span> <span class="n">schedulers</span>
+<span class="kn">from</span> <span class="nn">cogen.core.coroutines</span> <span class="kn">import</span> <span class="n">coroutine</span>
+
+<span class="nd">@coroutine</span>
+<span class="k">def</span> <span class="nf">server</span><span class="p">():</span>
+    <span class="n">srv</span> <span class="o">=</span> <span class="n">sockets</span><span class="o">.</span><span class="n">Socket</span><span class="p">()</span>
+    <span class="n">adr</span> <span class="o">=</span> <span class="p">(</span><span class="s1">'0.0.0.0'</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">)</span><span class="o">&gt;</span><span class="mi">1</span> <span class="ow">and</span> <span class="nb">int</span><span class="p">(</span><span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">])</span> <span class="ow">or</span> <span class="mi">1200</span><span class="p">)</span>
+    <span class="n">srv</span><span class="o">.</span><span class="n">bind</span><span class="p">(</span><span class="n">adr</span><span class="p">)</span>
+    <span class="n">srv</span><span class="o">.</span><span class="n">listen</span><span class="p">(</span><span class="mi">64</span><span class="p">)</span>
+    <span class="k">while</span> <span class="mi">1</span><span class="p">:</span>
+        <span class="k">print</span> <span class="s2">"Listening on"</span><span class="p">,</span> <span class="n">adr</span>
+        <span class="n">conn</span><span class="p">,</span> <span class="n">addr</span> <span class="o">=</span> <span class="k">yield</span> <span class="n">srv</span><span class="o">.</span><span class="n">accept</span><span class="p">()</span>
+        <span class="k">print</span> <span class="s2">"Connection from </span><span class="si">%s</span><span class="s2">:</span><span class="si">%s</span><span class="s2">"</span> <span class="o">%</span> <span class="n">addr</span>
+        <span class="n">m</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">handler</span><span class="p">,</span> <span class="n">args</span><span class="o">=</span><span class="p">(</span><span class="n">conn</span><span class="p">,</span> <span class="n">addr</span><span class="p">))</span>
+
+<span class="nd">@coroutine</span>
+<span class="k">def</span> <span class="nf">handler</span><span class="p">(</span><span class="n">sock</span><span class="p">,</span> <span class="n">addr</span><span class="p">):</span>
+    <span class="n">fh</span> <span class="o">=</span> <span class="n">sock</span><span class="o">.</span><span class="n">makefile</span><span class="p">()</span>
+    <span class="k">yield</span> <span class="n">fh</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">"WELCOME TO ECHO SERVER!</span><span class="se">\r\n</span><span class="s2">"</span><span class="p">)</span>
+    <span class="k">yield</span> <span class="n">fh</span><span class="o">.</span><span class="n">flush</span><span class="p">()</span>
+
+    <span class="k">while</span> <span class="mi">1</span><span class="p">:</span>
+        <span class="n">line</span> <span class="o">=</span> <span class="k">yield</span> <span class="n">fh</span><span class="o">.</span><span class="n">readline</span><span class="p">(</span><span class="mi">1024</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">line</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span> <span class="o">==</span> <span class="s1">'exit'</span><span class="p">:</span>
+            <span class="k">yield</span> <span class="n">fh</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">"GOOD BYE"</span><span class="p">)</span>
+            <span class="k">yield</span> <span class="n">fh</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+            <span class="n">sock</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+            <span class="k">return</span>
+        <span class="k">yield</span> <span class="n">fh</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">line</span><span class="p">)</span>
+        <span class="k">yield</span> <span class="n">fh</span><span class="o">.</span><span class="n">flush</span><span class="p">()</span>
+
+<span class="n">m</span> <span class="o">=</span> <span class="n">schedulers</span><span class="o">.</span><span class="n">Scheduler</span><span class="p">()</span>
+<span class="n">m</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">server</span><span class="p">)</span>
+<span class="n">m</span><span class="o">.</span><span class="n">run</span><span class="p">()</span>
+</pre></div><p>It's pretty rough right now - I still need to add tests and check the performance, but I wanted to give an idea of what's going on for the braver ones :)</p></div></div></body></html>

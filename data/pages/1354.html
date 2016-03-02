@@ -1,0 +1,277 @@
+<html><body><div><article>
+    <header>
+        
+    </header>
+
+
+
+
+    <p>This how-to article describes how you can create a set of charts for monitoring the load on one or more servers. It uses Python (psutil and bottle), MongoDb, and jquery. The general idea is the same no matter if you use a different database or web framework.</p>
+<p>At the end of the process, you will have a web page for each machine that displays charts showing cpu, memory, and disk usage.</p>
+
+<p>I need to watch a couple of FreeBSD machines to make sure they’re healthy and not running into memory or disk space issues. Their names are, for the purposes of the article, <code>example01</code> and <code>example02</code>.  </p>
+<p class="callout"><span class="note">Note: </span>These happen to be the same machines that run the MongoDB replica set and one of them runs the web server. There is no reason they all have to be the same machines—you can have MongoDB running on completely different machines than the ones you want to monitor. The same is true for the web server—it can be on any machine, not necessarily one you’re monitoring.</p>
+<p>I don’t want to go to each machine and run <code>top</code> or <code>ds</code> to find out what’s going on, I want a web page with up-to-date charts that I can glance at, one page per machine.</p>
+<p>The overall workflow follows these three steps:</p>
+<ol>
+<li>Get the system data into MongoDB (<code>psutil</code> and <code>cron</code>).</li>
+<li>Set up a web server to query the MongoDB server (<code>bottle</code>).</li>
+<li>Write a short <span class="caps">HTML</span> page to display the data (<code>jqplot</code> + <span class="caps">AJAX</span>).</li>
+</ol>
+<p><img alt="psflow" src="../images/psflow.png"/></p>
+<p>You can get all the code in the GitHub project <a href="https://github.com/tiarno/psmonitor">psmonitor</a>. I use snippets of that code in this article.</p>
+<p>In the first part, you use the <code>psutil</code> Python package inside a <code>cron</code> job to write system load information to a capped collection in MongoDB every 5 minutes. The 5 minutes is totally arbitrary—you can pick whatever period you like. With the systems I’m looking at, a few minutes provides a fine enough granularity. This part puts the data into MongoDB.</p>
+<p>In the second part, the <code>bottle</code> application makes a request to MongoDB and responds with the <span class="caps">JSON</span> data. This creates the broker between the client <span class="caps">HTML</span> page and the MongoDB data.</p>
+<p>In the third part, you have an <span class="caps">HTML</span> file corresponding to each machine you want to monitor. The file loads <code>jqplot</code> and makes an <span class="caps">AJAX</span> request to the <code>bottle</code> application. This part is the reason for the exercise—we get the time-series chart of the load data that we’ve stored in MongoDB.</p>
+<p>This is an example of one of the charts we will create:
+<img alt="monitor01" src="../images/monitor01.png"/></p>
+<p>You can make charts for any data you want. 
+The charts I use for each machine are:</p>
+<ul>
+<li>cpu user percent</li>
+<li>cpu system percent</li>
+<li>cpu irq</li>
+<li>cpu nice percent</li>
+<li>disk space free</li>
+<li>memory free</li>
+</ul>
+<h3 class="article-title" id="part-0-get-the-tools">Part 0: Get the Tools</h3>
+<p>The following tools are the ones to install for this implementation, but you can use a different database or web framework if you already have one.</p>
+<p>The <code>psutil</code> Python package is a great cross-platform tool for system monitoring. Read more about it on its <a href="http://pythonhosted.org/psutil/">project page</a>. You can install it with <code>pip</code>.</p>
+<p>The <span class="caps">NOSQL</span> database <a href="http://www.mongodb.org/">mongoDB</a> is an open-source document database. If you have data that naturally fits a <span class="caps">JSON</span>-style structure, mongoDB is a great fit for data storage. It has become a natural tool for me anytime I find I need a <span class="caps">JSON</span> store. The funny thing is, the more I use it, the more I find new uses for it. The structure of a MongoDB <em>document</em> is suprising useful and can provide a map for lots of information types.</p>
+<p>The <code>bottle</code> web <a href="http://bottlepy.org/docs/dev/index.html">framework</a> is a tiny framework written in Python with no other dependencies. You can install it with <code>pip</code>. You can use the included development server to get things going and put it under a different backend server later. I put mine under my Apache server once I got things like I wanted them. I’ll write an article about that setup later on.</p>
+<p>The <a href="http://www.jqplot.com/">jqplot</a> <code>jquery</code> plugin makes producing the charts easy, plus they look good and they are all uniform so it easy to compare charts. For example, it is easy to see on the chart when a process spins up because you can see the spike for cpu and memory at the same moment, which is the same x-axis location for both charts. There is a lot more you can do with this plugin, this exercise just scratches the surface.</p>
+<h3 class="article-title" id="part-1-get-the-data">Part 1: Get the Data</h3>
+<p>We want to create a data structure that follows this pattern. You can add or remove any data that psutil supports in this step. The end point is the user, who will be looking at a <code>jqplot</code> chart, so it is good to keep that data structure in the back of your mind. What <code>jqplot</code> will want is a list of two-element lists, one of which is a datetime, something like this:</p>
+<div class="highlight"><pre><span class="p">[[</span><span class="n">datetime1</span><span class="p">,</span> <span class="n">y</span><span class="o">-</span><span class="n">value1</span><span class="p">],</span> <span class="p">[</span><span class="n">datetime2</span><span class="p">,</span> <span class="n">y</span><span class="o">-</span><span class="n">value2</span><span class="p">],</span> <span class="n">and</span> <span class="n">so</span> <span class="n">on</span><span class="p">.]</span>
+</pre></div>
+
+
+<p>That structure isn’t the most efficient way to gather the data, but it’s always important to remember where you’re going. We’ll gather the data and then change the structure to give <code>jqplot</code> the structure it needs.</p>
+<p>As my first step I wasn’t sure of what I needed and would use and I had a few more measurements. I figured that as time went by and I saw the actual needs of the machine this would change, and it could be easily changed. </p>
+<div class="highlight"><pre><span class="p">{</span>
+  <span class="s">'server'</span><span class="p">:</span> <span class="n">servername</span><span class="p">,</span>
+  <span class="s">'datetime'</span><span class="p">:</span> <span class="n">datetime</span><span class="o">.</span><span class="n">now</span><span class="p">(),</span>
+  <span class="s">'disk_root'</span><span class="p">:</span> <span class="p">,</span>
+  <span class="s">'phymem'</span><span class="p">:,</span>
+  <span class="s">'cpu'</span><span class="p">:</span> <span class="p">{</span><span class="s">'user'</span><span class="p">:,</span> <span class="s">'nice'</span><span class="p">:,</span> <span class="s">'system'</span><span class="p">:,</span> <span class="s">'idle'</span><span class="p">:,</span> <span class="s">'irq'</span><span class="p">:,},</span>
+<span class="p">}</span>
+</pre></div>
+
+
+<p>What follows is the python code for getting data from the system (using <code>psutil</code>) into the MongoDb database. I created a collection in MongoDb for each machine to be monitored. </p>
+<p>You could create a single document in MongoDb that contains data for each machine; it depends on your needs. Since I want a separate page for each machine, I divided the data in the same way. You might want the data for all machines in one document if you want to render one page with charts for all the machines.</p>
+<h4 id="about-the-mongodb-collection">About the MongoDB Collection.</h4>
+<p>I have a three-member MongoDB replica set named <code>rs1</code>. The machines that hold the data happen to be the same ones I am monitoring, <code>example01</code> and <code>example02</code>.
+The third member is an arbiter and doesn’t keep the data. These mongoDB servers don’t have to be the ones that are monitored, they could be anywhere.</p>
+<p>I have a database called <code>reports</code> and it is in that database we will put the new collections. For each machine we will have one collection to contain its load data:
+With 1440 minutes per day, sampling every 5 minutes, and keeping two days worth of data, we’ll need 576 records (documents)</p>
+<div class="highlight"><pre><span class="p">(</span><span class="mi">1440</span><span class="o">/</span><span class="mi">5</span><span class="p">)</span><span class="o">*</span><span class="mi">2</span> <span class="o">=</span> <span class="mi">576</span> <span class="n">records</span> <span class="n">per</span> <span class="n">server</span>
+</pre></div>
+
+
+<p>I wasn’t sure how much data I would eventually use, so I estimated 2k per document. I estimated a generous size for the documents because this is just a start and I may want to gather more data later on. Turns out that 2k is extremely generous. The average size of a record is around 200 bytes but I haven’t included any networking data (and disk space is cheap). </p>
+<div class="highlight"><pre><span class="mi">576</span> <span class="n">documents</span> <span class="err">@</span> <span class="mi">2048</span> <span class="n">bytes</span> <span class="n">per</span> <span class="n">doc</span> <span class="o">=</span> <span class="mi">1</span><span class="p">,</span><span class="mi">179</span><span class="p">,</span><span class="mi">648</span> <span class="n">bytes</span>
+</pre></div>
+
+
+<p>For each machine to be monitored, I created a capped collection with a maximum size of 1179648 and a maximum number of 576 documents:</p>
+<div class="highlight"><pre><span class="nx">use</span> <span class="nx">reports</span>
+<span class="nx">db</span><span class="p">.</span><span class="nx">createCollection</span><span class="p">(</span><span class="s1">'example01'</span><span class="p">,</span> <span class="p">{</span><span class="nx">capped</span><span class="o">:</span><span class="kc">true</span><span class="p">,</span> <span class="nx">size</span><span class="o">:</span><span class="mi">1179648</span><span class="p">,</span> <span class="nx">max</span><span class="o">:</span><span class="mi">576</span><span class="p">})</span>
+<span class="nx">db</span><span class="p">.</span><span class="nx">createCollection</span><span class="p">(</span><span class="s1">'example02'</span><span class="p">,</span> <span class="p">{</span><span class="nx">capped</span><span class="o">:</span><span class="kc">true</span><span class="p">,</span> <span class="nx">size</span><span class="o">:</span><span class="mi">1179648</span><span class="p">,</span> <span class="nx">max</span><span class="o">:</span><span class="mi">576</span><span class="p">})</span>
+</pre></div>
+
+
+<p>By using a capped collection, we are guaranteed that the data will be preserved in insertion order, and old documents are automatically removed as time goes by so we always have the latest 48 hours of data.</p>
+<h4 id="the-data-gathering-code">The Data Gathering Code</h4>
+<p>First, do the necessary imports and make the connection to the MongoDb instance.</p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">datetime</span> <span class="kn">import</span> <span class="n">datetime</span>
+<span class="kn">import</span> <span class="nn">psutil</span>
+<span class="kn">import</span> <span class="nn">pymongo</span>
+<span class="kn">import</span> <span class="nn">socket</span>
+
+<span class="n">conn</span> <span class="o">=</span> <span class="n">pymongo</span><span class="o">.</span><span class="n">MongoReplicaSetClient</span><span class="p">(</span>
+    <span class="s">'example01.com, example02.com'</span><span class="p">,</span>
+    <span class="n">replicaSet</span><span class="o">=</span><span class="s">'rs1'</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="n">db</span> <span class="o">=</span> <span class="n">conn</span><span class="o">.</span><span class="n">reports</span>
+</pre></div>
+
+
+<p>Now call <code>psutil</code> for every piece of data you want.</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">main</span><span class="p">():</span>
+    <span class="n">cpu</span> <span class="o">=</span> <span class="n">psutil</span><span class="o">.</span><span class="n">cpu_times_percent</span><span class="p">()</span>
+    <span class="n">disk_root</span> <span class="o">=</span> <span class="n">psutil</span><span class="o">.</span><span class="n">disk_usage</span><span class="p">(</span><span class="s">'/'</span><span class="p">)</span>
+    <span class="n">phymem</span> <span class="o">=</span> <span class="n">psutil</span><span class="o">.</span><span class="n">phymem_usage</span><span class="p">()</span>
+</pre></div>
+
+
+<p>Create a dictionary to contain the data in the time-series structure you need.</p>
+<div class="highlight"><pre>    <span class="n">doc</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">()</span>
+    <span class="n">doc</span><span class="p">[</span><span class="s">'server'</span><span class="p">]</span> <span class="o">=</span> <span class="n">socket</span><span class="o">.</span><span class="n">gethostname</span><span class="p">()</span>
+    <span class="n">doc</span><span class="p">[</span><span class="s">'date'</span><span class="p">]</span> <span class="o">=</span> <span class="n">datetime</span><span class="o">.</span><span class="n">now</span><span class="p">()</span>
+    <span class="n">doc</span><span class="p">[</span><span class="s">'disk_root'</span><span class="p">]</span> <span class="o">=</span> <span class="n">disk_root</span><span class="o">.</span><span class="n">free</span><span class="p">,</span> 
+    <span class="n">doc</span><span class="p">[</span><span class="s">'phymem'</span><span class="p">]</span> <span class="o">=</span> <span class="n">phymem</span><span class="o">.</span><span class="n">free</span>
+
+    <span class="n">doc</span><span class="p">[</span><span class="s">'cpu'</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="s">'user'</span><span class="p">:</span> <span class="n">cpu</span><span class="o">.</span><span class="n">user</span><span class="p">,</span> 
+        <span class="s">'nice'</span><span class="p">:</span> <span class="n">cpu</span><span class="o">.</span><span class="n">nice</span><span class="p">,</span>
+        <span class="s">'system'</span><span class="p">:</span> <span class="n">cpu</span><span class="o">.</span><span class="n">system</span><span class="p">,</span> 
+        <span class="s">'idle'</span><span class="p">:</span> <span class="n">cpu</span><span class="o">.</span><span class="n">idle</span><span class="p">,</span>
+        <span class="s">'irq'</span><span class="p">:</span> <span class="n">cpu</span><span class="o">.</span><span class="n">irq</span>
+    <span class="p">}</span>
+</pre></div>
+
+
+<p>Finally, add that dictionary as a document into the corresponding MongoDb collection. It is converted to a <span class="caps">BSON</span> document when it is inserted into the database, but the structure is the same.</p>
+<div class="highlight"><pre>    <span class="k">if</span> <span class="n">doc</span><span class="p">[</span><span class="s">'server'</span><span class="p">]</span> <span class="o">==</span> <span class="s">'example01.com'</span><span class="p">:</span>
+        <span class="n">db</span><span class="o">.</span><span class="n">example01</span><span class="o">.</span><span class="n">insert</span><span class="p">(</span><span class="n">doc</span><span class="p">)</span>
+    <span class="k">elif</span> <span class="n">doc</span><span class="p">[</span><span class="s">'server'</span><span class="p">]</span> <span class="o">==</span> <span class="s">'example02'</span><span class="p">:</span>
+        <span class="n">db</span><span class="o">.</span><span class="n">example02</span><span class="o">.</span><span class="n">insert</span><span class="p">(</span><span class="n">doc</span><span class="p">)</span>
+</pre></div>
+
+
+<p>There you have the code to get the data and the database collections in which to store it. All that’s left to do for this part is to automatically run the code:</p>
+<p>Set up a cron job to run the script every 5 minutes on each server you want to monitor:</p>
+<div class="highlight"><pre>*/5 * * * * /path/to/psutil_script
+</pre></div>
+
+
+<p>Each mongoDB collection contains 48 hours of system performance data about the corresponding server; you can set it and forget it.</p>
+<h3 class="article-title" id="part-2-set-up-the-bottle-server">Part 2: Set up the bottle Server</h3>
+<p>Create a <code>bottle</code> application to query the mongoDb collection.</p>
+<p>Connect to MongoDb. On receipt of a request for server data, return the formatted data for the appropriate server in the response.  </p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">bottle</span> <span class="kn">import</span> <span class="n">Bottle</span>
+<span class="kn">import</span> <span class="nn">pymongo</span>
+<span class="n">load</span> <span class="o">=</span> <span class="n">Bottle</span><span class="p">()</span>
+
+<span class="n">conn</span> <span class="o">=</span> <span class="n">pymongo</span><span class="o">.</span><span class="n">MongoReplicaSetClient</span><span class="p">(</span>
+    <span class="s">'example01.com, example02.com'</span><span class="p">,</span>
+    <span class="n">replicaSet</span><span class="o">=</span><span class="s">'rs1'</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="n">db</span> <span class="o">=</span> <span class="n">conn</span><span class="o">.</span><span class="n">reports</span>
+</pre></div>
+
+
+<p>This is a route, a url connection. When a request comes in, <em>get</em> the servername from the url (<code>&lt;server&gt;</code>) and create and return the proper data structure (the structure that <code>jqplot</code> will need).</p>
+<div class="highlight"><pre><span class="nd">@load.get</span><span class="p">(</span><span class="s">'/&lt;server&gt;'</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">get_loaddata</span><span class="p">(</span><span class="n">server</span><span class="p">):</span>
+    <span class="n">data_cursor</span> <span class="o">=</span> <span class="nb">list</span><span class="p">()</span>
+    <span class="k">if</span> <span class="n">server</span> <span class="o">==</span> <span class="s">'example02'</span><span class="p">:</span>
+        <span class="n">data_cursor</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">example02</span><span class="o">.</span><span class="n">find</span><span class="p">()</span>
+    <span class="k">elif</span> <span class="n">server</span> <span class="o">==</span> <span class="s">'example01'</span><span class="p">:</span>
+        <span class="n">data_cursor</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">example01</span><span class="o">.</span><span class="n">find</span><span class="p">()</span>
+
+    <span class="n">disk_root_free</span> <span class="o">=</span> <span class="nb">list</span><span class="p">()</span>
+    <span class="n">phymem_free</span> <span class="o">=</span> <span class="nb">list</span><span class="p">()</span>
+    <span class="n">cpu_user</span> <span class="o">=</span> <span class="nb">list</span><span class="p">()</span>
+    <span class="n">cpu_nice</span> <span class="o">=</span> <span class="nb">list</span><span class="p">()</span>
+    <span class="n">cpu_system</span> <span class="o">=</span> <span class="nb">list</span><span class="p">()</span>
+    <span class="n">cpu_idle</span> <span class="o">=</span> <span class="nb">list</span><span class="p">()</span>
+    <span class="n">cpu_irq</span> <span class="o">=</span> <span class="nb">list</span><span class="p">()</span>
+
+    <span class="k">for</span> <span class="n">data</span> <span class="ow">in</span> <span class="n">data_cursor</span><span class="p">:</span>
+        <span class="n">date</span> <span class="o">=</span> <span class="n">data</span><span class="p">[</span><span class="s">'date'</span><span class="p">]</span>
+        <span class="n">disk_root_free</span><span class="o">.</span><span class="n">append</span><span class="p">([</span><span class="n">date</span><span class="p">,</span> <span class="n">data</span><span class="p">[</span><span class="s">'disk_root'</span><span class="p">])</span>
+        <span class="n">phymem_free</span><span class="o">.</span><span class="n">append</span><span class="p">([</span><span class="n">date</span><span class="p">,</span> <span class="n">data</span><span class="p">[</span><span class="s">'phymem'</span><span class="p">])</span>
+        <span class="n">cpu_user</span><span class="o">.</span><span class="n">append</span><span class="p">([</span><span class="n">date</span><span class="p">,</span> <span class="n">data</span><span class="p">[</span><span class="s">'cpu'</span><span class="p">][</span><span class="s">'user'</span><span class="p">]])</span>
+        <span class="n">cpu_nice</span><span class="o">.</span><span class="n">append</span><span class="p">([</span><span class="n">date</span><span class="p">,</span> <span class="n">data</span><span class="p">[</span><span class="s">'cpu'</span><span class="p">][</span><span class="s">'nice'</span><span class="p">]])</span>
+        <span class="n">cpu_system</span><span class="o">.</span><span class="n">append</span><span class="p">([</span><span class="n">date</span><span class="p">,</span> <span class="n">data</span><span class="p">[</span><span class="s">'cpu'</span><span class="p">][</span><span class="s">'system'</span><span class="p">]])</span>
+        <span class="n">cpu_idle</span><span class="o">.</span><span class="n">append</span><span class="p">([</span><span class="n">date</span><span class="p">,</span> <span class="n">data</span><span class="p">[</span><span class="s">'cpu'</span><span class="p">][</span><span class="s">'idle'</span><span class="p">]])</span>
+        <span class="n">cpu_irq</span><span class="o">.</span><span class="n">append</span><span class="p">([</span><span class="n">date</span><span class="p">,</span> <span class="n">data</span><span class="p">[</span><span class="s">'cpu'</span><span class="p">][</span><span class="s">'irq'</span><span class="p">]])</span>
+
+    <span class="k">return</span> <span class="p">{</span>
+            <span class="s">'disk_root_free'</span><span class="p">:</span> <span class="n">disk_root_free</span><span class="p">,</span>
+            <span class="s">'phymem_free'</span><span class="p">:</span> <span class="n">phymem_free</span>
+            <span class="s">'cpu_user'</span><span class="p">:</span> <span class="n">cpu_user</span><span class="p">,</span>
+            <span class="s">'cpu_irq'</span><span class="p">:</span> <span class="n">cpu_irq</span><span class="p">,</span>
+            <span class="s">'cpu_system'</span><span class="p">:</span> <span class="n">cpu_system</span><span class="p">,</span>
+            <span class="s">'cpu_nice'</span><span class="p">:</span> <span class="n">cpu_nice</span><span class="p">,</span>
+            <span class="s">'cpu_idle'</span><span class="p">:</span> <span class="n">cpu_idle</span><span class="p">,</span>
+            <span class="p">}</span>
+</pre></div>
+
+
+<h3 class="article-title" id="part-3-display-the-data-with-jqplot">Part 3: Display the Data with jqplot</h3>
+<h4 id="the-html-page">The <span class="caps">HTML</span> Page</h4>
+<p>The <span class="caps">HTML</span> is very simple. </p>
+<ol>
+<li>Read in the stylesheet.</li>
+<li>Write the <code>div</code> to hold each chart. In the example below I display only the <code>cpu_user</code> data. The pattern is the same for all the variables.</li>
+<li>Load the javascript.</li>
+</ol>
+<p>You can put the javascript from <code>psmonitor.js</code> directly into the page or call it as a file (as shown in the example).</p>
+<div class="highlight"><pre><span class="cp">&lt;!doctype html&gt;</span>
+<span class="nt">&lt;html&gt;</span>
+<span class="nt">&lt;head&gt;</span>
+<span class="nt">&lt;meta</span> <span class="na">charset=</span><span class="s">"utf-8"</span><span class="nt">&gt;</span>
+<span class="nt">&lt;title&gt;</span>Load Monitoring<span class="nt">&lt;/title&gt;</span>
+<span class="nt">&lt;link</span> <span class="na">rel=</span><span class="s">"stylesheet"</span> <span class="na">type=</span><span class="s">"text/css"</span> <span class="na">href=</span><span class="s">"/css/jquery.jqplot.css"</span> <span class="nt">/&gt;</span>
+<span class="nt">&lt;style&gt;div</span> <span class="p">{</span><span class="k">margin</span><span class="o">:</span><span class="k">auto</span><span class="p">;}</span><span class="nt">&lt;/style&gt;</span>
+<span class="nt">&lt;/head&gt;</span>
+<span class="nt">&lt;body&gt;</span>
+
+    <span class="nt">&lt;div</span> <span class="na">id=</span><span class="s">"cpu_user"</span> <span class="na">style=</span><span class="s">"height:400px;width:800px; "</span><span class="nt">&gt;&lt;/div&gt;</span>
+
+<span class="nt">&lt;script </span><span class="na">src=</span><span class="s">"http://code.jquery.com/jquery-latest.min.js"</span> <span class="nt">&gt;&lt;/script&gt;</span>
+<span class="nt">&lt;script </span><span class="na">type=</span><span class="s">"text/javascript"</span> <span class="na">src=</span><span class="s">"/js/jquery.jqplot.js"</span><span class="nt">&gt;&lt;/script&gt;</span>
+<span class="nt">&lt;script </span><span class="na">type=</span><span class="s">"text/javascript"</span> <span class="na">src=</span><span class="s">"/js/jqplot.json2.js"</span><span class="nt">&gt;&lt;/script&gt;</span>
+<span class="nt">&lt;script </span><span class="na">type=</span><span class="s">"text/javascript"</span> <span class="na">src=</span><span class="s">"/js/jqplot.dateAxisRenderer.js"</span><span class="nt">&gt;&lt;/script&gt;</span>
+<span class="nt">&lt;script </span><span class="na">type=</span><span class="s">"text/javascript"</span> <span class="na">src=</span><span class="s">"/js/jqplot.highlighter.js"</span><span class="nt">&gt;&lt;/script&gt;</span>
+<span class="nt">&lt;script </span><span class="na">type=</span><span class="s">"text/javascript"</span> <span class="na">src=</span><span class="s">"/js/jqplot.cursor.js"</span><span class="nt">&gt;&lt;/script&gt;</span>
+<span class="c">&lt;!--[if lt IE 9]&gt;</span>
+<span class="c">  &lt;script language="javascript" type="text/javascript" src="excanvas.js"&gt;&lt;/script&gt;</span>
+<span class="c">&lt;![endif]--&gt;</span>
+<span class="nt">&lt;script </span><span class="na">type=</span><span class="s">"text/javascript"</span> <span class="na">src=</span><span class="s">"/js/psmonitor.js"</span> <span class="nt">/&gt;</span>
+<span class="nt">&lt;/body&gt;</span>
+<span class="nt">&lt;/html&gt;</span>
+</pre></div>
+
+
+<h4 id="the-javascript-jqplot-code">The JavaScript (jqplot) Code</h4>
+<p>The complete code is in the GitHub project, but here is a snippet of how <code>jqplot</code> is set up to show the data. The machine <code>example01</code> runs the web server that will return the json load data. Again, the web server could be on any machine; in my example, it happens to be one of the machines being monitored. </p>
+<p>The code follows the same pattern for each plot:</p>
+<ol>
+<li>Make the <span class="caps">AJAX</span> call to the server that is running the <code>bottle</code> app.</li>
+<li>Put the data you want to chart into a variable.</li>
+<li>Pass the variable to <code>jqplot</code>.</li>
+</ol>
+<p>The <code>url</code> in the code contains the string ‘example01’:</p>
+<div class="highlight"><pre><span class="nl">url:</span> <span class="s">"http://example01/load/example01"</span>
+</pre></div>
+
+
+<p>The first instance of <code>example01</code> is addressing the web server since that is the machine running the <code>bottle</code> app. The second instance is the name of the machine we want the data for. That is the server name (<code>&lt;server&gt;</code>) that is passed to the <code>bottle</code> route (<code>get_loaddata</code>) for retrieving the MongoDB records (documents).</p>
+<div class="highlight"><pre><span class="nx">$</span><span class="p">(</span><span class="nb">document</span><span class="p">).</span><span class="nx">ready</span><span class="p">(</span><span class="kd">function</span><span class="p">(){</span>
+    <span class="kd">var</span> <span class="nx">jsonData</span> <span class="o">=</span> <span class="nx">$</span><span class="p">.</span><span class="nx">ajax</span><span class="p">({</span>
+      <span class="nx">async</span><span class="o">:</span> <span class="kc">false</span><span class="p">,</span>
+      <span class="nx">url</span><span class="o">:</span> <span class="s2">"http://example01/load/example01"</span><span class="p">,</span>
+      <span class="nx">dataType</span><span class="o">:</span><span class="s2">"json"</span>
+    <span class="p">});</span>
+
+    <span class="kd">var</span> <span class="nx">cpu_user</span> <span class="o">=</span> <span class="p">[</span><span class="nx">jsonData</span><span class="p">.</span><span class="nx">responseJSON</span><span class="p">[</span><span class="s1">'cpu_user'</span><span class="p">]];</span>
+
+    <span class="nx">$</span><span class="p">.</span><span class="nx">jqplot</span><span class="p">(</span><span class="s1">'cpu_user'</span><span class="p">,</span>  <span class="nx">cpu_user</span><span class="p">,</span> <span class="p">{</span>
+        <span class="nx">title</span><span class="o">:</span> <span class="s2">"CPU User Percent: EXAMPLE01"</span><span class="p">,</span>
+        <span class="nx">highlighter</span><span class="o">:</span> <span class="p">{</span><span class="nx">show</span><span class="o">:</span> <span class="kc">true</span><span class="p">,</span> <span class="nx">sizeAdjust</span><span class="o">:</span> <span class="mf">7.5</span><span class="p">},</span>
+        <span class="nx">cursor</span><span class="o">:</span> <span class="p">{</span><span class="nx">show</span><span class="o">:</span> <span class="kc">false</span><span class="p">},</span>
+        <span class="nx">axes</span><span class="o">:</span><span class="p">{</span><span class="nx">xaxis</span><span class="o">:</span><span class="p">{</span><span class="nx">renderer</span><span class="o">:</span><span class="nx">$</span><span class="p">.</span><span class="nx">jqplot</span><span class="p">.</span><span class="nx">DateAxisRenderer</span><span class="p">,</span> 
+              <span class="nx">tickOptions</span><span class="o">:</span><span class="p">{</span><span class="nx">formatString</span><span class="o">:</span><span class="s2">"%a %H:%M"</span><span class="p">}}},</span>
+        <span class="nx">series</span><span class="o">:</span><span class="p">[{</span><span class="nx">lineWidth</span><span class="o">:</span><span class="mi">1</span><span class="p">,</span> <span class="nx">showMarker</span><span class="o">:</span> <span class="kc">false</span><span class="p">}]</span>
+    <span class="p">});</span>
+<span class="p">});</span>
+</pre></div>
+
+
+<p>This javascript plots the <span class="caps">CPU</span> user percent; you can add the other plots in exactly the same way, changing only the variable name and the title.</p>
+
+
+
+
+
+	<h4>Comments</h4>
+    <p id="disqus_thread"/>
+    
+    <noscript>Please enable JavaScript to view the <a href="http://disqus.com/?ref_noscript">comments powered by Disqus.</a></noscript>
+</article>
+    </div></body></html>

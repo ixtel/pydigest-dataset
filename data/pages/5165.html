@@ -1,0 +1,104 @@
+<html><body><div><div class="entry-content">
+						<p>This is a story that grew in the telling. It’s also a story of firsts; my first time using Django, first time using AWS, first time using Nginx…like I said lots of firsts. So let me start at the beginning.</p>
+<h2>Background</h2>
+<p>I had an idea for a web application and I decided to build it using Django. I hadn’t used Django before so there was a bit of a learning curve, but all in all it went really well and after a bit of development I had something to share with the world. The question was how to deploy my application ? When you’re developing with Django things are pretty straight forward. Django ships with a basic application server that can serve your code that works great for testing, but it’s not designed for production use. For production you need 2 things; a WSGI compliant application server for your Python code and a regular web server for static files and resources. This usually boils down to a choice of Apache or Nginx for the web server and 1 of mod_wsgi (if you’re using Apache), uWSGI or Gunicorn. I decided for my application to use Nginx (for no other reason than I had been reading good things about it and wanted an excuse to play with it) and Gunicorn (because there seemed to be good documentation). The next question was how to host the application and for that I chose Amazon Web Services (AWS). The problem was when I started looking for documentation on how to set everything I was able to find descriptions for each of the component pieces but nothing that put it all together. The remainder of this post does just that.</p>
+<p><span>AWS</span></p>
+<p>NB: The following assumes you’re signed into the AWS web console.</p>
+<p>AWS offers a plethora of services for developers to build applications, but with so many options it can be confusing for noobs like me to know which services they should use. For example, should I run my own EC2 instances or should I use Amazon’s PaaS offering (Elastic Beanstalk), should I install a database myself or use Relational Database Service (RDS) ? So many choices and to be honest the only way to make an informed decision is to read the documentation for the available services. For my requirements I chose to use an Ubuntu 14.04 EC2 instance to deploy Django and run a PostgreSQL instance on RDS. I had investigated using Elastic Beanstalk, but it wouldn’t have given me the level of control I wanted for the Django installation.</p>
+<p>So the first thing I needed to do was signup for an AWS account. When you sign up you get a basic level of resources free for the first year and as long as you don’t use more than those resources you won’t be billed for anything. Once I had an account setup I created a second account using Identity &amp; Access Management (IAM) to use to log into the console rather than the root account. Once that was done I logout of the root account and log back in using the new account. Now I was ready to setup my security groups.</p>
+<h3>VPC &amp; Security Groups</h3>
+<p>When you create an AWS account Amazon create a default Virtual Private Cloud (VPC) for you. Your VPC allows you to isolate your services and control access to the Internet. You can create separate subnets for services to isolate groups of resources and then define what visibility they have to the Internet and to other subnets. The default VPC Amazon provide you with has 1 subnet defined which is accessible from the Internet. This was sufficient for my setup, but if you have more complex requirements you can setup what ever subnets you need.</p>
+<p>Once you’ve configured the VPC the way you want you need to setup the access rules for the services you’ll be running. You do this using Security Groups. Security Groups are essentially firewall rules that you define which you can apply to any server or service. The great thing is that they’re reusable so if you apply the same group to several services and then make a change that change is automatically applied every where. To create Security Groups:</p>
+<ol>
+<li>Select VPC from the Services menu.</li>
+<li>Select Security Groups from the sidebar menu.</li>
+<li>Click ‘Create Security Group’ and fill in the details.</li>
+</ol>
+<p>I created 2 groups, 1 for accessing the database and 1 for accessing the web server.</p>
+<p>After creating the 2 groups I selected the database group from the list and selected the Inbound Rules tab. Since I’ll be running PostgreSQL I needed to allow access on the default PostgreSQL port, 5432. I did that by creating a new Custom TCP rule and setting the port to 5432. I also needed to set the source address range that can access the rule. (If you want to set this completely open you can set it to 0.0.0.0/0 but if you want to limit it to a specific subnet you can enter the subnet address range here.)</p>
+<p>I then did the same thing for the web server group, but this time used the default values for HTTP and HTTPS on the Inbound Rules tab. I also added an SSH rule so that I could connect to the server remotely. I was now ready to setup my database instance.</p>
+<h3>PostgreSQL RDS</h3>
+<p>Amazone Relational Database service allows you to run relational database instances in the cloud. You can select from a number of database types and once you have an instance created AWS can handle things like backups, data replication, automated failover etc.</p>
+<p>To setup an RDS instance you should select ‘Database’ and ‘RDS’ from the Services menu and click ‘Launch a DB Instance’. You then select the type of database you want to setup, in my case it was PostgreSQL, and complete the rest of the setup, I selected the default VPC and the database security group I setup earlier. AWS will now create your database instance. Once the instance is running I logged into it using the root username and password I set during setup (I used pgadmin to connect to the database, but you can use any tool that works for you). Once connected to the database I created a new user account for use by the web server. I granted this account all privileges except making it as super user since Django will need to create tables, users etc.</p>
+<h3>Ubuntu 14.04 EC2</h3>
+<p>The next step was to setup a server instance to host Django. I did this by selecting EC2 from the Services menu and clicked ‘Launch Instance’. I then needed to select a virtual machine image to launch, in my case this was a Ubuntu 14.04. Next I had to select the instance size. If you want to stick within the free tier choose the smallest size, in this case t2.micro and then configured the instance details such as the network (VPC), subnet, public IP assignment etc. I then allocated storage for the instance, tagged it (to make it easy to find if you have a lot of instances) and set the Security Group to be the web group I created earlier. Finally I reviewed the instance details and clicked Launch. AWS then created and initialised my instance.</p>
+<p>Once the instance was up and running I SSH’d into it using the default username for Ubuntu instances (which is ubuntu) and the keyfile I downloaded from AWS. The command should look like this:</p>
+<pre>&gt; ssh -l ubuntu -i yourkeyfile.pem host.or.ip.address</pre>
+<p>You can use either the public IP address or the public DNS name AWS assigns to the instance. One thing to note though is that the public IP and DNS name get reset if the instance is restarted. To get around the IP changing you can assign a static IP to the instance using Elastic IP.</p>
+<p>Once logged into the server I installed some additional packages to complete the setup. The first thing I did was run:</p>
+<pre>&gt; sudo apt-get update</pre>
+<p>Followed by</p>
+<pre>&gt; sudo apt-get install python3 pip3 nginx git libpg-dev</pre>
+<p>These 2 commands installed Python v3.4 and pip, Nginx, Git and the PostgreSQL development libraries which are needed to install Psycopg2, Python’s PostgreSQL binding. The next step was to create a directory to hold the project and checkout the code from my source repository using git e.g.</p>
+<pre>&gt; git clone http://url.of.repo</pre>
+<p>Finally I had to install the project’s Python dependencies by running:</p>
+<pre>&gt; sudo pip3 -r requirements.txt</pre>
+<p>from the project’s root folder. Now I was ready to configure Django for production.</p>
+<h2>Django</h2>
+<p>By default Django stores configurable settings in a file called settings.py. This is where you put things like your installed apps, database connection details, secret keys, middleware and generally anything that you might want to be able to configure. This works great when your developing, but as soon as you need to deploy to more than 1 machine you have a problem. For example, if you use different databases for development and production (which you should) you will need 2 different configurations. There are several ways of working around this, but what I did is create 3 settings files:</p>
+<ul>
+<li>base_settings.py which holds settings that are common to all environments</li>
+<li>dev_settings.py which contains settings specific to my development environment</li>
+<li>prod_settings.py which contains production specific settings</li>
+</ul>
+<p>Both dev_settings.py and prod_settings.py import base_settings.py to make them available in both environments. I then had to tell Django which settings file to use. That can be done via an environment variable, but the manage.py utility seems to be hard coded to look for settings.py and if this doesn’t exist you can’t run migrations or any other commands provided by the file. The way I work around this (which works as long as your running a Linux/UNIX based OS) is to create a symlink for settings.py that points to the correct environment file. Once I did that I ran</p>
+<pre>&gt; sudo python3 manage.py makemigrations
+&gt; sudo python3 manage.py migrate
+&gt; sudo python3 manage.py createsuperuser
+</pre>
+<p><span>Gunicorn</span></p>
+<p>The next step was to setup a web application server. Python offers several application servers that are WSGI (Web Server Gateway Interface) compliant, the one I chose to use was Gunicorn (Green Unicorn). Gunicorn is a light weight reasonably fast Python port of Ruby’s Unicorn server. I had already installed it through requirements.txt so now I just need to run it. The simplest way to run Gunicorn is to execute the following at the command line</p>
+<pre>&gt; gunicorn -w 2 myapp.wsgi:application</pre>
+<p>where -w specifies the number of worker processes. This will start the server listening at <a href="http://127.0.0.1:8000" rel="nofollow">http://127.0.0.1:8000</a>.</p>
+<p>This is usually fine for a development environment, but for production you probably want to customise the setup such as setting the IP address or port binding, changing the number of workers or threads etc. Fortunately Gunicorn allows you to make these customisations either on the command line or by specifying a configuration file. The config file is just a Python file where you specify the parameters you want to set as variables and you tell Gunicorn which file to use by passing the path via the -c command line option, e.g.</p>
+<pre>&gt; gunicorn -c path/to/gunicorn_config.py</pre>
+<p>Here’s an example of a config file</p>
+<pre>import multiprocessing
+bind = "127.0.0.1:8000"
+workers = multiprocessing.cpu_count() * 2 + 1# Usually 64-2048# backlog = 2048
+# Number of threads per worker. Usually  2-4 x $(NUM_CORES), but the default us 1
+threads = mul tiprocessing.cpu_count() * 2 + 1
+</pre>
+<p>where we set the IP address and port to run the server on, the number of workers processes and the number of threads per process. Gunicorn has many options that can be set and I recommend reviewing the documentation on the web site for more details.</p>
+<p>Running Gunicorn with these settings will got my application server up and running, but there’s a problem; if the server fails or the instance is restarted Gunicorn will not be restarted automatically. To get around this I needed to setup Gunicorn as a service. On Ubuntu 14.04 this is done using Upstart. So what I did was create a config file that defines how I wanted Upstart to treat my Gunicorn service. Here’s an example config file</p>
+<pre>description “Put a description here"
+start on runlevel [2345]
+stop on runlevel [12345]
+respawn
+setuid ubuntu
+setgid www-data
+chdir /path/to/my/app
+exec /path/to/gunicorn -c /path/to/guncorn_config.py myapp.wsgi:application
+</pre>
+<p>This tells Upstart when it should start the service, restart the service if it isn’t running and the command to execute (in this case Gunicorn). I created this file in /etc/init and then ran</p>
+<pre>&gt; sudo service gunicorn start</pre>
+<p>Now if the server crashes or the instance restarts Gunicorn will always be restarted.</p>
+<h2>Nginx</h2>
+<p>The final step was to setup a web server to serve static resources and to act as a reverse proxy if required. For this I used Nginx which was installed as part of setting up my instance. Nginx comes with a default site setup so if you access your public IP address after you install it you should see a welcome page. What I then did was replace the default site with my application so that Nginx served the static resources, such as javascript, CSS, images etc, and all other traffic got routed to the web application. Fortunately Nginx is simple to configure and setting up my application involved creating a configuration in Nginx’s ‘sites-available’ directory (usually at /etc/nginx/sites-available) and then creating a symlink to it in the ‘sites-enabled’ directory (usually /etc/nginx/sites-enabled). By convention you usually name the configuration after the domain it will be hosting e.g. myapp.com. Here’s an example configuration for connection to Gunicorn</p>
+<pre>server {
+    listen 80;
+    location /static/ {
+        root /path/to/static/files
+    }
+
+    location / {
+        uwsgi_pass 127.0.0.1:8000;
+        include uwsgi_params;
+    }
+}
+</pre>
+<p>Here I’m setting the server to listen on port 80 and then pointing any requests for static resources to my static files directory (note this can be anywhere on the machine). Finally I specify that any other requests should be passed to the uWSGI server running on port 8000 on the localhost (obviously this has to match the IP and port Gunicorn is running on). The ‘include uwsgi_params’ adds some pre-configured settings Nginx has defined for uWSGI servers.</p>
+<p>Finally, to get Nginx to apply the new configuration, I needed to execute</p>
+<pre>&gt; sudo service nginx restart</pre>
+<p>My application was now be up and running and by entering the public IP address in a browser i was able to see my site.</p>
+<h2>Optional / Bonus Step – DNS Routing</h2>
+<p>One extra step you can apply is to setup a domain name so you don’t have to enter the instance IP address all the time. To do this you first have to register a domain name and then go to your providers DNS control panel and set the @ record to point to your AWS Elastic IP (this assumes you don’t need email or are hosting your own server, if you’re using a hosted email service you’ll need to setup your DNS records to route your mail correctly). Once that’s done you need to modify your Nginx config to recognise the domain name. You do that by adding</p>
+<pre>server_name www.myapp.com  myapp.com;</pre>
+<p>to your server directive in your Nginx config and then execute</p>
+<pre>&gt; sudo service nginx restart</pre>
+<p>Now you should be able to access your site using the domain name.</p>
+<p>And we’re done.</p>
+											</div>
+
+
+					</div></body></html>

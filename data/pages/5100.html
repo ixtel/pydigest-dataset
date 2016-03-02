@@ -1,0 +1,298 @@
+<html><body><div><div class="post-meta">
+        <p>This week we will cover how to parse Nginx server access logs using Python and Regular Expressions. The goal is to create a single statement optimized for performance that can match the patterns of every element within an access log.</p>
+<p>A <a href="https://en.wikipedia.org/?title=Regular_expression" title="regex_wiki">Regular Expression</a>, commonly referred to as regex, is a sequence of characters that can be literally interpreted to match patterns within strings. This can be extraordinarily useful when attempting to extract information from server logs. Generally speaking, servers create enormous amounts of log files that are comprised of long strings. To a casual observer a log file may appear as little more than a wall of text. Without some type of automated parsing these logs can become unmanageable and therefore irrelevant. </p>
+<p><br/></p>
+<h4>Regex to the Rescue</h4>
+<p>Let's take a look at the elements within an Nginx access log:</p>
+<div class="codehilite"><pre><span class="nv">$http_x_real_ip</span> <span class="o">[</span><span class="nv">$time_local</span><span class="o">]</span> <span class="s2">"</span><span class="nv">$request</span><span class="s2">"</span> <span class="nv">$status</span> <span class="nv">$body_bytes_sent</span> <span class="s2">"</span><span class="nv">$http_referer</span><span class="s2">"</span> <span class="s2">"</span><span class="nv">$http_user_agent</span><span class="s2">"</span> <span class="s2">"</span><span class="nv">$http_x_forwarded_for</span><span class="s2">"</span>
+</pre></div>
+
+
+<p><br/>
+When output to a .log file, we see something like this:</p>
+<div class="codehilite"><pre>192.168.1.12 - - <span class="o">[</span>23/Jun/2015:11:10:57 +0000<span class="o">]</span> <span class="s2">"GET /entry/how-create-configure-free-ssl-certificate-using-django-and-pythonanywhere HTTP/1.1"</span> <span class="m">302</span> <span class="m">5</span> <span class="s2">"http://www.reddit.com/r/Python/"</span> <span class="s2">"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/44.0.2403.18 Safari/537.36"</span> <span class="s2">"192.168.1.12"</span>
+</pre></div>
+
+
+<p><br/>
+It would be nice if we could break down the log entry and extract individual pieces of information, such as IP addresses, referral information, date and time, etc.  We could then analyze that data to gain a deeper and more meaningful insight into how our server is being accessed. The first step in this process is to identify the unique pattern for each element in the string. </p>
+<p><br/></p>
+<h4>The Goal</h4>
+<p>Our regex should be able to correctly extract every element in our access log. Since our logs are most likely accurate, e.g., IP addresses such as <em>999.999.999.999</em> will not be logged, the statement does not need to be perfect. For our purposes we care more about the pattern than the content because we trust the server to correctly log information. </p>
+<p>Additionally, we should focus on performance rather than legibility. Even though we will be using Python, regex is so obtuse to begin with that we should go the extra mile and optimize for speed. In some cases the more explicit code will be faster and at other times it will be slower. We will measure multiple expressions using the timeit module and determine which to incorporate into our final statement based on how long it takes to run one million times. </p>
+<p><br/></p>
+<h4>Regex Basics</h4>
+<p>These are the only <a href="https://docs.python.org/2/library/re.html" title="regex_stdlib">regex</a> characters we will need to use:</p>
+<div class="codehilite"><pre><span class="s2">"."</span>      Matches any character except a newline.
+<span class="s2">"*"</span>      Matches <span class="m">0</span> or more <span class="o">(</span>greedy<span class="o">)</span> repetitions of the preceding RE.
+             Greedy means that it will match as many repetitions as possible.
+<span class="s2">"+"</span>      Matches <span class="m">1</span> or more <span class="o">(</span>greedy<span class="o">)</span> repetitions of the preceding RE.
+<span class="o">{</span>m,n<span class="o">}</span>    Matches from m to n repetitions of the preceding RE.
+<span class="s2">"\\"</span>     Either escapes special characters or signals a special sequence.
+<span class="o">[]</span>       Indicates a <span class="nb">set </span>of characters.
+<span class="s2">"|"</span>      A<span class="p">|</span>B, creates an RE that will match either A or B.
+<span class="o">(</span>...<span class="o">)</span>    Matches the RE inside the parentheses.
+             The contents can be retrieved or matched later in the string.
+<span class="o">(</span>?:...<span class="o">)</span>  Non-grouping version of regular parentheses.
+<span class="se">\d</span>       Matches any decimal digit<span class="p">;</span> equivalent to the <span class="nb">set</span> <span class="o">[</span>0-9<span class="o">]</span> in
+             bytes patterns or string patterns with the ASCII flag.
+             In string patterns without the ASCII flag, it will match the whole
+<span class="se">\S</span>       Matches any non-whitespace character<span class="p">;</span> equivalent to <span class="o">[</span>^<span class="se">\s</span><span class="o">]</span>.
+<span class="se">\w</span>       Matches any alphanumeric character<span class="p">;</span> equivalent to <span class="o">[</span>a-zA-Z0-9_<span class="o">]</span>
+             in bytes patterns or string patterns with the ASCII flag.
+             In string patterns without the ASCII flag, it will match the
+             range of Unicode alphanumeric characters <span class="o">(</span>letters plus digits
+             plus underscore<span class="o">)</span>.
+</pre></div>
+
+
+<p><br/>
+By using various combinations of these characters we will be able to generate a single regex that captures all elements within an Nginx log!</p>
+<p><br/></p>
+<h4>IP Address</h4>
+<p>An IP address is composed of four octets, each octet containing one, two, or three integers. All but the last octet are trailed by a period. We have an IP address at the beginning and end of the string we are parsing, therefore we will use this expression twice in our final statement. </p>
+<p>This is the pattern we want to match:</p>
+
+
+
+<p><br/>
+Since the log could contain IP addresses ranging from <em>1.0.0.0</em> through <em>223.255.255.255</em>, we need to make sure that we focus on finding a range of integers. The pattern should look something like this, with <em>{1,3}</em> indicating the minimum and maximum number of digits per octet:</p>
+<div class="codehilite"><pre><span class="se">\d</span><span class="o">{</span>1,3<span class="o">}</span><span class="se">\.\d</span><span class="o">{</span>1,3<span class="o">}</span><span class="se">\.\d</span><span class="o">{</span>1,3<span class="o">}</span><span class="se">\.\d</span><span class="o">{</span>1,3<span class="o">}</span>
+</pre></div>
+
+
+<p><br/>
+We can shorten the statement though by using non-grouping. This way we effectively say "find this group three times":</p>
+<div class="codehilite"><pre><span class="o">((</span>?:<span class="se">\d</span><span class="o">{</span>1,3<span class="o">}</span><span class="se">\.</span><span class="o">){</span>3<span class="o">}</span><span class="se">\d</span><span class="o">{</span>1,3<span class="o">})</span>
+</pre></div>
+
+
+<p><br/>
+Now that we have two different but similar expressions, let's see which is faster.</p>
+<div class="codehilite"><pre><span class="kn">import</span> <span class="nn">re</span>
+<span class="kn">from</span> <span class="nn">timeit</span> <span class="kn">import</span> <span class="n">timeit</span>
+
+
+<span class="c"># http_x_real_ip explicit </span>
+<span class="k">print</span><span class="p">(</span><span class="n">timeit</span><span class="p">(</span><span class="n">setup</span><span class="o">=</span><span class="s">"import re"</span><span class="p">,</span> <span class="n">stmt</span><span class="o">=</span><span class="s">'''r = re.search(r'(\d{1,3}\.\d{1,3}.\d{1,3}.\d{1,3})', '192.168.1.1 999.999.999.999')'''</span><span class="p">,</span> <span class="n">number</span><span class="o">=</span><span class="mi">1000000</span><span class="p">))</span>
+<span class="mf">1.159849308001867</span>
+
+<span class="c"># http_x_real_ip succinct</span>
+<span class="k">print</span><span class="p">(</span><span class="n">timeit</span><span class="p">(</span><span class="n">setup</span><span class="o">=</span><span class="s">"import re"</span><span class="p">,</span> <span class="n">stmt</span><span class="o">=</span><span class="s">'''r = re.search(r'((?:\d{1,3}\.){3}\d{1,3})', '192.168.1.1 999.999.999.999')'''</span><span class="p">,</span> <span class="n">number</span><span class="o">=</span><span class="mi">1000000</span><span class="p">))</span>
+<span class="mf">1.7421739230003368</span>
+</pre></div>
+
+
+<p><br/>
+In this instance the results are clear. The succinct statement is shorter but ~50% slower. In our final statement we will use the explicit expression. </p>
+<p><br/></p>
+<h4>Date and Time</h4>
+<p>Date and time is something that is slightly more difficult to match precisely as the pattern is longer and dates also have ranges. Here is what we are trying to match: </p>
+<div class="codehilite"><pre>23/Jun/2015:11:10:57 +0000
+</pre></div>
+
+
+<p><br/>
+We will need something that captures up to two digits, exactly three alphas, four digits (the first two always being 20), two more digits, etc. Here is what I came up with for explicit:</p>
+<div class="codehilite"><pre><span class="o">(</span><span class="se">\d</span><span class="o">{</span>1,2<span class="o">}</span>/<span class="se">\w</span><span class="o">{</span>3<span class="o">}</span>/<span class="o">[</span>2<span class="o">][</span>0<span class="o">]</span><span class="se">\d</span><span class="o">{</span>2<span class="o">}</span>:<span class="se">\d</span><span class="o">{</span>2<span class="o">}</span>:<span class="se">\d</span><span class="o">{</span>2<span class="o">}</span>:<span class="se">\d</span><span class="o">{</span>2<span class="o">}</span><span class="se">\s</span><span class="o">[</span>+<span class="o">][</span>0<span class="o">]{</span>4<span class="o">})</span>
+</pre></div>
+
+
+<p><br/>
+If we wanted, we could take advantage of the square brackets in the log. They are the only pair, so we could just look for those and grab everything in between. This will actually prove to be somewhat faster as shown below:</p>
+
+
+
+<p><br/>
+<strong>Moving forward make sure to import re and timeit</strong>.</p>
+<div class="codehilite"><pre><span class="c"># time_local explicit</span>
+<span class="k">print</span><span class="p">(</span><span class="n">timeit</span><span class="p">(</span><span class="n">setup</span><span class="o">=</span><span class="s">"import re"</span><span class="p">,</span> <span class="n">stmt</span><span class="o">=</span><span class="s">'''r = re.search(r'(\d{1,2}/\w{3}/[2][0]\d{2}:\d{2}:\d{2}:\d{2}\s[+][0]{4})', "[23/Jun/2015:11:10:57 +0000]")'''</span><span class="p">,</span> <span class="n">number</span><span class="o">=</span><span class="mi">1000000</span><span class="p">))</span>
+<span class="mf">1.248802040994633</span>
+
+<span class="c"># time_local succinct</span>
+<span class="k">print</span><span class="p">(</span><span class="n">timeit</span><span class="p">(</span><span class="n">setup</span><span class="o">=</span><span class="s">"import re"</span><span class="p">,</span> <span class="n">stmt</span><span class="o">=</span><span class="s">'''r = re.search(r'\[(.*)\]', "[23/Jun/2015:11:10:57 +0000]")'''</span><span class="p">,</span> <span class="n">number</span><span class="o">=</span><span class="mi">1000000</span><span class="p">))</span>
+<span class="mf">1.0256699790043058</span>
+</pre></div>
+
+
+<p><br/></p>
+<h4>HTTP Request</h4>
+<p>Excepting the http_referer, this will be the best most difficult pattern to get an exact match on. The request could be a GET but it could also be a PUT or DELETE, depending on configuration. Generally, we will want to match something like this:</p>
+<div class="codehilite"><pre>GET /entry/how-create-configure-free-ssl-certificate-using-django-and-pythonanywhere
+</pre></div>
+
+
+<p><br/>
+For the explicit, we can identify our starting position by a double quote. From there we will always have a three to six alpha followed by a space and a slug. The slug could be of varying lengths so we need to be greedy and grab everything up until we hit our next space:</p>
+<div class="codehilite"><pre><span class="se">\"</span><span class="o">(</span><span class="se">\w</span><span class="o">{</span>3,6<span class="o">}</span>.* <span class="se">\w</span><span class="o">{</span>0,4<span class="o">}</span>/<span class="se">\d\.\d</span><span class="o">)</span>
+</pre></div>
+
+
+<p><br/>
+Just like for request, we can truncate the expression by looking at the boundaries and grabbing everything in between. This time, however, there is no significant performance hit:</p>
+
+
+
+<p><br/></p>
+<div class="codehilite"><pre><span class="c"># request explicit</span>
+<span class="k">print</span><span class="p">(</span><span class="n">timeit</span><span class="p">(</span><span class="n">setup</span><span class="o">=</span><span class="s">"import re"</span><span class="p">,</span> <span class="n">stmt</span><span class="o">=</span><span class="s">'''r =re.search(r'</span><span class="se">\"</span><span class="s">(\w{3,6}.* \w{0,4}/\d\.\d)','GET /entry/how-create-configure-free-ssl-certificate-using-django-and-pythonanywhere HTTP/1.1')'''</span><span class="p">,</span> <span class="n">number</span><span class="o">=</span><span class="mi">1000000</span><span class="p">))</span>
+<span class="mf">0.8531186500040349</span>
+
+<span class="c"># request succinct</span>
+<span class="k">print</span><span class="p">(</span><span class="n">timeit</span><span class="p">(</span><span class="n">setup</span><span class="o">=</span><span class="s">"import re"</span><span class="p">,</span> <span class="n">stmt</span><span class="o">=</span><span class="s">'''r = re.search(r'"(.*)" \d','GET /entry/how-create-configure-free-ssl-certificate-using-django-and-pythonanywhere HTTP/1.1')'''</span><span class="p">,</span> <span class="n">number</span><span class="o">=</span><span class="mi">1000000</span><span class="p">))</span>
+<span class="mf">0.8583502010005759</span>
+</pre></div>
+
+
+<p><br/></p>
+<h4>HTTP Status and Bytes Sent</h4>
+<p>Both the status and bytes sent are adjacent digits and can be grabbed with one statement. Here's what we want:</p>
+
+
+
+<p><br/>
+We'll start by looking for a white space, followed by a three digit pattern, another white space, and a sequence of uninterrupted digits. Notice how we group each of them:</p>
+
+
+
+<p><br/>
+We could also do this:</p>
+
+
+
+<p><br/>
+Our succinct statement is only a minor variation of our explicit statement and as such the performance difference is largely negligible. </p>
+<div class="codehilite"><pre><span class="c"># status, request, body_bytes_sent explicit</span>
+<span class="k">print</span><span class="p">(</span><span class="n">timeit</span><span class="p">(</span><span class="n">setup</span><span class="o">=</span><span class="s">"import re"</span><span class="p">,</span> <span class="n">stmt</span><span class="o">=</span><span class="s">'''r = re.search(r' (\d\d\d) (\d+)','HTTP/1.1" 302 5949502 "http:')'''</span><span class="p">,</span> <span class="n">number</span><span class="o">=</span><span class="mi">1000000</span><span class="p">))</span>
+<span class="mf">1.0922818089966313</span>
+
+<span class="c"># status, request, body_bytes_sent succinct</span>
+<span class="k">print</span><span class="p">(</span><span class="n">timeit</span><span class="p">(</span><span class="n">setup</span><span class="o">=</span><span class="s">"import re"</span><span class="p">,</span> <span class="n">stmt</span><span class="o">=</span><span class="s">'''r = re.search(r' (\d+) (\d+)','HTTP/1.1" 302 5949502 "http:')'''</span><span class="p">,</span> <span class="n">number</span><span class="o">=</span><span class="mi">1000000</span><span class="p">))</span>
+<span class="mf">1.1674523820038303</span>
+</pre></div>
+
+
+<p><br/></p>
+<h4>Referral</h4>
+<p>Referral is tough to capture precisely since we cannot be 100% certain where the referral came from. The referral should take the form of a URL:</p>
+<div class="codehilite"><pre>http://www.reddit.com/r/Python/
+</pre></div>
+
+
+<p><br/>
+We can take a shot at it refining our expression and surmise that the referral always comes from an http or https connection and always ends at a double quote:</p>
+
+
+
+<p><br/></p>
+<p>For our succinct version, we will just grab everything between a digit and a double quote. This is the only such pattern in our log and, just as we saw with local time, actually performs noticeably better than our explicit statement:</p>
+
+
+
+<p><br/></p>
+<div class="codehilite"><pre><span class="c"># http_referer explicit</span>
+<span class="k">print</span><span class="p">(</span><span class="n">timeit</span><span class="p">(</span><span class="n">setup</span><span class="o">=</span><span class="s">"import re"</span><span class="p">,</span> <span class="n">stmt</span><span class="o">=</span><span class="s">'''r = re.search(r'(\w{3,5}://\S+)"','302 5 "http://www.reddit.com/r/Python/" "Mozilla/5.0')'''</span><span class="p">,</span> <span class="n">number</span><span class="o">=</span><span class="mi">1000000</span><span class="p">))</span>
+<span class="mf">1.5528190339973662</span>
+
+<span class="c"># http_referer succinct</span>
+<span class="k">print</span><span class="p">(</span><span class="n">timeit</span><span class="p">(</span><span class="n">setup</span><span class="o">=</span><span class="s">"import re"</span><span class="p">,</span> <span class="n">stmt</span><span class="o">=</span><span class="s">'''r = re.search(r'\d "(\S+)"','302 5 "http://www.reddit.com/r/Python/" "Mozilla/5.0')'''</span><span class="p">,</span> <span class="n">number</span><span class="o">=</span><span class="mi">1000000</span><span class="p">))</span>
+<span class="mf">1.3216939499980072</span>
+</pre></div>
+
+
+<p><br/></p>
+<h4>User Agent</h4>
+<p>User agent is very difficult create an explicit statement for. Here is an example of what we are trying to define:</p>
+<div class="codehilite"><pre>Mozilla/5.0 <span class="o">(</span>X11<span class="p">;</span> Linux x86_64<span class="o">)</span> AppleWebKit/537.36 <span class="o">(</span>KHTML, like Gecko<span class="o">)</span> Chrome/44.0.2403.18 Safari/537.36
+</pre></div>
+
+
+<p><br/>
+There are a myriad of different user agents and we have no idea which will appear in our log. Let's just create a succinct statement to grab everything between two sets of double quotes, again the only such pattern in our log. </p>
+
+
+
+<p><br/></p>
+<div class="codehilite"><pre><span class="c"># http_user_agent succinct</span>
+<span class="k">print</span><span class="p">(</span><span class="n">timeit</span><span class="p">(</span><span class="n">setup</span><span class="o">=</span><span class="s">"import re"</span><span class="p">,</span> <span class="n">stmt</span><span class="o">=</span><span class="s">'''r = re.search(r'["] ["](.*)["] ["]',' "GET /entry/how-create-configure-free-ssl-certificate-using-django-and-pythonanywhere HTTP/1.1" 302 5 "http://www.reddit.com/r/Python/" "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/44.0.2403.18 Safari/537.36" "192.168.1.12')'''</span><span class="p">,</span> <span class="n">number</span><span class="o">=</span><span class="mi">1000000</span><span class="p">))</span>
+<span class="mf">1.3882431919992086</span>
+</pre></div>
+
+
+<p><br/></p>
+<h4>Full regex statement</h4>
+<p>Congratulations! We now have all the pieces we need to create our full regex. Some of the expressions will need to be altered slightly to match new boundaries, but that is a relatively minor change. Remember, this is what we are trying to match:</p>
+<div class="codehilite"><pre>192.168.1.12 - - <span class="o">[</span>23/Jun/2015:11:10:57 +0000<span class="o">]</span> <span class="s2">"GET /entry/how-create-configure-free-ssl-certificate-using-django-and-pythonanywhere HTTP/1.1"</span> <span class="m">302</span> <span class="m">5</span> <span class="s2">"http://www.reddit.com/r/Python/"</span> <span class="s2">"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/44.0.2403.18 Safari/537.36"</span> <span class="s2">"192.168.1.12"</span>
+</pre></div>
+
+
+<p><br/>
+If we glue everything together, we should get something like this:</p>
+<div class="codehilite"><pre><span class="o">(</span><span class="se">\d</span><span class="o">{</span>1,3<span class="o">}</span><span class="se">\.\d</span><span class="o">{</span>1,3<span class="o">}</span><span class="se">\.\d</span><span class="o">{</span>1,3<span class="o">}</span><span class="se">\.\d</span><span class="o">{</span>1,3<span class="o">})</span> - - <span class="se">\[</span><span class="o">(</span>.*<span class="o">)</span><span class="se">\]</span> <span class="se">\"</span><span class="o">(</span><span class="se">\w</span><span class="o">{</span>3,6<span class="o">}</span>.* <span class="se">\w</span><span class="o">{</span>0,4<span class="o">}</span>/<span class="se">\d\.\d</span><span class="o">)</span><span class="se">\"</span> <span class="o">(</span><span class="se">\d</span>+<span class="o">)</span> <span class="o">(</span><span class="se">\d</span>+<span class="o">)</span> <span class="s2">"(\S+)"</span> <span class="o">[</span><span class="s2">"](.*)["</span><span class="o">]</span> <span class="o">[</span><span class="s2">"](\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})</span>
+</pre></div>
+
+
+<p><br/>
+Let's see how fast it is:</p>
+<div class="codehilite"><pre><span class="k">print</span><span class="p">(</span><span class="n">timeit</span><span class="p">(</span><span class="n">setup</span><span class="o">=</span><span class="s">"import re"</span><span class="p">,</span> <span class="n">stmt</span><span class="o">=</span><span class="s">'''r = re.search(r'(\d{1,3}\.\d{1,3}.\d{1,3}.\d{1,3}) - - \[(.*)\] </span><span class="se">\"</span><span class="s">(\w{3,6}.* \w{0,4}/\d\.\d)</span><span class="se">\"</span><span class="s"> (\d+) (\d+) "(\S+)" ["](.*)["] ["](\d{1,3}\.\d{1,3}.\d{1,3}.\d{1,3})','192.168.1.12 - - [23/Jun/2015:11:10:57 +0000] "GET /entry/how-create-configure-free-ssl-certificate-using-django-and-pythonanywhere HTTP/1.1" 302 5 "http://www.reddit.com/r/Python/" "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/44.0.2403.18 Safari/537.36" "192.168.1.12"')'''</span><span class="p">,</span> <span class="n">number</span><span class="o">=</span><span class="mi">1000000</span><span class="p">))</span>
+<span class="mf">7.735765480996633</span>
+</pre></div>
+
+
+<p><br/>
+Approximately ~7.7 seconds to parse one million log entries. Not too shabby. How does that compare to a greedy regex that grabs the same content? </p>
+<div class="codehilite"><pre><span class="o">(</span>.*<span class="o">)</span> - - <span class="se">\[</span><span class="o">(</span>.*<span class="o">)</span><span class="se">\]</span> <span class="se">\"</span><span class="o">(</span>.*<span class="o">)</span><span class="se">\"</span> <span class="o">(</span><span class="se">\d</span>+<span class="o">)</span> <span class="o">(</span><span class="se">\d</span>+<span class="o">)</span> <span class="s2">"(\S+)"</span> <span class="o">[</span><span class="s2">"](.*)["</span><span class="o">]</span> <span class="o">[</span><span class="s2">"](.*)</span>
+</pre></div>
+
+
+<p><br/>
+Approximately ~64% faster, definitely noticeable:</p>
+<div class="codehilite"><pre><span class="k">print</span><span class="p">(</span><span class="n">timeit</span><span class="p">(</span><span class="n">setup</span><span class="o">=</span><span class="s">"import re"</span><span class="p">,</span> <span class="n">stmt</span><span class="o">=</span><span class="s">'''r = re.search(r'(.*) - - \[(.*)\] </span><span class="se">\"</span><span class="s">(.*)</span><span class="se">\"</span><span class="s"> (\d+) (\d+) "(\S+)" ["](.*)["] ["](.*)','192.168.1.12 - - [23/Jun/2015:11:10:57 +0000] "GET /entry/how-create-configure-free-ssl-certificate-using-django-and-pythonanywhere HTTP/1.1" 302 5 "http://www.reddit.com/r/Python/" "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/44.0.2403.18 Safari/537.36" "192.168.1.12"')'''</span><span class="p">,</span> <span class="n">number</span><span class="o">=</span><span class="mi">1000000</span><span class="p">))</span>
+<span class="mf">12.023143660000642</span>
+</pre></div>
+
+
+<p><br/></p>
+<h4>Verification</h4>
+<p>To verify that all the information is pulling correctly, run the following:</p>
+<div class="codehilite"><pre><span class="kn">import</span> <span class="nn">re</span>
+
+
+<span class="n">nlog</span> <span class="o">=</span> <span class="s">'192.168.1.12 - - [23/Jun/2015:11:10:57 +0000] "GET /entry/how-create-configure-free-ssl-certificate-using-django-and-pythonanywhere HTTP/1.1" 302 5 "http://www.reddit.com/r/Python/" "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/44.0.2403.18 Safari/537.36" "192.168.1.12"'</span>
+
+<span class="n">r</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="s">r'(\d{1,3}\.\d{1,3}.\d{1,3}.\d{1,3}) - - \[(.*)\] \"(\w{3,6}.* \w{0,4}/\d\.\d)\" (\d+) (\d+) "(\S+)" ["](.*)["] ["](\d{1,3}\.\d{1,3}.\d{1,3}.\d{1,3})'</span><span class="p">,</span> <span class="n">nlog</span><span class="p">)</span>
+<span class="n">http_x_real_ip</span> <span class="o">=</span> <span class="n">r</span><span class="o">.</span><span class="n">groups</span><span class="p">()[</span><span class="mi">0</span><span class="p">]</span>
+<span class="k">print</span><span class="p">(</span><span class="n">http_x_real_ip</span><span class="p">)</span>
+<span class="n">time_local</span> <span class="o">=</span> <span class="n">r</span><span class="o">.</span><span class="n">groups</span><span class="p">()[</span><span class="mi">1</span><span class="p">]</span>
+<span class="k">print</span><span class="p">(</span><span class="n">time_local</span><span class="p">)</span>
+<span class="n">request</span> <span class="o">=</span> <span class="n">r</span><span class="o">.</span><span class="n">groups</span><span class="p">()[</span><span class="mi">2</span><span class="p">]</span>
+<span class="k">print</span><span class="p">(</span><span class="n">request</span><span class="p">)</span>
+<span class="n">status</span> <span class="o">=</span> <span class="n">r</span><span class="o">.</span><span class="n">groups</span><span class="p">()[</span><span class="mi">3</span><span class="p">]</span>
+<span class="k">print</span><span class="p">(</span><span class="n">status</span><span class="p">)</span>
+<span class="n">body_bytes_sent</span> <span class="o">=</span> <span class="n">r</span><span class="o">.</span><span class="n">groups</span><span class="p">()[</span><span class="mi">4</span><span class="p">]</span>
+<span class="k">print</span><span class="p">(</span><span class="n">body_bytes_sent</span><span class="p">)</span>
+<span class="n">http_referer</span> <span class="o">=</span> <span class="n">r</span><span class="o">.</span><span class="n">groups</span><span class="p">()[</span><span class="mi">5</span><span class="p">]</span>
+<span class="k">print</span><span class="p">(</span><span class="n">http_referer</span><span class="p">)</span>
+<span class="n">http_user_agent</span> <span class="o">=</span> <span class="n">r</span><span class="o">.</span><span class="n">groups</span><span class="p">()[</span><span class="mi">6</span><span class="p">]</span>
+<span class="k">print</span><span class="p">(</span><span class="n">http_user_agent</span><span class="p">)</span>
+<span class="n">http_x_forwarded_for</span> <span class="o">=</span> <span class="n">r</span><span class="o">.</span><span class="n">groups</span><span class="p">()[</span><span class="mi">7</span><span class="p">]</span>
+<span class="k">print</span><span class="p">(</span><span class="n">http_x_forwarded_for</span><span class="p">)</span>
+</pre></div>
+
+
+<p><br/>
+If you receive the following error message:</p>
+<div class="codehilite"><pre>AttributeError: <span class="s1">'NoneType'</span> object has no attribute <span class="s1">'groups'</span>
+</pre></div>
+
+
+<p><br/>
+it means the regex failed to parse the log entry correctly and you will need to go back to the individual pieces and see where there issue is. For reference, everything should match the contents of this <a href="https://github.com/DJO3/regex_grounds/blob/master/exercise_4/parse_nginx_logs.py" title="parse_nginx_logs">repository</a>. </p>
+<p>Great work! Moving forward we will see how we can store and manipulate this data for future processing. </p>
+    </div>
+
+
+
+
+               
+           </div></body></html>

@@ -1,0 +1,78 @@
+<html><body><div><article class="post-content">
+  <p>A while back, I was working on an extremely tedious refactor on a huge Python codebase. I figure most people have hit something like this: a little too complicated for a find/replace, but painfully boring to write out by hand.</p>
+
+<p>I realized pretty quickly that I could describe the edits I wanted to make algorithmically – in that context, they were really, really simple. So I went looking for some scriptable Python refactoring tools, and found… well… not much. <a href="https://github.com/python-rope/rope">Rope</a>, the most well-developed refactoring library for Python, still felt a little too heavy and complicated for the kind of quick one-offs I wanted to write. So, I took a stab at creating my own.</p>
+
+<p>Singer/songwriter/genius Jonathan Coulton wrote a <a href="https://www.youtube.com/watch?v=v4Wy7gRGgeA">great song</a> honoring those who slog through boring, tedious coding work. So, I thought, what better name for a refactoring library than <a href="https://github.com/ForSpareParts/code_monkey">code_monkey</a>?</p>
+
+
+
+<p>code_monkey sat dormant for a long time, but I needed his help for another new project (which I hope to be posting about soon!), so I decided to dust him off, update him, and finally give him a proper release.</p>
+
+<h2 id="so-it-does-what-exactly">So, it does what, exactly?</h2>
+
+<p>If you’ve got a weird refactoring problem (e.g., rename all instances of “foo” to “bar”, but only on odd-numbered lines of methods of subclasses of BazQuux, unless, of course, it’s during a full moon<sup id="fnref:1"><a href="#fn:1" class="footnote">1</a></sup>) , the information you want is probably tied up in Python’s <a href="https://docs.python.org/2/library/ast.html">abstract syntax tree</a>. It’s not the easiest thing to use, though, and the documentation is pretty sparse – in fact, there’s an entire <a href="https://greentreesnakes.readthedocs.org/en/latest/">independent project</a> dedicated just to explaining <code>ast</code>.</p>
+
+<p>It’d be nice if you could get at this data in a more straightforward way, and that’s the first problem code_monkey solves. I’d be remiss if not to mention here that I’m building on the work of Logilab’s <a href="http://www.astroid.org/">astroid</a>, which is an expanded version of the Python AST with a similar API but more data. Thank you, Logilab!</p>
+
+<p>Anyway, here’s some code:</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="kn">from</span> <span class="nn">code_monkey.node_query</span> <span class="kn">import</span> <span class="n">project_query</span>
+    <span class="kn">from</span> <span class="nn">code_monkey.edit</span> <span class="kn">import</span> <span class="n">ChangeSet</span>
+
+    <span class="n">q</span> <span class="o">=</span> <span class="n">project_query</span><span class="p">(</span><span class="s">'/path/to/my/project'</span><span class="p">)</span>
+    
+    <span class="c">#these are all the Model classes in our project (hopefully)</span>
+    <span class="n">model_classes</span> <span class="o">=</span> <span class="n">q</span><span class="o">.</span><span class="n">flatten</span><span class="p">()</span><span class="o">.</span><span class="n">classes</span><span class="p">()</span><span class="o">.</span><span class="n">path_contains</span><span class="p">(</span><span class="s">'.models.'</span><span class="p">)</span></code></pre></div>
+
+<p>code_monkey’s strategy for exposing the AST is to wrap it in chainable queries (think jQuery). <code>project_query()</code>, <code>flatten()</code>, <code>classes()</code>, and <code>path_contains()</code> all return <code>NodeQuery</code> objects, and NodeQueries don’t change once they’re created. They’re also indexable, so we can do <code>model_classes[0]</code> to grab a single <code>Node</code> representing one of the classes we’ve selected.</p>
+
+<p>Nodes keep track of things like:</p>
+
+<ul>
+  <li>what file the code – in this case, a single class – is in (<code>Node.fs_path</code>)</li>
+  <li>what the class’ “dotpath” is, e.g. my_project.my_app.models.Todo (<code>Node.path</code>)</li>
+  <li>what line the class starts on (<code>Node.start_line</code>)</li>
+  <li>what line the body of the class starts on (<code>Node.body_start_line</code>)</li>
+</ul>
+
+<p>and so forth.</p>
+
+<p>In the code above, we’re using some of the information through the querying API. We create a query with a <code>ProjectNode</code> in it representing our whole project (that’s <code>project_query()</code>), then we “flatten” it to contain all the children of everything in the project, recursively, all the way down to the variable assignment level. After that, we filter out everything that’s not a class definition, and search through what’s left using the dotpath.</p>
+
+<p>The whole query API is <a href="http://code-monkey.readthedocs.org/en/latest/querying.html">here</a>.</p>
+
+<h2 id="thats-great-and-all-but-werent-we-trying-to-change-the-code">That’s great and all, but weren’t we trying to <em>change</em> the code?</h2>
+
+<p>Yes! Definitely! Getting there.</p>
+
+<p>Once you’ve got a bunch of interesting Nodes, you can create a <code>ChangeSet</code> to alter them:</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="c">#continuing from above...</span>
+
+    <span class="kn">from</span> <span class="nn">code_monkey.edit</span> <span class="kn">import</span> <span class="n">ChangeSet</span>
+    <span class="n">changeset</span> <span class="o">=</span> <span class="n">ChangeSet</span><span class="p">()</span>
+    
+    <span class="k">for</span> <span class="n">class_node</span> <span class="ow">in</span> <span class="n">model_classes</span><span class="p">:</span>
+        <span class="n">changeset</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">class_node</span><span class="o">.</span><span class="n">change</span><span class="o">.</span><span class="n">inject_at_body_line</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span>
+            <span class="s">'    new_property = models.CharField(max_length=128)</span><span class="se">\n</span><span class="s">'</span><span class="p">))</span>
+    
+    <span class="k">print</span><span class="p">(</span><span class="n">changeset</span><span class="o">.</span><span class="n">diff</span><span class="p">())</span></code></pre></div>
+
+<p>So what’s going on here is that every Node has a <code>.change</code> property with a bunch of methods to generate <code>Change</code> objects. A <code>Change</code> object says, basically, “write this code into this file, at this position” (or potentially, “overwrite this part of the file with this other code”). You can make Changes by hand, but you probably don’t want to, because it’s tedious. Let code_monkey do that! It’s his job.</p>
+
+<p>All those Change objects go into a ChangeSet, which can either generate a diff (as we saw above), or apply them to the filesystem (that’d be <code>changeset.commit()</code>). Any refactor complicated enough to merit this sort of treatment should probably be reviewed as a diff before you apply it.</p>
+
+<p>It’s possible to create Changes that overlap, so if you add conflicting Changes to the same ChangeSet, code_monkey will politely raise an exception. He might also mutter a few unflattering things about you behind your back, but hey – given what he’s putting up with on your behalf, he’s probably entitled to a little grousing.</p>
+
+<p>The API for creating Changes can be found <a href="http://code-monkey.readthedocs.org/en/latest/editing.html">here</a>.</p>
+
+<h2 id="so-yeah">So, yeah.</h2>
+
+<p>If your curiosity is piqued, you can grab code_monkey off of pip. I’d welcome comments and criticism, of course. It’s <strong>super</strong> alpha right now.</p>
+
+
+
+  </article>
+
+  </div></body></html>

@@ -1,0 +1,194 @@
+<html><body><div><div class="post-text" itemprop="text">
+<p>May I suggest you try the approach below. I have no mathematical proof that it produces the absolutely best "score", or indeed some other "measure of goodness",
+ but I do believe it may help you out, unless, of course, the case requires that you actually prove and find the absolutely best.</p>
+
+<p>I don't speak python, but the strategy and ensuing implementation are simple enough to not even require pseudo-code to explain.
+I will use quite a few words though, not because it is very complicated, but to be clear (I hope).</p>
+
+<p>You will need a method to diagonalize a matrix, or at least to find the eigenvector corresponding to the largest eigenvalue.
+Not every language provides natively a method for that. In C++ you might use the Eigen library. In C#, which I used to test, I hooked up MathNet. In python, I've no idea.
+The requirements for the diagonalization/eigenvector facility are limited: the matrix is always real, symmetric, all elements are positive.
+However, although the diagonal elements are at least as big as any other in their row/column, the matrix is certainly not "diagonal-dominant".</p>
+
+<p>The problem you present can in abstracto be formulated for integers, not words, which makes it more convenient (for me...) to formulate and implement
+ (but otherwise, it is quite irrelevant).
+In fact, we only need your "common_words", hence 100 integers [0..99], and you set up once the map between words and integers simply by putting the words in an array or list and using their index.</p>
+
+<p>As a side note: the strategy is likely (much) more adequate for your language application than for a completely generalized problem with integers where you might construct "maliciously" difficult input.
+The reason is that we'll essentially exploit pair-wise correlations, if there are any, between the items (words within the same sentence), whereas dominantly strong correlations for triples, quadruples, ... might make it less efficient (but we'll do something for the triples).
+Obviously, in well-formed language you'd expect correlations: "am" is often to show up together with "I",
+ and whereas "have" may in total be more frequent than "has", as soon as you find "he" you might be more likely to also get a "has" than "have" in the same sentence. And so on.</p>
+
+<p>A few definitions are in order.</p>
+
+<p>NCommon is the number of elements in your common_words (i.c. 100). The common_words "are" the integers [0..NCommon-1].</p>
+
+<p>NMaxSet is your problem-limit (i.c. 20) the maximum number of 'words' you are willing to use, finally.</p>
+
+<p>F is a filter: the collection of 'words' that you're using to define which sentences are included in some collection.
+In the end you must have adapted your filter such that F.Count does not exceed NMaxSet.</p>
+
+<p>M(N) is a square NxN matrix; row and column indexes are in [0..N-1]</p>
+
+<p>S(F) is the collection of sentences (from the problem input) that satisfy a filter F.
+A "sentence" is here always a collection of integers in the range [0..NCommon-1], see above.
+Duplicate words in the same sentence are irrelevant (problem description) and such duplications are removed from our integer-sentences.</p>
+
+<p>Here we go.</p>
+
+<p>I. Preparation.</p>
+
+<p>Initialize a matrix MCommon = M(NCommon).
+Create the FCommon filter that contains all the common_words.</p>
+
+<p>Filter the input, removing duplicate words in sentences.
+This produces a sentences set S0 = S(FCommon), which is your "real" input: everything that's irrelevant has been removed.</p>
+
+<p>On-the fly, while accepting sentences into S0, fill the matrix MCommon: {for (j in sentence): for(k in sentence): M(j,k)+=1}.
+The matrix is symmetric, so you may just fill the upperright triangle and mirror at the end into the lowerleft triangle.</p>
+
+<p>Having completed the scan, M[j,k] is the number of k-occurrences in 'sentences' that contain j (and vice-versa: the matrix is symmetric).
+M[k,k] is the total count of k in all sentences in S together.
+M is the (pair-wise) correlation matrix, telling you how likely it is that a {j,k} combination occurs in the underlying sentences set S.</p>
+
+<p>(Always, when dealing with such matricies: if there happen to be, at the end, empty columns (and hence rows): remove these columns and rows,
+simultaneously removing the corresponding entry in the Filter that underlies the matrix, as obviously it doesn't play a role.
+Henceforth we'll assume this has been done (unless stated otherwise), i.e. no column/row in the matrix is empty.)</p>
+
+<p>II. Compute result (main approach, we'll refine below):</p>
+
+<p>Compute the eigenvector E of MCommon that corresponds to the highest eigenvalue: E is an array (vector) with NCommon coefficients.</p>
+
+<p>Set NTarget=NSetMax</p>
+
+<p>Determine which are the NTarget biggest coefficients in E. We're not interested in their values, but in their indexes.
+Put these indexes together: they define a new filter F(NTarget).</p>
+
+<p>Run S0 through the new filter to produce STarget.
+Count all 'word'-occurrences, find their minimum: that's your "set-quality" value.
+You may do so, for instance, by also computing the associated MTarget and scanning the diagonal values MTarget[k,k].
+That may seem to involve unnecessary additional effort, as you're computing also the off-diagonal elements, but we'll see that MTarget may be handy in the follow-up refinements.</p>
+
+<p>III. Refinements.</p>
+
+<p>A) We need to verify whether by removing one or a few more items from the filter F(NsetMax), reducing it to some NTarget smaller than NSetMax, we would get a better score value.
+This requires some care: it is very well possible that removing TWO (or 3, ...) items would improve the score, but that removing either of them would deteriorate it.</p>
+
+<p>Let's take a first (and fairly reasonable) shot at this issue.</p>
+
+<p>While producing STarget you also fill a new matrix MTarget (you see, it is handy...), as you did with MCommon before. The size is NTarget.
+Get it's largest-eigenvalue eigenvector. Determine the SMALLEST coefficient. Remove from the filter the corresponding index.</p>
+
+<p>Filter again (as input you can, of course, now use the STarget collection) and compute the score.
+If it's better: mark/remember.
+In all cases (improvement or not) continue in the same fashion, reducing the filter one-by-one until you've nothing left.</p>
+
+<p>B) One may expect that the reason, as briefly explained, for the "cautious" approach in further reducing the filter below NSetMax - one at a time - 
+might also apply to some extent to the first step where we reduce F(NCommon) to F(NTarget=NMaxSet) in one big strike.</p>
+
+<p>To accomodate this, we may want to go from NCommon down to NMaxSet in steps. In order not to incur too much computational overhead, we won't
+take steps of size 1, but rather each time for instance a reduction by some 10%, or something similar.</p>
+
+<p>So, in II above, do not set NTarget immediately to NSetMax, but (for instance) set NTarget = 90.
+Construct the corresponding filter, apply the filter to S0, giving S1, produce also the matrix M1, get its eigenvector (largest eigenvalue).
+Repeat: set NTarget=80, 70, 60 and so on. In later stages you may get even more cautious, lowering 40 to 35 to 30 to 28 to 26 ...
+In each step you build upon and use the results from the previous, to optimally exploit the reduction in size and computational effort.</p>
+
+<p>All the time you want to monitor whether or not the largest NSetMax (final value in this part of the algorithm) coefficients always occur with the same indexes or not.
+This will give some information regarding whether the final result is reliable: the stability, or not, of the expected final filter against the algorithmic path towards it.</p>
+
+<p>C) Consider the situation where we have reduced to NSetMax and investigate whether or not it should be reduced further in a one-at-a-time approach.
+(The same may apply in the final stages of (B), if, when approaching NSetMax from above, you go "one-at-a-time" as soon as you get close to NSetMax.)</p>
+
+<p>Suppose there are during this phase of the algorithm, in your (first or a later) STarget collection,
+ certain PAIRS of 'words', such that removing such specific pair from the filter would improve things,
+ while neither of their individual coefficients in the eigenvector is the smallest.
+I'm not sure whether or not this is likely or even possible, but let's see how we might handle it.
+If (your) tests show that it's irrelevant, you may in a final implementation remove this feature from the algorithm.</p>
+
+<p>Assume we have some NTarget, an associated filter FTarget and matrix MTarget.
+(The order of the items ('words') in the filter always equals (of course) the order of the rows and columns in the matrix.)</p>
+
+<p>From MTarget we can directly deduce some information about what would happen if we were to remove the j-th item from the filter.
+Of course, the j-th row and j-th column in the matrix become empty (all zero's).
+More interestingly, M[j,k] presents how many times item k occurs in all sentences that contain item j together.
+So, when eliminating all j (by removing it from the filter), we know in advance that in the resulting new matrix MReducted,
+ element MReduced[k,k] will diminish precisely by that M[j,k] value.
+(By the way, this provides an alternative way of determining which item to remove (if you opt to remove only one):
+ the minimum{j: M[j,j]} is the score of the associated set S, and from M we can compute how ALL diagonal elements would change upon removing a particular item j, enabling a precomputation of the resulting score)</p>
+
+<p>Here, however, we would like to know how the score would be affected upon removal of some PAIR of items, j and k.
+We now need to determine how M[p,p] is affected for all p that are not j or k.
+This, you can not directly compute from M:
+ removing j affects row k and whereas we know how it changes [k.k], and any other [p,p], we don't know how it would change [k,p],
+ which is needed to compute how ALSO ('subsequently') removing k will change [p,p].
+Note, by the way, that it must be immaterial for the final outcome whether you remove first j and then k or vice-versa, or both simultaneously.</p>
+
+<p>For this we need some kind of 'derivative'.
+Fortunately we can compute and process that without too much computational effort (given that NTarget is already rather small, 20 or so).</p>
+
+<p>Consider a 'reductionfilter' G(F; j) related to the current filter F, defined simply as processing F but ignoring therein item j.
+With G we compute, in the same manner as always, a 'reductionmatrix' N(G), where for convenience in the discussion (and implementation) we keep the same size (not removing empty column/row).
+Of course, in such N matrix, the j-th row and j-th column are empty.
+Its diagonal elements will have values as explained above (we could have computed these from M directly).
+However, now we also have all off-diagonal elements that result from removing j.</p>
+
+<p>From N(G{F;j}) we can now determine what would happen if we remove ALSO item k, see elaboration above about how to get the expected score from a current matrix.
+So, this allows computing the score upon removal of the pair {j,k}.</p>
+
+<p>If the setsize is 20 we have to compute 20 N(G(F;j)) matrices, a relatively small effort, I assume (your sentences-collection will also by now have become a lot smaller than originally).
+Then, having all N, compute for each of the 20*19/2 unique pairs the resulting pair-removal-scores and you're in the position to
+choose which PAIR (rather than individual element) to remove from a filter.
+You may compare that, on the fly, against reduction by 'one-at-a-time' and make appropriate choices how to systematically reduce the filter in search for a better score.
+There are many ways to go about this comparison. A relatively simple one would be: calculate a reduction from first a pair and then a single one (in total 3 elements).
+ Compare against first removing a single one and then a pair.
+Pick the best of these two, but perform from that choice only the first step (either a single or a pair) and repeat the procedure.</p>
+
+<p>Note that using these "derived" filters G, matrices N and the ensuing score-precalculations as explained,
+ you effectively bring in correlations between TRIPLES of items: you determine what happens for all {j,k,p} to the frequency of p upon removing both j and k.
+This idea can, of course, be extended to incorporate quadruples and beyond, but (a) I don't believe it will practically help very much, and (b) the further you go on this road, the faster the computational effort will increase.
+I even doubt whether bringing in the "triples" as explained here is relevant,
+ but I'm not a language expert and apart from a little additional programming effort there's no major drawback.</p>
+
+<p>D) The backbone of the strategy is relying on the eigenvector with the largest eigenvalue to point to the relevant items to subsequently filter with.
+Of course, it may happen that two or more eigenvalues are "almost" the same and the corresponding eigenvectors may point to completely different sets of items
+ when analyzing their largest components. 
+In that case it will be worthwhile to "branch", that is: go with one of them, work to the end, and afterwards 
+redo everything with their competitor(s) and see if they produce a better outcome.
+A problem arises here if you encounter a lot of branches (at various points on the road to a solution). This is not likely to happen, but 
+the implementation should have some strategy to deal with it in a practical way if it does happen. 
+I suggest that you first leave any branching out, but that you do monitor the occurrence of "competitive" largest eigenvalues so as to output a warning to the user.
+ Alternatively you may implement a handling of such branching, but be very strict on what the programm will consider "almost equal", or put in some limit as 
+to the number of branches that are (in total) to be investigated, thereby reducing the chance that the computationtime runs out of hand.</p>
+
+<p>I have to leave it here (for lack of time...), hope I've explained sufficiently the idea, as well as some details and refinements to consider.</p>
+
+<p>I've not had the time to organize for myself relevant 'real language' sentences as input and test against that.
+I've programmed the basic steps in C#, tested against random integer-'sentences', with some biasses to force certain 'words' to occur more often that others,
+ but without bothering about correlations among 'words' within 'sentences'.
+The results appeared quite reasonable to me, but I didn't have the time to analyze it extensively.</p>
+
+<p>Given the lack of structure in the 'random' sequences that I've used as input, whereas real language is expected to exhibit significant pair-wise correlations,
+ which the strategy exploits,
+ I have good hope that it might be a useful thing for you to have a look at.</p>
+
+<p>[EDITED] Note added: in the above I've occasionally been sloppy in talking about "j", "k" and so on. I'm sorry about that.
+Sometimes "j" refers to the j-th entry of something (a Matrix row, an index in a filter-list), sometimes it refers to the corresponding VALUE in (usually) a filter.
+For instance, a filter may contain 18 items, numbered (indexes) 0..17, but their VALUES always refer to the original Common_words list,
+ so they may be {3, 15, 29, 30, 31, 40, ...}.
+Then, when it says "remove j from the filter", it will usually mean "remove the j-th entry from the filter (and that entry may have any value from [0..NCommon-1]).
+When APPLYING a filter to a sentence, you compare the VALUES in the filter against the values in the sentence.
+I hope that the context - in combination with a fair understanding of the line of reasoning - always makes it clear what is really meant.</p>
+
+<p>[EDITED: some test results]
+I've ran my C# implementation, using the above algorithm (more or less: most but not all refinements/details described) to get some impression of what it would produce.</p>
+
+<p>For input I took 4 books (plain text) from the Gutenberg project. In total (only) 27k sentences, 380k words (20k different), so a rather small sample.</p>
+
+<p>The list of common words as determined from that input started with "the", "of", "and", "to"... (when sorted to frequency of occurrence in the total input).</p>
+
+<p>The algorithm filtered 14 words ("i", "what", "do", "you", "it", "yes", ...) to produce an "optimal" "set-quality-value" of 8 (139 sentences were found with only those 14 words).</p>
+
+<p>As I was suspicious about the assumption that just 100 "common words" were to be used, I had a priori allowed 500 common words, rather than 100, and sure enough among the words that made it to the final filter, 4 were frequency-numbered above 100 ("yes", "know", "say", "think"): "yes", for instance, was #224 in the overall list if you were to sort them by occurrence in all input, presumably the base for "common words".</p>
+    </div>
+    </div></body></html>

@@ -1,0 +1,85 @@
+<html><body><div><div class="post-body entry-content" id="post-body-2888431850350488876" itemprop="description articleBody">
+<h2 id="_1">Введение</h2>
+<p>Сегодня работал над добавлением в
+<a href="http://aiohttp.readthedocs.org/en/v0.15.3/web.html">aiohttp.web</a>
+свойства <code>scheme</code> для <em>request object</em>.</p>
+<p>Идея простая: отвечать что <code>request.scheme</code> <code>"http"</code> для HTTP
+запросов, иначе <code>"https"</code>.</p>
+<p>У меня есть правило: перед началом погляди как другие уже справились с этой задачей.</p>
+<p>У создателей популярных библиотек есть большой опыт по преодолению
+неочевидных проблем, учиться у мастеров -- полезно.</p>
+<p>Так вышло что сегодня я смотрел код Django.</p>
+<p>И было в том коде примерно такое:</p>
+<pre><code>@property
+def scheme(self):
+    if settings.SECURE_PROXY_SSL_HEADER:
+        try:
+            header, value = settings.SECURE_PROXY_SSL_HEADER
+        except ValueError:
+            raise ImproperlyConfigured(
+                'The SECURE_PROXY_SSL_HEADER setting must be a tuple containing two values.'
+            )
+        if self.META.get(header, None) == value:
+            return 'https'
+    return 'http'
+</code></pre>
+<p>В целом очень хорошо: Django показала, как работать с <em>HTTP</em> и что
+делать если сервер расположен за <em>HTTPS Reverse Proxy</em> (Nginx,
+например).</p>
+<p>В последнем случае я сконфигурирую Nginx чтобы он добавил несколько
+полезных HTTP HEADERS для <em>HTTPS connection</em>:</p>
+<pre><code>  proxy_set_header        Host $host;
+  proxy_set_header        X-Real-IP $remote_addr;
+  proxy_set_header        X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header        X-Forwarded-Proto $scheme;
+</code></pre>
+<p>По <code>X-Forwarded-Proto</code> я пойму что это был <em>HTTPS</em>.</p>
+<p>В целом стандартная и всем (надеюсь) известная процедура.</p>
+<p>У <em>aiohttp</em> свободы чуть больше: оно может понять что сокет, по
+которому подключились напрямую, сам уже <em>SSL</em> -- но это пригодно
+только если мы готовы выставить наш <em>aiohttp сервер</em> прямо в веб.</p>
+<p>Куда чаще его прячут за <em>Nginx</em>, <em>HAProxy</em> или похожим <em>reverse proxy</em>
+и там уже работают с сертификататами, проксируя обычный <em>HTTP connection</em>.</p>
+<p>В общем всё прекрасно: <em>Nginx</em> выставит <em>X-Forwarded-Proto</em> <em>HTTP
+HEADER</em> который будет или <code>"http"</code> или <code>"https"</code>.</p>
+<p>Django глянет на <code>settings.SECURE_PROXY_SSL_HEADER</code> и если там
+<code>("X-Forwarded-Proto", "https")</code> то <em>scheme</em> тоже будет <code>"https"</code>.</p>
+<p>Очень грамотно сделано, мне нравится.</p>
+<h2 id="_2">Проблема</h2>
+<p>Так почему я этот пост написал?</p>
+<p>А потому что <code>settings.SECURE_PROXY_SSL_HEADER</code> может быть чем угодно
+-- строкой, числом или ещё какой непотребной константой.</p>
+<p>Проверка выполняется на момент получения <code>request.scheme</code>.</p>
+<p>Нам, питонщикам, плевать на производительность в данном случае -- на
+самом деле <em>try/except</em> обходится дешево и никак не отразится на
+работе сайта.</p>
+<p>Беда в другом -- ошибка неправильной конфигурации выявится не на этапе
+старта приложения а тогда, когда его выкатят в <em>production</em>.</p>
+<p>У тестов будет свой правильный <code>settings.py</code>, а на <em>production server</em>
+админ чуть-чуть ошибётся.</p>
+<p>И это тоже не слишком большая проблема -- при ручном тестировании
+команда QA, наверное, обнаружит ошибку очень быстро. Или на следующее
+утро -- тут уж зависит от того как техроцесс построен.</p>
+<p>А теперь представьте что вы ошиблись в другой настройке. Очень редко
+используемой, но при этом важной.</p>
+<h2 id="_3">Решение</h2>
+<p>Проблему вроде бы можно выявить рано, перестроив процесс запуска
+программы.</p>
+<p>Для начала нужно отказаться от использования общего конфига в API.</p>
+<p>Строить код библиотеки так, чтобы она никогда не лезла в <code>settings.py</code>
+(это и Flask касается если что).</p>
+<p>Пусть все нужные классы принимают конфигурационные параметры явно,
+прямо в конструкторах.</p>
+<p>Тогда можно быстро понять, что формат параметра не тот или <em>IP address</em> недоступен.</p>
+<p>Разделение на этапы:</p>
+<ul>
+<li>чтение конфига, анализ его и подготовка приложения к работе</li>
+<li>запуск и работа</li>
+</ul>
+<p>помогает избежать досадных недоразумений.</p>
+<p>Плюс, к тому же, на <em>явном</em> этапе подготовки к старту можно позволить
+себе довольно дорогостоящие проверки на корректное функционирование
+системы (послать <em>PING</em> чтобы убедится что Redis живой, например).</p>
+<p/>
+</div>
+</div></body></html>

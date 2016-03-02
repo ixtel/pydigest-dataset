@@ -1,0 +1,375 @@
+<html><body><div><div class="post">
+			<h2>Owing Graph Minimization</h2>
+			<p class="time">July 11, 2015</p>
+			<p>Do you have a whiteboard? Do you share it with a group of people? It probably has some variation of this:</p>
+
+<p><img src="img/whiteboard-list.png" alt="Owing list with 3 entries"/></p>
+
+<p>Each line of the form  represents a <strong>transaction</strong> - the fact that  owes  exactly  dollars, where  and  are people and  is a dollar amount.</p>
+
+<p>Every time a new transaction is created, we can just add a new entry to the list. However, this causes the list to slowly grow out of control:</p>
+
+<p><img src="img/whiteboard-long-list.png" alt="Owing list with 10 entries"/></p>
+
+<p>Our goal is to make this list smaller. Let’s kick this off by representing the above example in code. In this post I will be using Python 3:</p>
+
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><table><tbody><tr><td class="gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12</pre></td><td class="code"><pre><span class="n">owings</span> <span class="o">=</span> <span class="p">[</span>
+    <span class="p">(</span><span class="s">"Avi"</span><span class="p">,</span>      <span class="s">"Randall"</span><span class="p">,</span>   <span class="mi">25</span><span class="p">),</span> <span class="c"># Avi owes Randall 25 dollars</span>
+    <span class="p">(</span><span class="s">"Charlene"</span><span class="p">,</span> <span class="s">"Andrew"</span><span class="p">,</span>    <span class="mi">65</span><span class="p">),</span>
+    <span class="p">(</span><span class="s">"Avi"</span><span class="p">,</span>      <span class="s">"Andrew"</span><span class="p">,</span>    <span class="mi">73</span><span class="p">),</span>
+    <span class="p">(</span><span class="s">"Beryl"</span><span class="p">,</span>    <span class="s">"Randall"</span><span class="p">,</span>    <span class="mi">8</span><span class="p">),</span>
+    <span class="p">(</span><span class="s">"Beryl"</span><span class="p">,</span>    <span class="s">"Charlene"</span><span class="p">,</span>  <span class="mi">65</span><span class="p">),</span>
+    <span class="p">(</span><span class="s">"Hubert"</span><span class="p">,</span>   <span class="s">"Amy"</span><span class="p">,</span>       <span class="mi">12</span><span class="p">),</span>
+    <span class="p">(</span><span class="s">"Amy"</span><span class="p">,</span>      <span class="s">"Hubert"</span><span class="p">,</span>    <span class="mi">46</span><span class="p">),</span>
+    <span class="p">(</span><span class="s">"Avi"</span><span class="p">,</span>      <span class="s">"Andrew"</span><span class="p">,</span>    <span class="mi">17</span><span class="p">),</span>
+    <span class="p">(</span><span class="s">"Avi"</span><span class="p">,</span>      <span class="s">"Randall"</span><span class="p">,</span>    <span class="mi">4</span><span class="p">),</span>
+    <span class="p">(</span><span class="s">"Beryl"</span><span class="p">,</span>    <span class="s">"John"</span><span class="p">,</span>      <span class="mi">25</span><span class="p">),</span>
+<span class="p">]</span><span class="w">
+</span></pre></td></tr></tbody></table></code></pre></figure>
+
+<p>This list of transactions is a graph, where people are the vertices, transactions are edges, and dollar values are the edge labels. Edges in this graph are directed since  owing  is not the same as  owing . I’m going to call this structure an <strong>owing graph</strong>.</p>
+
+<p>The above, then, translates to the following:</p>
+
+<p><img src="img/whiteboard-graph.png" alt="Owing list drawn as a graph"/></p>
+
+<p>Two owing graphs are <strong>equivalent</strong> if when everyone in either graph pays the amounts they owe everyone else, they end up with the same amounts in the end. Our goal is to find the <strong>smallest possible graph (a graph with the fewest possible edges) that is equivalent to a given owing graph</strong>.</p>
+
+<h3 id="start-your-text-editors">Start your text editors</h3>
+
+<p>Solving this problem optimally is NP-complete, since it requires solving the subset-sum problem repeatedly. However, we don’t care and just want to generate some minimal transactions, even if it takes exponential time to run. Afterwards, we will look at an approximate, much more efficient solution that works just as well for most inputs.</p>
+
+<p>First, we will calculate the overall amount each person owes - the net balances:</p>
+
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><table><tbody><tr><td class="gutter gl"><pre class="lineno">1
+2
+3
+4
+5</pre></td><td class="code"><pre><span class="kn">from</span> <span class="nn">collections</span> <span class="kn">import</span> <span class="n">defaultdict</span>
+<span class="n">net_values</span> <span class="o">=</span> <span class="n">defaultdict</span><span class="p">(</span><span class="nb">int</span><span class="p">)</span> <span class="c"># net dollar amount each person owes</span>
+<span class="k">for</span> <span class="n">entry</span> <span class="ow">in</span> <span class="n">owings</span><span class="p">:</span>
+    <span class="n">net_values</span><span class="p">[</span><span class="n">entry</span><span class="p">[</span><span class="mi">0</span><span class="p">]]</span> <span class="o">+=</span> <span class="n">entry</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span>
+    <span class="n">net_values</span><span class="p">[</span><span class="n">entry</span><span class="p">[</span><span class="mi">1</span><span class="p">]]</span> <span class="o">-=</span> <span class="n">entry</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span><span class="w">
+</span></pre></td></tr></tbody></table></code></pre></figure>
+
+<p>This algorithm will create a graph using the star topology (all vertices have 1 transaction with a designated <strong>hub vertex</strong>), which, in a set of  people, results in exactly  transactions taking place - the hub has one transaction with each other person.</p>
+
+<p>Suppose we partition the set of people into  disjoint sets of people such that no set owes any other (there are no transactions between any two sets). Then, for each set, we construct a graph with a star topology. The graph for a set of size  has  transactions, and so  transactions take place in total (the sum of the sizes of all the subsets in the partition is always the size of the original set). If we maximize , then we minimize , the number of transactions.</p>
+
+<p>Clearly, no two sets will owe any other if and only if the sum of all the net balances in the set is 0. This is because if the sum of the net balances of a set was non-zero, money must be flowing into or out of that set of people.</p>
+
+<p>Therefore, <strong>we want to partition the set of people into the largest possible number of disjoint subsets, such that the sum of each subset is 0</strong>. Afterwards, we simply construct graphs out of each set in the resulting partition, and we will have the smallest possible owing graph.</p>
+
+<p>The partitioning part is actually what makes the problem NP-complete - if we can solve this problem in polynomial time, we can solve the subset-sum problem in polynomial time, and prove that . The number of partitions of a set of size  is the th <a href="https://en.wikipedia.org/wiki/Bell_number#Set_partitions">Bell numbers</a>, and according to that page, there are  (or more loosely, ) possible partitions. We will use a naive approach and simply check if all the subsets of a partition add up to 0.</p>
+
+<p>One way to enumerate all partitions of a set of size  is to, for each partition, allocate  subsets, go through each element, and assign them to one of those subsets (afterward, we filter out empty subsets from the partition) - there is one unique element assignment per unique partition:</p>
+
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><table><tbody><tr><td class="gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16</pre></td><td class="code"><pre><span class="k">def</span> <span class="nf">all_partitionings</span><span class="p">(</span><span class="n">elements</span><span class="p">):</span>
+    <span class="n">labels</span> <span class="o">=</span> <span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">*</span> <span class="nb">len</span><span class="p">(</span><span class="n">elements</span><span class="p">)</span>
+    <span class="k">while</span> <span class="bp">True</span><span class="p">:</span>
+        <span class="c"># generate the results</span>
+        <span class="n">partitions</span> <span class="o">=</span> <span class="p">[</span><span class="nb">set</span><span class="p">()</span> <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="n">elements</span><span class="p">]</span>
+        <span class="k">for</span> <span class="n">element</span><span class="p">,</span> <span class="n">label</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">elements</span><span class="p">,</span> <span class="n">labels</span><span class="p">):</span> <span class="n">partitions</span><span class="p">[</span><span class="n">label</span><span class="p">]</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">element</span><span class="p">)</span>
+        <span class="k">yield</span> <span class="p">[</span><span class="n">partition</span> <span class="k">for</span> <span class="n">partition</span> <span class="ow">in</span> <span class="n">partitions</span> <span class="k">if</span> <span class="n">partition</span><span class="p">]</span>
+
+        <span class="c"># increment the labels</span>
+        <span class="n">labels</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="n">i</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">labels</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span>
+        <span class="k">while</span> <span class="n">labels</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">==</span> <span class="nb">len</span><span class="p">(</span><span class="n">elements</span><span class="p">)</span> <span class="ow">and</span> <span class="n">i</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="n">labels</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="mi">0</span>
+            <span class="n">i</span> <span class="o">-=</span> <span class="mi">1</span>
+            <span class="n">labels</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="k">if</span> <span class="n">labels</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">==</span> <span class="nb">len</span><span class="p">(</span><span class="n">elements</span><span class="p">):</span> <span class="k">break</span><span class="w">
+</span></pre></td></tr></tbody></table></code></pre></figure>
+
+<p>This is very simple and works well, but we don’t get the partitions in a nice order - ideally, we want to get them in decreasing order by number of subsets, because then we can stop looking through partitions as soon as we find one where all subsets sum to 0.</p>
+
+<p>There is another way to do that, which is almost as simple. We first take one vertex  from the set of vertices , and compute all the partitions of . For each partition  of , we can compute one partition of  by adding  as a subset, and more partitions by adding  to each subset of the partition in turn:</p>
+
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><table><tbody><tr><td class="gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9</pre></td><td class="code"><pre><span class="k">def</span> <span class="nf">all_partitions</span><span class="p">(</span><span class="n">elements</span><span class="p">,</span> <span class="n">max_index</span> <span class="o">=</span> <span class="bp">None</span><span class="p">):</span> <span class="c"># return partitions from most subsets to least subsets</span>
+    <span class="k">if</span> <span class="n">max_index</span> <span class="o">==</span> <span class="bp">None</span><span class="p">:</span> <span class="n">max_index</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">elements</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span>
+    <span class="k">if</span> <span class="n">max_index</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">:</span> <span class="k">yield</span> <span class="p">()</span> <span class="c"># zero elements has no partitions in its one partitioning</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">current_subset</span> <span class="o">=</span> <span class="p">(</span><span class="n">elements</span><span class="p">[</span><span class="n">max_index</span><span class="p">],)</span> <span class="c"># obtain a single element subset of the available elements</span>
+        <span class="k">for</span> <span class="n">partition</span> <span class="ow">in</span> <span class="n">all_partitions</span><span class="p">(</span><span class="n">elements</span><span class="p">,</span> <span class="n">max_index</span> <span class="o">-</span> <span class="mi">1</span><span class="p">):</span> <span class="c"># compute the partitions of the set without the current subset</span>
+            <span class="k">yield</span> <span class="n">partition</span> <span class="o">+</span> <span class="p">(</span><span class="n">current_subset</span><span class="p">,)</span> <span class="c"># insert the current subset as its own subset in the partition</span>
+            <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">subset</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">partition</span><span class="p">):</span> <span class="c"># insert the current subset into each subset in the partition in turn</span>
+                <span class="k">yield</span> <span class="n">partition</span><span class="p">[:</span><span class="n">i</span><span class="p">]</span> <span class="o">+</span> <span class="p">(</span><span class="n">subset</span> <span class="o">+</span> <span class="n">current_subset</span><span class="p">,)</span> <span class="o">+</span> <span class="n">partition</span><span class="p">[</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">:]</span><span class="w">
+</span></pre></td></tr></tbody></table></code></pre></figure>
+
+<p>Here, we store the set of vertices as a list in order to use indexing. The only unusual thing to note is that we use <code class="highlighter-rouge">max_index</code> to mark the end of <code class="highlighter-rouge">elements</code> rather than making copies of <code class="highlighter-rouge">elements</code>, for efficiency reasons. This generator function yields partitions in order from most subsets to least subsets.</p>
+
+<p>We can now calculate the partition with the most subsets that sums to 0 pretty easily:</p>
+
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><table><tbody><tr><td class="gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8</pre></td><td class="code"><pre><span class="k">def</span> <span class="nf">largest_partition</span><span class="p">(</span><span class="n">net_balances</span><span class="p">):</span>
+    <span class="n">vertices</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">net_balances</span><span class="o">.</span><span class="n">keys</span><span class="p">())</span>
+    <span class="k">for</span> <span class="n">partition</span> <span class="ow">in</span> <span class="n">all_partitions</span><span class="p">(</span><span class="n">vertices</span><span class="p">):</span>
+        <span class="k">for</span> <span class="n">subset</span> <span class="ow">in</span> <span class="n">partition</span><span class="p">:</span>
+            <span class="k">if</span> <span class="nb">sum</span><span class="p">(</span><span class="n">net_balances</span><span class="p">[</span><span class="n">vertex</span><span class="p">]</span> <span class="k">for</span> <span class="n">vertex</span> <span class="ow">in</span> <span class="n">subset</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">:</span> <span class="k">break</span>
+        <span class="k">else</span><span class="p">:</span> <span class="c"># all subsets sum to 0</span>
+            <span class="k">return</span> <span class="nb">tuple</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">subset</span><span class="p">)</span> <span class="k">for</span> <span class="n">subset</span> <span class="ow">in</span> <span class="n">partition</span><span class="p">)</span>
+    <span class="k">return</span> <span class="bp">None</span><span class="w">
+</span></pre></td></tr></tbody></table></code></pre></figure>
+
+<p>This is pretty self-explanatory - we go through each partition, from most subsets to least subsets, and if any partition contains only subsets where the elements sum up to 0, we’ve found the result.</p>
+
+<p>To generate the minimal graphs now, we go through the subsets in our partition - the sets of vertices whose net balances add up to 0. For each set of vertices, we output edges to make a graph with a star topology:</p>
+
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><table><tbody><tr><td class="gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11</pre></td><td class="code"><pre><span class="n">new_owings</span> <span class="o">=</span> <span class="p">[]</span> <span class="c"># list of transactions</span>
+<span class="k">for</span> <span class="n">subset</span> <span class="ow">in</span> <span class="n">largest_partition</span><span class="p">(</span><span class="n">net_balances</span><span class="p">):</span>
+    <span class="n">vertex_hub</span> <span class="o">=</span> <span class="n">subset</span><span class="o">.</span><span class="n">pop</span><span class="p">()</span> <span class="c"># pick arbitrary hub, and remove it from the set of vertices</span>
+    <span class="n">new_owings</span> <span class="o">+=</span> <span class="p">[</span>
+        <span class="p">(</span>
+            <span class="p">(</span><span class="n">vertex_hub</span><span class="p">,</span> <span class="n">vertex</span><span class="p">,</span> <span class="n">net_balances</span><span class="p">[</span><span class="n">vertex</span><span class="p">])</span> <span class="c"># hub owes the person</span>
+            <span class="k">if</span> <span class="n">net_balances</span><span class="p">[</span><span class="n">vertex</span><span class="p">]</span> <span class="o">&gt;</span> <span class="mi">0</span> <span class="k">else</span>
+            <span class="p">(</span><span class="n">vertex</span><span class="p">,</span> <span class="n">vertex_hub</span><span class="p">,</span> <span class="o">-</span><span class="n">net_balances</span><span class="p">[</span><span class="n">vertex</span><span class="p">])</span> <span class="c"># person owes the hub</span>
+        <span class="p">)</span>
+        <span class="k">for</span> <span class="n">vertex</span> <span class="ow">in</span> <span class="n">subset</span> <span class="k">if</span> <span class="n">net_balances</span><span class="p">[</span><span class="n">vertex</span><span class="p">]</span> <span class="o">!=</span> <span class="mi">0</span>
+    <span class="p">]</span><span class="w">
+</span></pre></td></tr></tbody></table></code></pre></figure>
+
+<p>Here, we pick a hub vertex, and for each of the remaining vertices in the subset, we create a transaction between the hub and that vertex. The resulting edge list represents a minimal owing graph!</p>
+
+<p>Let’s test it out with our first example:</p>
+
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><table><tbody><tr><td class="gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13</pre></td><td class="code"><pre><span class="kn">from</span> <span class="nn">pprint</span> <span class="kn">import</span> <span class="n">pprint</span>
+<span class="n">pprint</span><span class="p">(</span><span class="n">minimize_owings</span><span class="p">([</span>
+    <span class="p">(</span><span class="s">"Avi"</span><span class="p">,</span>      <span class="s">"Randall"</span><span class="p">,</span>   <span class="mi">25</span><span class="p">),</span> <span class="c"># Avi owes Randall 25 dollars</span>
+    <span class="p">(</span><span class="s">"Charlene"</span><span class="p">,</span> <span class="s">"Andrew"</span><span class="p">,</span>    <span class="mi">65</span><span class="p">),</span>
+    <span class="p">(</span><span class="s">"Avi"</span><span class="p">,</span>      <span class="s">"Andrew"</span><span class="p">,</span>    <span class="mi">73</span><span class="p">),</span>
+    <span class="p">(</span><span class="s">"Beryl"</span><span class="p">,</span>    <span class="s">"Randall"</span><span class="p">,</span>    <span class="mi">8</span><span class="p">),</span>
+    <span class="p">(</span><span class="s">"Beryl"</span><span class="p">,</span>    <span class="s">"Charlene"</span><span class="p">,</span>  <span class="mi">65</span><span class="p">),</span>
+    <span class="p">(</span><span class="s">"Hubert"</span><span class="p">,</span>   <span class="s">"Amy"</span><span class="p">,</span>       <span class="mi">12</span><span class="p">),</span>
+    <span class="p">(</span><span class="s">"Amy"</span><span class="p">,</span>      <span class="s">"Hubert"</span><span class="p">,</span>    <span class="mi">46</span><span class="p">),</span>
+    <span class="p">(</span><span class="s">"Avi"</span><span class="p">,</span>      <span class="s">"Andrew"</span><span class="p">,</span>    <span class="mi">17</span><span class="p">),</span>
+    <span class="p">(</span><span class="s">"Avi"</span><span class="p">,</span>      <span class="s">"Randall"</span><span class="p">,</span>    <span class="mi">4</span><span class="p">),</span>
+    <span class="p">(</span><span class="s">"Beryl"</span><span class="p">,</span>    <span class="s">"John"</span><span class="p">,</span>      <span class="mi">25</span><span class="p">),</span>
+<span class="p">]))</span><span class="w">
+</span></pre></td></tr></tbody></table></code></pre></figure>
+
+<p>The above outputs:</p>
+
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><table><tbody><tr><td class="gutter gl"><pre class="lineno">1
+2
+3
+4
+5</pre></td><td class="code"><pre><span class="p">[(</span><span class="s">'Hubert'</span><span class="p">,</span> <span class="s">'Amy'</span><span class="p">,</span> <span class="mi">34</span><span class="p">),</span>
+ <span class="p">(</span><span class="s">'John'</span><span class="p">,</span> <span class="s">'Beryl'</span><span class="p">,</span> <span class="mi">25</span><span class="p">),</span>
+ <span class="p">(</span><span class="s">'Beryl'</span><span class="p">,</span> <span class="s">'Avi'</span><span class="p">,</span> <span class="mi">119</span><span class="p">),</span>
+ <span class="p">(</span><span class="s">'Andrew'</span><span class="p">,</span> <span class="s">'Beryl'</span><span class="p">,</span> <span class="mi">155</span><span class="p">),</span>
+ <span class="p">(</span><span class="s">'Randall'</span><span class="p">,</span> <span class="s">'Beryl'</span><span class="p">,</span> <span class="mi">37</span><span class="p">)]</span><span class="w">
+</span></pre></td></tr></tbody></table></code></pre></figure>
+
+<p>Clearly, this is optimal - it is impossible to resolve these debts using 4 or fewer transactions.</p>
+
+<h3 id="some-say-its-still-running-to-this-day">Some say it’s still running to this day</h3>
+
+<p>What if we have a larger network, say, 100 people all having various transactions with each other? Aside from needing to buy a bigger whiteboard, an  algorithm isn’t really practical when we have more than a dozen or so people - each additional person massively increases the time needed to run the algorithm.</p>
+
+<p>Here, we need to use approximations. Our goal is now to create an owing graph that is equivalent to the original owing graph, with a preference for smaller graphs - we no longer require that the results be optimal, only reasonably close to optimal. In the real world, reasonable people don’t borrow tiny amounts of money from every single person they know for every purchase, or specifically try to borrow from people who indirectly owe them.</p>
+
+<p>Here’s an approximation that works pretty well on that sort of owing graph: instead of finding the partition with the largest number of subsets, we simply remove vertices that have a 0 net balance, and use the components of the resulting graph as the partition.</p>
+
+<p>First, we compute the net balances for each person, and remove any people who have a net balance of 0 (as well as transactions that involve these people). People with a net balance of 0 neither owe or are owed any money, in the end:</p>
+
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><table><tbody><tr><td class="gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6</pre></td><td class="code"><pre><span class="n">net_balances</span> <span class="o">=</span> <span class="n">defaultdict</span><span class="p">(</span><span class="nb">int</span><span class="p">)</span> <span class="c"># net dollar amount each person is owed</span>
+<span class="k">for</span> <span class="n">entry</span> <span class="ow">in</span> <span class="n">owings</span><span class="p">:</span>
+    <span class="n">net_balances</span><span class="p">[</span><span class="n">entry</span><span class="p">[</span><span class="mi">0</span><span class="p">]]</span> <span class="o">+=</span> <span class="n">entry</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span>
+    <span class="n">net_balances</span><span class="p">[</span><span class="n">entry</span><span class="p">[</span><span class="mi">1</span><span class="p">]]</span> <span class="o">-=</span> <span class="n">entry</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span>
+<span class="n">nonzero_owings</span> <span class="o">=</span> <span class="p">[</span><span class="n">entry</span> <span class="k">for</span> <span class="n">entry</span> <span class="ow">in</span> <span class="n">owings</span> <span class="k">if</span> <span class="n">net_balances</span><span class="p">[</span><span class="n">entry</span><span class="p">[</span><span class="mi">0</span><span class="p">]]</span> <span class="o">!=</span> <span class="mi">0</span> <span class="ow">and</span> <span class="n">net_balances</span><span class="p">[</span><span class="n">entry</span><span class="p">[</span><span class="mi">1</span><span class="p">]]</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">]</span>
+<span class="n">vertices</span> <span class="o">=</span> <span class="p">{</span><span class="n">vertex</span> <span class="k">for</span> <span class="n">vertex</span><span class="p">,</span> <span class="n">net_value</span> <span class="ow">in</span> <span class="n">net_balances</span><span class="o">.</span><span class="n">items</span><span class="p">()</span> <span class="k">if</span> <span class="n">net_value</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">}</span><span class="w">
+</span></pre></td></tr></tbody></table></code></pre></figure>
+
+<p>We then identify the components of the graph, using repeated breadth-first traversal:</p>
+
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><table><tbody><tr><td class="gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18</pre></td><td class="code"><pre><span class="k">def</span> <span class="nf">largest_partition_most_of_the_time</span><span class="p">(</span><span class="n">vertices</span><span class="p">,</span> <span class="n">nonzero_owings</span><span class="p">):</span>
+    <span class="n">connections</span> <span class="o">=</span> <span class="n">defaultdict</span><span class="p">(</span><span class="nb">set</span><span class="p">)</span> <span class="c"># mapping from each person to the set of people that owe or are owed by this person</span>
+    <span class="k">for</span> <span class="n">entry</span> <span class="ow">in</span> <span class="n">nonzero_owings</span><span class="p">:</span>
+        <span class="n">connections</span><span class="p">[</span><span class="n">entry</span><span class="p">[</span><span class="mi">0</span><span class="p">]]</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">entry</span><span class="p">[</span><span class="mi">1</span><span class="p">])</span>
+        <span class="n">connections</span><span class="p">[</span><span class="n">entry</span><span class="p">[</span><span class="mi">1</span><span class="p">]]</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">entry</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
+
+    <span class="n">components</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="n">unvisited_vertices</span> <span class="o">=</span> <span class="nb">set</span><span class="p">(</span><span class="n">vertices</span><span class="p">)</span> <span class="c"># duplicate the set of vertices, since we will be mutating both separately later</span>
+    <span class="k">while</span> <span class="n">unvisited_vertices</span><span class="p">:</span> <span class="c"># there are still vertices to visit</span>
+        <span class="c"># find all connected vertices and group them together into a component</span>
+        <span class="n">component</span><span class="p">,</span> <span class="n">vertices_to_visit</span> <span class="o">=</span> <span class="nb">set</span><span class="p">(),</span> <span class="p">{</span><span class="n">unvisited_vertices</span><span class="o">.</span><span class="n">pop</span><span class="p">()}</span>
+        <span class="k">while</span> <span class="n">vertices_to_visit</span><span class="p">:</span>
+            <span class="n">vertex</span> <span class="o">=</span> <span class="n">vertices_to_visit</span><span class="o">.</span><span class="n">pop</span><span class="p">()</span> <span class="c"># visit the next vertex</span>
+            <span class="n">component</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">vertex</span><span class="p">)</span>
+            <span class="n">vertices_to_visit</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">v</span> <span class="k">for</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">connections</span><span class="p">[</span><span class="n">vertex</span><span class="p">]</span> <span class="k">if</span> <span class="n">v</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">component</span><span class="p">)</span> <span class="c"># add all the vertices that are connected that we haven't visited yet</span>
+        <span class="n">unvisited_vertices</span> <span class="o">-=</span> <span class="n">component</span>
+        <span class="n">components</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">component</span><span class="p">)</span>
+    <span class="k">return</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">components</span><span class="p">)</span><span class="w">
+</span></pre></td></tr></tbody></table></code></pre></figure>
+
+<p>Now we treat our components list as a partition, and generate the star-topology graphs like we did earlier:</p>
+
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><table><tbody><tr><td class="gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11</pre></td><td class="code"><pre><span class="n">new_owings</span> <span class="o">=</span> <span class="p">[]</span> <span class="c"># list of transactions</span>
+<span class="k">for</span> <span class="n">subset</span> <span class="ow">in</span> <span class="n">largest_partition_most_of_the_time</span><span class="p">(</span><span class="n">vertices</span><span class="p">,</span> <span class="n">nonzero_owings</span><span class="p">):</span>
+    <span class="n">vertex_hub</span> <span class="o">=</span> <span class="n">subset</span><span class="o">.</span><span class="n">pop</span><span class="p">()</span> <span class="c"># pick arbitrary hub, and remove it from the set of vertices</span>
+    <span class="n">new_owings</span> <span class="o">+=</span> <span class="p">[</span>
+        <span class="p">(</span>
+            <span class="p">(</span><span class="n">vertex_hub</span><span class="p">,</span> <span class="n">vertex</span><span class="p">,</span> <span class="n">net_balances</span><span class="p">[</span><span class="n">vertex</span><span class="p">])</span> <span class="c"># hub owes the person</span>
+            <span class="k">if</span> <span class="n">net_balances</span><span class="p">[</span><span class="n">vertex</span><span class="p">]</span> <span class="o">&gt;</span> <span class="mi">0</span> <span class="k">else</span>
+            <span class="p">(</span><span class="n">vertex</span><span class="p">,</span> <span class="n">vertex_hub</span><span class="p">,</span> <span class="o">-</span><span class="n">net_balances</span><span class="p">[</span><span class="n">vertex</span><span class="p">])</span> <span class="c"># person owes the hub</span>
+        <span class="p">)</span>
+        <span class="k">for</span> <span class="n">vertex</span> <span class="ow">in</span> <span class="n">subset</span> <span class="k">if</span> <span class="n">net_balances</span><span class="p">[</span><span class="n">vertex</span><span class="p">]</span> <span class="o">!=</span> <span class="mi">0</span>
+    <span class="p">]</span><span class="w">
+</span></pre></td></tr></tbody></table></code></pre></figure>
+
+<p>Let’s try all this out with the same example as before:</p>
+
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><table><tbody><tr><td class="gutter gl"><pre class="lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13</pre></td><td class="code"><pre><span class="kn">from</span> <span class="nn">pprint</span> <span class="kn">import</span> <span class="n">pprint</span>
+<span class="n">pprint</span><span class="p">(</span><span class="n">minimize_owings_approximate</span><span class="p">([</span>
+    <span class="p">(</span><span class="s">"Avi"</span><span class="p">,</span>      <span class="s">"Randall"</span><span class="p">,</span>   <span class="mi">25</span><span class="p">),</span> <span class="c"># Avi owes Randall 25 dollars</span>
+    <span class="p">(</span><span class="s">"Charlene"</span><span class="p">,</span> <span class="s">"Andrew"</span><span class="p">,</span>    <span class="mi">65</span><span class="p">),</span>
+    <span class="p">(</span><span class="s">"Avi"</span><span class="p">,</span>      <span class="s">"Andrew"</span><span class="p">,</span>    <span class="mi">73</span><span class="p">),</span>
+    <span class="p">(</span><span class="s">"Beryl"</span><span class="p">,</span>    <span class="s">"Randall"</span><span class="p">,</span>    <span class="mi">8</span><span class="p">),</span>
+    <span class="p">(</span><span class="s">"Beryl"</span><span class="p">,</span>    <span class="s">"Charlene"</span><span class="p">,</span>  <span class="mi">65</span><span class="p">),</span>
+    <span class="p">(</span><span class="s">"Hubert"</span><span class="p">,</span>   <span class="s">"Amy"</span><span class="p">,</span>       <span class="mi">12</span><span class="p">),</span>
+    <span class="p">(</span><span class="s">"Amy"</span><span class="p">,</span>      <span class="s">"Hubert"</span><span class="p">,</span>    <span class="mi">46</span><span class="p">),</span>
+    <span class="p">(</span><span class="s">"Avi"</span><span class="p">,</span>      <span class="s">"Andrew"</span><span class="p">,</span>    <span class="mi">17</span><span class="p">),</span>
+    <span class="p">(</span><span class="s">"Avi"</span><span class="p">,</span>      <span class="s">"Randall"</span><span class="p">,</span>    <span class="mi">4</span><span class="p">),</span>
+    <span class="p">(</span><span class="s">"Beryl"</span><span class="p">,</span>    <span class="s">"John"</span><span class="p">,</span>      <span class="mi">25</span><span class="p">),</span>
+<span class="p">]))</span><span class="w">
+</span></pre></td></tr></tbody></table></code></pre></figure>
+
+<p>The above outputs:</p>
+
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><table><tbody><tr><td class="gutter gl"><pre class="lineno">1
+2
+3
+4
+5</pre></td><td class="code"><pre><span class="p">[(</span><span class="s">'Hubert'</span><span class="p">,</span> <span class="s">'Amy'</span><span class="p">,</span> <span class="mi">34</span><span class="p">),</span>
+ <span class="p">(</span><span class="s">'John'</span><span class="p">,</span> <span class="s">'Beryl'</span><span class="p">,</span> <span class="mi">25</span><span class="p">),</span>
+ <span class="p">(</span><span class="s">'Beryl'</span><span class="p">,</span> <span class="s">'Avi'</span><span class="p">,</span> <span class="mi">119</span><span class="p">),</span>
+ <span class="p">(</span><span class="s">'Andrew'</span><span class="p">,</span> <span class="s">'Beryl'</span><span class="p">,</span> <span class="mi">155</span><span class="p">),</span>
+ <span class="p">(</span><span class="s">'Randall'</span><span class="p">,</span> <span class="s">'Beryl'</span><span class="p">,</span> <span class="mi">37</span><span class="p">)]</span><span class="w">
+</span></pre></td></tr></tbody></table></code></pre></figure>
+
+<p>In this case, the result also happens to be optimal. This is also the case for most real-world inputs!</p>
+
+<p>However, the result will not be optimal whenever the largest partition with subsets that all sum to 0 is larger than the number of components in the graph where all vertices with a 0 net balance are removed. Let’s try to construct one of these graphs:</p>
+
+<p><img src="img/whiteboard-contrived-example.png" alt="Contrived example of graph where approximation isn't optimal"/></p>
+
+<p>On the top left, we have a graph with a single component, where none of the vertices have a net balance of 0 (each vertex is labelled with the amount they are owed). Running the approximation on this graph results in 3 transactions, when the optimal result, shown on the bottom right, has 2.</p>
+
+<p>There are many ways to improve our approximation: for example, we could detect and break cycles in the graph. However, since the problem is NP-complete, our approximations will never be perfect in all cases without also taking just as much time.</p>
+
+<h3 id="the-leftovers">The leftovers</h3>
+
+<p>The code in this post can be downloaded directly:</p>
+
+
+
+			
+		</div>
+		</div></body></html>

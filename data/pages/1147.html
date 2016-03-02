@@ -1,0 +1,95 @@
+<html><body><div><div class="entry-content">
+                
+                <p>A while ago I decided to try and build a little app that makes use of Spotify's <a href="https://developer.spotify.com/technologies/metadata-api/">Metadata API</a>. At the time, I also started experimenting with Python, so I chose that as the language to build this experiment in.</p>
+<p>The result is a this little (web)app automatically generates <a href="https://www.spotify.com">Spotify</a> playlists based on a search query entered by the user. <em>Auto Playlist Poetry</em> is a proof-of-concept that's inspired by <a href="http://playlistpoetry.com/"><strong>Playlist Poetry</strong></a>, which in turn was based on <a href="http://spotifypoetry.tumblr.com/">this Tumbler blog</a>. The idea is that the user can provide a message and the application will use the Spotify Metadata API to find songs whose titles together make up the provided message. </p>
+<p>I started out by building a simple command line app that served the aforementioned purpose. But as I progressed, I wanted to experiment with different technologies in different settings and eventually ended up with more than one application - a command line app and a web app - which I will detail below. Both are written in Python.</p>
+<p>This blog post will detail what I built, what choices I made, what algorithm underlies the results, what technologies were used, etc.</p>
+<h3 id="the-goods-and-the-code">The goods and the code</h3>
+<p>If you don't care about the rest of this article (and I don't blame you), but just want try the app and/or get the code, look no further.</p>
+<p><a href="http://autoplaylistpoetry.com/"><strong>CLICK HERE FOR AUTOPLAYLISTPOETRY</strong></a></p>
+<p><a href="https://github.com/DandyDev/autoplaylistpoetry"><strong>CLICK HERE FOR THE CODE</strong></a></p>
+<h3 id="disclaimer">Disclaimer</h3>
+<p>A few caveats (ok, excuses really :) ) before reading the rest of this blog post, looking at my code and testing out the applications:</p>
+<ul>
+<li>The time I was able to put into this project - and thus the scope - were limited. That means that, while I tried my best to squash any bugs I encountered, the applications may (probably will) still contain bugs. I am of course sorry for that!</li>
+<li>The way playlists get generated is somewhat involved I haven't smoothed out the algorithm completely yet. This means that it will sometimes get caught in some kind of loop, making the web app hang. Shouldn't occur too often though. Solutions and better ideas are welcome!</li>
+<li>The largest problem currently, is that it can handle single sentences, and maybe a couple of small sentences together, but nothing more than that. I will hang. This is probably due to the algorithm and the way I use threading (see below), but I've not found out yet how to fix it.</li>
+<li>No Test-coverage whatsoever. You read that right. I know, it's a shame. I would have loved to provide tests for everything, but so far the time spent on this project was limited, and I consider this a proof-of-concept. Do know, that I am well aware of best practices in Software Engineering and that I normally go out of my way to provide decent test-coverage for the code I write. Tests are at the top of my TODO list for this project.</li>
+<li>External dependencies may make these applications fail sometimes. <a href="https://developer.spotify.com/technologies/metadata-api/">The Spotify Metadata API</a> was somewhat fickle, and would sometimes return either a undocumented HTTP 502 or 504 error. I haven't seen any odd behaviour since moving to the new <a href="https://developer.spotify.com/web-api/">Web API</a> though.</li>
+<li>Python is relatively new to me: In my current job I mainly develop in Scala &amp; Java. I've done some Python programming as a hobby for some time now, and I really love the language! But I'm sure many of my solutions are "un-pythonic". I especially was unsure about how to organize my code, coming from an environment where everything is a class, and almost every class has it's own file. So I don't really know which code to put in what module/package/class/etc. Any ideas, contributions, PRs are welcome!</li>
+</ul>
+<h3 id="the-applications-and-installationusage-instructions">The applications and installation/usage instructions</h3>
+<p>I ended up building two implementations of the idea: a command line app and a web app. Both (can) use Redis for caching the API results for later reuse. In the command line app, using Redis is optional, the web app requires it. Aside from <code>redis</code>, two other external Python libraries are used: <code>requests</code> is used by both implementations for querying the Spotify Metadata API and <code>Flask</code> is used as a web framework in the web app.</p>
+<p>To install the requirements, you can (assuming you have <code>pip</code> installed) do the following in your terminal: </p>
+<div class="highlight"><pre>pip install -r requirements.txt
+</pre></div>
+
+
+<p>If you only want to try out the command line app locally (which is easier), you could choose to only install <code>requests</code> and optionally <code>redis</code>.</p>
+<h4 id="the-command-line-app">The command line app</h4>
+<p>The command line app has two different modes of operation: one-off or interactive. The latter can be invoked by passing <code>-i</code> or <code>--interactive</code> as an argument on the command line. Review the help by running:</p>
+
+
+
+<p>To run it for one message:</p>
+<div class="highlight"><pre>./cli.py -m "if i can't let it go out of my mind"
+</pre></div>
+
+
+<p>The app tries to be a good unix-citizen and as such only gives back the endresult, without outputting any other messages during it's runtime. It also gives back 0 on success and non-0 on failure. Should you need more verbosity, you can pass <code>-v</code>. Without it, you only get the URIs for the playlist entries (or optionally the URLs)</p>
+<p>The interactive mode let's you type in messages on a prompt, and returns the result. It's straigtforward enough. In iteractive mode, the app, by default, uses an in-memory caching mechanism for storing API results for later reuse. Both interactive and one-off mode can also use Redis by providing the <code>-r</code> switch, with optionally a hostname, port and password. It requires Redis to be running of course.</p>
+<h4 id="the-web-app">The web app</h4>
+<p>To run the web app:</p>
+
+
+
+<p>The web application has a very simple interface which needs no further explanation. The application was built using <a href="http://flask.pocoo.org/">Flask</a> and for the interface I used <a href="http://twitter.github.io/bootstrap/">Twitter Bootstrap</a> (I know! just don't tell any designersâŚ) The app uses Redis for caching API results for later reuse.</p>
+<p>The web app also provides a very simple REST API. The endpoint resides at <code>/api/playlist</code> and requires a <code>message</code> to be passed in the query string. It gives back the result in JSON or returns an error in case something went wrong. It also tells you if the result is a complete playlist covering all the words, or if it's a partial result.</p>
+<h3 id="the-algorithm">The algorithm</h3>
+<p>When I started out, my first idea was to generate all possible ways the input message could be divided in different groups of words. I would then sort those combinations, favoring the groupings that were larger so the resulting playlist would be shorter. The next step would be to find the first combination that yielded results from the API for each group. After giving it some more thought however, I realized that with a growing message-size, the amount of combinations/groupings would grow exponentially. It has a space-complexity of O(c^n)</p>
+<p>I stuck to the idea of starting out with word-groupings as large as possible, so the resulting playlist would be as short as possible (optimal solution). The resulting approach is basically as follows:</p>
+<ol>
+<li>Filter any non-alphanumeric/non-space/non-apostrophe characters from the message</li>
+<li>Break down the message into words</li>
+<li>Break the resulting list into two halves, with the first half being max size minus one</li>
+<li>Start searching for a song with a title equal to the words in the first half, <em>ignoring case</em></li>
+<li>If it isn't found, make the first half of the list one word smaller and look again</li>
+<li>Repeat 5 until a match is found</li>
+<li>Start at 3 again with the remainder of the list (so it kind of uses recursion)</li>
+</ol>
+<p>If at some point a sublist is encountered for which none of the "slices" yield a result, the algorithm backtracks:</p>
+<ol>
+<li>Take the previous successful match</li>
+<li>subtract one word</li>
+<li>continue processing as above</li>
+</ol>
+<p>So if have the sentence "This is a painfully boring example message", which is currently divided as follows, where &lt;&gt; means they have already matched and [] is currently being processed: </p>
+<div class="highlight"><pre><span class="p">[</span><span class="o">&lt;</span><span class="n">this</span> <span class="n">is</span><span class="o">&gt;</span><span class="p">,</span> <span class="o">&lt;</span><span class="n">a</span> <span class="n">painfully</span> <span class="n">boring</span><span class="o">&gt;</span><span class="p">,</span> <span class="p">[</span><span class="n">example</span> <span class="n">message</span><span class="p">]]</span>
+</pre></div>
+
+
+<p>The backtracking algorithm will go back to the last match, "unmatch" it, subtract a word from it and continue processing:</p>
+<div class="highlight"><pre><span class="p">[</span><span class="o">&lt;</span><span class="n">this</span> <span class="n">is</span><span class="o">&gt;</span><span class="p">,</span> <span class="p">[</span><span class="n">a</span> <span class="n">painfully</span><span class="p">],</span> <span class="p">[</span><span class="n">boring</span> <span class="n">example</span> <span class="n">message</span><span class="p">]]</span>
+</pre></div>
+
+
+<p>The middle group is now the group that is currently processed, the last group is the remainder of the message.</p>
+<p>This algorithm is implemented as an iterator, through the <code>MessageChunker</code> class. It returns a smaller chunk at each call of <code>next()</code>. A chunk can be "accepted" through calling <code>progress()</code>. The <code>MessageChunker</code> class is used by the <code>PlaylistGenerator</code> class, which takes care of querying the API, optionally caching results. The main method of this class is <code>generate_playlist()</code> which takes a message and tries to generate a playlist. The method can also give back a partial result, if it can't wholly match the message, and it will tell the calling code as much.</p>
+<h4 id="caching">Caching</h4>
+<p>Because calling the Spotify API is "expensive", and because the assignment mentioned reusing results, I implemented a caching mechanism. <code>PlaylistCache</code> is the Abstract Base Class that defines the contract. Tracks should be stored as key/value pairs where the <em>key</em> is the title (in lowercase) and the <em>value</em> is a PlaylistItem object. </p>
+<p>Currently two implementations are provided: a naive in-memory cache based on a simple dictionary holding the keys and values (<code>MemPlaylistCache</code>) and a cache using the Redis key-value store (<code>RedisPlaylistCache</code>). The command line app will use the former by default and can optionally use the latter. The web app only uses the latter.</p>
+<p>As an extra caching step, the cachelayer stores the expiration time of the HTTP request, as returned by the Spotify API. If a PlaylistItem is retrieved from the cache, that has expired, the PlaylistGenerator will ask the API if it has been updated yet. If not, the API returns a 304 and the cached result is used. If it <em>is</em> updated, the cache will be invalidated.</p>
+<h4 id="parallelization">Parallelization</h4>
+<p>As said, calling the Spotify API is expensive. One solution is to divide the work to be handles by multiple threads. The algorithm I used, doesn't lend itself very well for this approach, because the remaining wordgroups to be queried, depend on the results of the current query. In my opinion, it would be a waste to start querying without knowing if we'd need the results. Besides, we'd probably hit the rate limit pretty quickly.</p>
+<p>There is however a scenario where using multiple threads becomes benificial: When a message consists of multiple sentences, determined by the occurence of .!?/ When either application encounters a message made up of multiple sentences, it will offload the work to multiple threads. Those threads - implemented in <code>PLGeneratorThread</code> - take a message from the queue and process it. Order is preserved through passing consecutive numbers to the queue and sorting them back at the end.
+The running time of the playlist generation, all but guarantees that no race conditions occur. Should one thread fail however, only a partial result is available.</p>
+<h3 id="future-improvements">Future improvements</h3>
+<p>Some future improvements could include:</p>
+<ul>
+<li>(unit)tests</li>
+<li>Dealing with skipping words to improve results</li>
+<li>Guarantee a maximum running time by setting time-outs for example. Strive for best-effort. Running time should improve however, when caching is used and the app is used many time, filling said cache.</li>
+</ul>
+            </div>
+            
+    </div></body></html>

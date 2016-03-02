@@ -1,0 +1,240 @@
+<html><body><div><div class="post">
+  <h1 class="post-title">Getting Amazon Reviews for Library Books with Python</h1>
+  <span class="post-date">26 Feb 2015</span>
+  <p>Often when I want to read about a new technical subject, I'll see what's available for free at the 
+local library before buying a new book. To decide which book to check out, I browse through the library's
+catalogue and look up the reviews for each book on Amazon to see which book is the best rated. 
+Of course, doing this manually is tedious and repetitive which is usually a sign that it should be 
+automated. </p>
+
+<p>In this post I'll go over a script I developed that queries a library catalogue for books on a particular 
+subject and then returns the books sorted according to their Amazon rating.</p>
+
+<h2>Overview</h2>
+
+<p>My local library uses <a href="http://www.sirsidynix.com/">SirsiDynix</a> for its catalogue software. Here's a 
+screenshot of their advanced search page:</p>
+
+<p><img src="/assets/sirsi/advanced_search.png" alt="Search Image"/></p>
+
+<p>As you can see, searches can be filtered by format type (Electronic Resources, Sound Recording, Books, etc.) 
+and language. For our purposes we only want English language books. Once you submit the search, you get a 
+results page like the following:</p>
+
+<p><img src="/assets/sirsi/search_results.png" alt="Results Image"/></p>
+
+<p>What part of the results do we need to scrape? Well, we'd like the title obviously, and also the book's 
+ISBN number so we can look it up on Amazon to get its rating. Since results are sorted by relevance we'll 
+limit our scrape to the first page of results. </p>
+
+<p>Here's a summary of everything we'll need the script to do:</p>
+
+<ul>
+<li>Query the Sirsi catalogue for books on a particular subject</li>
+<li>Scrape the book title and ISBN number for the first page of results</li>
+<li>Use the ISBN number to get the Amazon page for each book</li>
+<li>Scrape the rating for each book from its Amazon page</li>
+<li>Sort the books in reverse order by their Amazon rating</li>
+</ul>
+
+<h2>Implementation</h2>
+
+<p>We'll use <a href="http://wwwsearch.sourceforge.net/mechanize/">Mechanize</a> to send our requests and 
+<a href="http://www.crummy.com/software/BeautifulSoup/">BeautifulSoup</a> to parse the HTML. The script
+will take two arguments. One argument to specify the url of the advanced search page and the
+other to specify the search string.</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="c">#!/usr/bin/env python</span>
+
+<span class="kn">import</span> <span class="nn">re</span>
+<span class="kn">import</span> <span class="nn">argparse</span>
+<span class="kn">import</span> <span class="nn">mechanize</span>
+<span class="kn">from</span> <span class="nn">bs4</span> <span class="kn">import</span> <span class="n">BeautifulSoup</span>
+
+<span class="n">AMAZON_URL</span> <span class="o">=</span> <span class="s">'http://www.amazon.com/gp/product/'</span>
+
+<span class="k">class</span> <span class="nc">Scraper</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">br</span> <span class="o">=</span> <span class="n">mechanize</span><span class="o">.</span><span class="n">Browser</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">br</span><span class="o">.</span><span class="n">set_handle_robots</span><span class="p">(</span><span class="bp">False</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">br</span><span class="o">.</span><span class="n">addheaders</span> <span class="o">=</span> <span class="p">[(</span><span class="s">'User-agent'</span><span class="p">,</span> 
+                               <span class="s">'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_6_8) AppleWebKit/535.7 (KHTML, like Gecko) Chrome/16.0.912.63 Safari/535.7'</span><span class="p">)]</span>
+
+<span class="k">if</span> <span class="n">__name__</span> <span class="o">==</span> <span class="s">'__main__'</span><span class="p">:</span>
+    <span class="n">parser</span> <span class="o">=</span> <span class="n">argparse</span><span class="o">.</span><span class="n">ArgumentParser</span><span class="p">()</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span><span class="s">"-u"</span><span class="p">,</span> <span class="s">"--url"</span><span class="p">,</span>   <span class="n">help</span><span class="o">=</span><span class="s">"Url"</span><span class="p">,</span> <span class="n">required</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_argument</span><span class="p">(</span><span class="s">"-q"</span><span class="p">,</span> <span class="s">"--query"</span><span class="p">,</span> <span class="n">help</span><span class="o">=</span><span class="s">"Query"</span><span class="p">,</span> <span class="n">required</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+    <span class="n">args</span> <span class="o">=</span> <span class="n">parser</span><span class="o">.</span><span class="n">parse_args</span><span class="p">()</span>
+
+    <span class="n">scraper</span> <span class="o">=</span> <span class="n">Scraper</span><span class="p">()</span>
+    <span class="n">scraper</span><span class="o">.</span><span class="n">scrape</span><span class="p">(</span><span class="n">args</span><span class="o">.</span><span class="n">url</span><span class="p">,</span> <span class="n">args</span><span class="o">.</span><span class="n">query</span><span class="p">)</span></code></pre></div>
+
+<p>A top level <code>scrape()</code> method encapsulates all of the logic.</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="k">def</span> <span class="nf">scrape</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">url</span><span class="p">,</span> <span class="n">q</span><span class="p">):</span>
+   <span class="n">books</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">search_library_books</span><span class="p">(</span><span class="n">url</span><span class="o">=</span><span class="n">url</span><span class="p">,</span> <span class="n">q</span><span class="o">=</span><span class="n">q</span><span class="p">)</span>
+   <span class="bp">self</span><span class="o">.</span><span class="n">get_amazon_reviews</span><span class="p">(</span><span class="n">books</span><span class="p">)</span>
+   <span class="n">books</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">rank_by_reviews</span><span class="p">(</span><span class="n">books</span><span class="p">)</span>
+
+   <span class="k">for</span> <span class="n">b</span> <span class="ow">in</span> <span class="n">books</span><span class="p">:</span>
+       <span class="k">print</span> <span class="n">b</span><span class="p">[</span><span class="s">'rating'</span><span class="p">],</span> <span class="n">b</span><span class="p">[</span><span class="s">'title'</span><span class="p">]</span></code></pre></div>
+
+<h3>Scraping the Library Catalogue</h3>
+
+<p>To scrape the book titles and ISBN numbers from the Sirsi catalogue, we open up the advanced search page,
+fill out and submit the form. The search results are then filtered based on the <code>class</code> and <code>id</code> attributes 
+of the elements containing the title and ISBN number. </p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="k">def</span> <span class="nf">search_library_books</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">url</span><span class="p">,</span> <span class="n">q</span><span class="p">):</span>
+    <span class="sd">'''</span>
+<span class="sd">    Scrape the first page of books for the given query.</span>
+<span class="sd">    Calculate the ISBN10 value for each book so we can </span>
+<span class="sd">    look it up on Amazon</span>
+<span class="sd">    '''</span>
+    <span class="n">books</span> <span class="o">=</span> <span class="p">[]</span>
+
+    <span class="k">def</span> <span class="nf">select_form</span><span class="p">(</span><span class="n">form</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">form</span><span class="o">.</span><span class="n">attrs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'id'</span><span class="p">,</span> <span class="bp">None</span><span class="p">)</span> <span class="o">==</span> <span class="s">'advancedSearchForm'</span>
+
+    <span class="bp">self</span><span class="o">.</span><span class="n">br</span><span class="o">.</span><span class="n">open</span><span class="p">(</span><span class="n">url</span><span class="p">)</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">br</span><span class="o">.</span><span class="n">select_form</span><span class="p">(</span><span class="n">predicate</span><span class="o">=</span><span class="n">select_form</span><span class="p">)</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">br</span><span class="o">.</span><span class="n">form</span><span class="p">[</span><span class="s">'allWordsField'</span><span class="p">]</span> <span class="o">=</span> <span class="n">q</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">br</span><span class="o">.</span><span class="n">form</span><span class="p">[</span><span class="s">'formatTypeDropDown'</span><span class="p">]</span> <span class="o">=</span> <span class="p">[</span><span class="s">'BOOK'</span><span class="p">]</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">br</span><span class="o">.</span><span class="n">form</span><span class="p">[</span><span class="s">'languageDropDown'</span><span class="p">]</span> <span class="o">=</span> <span class="p">[</span><span class="s">'ENG'</span><span class="p">]</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">br</span><span class="o">.</span><span class="n">submit</span><span class="p">()</span>
+
+    <span class="n">s</span> <span class="o">=</span> <span class="n">BeautifulSoup</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">br</span><span class="o">.</span><span class="n">response</span><span class="p">()</span><span class="o">.</span><span class="n">read</span><span class="p">())</span>
+    <span class="n">x</span> <span class="o">=</span> <span class="p">{</span><span class="s">'class'</span><span class="p">:</span> <span class="s">'isbnValue'</span><span class="p">}</span>
+    <span class="n">y</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span><span class="s">r'^results_cell\d+$'</span><span class="p">)</span>
+    <span class="n">z</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span><span class="s">r'^results_bio\d+$'</span><span class="p">)</span>
+
+    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">s</span><span class="o">.</span><span class="n">findAll</span><span class="p">(</span><span class="s">'input'</span><span class="p">,</span> <span class="n">attrs</span><span class="o">=</span><span class="n">x</span><span class="p">):</span>
+        <span class="n">d</span> <span class="o">=</span> <span class="n">i</span><span class="o">.</span><span class="n">findParent</span><span class="p">(</span><span class="s">'div'</span><span class="p">,</span> <span class="nb">id</span><span class="o">=</span><span class="n">y</span><span class="p">)</span>
+        <span class="n">d</span> <span class="o">=</span> <span class="n">d</span><span class="o">.</span><span class="n">find</span><span class="p">(</span><span class="s">'div'</span><span class="p">,</span> <span class="nb">id</span><span class="o">=</span><span class="n">z</span><span class="p">)</span>
+
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">i</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'value'</span><span class="p">):</span>
+            <span class="k">continue</span>
+
+        <span class="n">book</span> <span class="o">=</span> <span class="p">{}</span>
+        <span class="n">book</span><span class="p">[</span><span class="s">'title'</span><span class="p">]</span> <span class="o">=</span> <span class="n">d</span><span class="o">.</span><span class="n">a</span><span class="p">[</span><span class="s">'title'</span><span class="p">]</span>
+        <span class="n">book</span><span class="p">[</span><span class="s">'isbn13'</span><span class="p">]</span> <span class="o">=</span> <span class="n">i</span><span class="p">[</span><span class="s">'value'</span><span class="p">]</span>
+        <span class="n">book</span><span class="p">[</span><span class="s">'isbn10'</span><span class="p">]</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">isbn13to10</span><span class="p">(</span><span class="n">book</span><span class="p">[</span><span class="s">'isbn13'</span><span class="p">])</span>
+        <span class="n">books</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">book</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">books</span></code></pre></div>
+
+<p>Note that we scrape the ISBN13 number and then convert it to ISBN10. That's because while the 
+Sirsi catalogue uses ISBN13 numbers, Amazon uses ISBN10 numbers for product links. <a href="http://www.newselfpublishing.com/AmazonLinking.html">[1]</a> <a href="https://affiliate-program.amazon.com/gp/associates/help/t5/a16">[2]</a></p>
+
+<h3>ISBN13 to ISBN10 Conversion</h3>
+
+<p><a href="http://en.wikipedia.org/wiki/International_Standard_Book_Number#ISBN-10_check_digit_calculation">Wikipedia</a> has a nice writeup
+on how ISBN numbers are formatted. To convert an ISBN13 number to ISBN10, we chop off the first 3 digits of the ISBN13 number, then
+calculate the ISBN10 check digit for the next nine numbers. The nine numbers plus the check digit is the ISBN10 number.</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="k">def</span> <span class="nf">isbn13to10</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">isbn13</span><span class="p">):</span>
+    <span class="sd">'''</span>
+<span class="sd">    Convert an ISBN13 number to ISBN10 by chomping off the</span>
+<span class="sd">    first 3 digits, then calculating the ISBN10 check digit </span>
+<span class="sd">    for the next nine digits to come up with the ISBN10 </span>
+<span class="sd">    '''</span>
+    <span class="n">first9</span> <span class="o">=</span> <span class="n">isbn13</span><span class="p">[</span><span class="mi">3</span><span class="p">:][:</span><span class="mi">9</span><span class="p">]</span>
+    <span class="n">isbn10</span> <span class="o">=</span> <span class="n">first9</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">isbn10_check_digit</span><span class="p">(</span><span class="n">first9</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">isbn10</span></code></pre></div>
+
+<p>The formula for calculating an ISBN10 check digit (the 10th number) given the first nine numbers
+is as follows:</p>
+
+<p>(11 - ((10x<sub>1</sub> + 9x<sub>2</sub> + 8x<sub>3</sub> + 7x<sub>4</sub> + 6x<sub>5</sub> + 5x<sub>6</sub> + 4x<sub>7</sub> + 3x<sub>8</sub> + 2x<sub>9</sub>) mod 11)) mod 11</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="k">def</span> <span class="nf">isbn10_check_digit</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">isbn10</span><span class="p">):</span>
+    <span class="sd">'''</span>
+<span class="sd">    Given the first 9 digits of an ISBN10 number calculate</span>
+<span class="sd">    the final (10th) check digit</span>
+<span class="sd">    '''</span>
+    <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="n">s</span> <span class="o">=</span> <span class="mi">0</span>
+
+    <span class="k">for</span> <span class="n">n</span> <span class="ow">in</span> <span class="nb">xrange</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span><span class="mi">1</span><span class="p">,</span><span class="o">-</span><span class="mi">1</span><span class="p">):</span>
+        <span class="n">s</span> <span class="o">+=</span> <span class="n">n</span> <span class="o">*</span> <span class="nb">int</span><span class="p">(</span><span class="n">isbn10</span><span class="p">[</span><span class="n">i</span><span class="p">])</span>
+        <span class="n">i</span> <span class="o">+=</span> <span class="mi">1</span>
+
+    <span class="n">s</span> <span class="o">=</span> <span class="n">s</span> <span class="o">%</span> <span class="mi">11</span>
+    <span class="n">s</span> <span class="o">=</span> <span class="mi">11</span> <span class="o">-</span> <span class="n">s</span>
+    <span class="n">v</span> <span class="o">=</span> <span class="n">s</span> <span class="o">%</span> <span class="mi">11</span>
+        
+    <span class="k">if</span> <span class="n">v</span> <span class="o">==</span> <span class="mi">10</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s">'x'</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">return</span> <span class="nb">str</span><span class="p">(</span><span class="n">v</span><span class="p">)</span></code></pre></div>
+
+<h3>Amazon Reviews</h3>
+
+<p>Once we've got the ISBN10 number for the book, we can look it up on Amazon using the following link
+format:</p>
+
+<p>http://www.amazon.com/gp/product/&lt;ISBN10&gt;</p>
+
+<p>Then we can go to that page and scrape the rating for the book.</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="k">def</span> <span class="nf">get_amazon_reviews</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">books</span><span class="p">):</span>
+    <span class="sd">'''</span>
+<span class="sd">    Get the Amazon review/rating for each book in books[]</span>
+<span class="sd">    '''</span>
+    <span class="k">for</span> <span class="n">b</span> <span class="ow">in</span> <span class="n">books</span><span class="p">:</span>
+        <span class="n">url</span> <span class="o">=</span> <span class="n">AMAZON_URL</span> <span class="o">+</span> <span class="n">b</span><span class="p">[</span><span class="s">'isbn10'</span><span class="p">]</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">br</span><span class="o">.</span><span class="n">open</span><span class="p">(</span><span class="n">url</span><span class="p">)</span>
+
+        <span class="n">s</span> <span class="o">=</span> <span class="n">BeautifulSoup</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">br</span><span class="o">.</span><span class="n">response</span><span class="p">()</span><span class="o">.</span><span class="n">read</span><span class="p">())</span>
+        <span class="n">d</span> <span class="o">=</span> <span class="n">s</span><span class="o">.</span><span class="n">find</span><span class="p">(</span><span class="s">'div'</span><span class="p">,</span> <span class="nb">id</span><span class="o">=</span><span class="s">'avgRating'</span><span class="p">)</span>
+        <span class="n">m</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="s">r'\d+(\.\d+)?'</span><span class="p">,</span> <span class="n">d</span><span class="o">.</span><span class="n">text</span><span class="o">.</span><span class="n">strip</span><span class="p">())</span>
+        <span class="n">f</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">m</span><span class="o">.</span><span class="n">group</span><span class="p">(</span><span class="mi">0</span><span class="p">))</span>
+
+        <span class="n">b</span><span class="p">[</span><span class="s">'rating'</span><span class="p">]</span> <span class="o">=</span> <span class="n">f</span></code></pre></div>
+
+<h3>Sorting the Results</h3>
+
+<p>Once we've got all the rating for all of the books, we sort them according to their rating.</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="k">def</span> <span class="nf">rank_by_reviews</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">books</span><span class="p">):</span>
+    <span class="sd">''' </span>
+<span class="sd">    Sort books by rating with highest rated books first</span>
+<span class="sd">    '''</span>
+    <span class="n">newlist</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">books</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="k">lambda</span> <span class="n">k</span><span class="p">:</span> <span class="n">k</span><span class="p">[</span><span class="s">'rating'</span><span class="p">],</span> <span class="n">reverse</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span> 
+    <span class="k">return</span> <span class="n">newlist</span></code></pre></div>
+
+<h3>Running It</h3>
+
+<p>Let's try it out.</p>
+
+<pre>
+$ ./scraper.py -u https://mdpl.ent.sirsi.net/client/catalog/search/advanced -q javascript
+4.7 Beginning JavaScript / Paul Wilton.
+4.6 JavaScript : the definitive guide / David Flanagan.
+4.6 Professional JavaScript for Web developers / Nicholas C. Zakas.
+4.5 High performance JavaScript / Nicholas C. Zakas.
+4.5 JavaScript : the definitive guide / David Flanagan.
+4.3 PPK on JavaScript  / Peter-Paul Koch.
+4.1 Pure JavaScript / Jason Gilliam, Charlton Ting, R. Allen Wyke.
+4.0 JavaScript bible / Danny Goodman, Michael Morrison.
+4.0 JavaScript : a beginner's guide / John Pollock.
+3.7 JavaScript &amp; Ajax for dummies / Andy Harris.
+3.5 Head first JavaScript / Michael Morrison.
+2.2 JavaScript for dummies / by Emily A. Vander Veer.
+</pre>
+
+<p>Each result from the library catalogue is printed out along with its Amazon rating, with the highest
+rated books listed first.</p>
+
+<p>If you'd like to see the full implementation, the source code for this article is available on 
+<a href="https://github.com/thayton/library-amazon-reviews">github</a>.</p>
+
+<h2>Shameless Plug</h2>
+
+<p>Have a scraping project you'd like done? I'm available for hire. <a href="/contact">Contact me</a> 
+for a free quote.</p>
+
+</div>
+
+</div></body></html>

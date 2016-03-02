@@ -1,0 +1,48 @@
+<html><body><div><div itemprop="articleBody"><p>If you need to report progress updates from the tasks (or you call update_state in the task) you cannot use the bundled AbortableTask from celery.contrib.abortable because it relies on status updates too. That means you'll get race conditions if you do that.</p><p>You can use revokes for aborting tasks but they don't give you enough control and it's not guaranteed that your tasks will stop gracefully (or stop at all). Revokes can raise <a class="reference external" href="http://docs.celeryproject.org/en/latest/userguide/workers.html#time-limits">SoftTimeLimitExceeded</a> if enabled (via TERM signal) however it might be tricky to perform cleanup - if you call C extension the exception will get delayed till the call returns. See the <a class="reference external" href="http://docs.python.org/library/signal.html">signal module docs</a> for what happens when you raise an exception from a signal handler (that's what celery does).</p><p>Given this, an alternative is to use redis to store the aborted task ids in a redis set. If you use the redis broker you can use this drop-in replacement:</p><div class="highlight"><pre><span/><span class="kn">from</span> <span class="nn">contextlib</span> <span class="kn">import</span> <span class="n">contextmanager</span>
+<span class="kn">import</span> <span class="nn">celery</span>
+<span class="kn">from</span> <span class="nn">celery.task.base</span> <span class="kn">import</span> <span class="n">Task</span>
+<span class="kn">from</span> <span class="nn">celery.result</span> <span class="kn">import</span> <span class="n">AsyncResult</span>
+
+<span class="kn">from</span> <span class="nn">django.conf</span> <span class="kn">import</span> <span class="n">settings</span>
+
+<span class="k">assert</span> <span class="n">settings</span><span class="o">.</span><span class="n">BROKER_TRANSPORT</span> <span class="o">==</span> <span class="s1">'redis'</span><span class="p">,</span> <span class="s2">"AbortableTask can only work with a 'redis' BROKER_TRANSPORT"</span>
+<span class="n">REDIS_KEY</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">settings</span><span class="p">,</span> <span class="s1">'ABORTABLE_REDIS_KEY'</span><span class="p">,</span> <span class="s1">'task-aborts'</span><span class="p">)</span>
+
+<span class="nd">@contextmanager</span>
+<span class="k">def</span> <span class="nf">client_from_pool</span><span class="p">():</span>
+    <span class="n">connection</span> <span class="o">=</span> <span class="n">celery</span><span class="o">.</span><span class="n">current_app</span><span class="o">.</span><span class="n">pool</span><span class="o">.</span><span class="n">acquire</span><span class="p">()</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">yield</span> <span class="n">connection</span><span class="o">.</span><span class="n">default_channel</span><span class="o">.</span><span class="n">client</span>
+    <span class="k">finally</span><span class="p">:</span>
+        <span class="n">connection</span><span class="o">.</span><span class="n">release</span><span class="p">()</span>
+
+<span class="k">class</span> <span class="nc">AbortableAsyncResult</span><span class="p">(</span><span class="n">AsyncResult</span><span class="p">):</span>
+
+    <span class="k">def</span> <span class="nf">is_aborted</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">client_from_pool</span><span class="p">()</span> <span class="k">as</span> <span class="n">client</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">client</span><span class="o">.</span><span class="n">sismember</span><span class="p">(</span><span class="n">REDIS_KEY</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">task_id</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">abort</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">client_from_pool</span><span class="p">()</span> <span class="k">as</span> <span class="n">client</span><span class="p">:</span>
+            <span class="n">client</span><span class="o">.</span><span class="n">sadd</span><span class="p">(</span><span class="n">REDIS_KEY</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">task_id</span><span class="p">)</span>
+
+<span class="k">class</span> <span class="nc">AbortableTask</span><span class="p">(</span><span class="n">Task</span><span class="p">):</span>
+
+    <span class="nd">@classmethod</span>
+    <span class="k">def</span> <span class="nf">AsyncResult</span><span class="p">(</span><span class="n">cls</span><span class="p">,</span> <span class="n">task_id</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">AbortableAsyncResult</span><span class="p">(</span><span class="n">task_id</span><span class="p">,</span> <span class="n">backend</span><span class="o">=</span><span class="n">cls</span><span class="o">.</span><span class="n">backend</span><span class="p">,</span>
+                                             <span class="n">task_name</span><span class="o">=</span><span class="n">cls</span><span class="o">.</span><span class="n">name</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">is_aborted</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="n">task_id</span> <span class="o">=</span> <span class="n">kwargs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'task_id'</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">request</span><span class="o">.</span><span class="n">id</span><span class="p">)</span>
+        <span class="k">with</span> <span class="n">client_from_pool</span><span class="p">()</span> <span class="k">as</span> <span class="n">client</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">client</span><span class="o">.</span><span class="n">sismember</span><span class="p">(</span><span class="n">REDIS_KEY</span><span class="p">,</span> <span class="n">task_id</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">cleanup</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="n">task_id</span> <span class="o">=</span> <span class="n">kwargs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'task_id'</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">request</span><span class="o">.</span><span class="n">id</span><span class="p">)</span>
+        <span class="k">with</span> <span class="n">client_from_pool</span><span class="p">()</span> <span class="k">as</span> <span class="n">client</span><span class="p">:</span>
+            <span class="n">client</span><span class="o">.</span><span class="n">srem</span><span class="p">(</span><span class="n">REDIS_KEY</span><span class="p">,</span> <span class="n">task_id</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">after_return</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">status</span><span class="p">,</span> <span class="n">retval</span><span class="p">,</span> <span class="n">task_id</span><span class="p">,</span> <span class="n">args</span><span class="p">,</span> <span class="n">kwargs</span><span class="p">,</span> <span class="n">einfo</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">cleanup</span><span class="p">(</span><span class="n">task_id</span><span class="o">=</span><span class="n">task_id</span><span class="p">)</span>
+</pre></div><p>This will use the broker's connection pool if enabled (you should enable it, just set <a class="reference external" href="http://docs.celeryproject.org/en/latest/configuration.html?highlight=broker_pool_limit#broker-pool-limit">BROKER_POOL_LIMIT</a>).</p></div></div></body></html>

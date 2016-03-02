@@ -1,0 +1,272 @@
+<html><body><div><aside class="article"> <div class="warning-nudge"> <span class="warning-nudge_icon">!</span><p> This article is outdated. Please visit our </p><a href="http://devcenter.wercker.com/docs/pipelines/stacks.html">Dev Center</a><p>. </p></div> <p>Django 1.6 was released a while ago. It now supports Python 3 and has some new features with geodjango. So let’s try it out with the updated python box we recently released! </p> <p><img alt="Django" src="/images/posts/django16/wercker-django.png"/></p> <p>This is the first part of a short series where we will also look at how to build, provision and deploy to any Ubuntu based server using <a href="http://ansibleworks.com">Ansible</a>.</p> <h3>Introduction</h3> <p>Before we actually start looking at this small application and django. We first want to introduce some wercker terminology:</p> <ul> <li><p><code>box</code>. Every test on wercker is run inside a box. There are two types of boxes: <em>main boxes</em> and <em>services</em>. Main boxes are aimed at different languages and are the sandboxed environments where your tests are actually run. Services are additional machines booted for other purposes, such as:</p> </li> <li><p><code>steps</code>. A build or deploy is devided into steps, usually groups of commands that perform a single action. Typical steps are: <a href="https://app.wercker.com/#applications/51c829fb3179be44780021f0/tab/details">pip-install</a>, <a href="https://app.wercker.com/#applications/527bb985138f8aef26000c8f/tab/details">virtualenv</a></p></li> </ul> <p>Keep in mind that wercker is an open platform, feel free to look around at our list of wercker- and user-created <a href="https://app.wercker.com/#explore/steps">steps</a> and <a href="https://app.wercker.com/#explore/boxes">boxes</a>!</p> <p>One more thing before diving into django: we’ll be focussing on getting the site tested on wercker, and later, deploying it to a server. We also assume you are familiar with python and related tools such as <code>virtual environments</code> and <code>pip</code>.</p> <h3>What’s new in Django 1.6?</h3> <p>Back to our main topic. What is new in Django 1.6? Naturally, there is more to Django 1.6 than just python 3 and geodjango form fields and widgets. Here are some of them:</p> <ul> <li>improved transaction management.</li> <li>persistent database connections</li> <li>new test runner</li> <li>simplified default project and app templates</li> <li>HTML5 types for input fields</li> <li><a href="https://pypi.python.org/pypi/Pillow/">pillow</a> is now preferred over <a href="https://pypi.python.org/pypi/PIL">PIL</a></li> </ul> <p>For more information see the <a href="https://docs.djangoproject.com/en/1.6/releases/1.6/">Django 1.6 release notes</a>.</p> <h3>Our goal</h3> <p>We are going to build a small application using python 3, django 1.6 and GeoDjango. We’ll create an overview page that calculates the distance between all locations in the database. The calculations are done using a library called <a href="https://pypi.python.org/pypi/geopy">geopy</a>.</p> <p>The end result will look like, this:</p> <p><img alt="Overview page" src="/images/posts/django16/location_list.jpg"/></p> <p>And we can add/edit the location in the django admin.</p> <p><img alt="Django admin for a location" src="/images/posts/django16/admin_interface.jpg"/></p> <p>You can find a version of the site <a href="http://ec2-72-44-59-104.compute-1.amazonaws.com/locations/">here</a>.</p> <h3>Step 1. Laying the foundation</h3> <p>Let’s install django 1.6.x, create a new project named <code>hellocities</code> and add to that project a new app named ‘locations’:</p> <pre class="highlight text">$ pip install "django==1.6" --upgrade
+Downloading/unpacking django==1.6
+  Downloading Django-1.6.tar.gz (6.6MB): 6.6MB downloaded
+  Running setup.py egg_info for package django
+
+    warning: no previously-included files matching '__pycache__' found under directory '*'
+    warning: no previously-included files matching '*.py[co]' found under directory '*'
+Installing collected packages: django
+  Running setup.py install for django
+    changing mode of build/scripts-2.7/django-admin.py from 644 to 755
+
+    warning: no previously-included files matching '__pycache__' found under directory '*'
+    warning: no previously-included files matching '*.py[co]' found under directory '*'
+    changing mode of [local path]/hellocities-venv/bin/django-admin.py to 755
+Successfully installed django
+Cleaning up...
+$ django-admin.py hellocities
+$ cd hellocities
+$ chmod +x manage.py
+$ ./manage.py startapp locations
+</pre> <p>Next, create the <code>requirements.txt</code> file, we can already add some requirements.</p> <pre class="highlight text">django==1.6
+dj-database-url==0.2.2
+psycopg2==2.5.1
+geopy==0.95.1
+gunicorn==18.0
+</pre> <p>What do these requirements mean:</p> <ul> <li>Django. Install the latest version (at this moment).</li> <li>dj-database-url. Allows us to configure the database settings via an <a href="http://12factor.net/backing-services">12factor</a> inspired environment variable. This way we don’t need to modify our code for our testing environment.</li> <li>psycopg2. The library needed to connect with PostgreSQL.</li> <li>geopy. Our helper library for the distance calculations later on.</li> <li><a href="http://gunicorn.org">gunicorn</a>. The WSGI HTTP Server for UNIX.</li> </ul> <p>We now have some basic code to add to a git repository. Create a git repository, add our code and creat our first commit.</p> <pre class="highlight text">$ git init
+$ git add .
+$ git commit -a -m "initial release"
+</pre> <p>Create a new repository on either GitHub or Bitbucket and add it as a remote to the repository. Both GitHub and Bitbucket show how to do this right after you’ve created a new repository. The line wil read something like:</p> <pre class="highlight text">$ git remote add origin git@github.com:flenter/hellocities.git
+</pre> <p>Let’s push our code to the repository (i.e. <code>git push origin master</code>) and <a href="https://app.wercker.com/#applications/create">add a new application</a> to wercker.</p> <p>During the add application wizard, wercker will generate a <code>wercker.yml</code> for you.</p> <pre class="highlight yaml"><span class="nn">---</span>
+<span class="s">box</span><span class="p">:</span> <span class="s">wercker/python</span>
+
+<span class="c1"># Build definition</span>
+<span class="s">build</span><span class="p">:</span>
+  <span class="c1"># The steps that will be executed on build</span>
+  <span class="s">steps</span><span class="p">:</span>
+    <span class="c1"># A step that sets up the python virtual environment</span>
+    <span class="p">-</span> <span class="s">virtualenv</span><span class="p">:</span>
+        <span class="s">name</span><span class="p">:</span> <span class="s">setup virtual environment</span>
+
+    <span class="c1"># # Use this virtualenv step for python 3.2</span>
+    <span class="c1"># - virtualenv</span>
+    <span class="c1">#     name: setup virtual environment</span>
+    <span class="c1">#     python_location: /usr/bin/python3.2</span>
+
+    <span class="c1"># A step that executes `pip install` command.</span>
+    <span class="p">-</span> <span class="s">pip-install</span>
+
+    <span class="c1"># # This pip-install clears the local wheel cache</span>
+    <span class="c1"># - pip-install:</span>
+    <span class="c1">#     clean_wheel_dir: true</span>
+
+    <span class="c1"># A custom script step, name value is used in the UI</span>
+    <span class="c1"># and the code value contains the command that get executed</span>
+    <span class="p">-</span> <span class="s">script</span><span class="p">:</span>
+        <span class="s">name</span><span class="p">:</span> <span class="s">echo python information</span>
+        <span class="s">code</span><span class="p">:</span> <span class="p">|</span>
+          <span class="no">echo "python version $(python --version) running"</span>
+          <span class="no">echo "pip version $(pip --version) running"</span>
+
+</pre> <p>Since we want to tweak it, let’s add it to our reposory:</p> <pre class="highlight text">$ git add wercker.yml
+$ git commit -a -m "wercker.yml added"
+$ git push origin master
+</pre> <p>This should result in our first green build on wercker (especially since we aren’t testing anything yet).</p> <p>Expanding the <code>echo python information</code> step, we see amongst the output:</p> <pre class="highlight text">Python 2.7.3
+python version  running
+(venv)$echo "pip version $(pip --version) running"
+pip version pip 1.4.1 from /home/ubuntu/venv/lib/python2.7/site-packages (python 2.7) running
+</pre> <p>By default the python box is using python 2.7.3 (default version of Ubuntu 12.04). However, we want our hellocities application to use Python 3.2, so let’s update our <code>wercker.yml</code> to use python 3, add a <a href="https://app.wercker.com/#applications/51f79a606b20d0a93e0002d0/tab/details">postgis enabled postgres service</a> and get ready for testing.</p> <pre class="highlight yaml"><span class="nn">---</span>
+<span class="s">box</span><span class="p">:</span> <span class="s">wercker/python</span>
+<span class="s">services</span><span class="p">:</span>
+  <span class="p">-</span> <span class="s">mies/postgis@0.0.5</span>
+
+<span class="c1"># Build definition</span>
+<span class="s">build</span><span class="p">:</span>
+  <span class="c1"># The steps that will be executed on build</span>
+  <span class="s">steps</span><span class="p">:</span>
+    <span class="p">-</span> <span class="s">install-packages</span><span class="p">:</span>
+        <span class="s">packages</span><span class="p">:</span> <span class="s">postgresql-client-9.3 postgis</span>
+
+    <span class="c1"># Use this virtualenv step for python 3.2</span>
+    <span class="p">-</span> <span class="s">virtualenv</span><span class="p">:</span>
+        <span class="s">name</span><span class="p">:</span> <span class="s">setup virtual environment</span>
+        <span class="s">python_location</span><span class="p">:</span> <span class="s">/usr/bin/python3.2</span>
+
+    <span class="p">-</span> <span class="s">pip-install</span>
+    <span class="c1"># A custom script step, name value is used in the UI</span>
+    <span class="c1"># and the code value contains the command that get executed</span>
+    <span class="p">-</span> <span class="s">script</span><span class="p">:</span>
+        <span class="s">name</span><span class="p">:</span> <span class="s">echo python information</span>
+        <span class="s">code</span><span class="p">:</span> <span class="p">|</span>
+          <span class="no">echo "python version $(python --version) running"</span>
+          <span class="no">echo "pip version $(pip --version) running"</span>
+    <span class="p">-</span> <span class="s">script</span><span class="p">:</span>
+        <span class="s">name</span><span class="p">:</span> <span class="s">run django tests</span>
+        <span class="s">code</span><span class="p">:</span> <span class="p">|</span>
+          <span class="no">python manage.py test</span>
+</pre> <p>With this new yaml, during a build, a machine with postgres will also be available. Our custom build steps are:</p> <ul> <li>install the postgres/postgis package</li> <li>setup a virtual environment with python 3.2</li> <li>run pip install against our requirements.txt</li> <li>display some python information (which should soon show python 3.2)</li> <li>run django tests</li> </ul> <pre class="highlight text">$ git commit -a -m "service added, python3.2 activated, manage.py test added"
+$ git push origin master
+</pre> <p>There are two steps/places of interest in the resulting build:</p> <ol> <li><p>“environment variables” step, where we can see the connection details for connecting with the database:</p> <pre class="highlight text">$export WERCKER_POSTGRESQL_URL="postgres://postgres:wercker@10.0.3.211:5432/werckerdb1"
+$export WERCKER_POSTGRESQL_DATABASE="werckerdb1"
+$export WERCKER_POSTGRESQL_PORT="5432"
+$export WERCKER_POSTGRESQL_PASSWORD="wercker"
+$export WERCKER_POSTGRESQL_USERNAME="postgres"
+$export WERCKER_POSTGRESQL_HOST="10.0.3.211"
+</pre></li> <li><p>“echo python information” step. Which should show python 3.2.3 in its output:</p> <pre class="highlight text">Python 3.2.3
+python version  running
+(venv)$echo "pip version $(pip --version) running"
+pip version pip 1.4.1 from /home/ubuntu/venv/lib/python3.2/site-packages (python 3.2) running
+</pre></li> </ol> <p>Now we have a database connection string and are using python 3. Let’s get back to our python code.</p> <p>Open up the hellocities/settings.py and update the INSTALLED_APPS list to:</p> <pre class="highlight python"><span class="n">INSTALLED_APPS</span> <span class="o">=</span> <span class="p">(</span>
+    <span class="s">'django.contrib.admin'</span><span class="p">,</span>
+    <span class="s">'django.contrib.auth'</span><span class="p">,</span>
+    <span class="s">'django.contrib.contenttypes'</span><span class="p">,</span>
+    <span class="s">'django.contrib.sessions'</span><span class="p">,</span>
+    <span class="s">'django.contrib.messages'</span><span class="p">,</span>
+    <span class="s">'django.contrib.staticfiles'</span><span class="p">,</span>
+    <span class="s">'django.contrib.gis'</span><span class="p">,</span>
+    <span class="s">'gunicorn'</span><span class="p">,</span>
+    <span class="s">'locations'</span><span class="p">,</span>
+<span class="p">)</span>
+</pre> <p>And add the following code at the bottom of the settings.py:</p> <pre class="highlight python"><span class="n">TEMPLATE_DIRS</span> <span class="o">=</span> <span class="p">[</span>
+    <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="s">'locations'</span><span class="p">,</span> <span class="s">'templates'</span><span class="p">)</span>
+<span class="p">]</span>
+
+<span class="n">STATIC_ROOT</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">BASE_DIR</span><span class="p">,</span> <span class="s">'static'</span><span class="p">)</span>
+
+<span class="kn">import</span> <span class="nn">dj_database_url</span>
+
+<span class="n">DATABASES</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s">'default'</span><span class="p">:</span> <span class="n">dj_database_url</span><span class="o">.</span><span class="n">config</span><span class="p">(</span>
+        <span class="n">env</span><span class="o">=</span><span class="s">"WERCKER_POSTGRESQL_URL"</span><span class="p">,</span>
+        <span class="n">default</span><span class="o">=</span><span class="s">'postgis://db-user:@localhost:5432/hellocities'</span>
+    <span class="p">)</span>
+<span class="p">}</span>
+</pre> <h3>Step 2. Create locations app</h3> <p>Open up <code>locations/models.py</code> and add:</p> <pre class="highlight python"><span class="kn">from</span> <span class="nn">django.contrib.gis.db</span> <span class="kn">import</span> <span class="n">models</span>
+
+
+<span class="k">class</span> <span class="nc">Location</span><span class="p">(</span><span class="n">models</span><span class="o">.</span><span class="n">Model</span><span class="p">):</span>
+    <span class="n">name</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">CharField</span><span class="p">(</span><span class="nb">max</span><span class="n">_length</span><span class="o">=</span><span class="mi">150</span><span class="p">)</span>
+    <span class="n">geom</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">PointField</span><span class="p">()</span>
+    <span class="nb">object</span><span class="n">s</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">GeoManager</span><span class="p">()</span>
+
+    <span class="k">class</span> <span class="nc">Meta</span><span class="p">:</span>
+        <span class="nb">ord</span><span class="n">ering</span> <span class="o">=</span> <span class="p">[</span><span class="s">'name'</span><span class="p">]</span>
+
+    <span class="k">def</span> <span class="nf">__unicode__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="nb">unicode</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">name</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">get_lat_long</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="s">"""Add an easy getter function, which returns the geometry coords in
+        latitude longitude order
+        """</span>
+        <span class="k">return</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">geom</span><span class="o">.</span><span class="n">coords</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="bp">self</span><span class="o">.</span><span class="n">geom</span><span class="o">.</span><span class="n">coords</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
+
+</pre> <p>Open the 'locations/admin.py’ and update the code to register the Location model:</p> <pre class="highlight text">from django.contrib import admin
+
+from locations.models import Location
+
+
+# Register your models here.
+admin.site.register(Location)
+</pre> <p>Now let’s add some tests and test data. Createa a new folder in the root of the application named 'data’. We have prepared a small json file, containing two locations: <a href="/images/posts/django16/locations.json">locations.json</a>. Download it and save it in the data folder. The fixture contains two locations, one named San Francisco and the other named Amsterdam.</p> <p>Open up locations/tests.py change it to:</p> <pre class="highlight python"><span class="kn">from</span> <span class="nn">django.test</span> <span class="kn">import</span> <span class="n">TestCase</span>
+
+<span class="kn">from</span> <span class="nn">django.contrib.gis.measure</span> <span class="kn">import</span> <span class="n">D</span>
+<span class="kn">from</span> <span class="nn">django.contrib.gis.geos</span> <span class="kn">import</span> <span class="n">GEOSGeometry</span>
+
+<span class="kn">from</span> <span class="nn">locations.models</span> <span class="kn">import</span> <span class="n">Location</span>
+
+
+<span class="k">class</span> <span class="nc">LocationTestCase</span><span class="p">(</span><span class="n">TestCase</span><span class="p">):</span>
+    <span class="n">fixtures</span> <span class="o">=</span> <span class="p">[</span><span class="s">"data/locations.json"</span><span class="p">]</span>
+
+    <span class="k">def</span> <span class="nf">test_find_cities</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="c"># not really a test... just seeing if there are two items</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">Location</span><span class="o">.</span><span class="nb">object</span><span class="n">s</span><span class="o">.</span><span class="n">count</span><span class="p">(),</span> <span class="mi">2</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">test_distances</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+
+        <span class="c"># "Random" point 0,0 latitude/longitude</span>
+        <span class="n">p</span> <span class="o">=</span> <span class="n">GEOSGeometry</span><span class="p">(</span><span class="s">'POINT(0 0)'</span><span class="p">)</span>
+
+        <span class="c"># Select all locations within the diameter of earth</span>
+        <span class="n">ls</span> <span class="o">=</span> <span class="n">Location</span><span class="o">.</span><span class="nb">object</span><span class="n">s</span><span class="o">.</span><span class="nb">filter</span><span class="p">(</span><span class="n">geom__distance_lte</span><span class="o">=</span><span class="p">(</span><span class="n">p</span><span class="p">,</span> <span class="n">D</span><span class="p">(</span><span class="n">km</span><span class="o">=</span><span class="mi">40000</span><span class="p">)))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">ls</span><span class="o">.</span><span class="n">count</span><span class="p">(),</span> <span class="mi">2</span><span class="p">)</span>
+
+        <span class="c"># Select a city less than 6000 km's away (AMS)</span>
+        <span class="n">ls</span> <span class="o">=</span> <span class="n">Location</span><span class="o">.</span><span class="nb">object</span><span class="n">s</span><span class="o">.</span><span class="nb">filter</span><span class="p">(</span><span class="n">geom__distance_lte</span><span class="o">=</span><span class="p">(</span><span class="n">p</span><span class="p">,</span> <span class="n">D</span><span class="p">(</span><span class="n">km</span><span class="o">=</span><span class="mi">6000</span><span class="p">)))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">ls</span><span class="o">.</span><span class="n">count</span><span class="p">(),</span> <span class="mi">1</span><span class="p">)</span>
+
+        <span class="n">sf</span> <span class="o">=</span> <span class="n">ls</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+
+        <span class="c"># Select a city more than 6000 km's away (SF)</span>
+        <span class="n">ls</span> <span class="o">=</span> <span class="n">Location</span><span class="o">.</span><span class="nb">object</span><span class="n">s</span><span class="o">.</span><span class="nb">filter</span><span class="p">(</span><span class="n">geom__distance_gte</span><span class="o">=</span><span class="p">(</span><span class="n">p</span><span class="p">,</span> <span class="n">D</span><span class="p">(</span><span class="n">km</span><span class="o">=</span><span class="mi">6000</span><span class="p">)))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">ls</span><span class="o">.</span><span class="n">count</span><span class="p">(),</span> <span class="mi">1</span><span class="p">)</span>
+
+        <span class="n">ams</span> <span class="o">=</span> <span class="n">ls</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertNotEqual</span><span class="p">(</span><span class="n">sf</span><span class="p">,</span> <span class="n">ams</span><span class="p">)</span>
+
+</pre> <p>Add the data/locadtions.json to the repository, commit the changes and push it.</p> <pre class="highlight text">$ git add data/locations.json
+$ git commit -am "Location test added"
+$ git push origin master
+</pre> <p>If you look at your build on wercker, you will see the build will fail with:</p> <p><code>AttributeError: 'DatabaseOperations' object has no attribute 'geo_db_type</code></p> <p>This is because django is still using the default postgres database engine. We can do two things to alleviate the problem: override the engine in the <code>hellocities/settings.py</code> or change the environment variable with the connection string. I like to solve this via the wercker.yml, especially since this allows us to familiarize ourselves with the availabe environment variables. You can find them as the third step for a build.</p> <pre class="highlight text">$export WERCKER=true
+$export WERCKER_MAIN_PIPELINE_STARTED=1384435837
+$export CI=true
+$export WERCKER_BUILD_ID=5284d0794a9e508c7700080f
+$export WERCKER_BUILD_URL="https://app.wercker.com/#build/5284d0794a9e508c7700080f"
+$export WERCKER_GIT_DOMAIN="github.com"
+$export WERCKER_GIT_OWNER="flenter"
+$export WERCKER_GIT_REPOSITORY="hellocities"
+$export WERCKER_GIT_BRANCH="master"
+$export WERCKER_GIT_COMMIT="da8b794f1c18b331a0d09914b7a46e73592d503f"
+$export WERCKER_ROOT="/pipeline/build"
+$export WERCKER_SOURCE_DIR="/pipeline/build"
+$export WERCKER_OUTPUT_DIR="/pipeline/output"
+$export WERCKER_CACHE_DIR="/cache"
+$export WERCKER_PIPELINE_DIR="/pipeline"
+$export WERCKER_REPORT_DIR="/report"
+$export MIES_POSTGIS_HOST=10.0.3.72
+$export POSTGIS_SQL_PATH="`pg_config --sharedir`/contrib/postgis-2.0"
+$export PGPASSWORD="wercker"
+$export PGUSER="postgres"
+$export PGDATABASE="werckerdb1"
+$export PGPORT="5432"
+$export PGHOST="10.0.3.72"
+$export WERCKER_POSTGRESQL_URL="postgres://postgres:wercker@10.0.3.72:5432/werckerdb1"
+$export WERCKER_POSTGRESQL_DATABASE="werckerdb1"
+$export WERCKER_POSTGRESQL_PORT="5432"
+$export WERCKER_POSTGRESQL_PASSWORD="wercker"
+$export WERCKER_POSTGRESQL_USERNAME="postgres"
+$export WERCKER_POSTGRESQL_HOST="10.0.3.72"
+$export WERCKER_STARTED_BY="Jacco Flenter"
+$export WERCKER_APPLICATION_ID="528242edfe0905e56f002a3d"
+$export WERCKER_APPLICATION_NAME="hellocities"
+$export WERCKER_APPLICATION_OWNER_NAME="flenter"
+$export WERCKER_APPLICATION_URL="https://app.wercker.com/#applications/528242edfe0905e56f002a3d"
+</pre> <p>You can see the <code>WERCKER_POSTGRESQL_URL</code> starts with 'postgres://’, we need to change that into postgis so django will use the right database engine. Let’s update our <code>wercker.yml</code>:</p> <pre class="highlight yaml"><span class="nn">---</span>
+<span class="s">box</span><span class="p">:</span> <span class="s">wercker/python</span>
+<span class="s">services</span><span class="p">:</span>
+  <span class="p">-</span> <span class="s">mies/postgis@0.0.5</span>
+
+<span class="c1"># Build definition</span>
+<span class="s">build</span><span class="p">:</span>
+  <span class="c1"># The steps that will be executed on build</span>
+  <span class="s">steps</span><span class="p">:</span>
+
+    <span class="p">-</span> <span class="s">script</span><span class="p">:</span>
+        <span class="s">name</span><span class="p">:</span> <span class="s">set postgis connection string</span>
+        <span class="s">code</span><span class="p">:</span> <span class="p">|</span>
+          <span class="no">export WERCKER_POSTGRESQL_URL="postgis://$WERCKER_POSTGRESQL_USERNAME:$WERCKER_POSTGRESQL_PASSWORD@$WERCKER_POSTGRESQL_HOST:$WERCKER_POSTGRESQL_PORT/$WERCKER_POSTGRESQL_DATABASE"</span>
+
+    <span class="p">-</span> <span class="s">install-packages</span><span class="p">:</span>
+        <span class="s">packages</span><span class="p">:</span> <span class="s">postgresql-client-9.3 postgis</span>
+
+    <span class="c1"># Use this virtualenv step for python 3.2</span>
+    <span class="p">-</span> <span class="s">virtualenv</span><span class="p">:</span>
+        <span class="s">name</span><span class="p">:</span> <span class="s">setup virtual environment</span>
+        <span class="s">python_location</span><span class="p">:</span> <span class="s">/usr/bin/python3.2</span>
+
+    <span class="p">-</span> <span class="s">pip-install</span>
+    <span class="c1"># A custom script step, name value is used in the UI</span>
+    <span class="c1"># and the code value contains the command that get executed</span>
+    <span class="p">-</span> <span class="s">script</span><span class="p">:</span>
+        <span class="s">name</span><span class="p">:</span> <span class="s">echo python information</span>
+        <span class="s">code</span><span class="p">:</span> <span class="p">|</span>
+          <span class="no">echo "python version $(python --version) running"</span>
+          <span class="no">echo "pip version $(pip --version) running"</span>
+    <span class="p">-</span> <span class="s">script</span><span class="p">:</span>
+        <span class="s">name</span><span class="p">:</span> <span class="s">run django tests</span>
+        <span class="s">code</span><span class="p">:</span> <span class="p">|</span>
+          <span class="no">python manage.py test</span>
+</pre> <p>Let’s commit this last change and get a green build!</p> <pre class="highlight text">$ git commit -am "specify postgis instead of postgres"
+$ git push
+</pre> <p>That’s it for now. Now that we have set everything up, in <a href="http://blog.wercker.com/2013/11/19/django-16-part-2.html">part two</a> we will create the public facing part of the site and get ready <a href="http://blog.wercker.com/2013/11/25/django-16-part3.html">for deployment</a>.</p> <hr/> <p>Have fun!</p> <h4>Earn some stickers!</h4> <p>Let us know about the applications you build with wercker. Don’t forget to tweet out a screenshot of your first green build with <strong>#wercker</strong> and we’ll send you some <a href="http://twitter.com/wercker">@wercker</a> stickers.</p> <p>Signing up for wercker is <a href="https://app.wercker.com/users/new/">free and easy</a>.</p>  </aside> </div></body></html>

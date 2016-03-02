@@ -1,0 +1,414 @@
+<html><body><div><div class="content html_format">
+      <img align="left" src="https://habrastorage.org/getpro/habr/post_images/16b/e18/a55/16be18a553ec0063b4fd4c36013923c0.jpg"/><p> На хабре неоднократно </p><a href="http://habrahabr.ru/post/191742/">упоминали</a><p> о карте памяти формата SDHC со встроенным WiFi передатчиком. Купив эту карту, я был разочарован ужасным программным обеспечением, которое идет «в комплекте» с картой. Если приложением для iOS и Android хоть как то можно пользоваться, то отсутствие клиента под windows и macos, лишает карту возможности использования ее профессионалами. Точнее сказать, на PC есть веб интерфейс, но кроме ужасного внешнего вида, меня разочаровало отсутствие востребованной у фотографов функции Shoot&amp;View, которая позволяет практически мгновенно видеть на большом экране компьютера результат съемки.
+</p><p>
+Любители geek-porno скорее всего разочаруются — мы не будет модифицировать прошивку, хакать ее, вскрывать саму карту памяти. Мы будет работать со «стоковой» картой памяти, без каких либо модификаций.
+</p><p>
+Итак, в этой статье, мы разберем с вами протокол Shoot&amp;View карт памяти Transcend WiFi и напишем на python кроссплатформенный клиент, который запустится на windows, linux и MacOS. А для самых нетерпеливых, в конце статьи вас ожидает готовый python модуль для своих проектов, консольный клиент, а так же GUI утилита, которая работает на windows, linux и macos.
+
+</p><a name="habracut"/>
+
+<h4>Поиск карты памяти в сети.</h4><p>
+Карта памяти может работать в двух режимах — режим точки доступа, когда карта создает свою точку достапа, и режим подключения к точке доступа, когда карта «цепляется» к заранее прописанным в ее настройках точкам доступа. Для наших экспериментов, лучше включить режим подключения к точке доступа, предварительно настроив подключение из приложения на android или ios. Так же не забудьте настроить «Turn Off WiFi», установив Never. Эта опция отвечает за отключение WiFi, если никто не подключился к карте. На первом этапе, советую подключить карту к кард-ридеру, либо настроить фотоаппарат так, чтоб он не отключался при бездействии. 
+</p><p>
+Пожалуй начнем программировать. Для консольного клиента нам не потребуются какие либо дополнительные модули, только «батарейки в комплекте». А начнем мы с:
+
+</p><pre><code class="python">import socket
+
+class SDCard:
+	def __init__(self,home_dir=''):
+		self.home_dir=home_dir
+		# узнаем ip адрес интерфейса, к которому в данный момент подключены
+		self.ip=socket.gethostbyname(socket.gethostname())
+                # переменная для ip карты
+		self.card_ip=None
+
+
+if __name__=='__main__':
+
+	# подготовим папку для принимаемых фотографий
+	HOME_DIR=os.path.expanduser('~')
+	if not os.path.exists(HOME_DIR+'/'+'ShootAndView'):
+		os.mkdir(HOME_DIR+'/'+'ShootAndView')
+	HOME_DIR=HOME_DIR+'/ShootAndView/'
+
+	sd=SDCard(home_dir=HOME_DIR)
+</code></pre>
+<p>
+Если карта подключена к точке доступа, ее ip-адрес можно посмотреть, например, в web интерфейсе роутера, а если же у нас прямое подключение к карте, то ее ip-адрес равен 192.168.11.254 (в соответствии с дефолтными настройками). </p><p>
+Но не хотелось бы искать ее вручную, тем более создатели карты предусмотрели поиск ее в сети, как это сделано в мобильном приложении. Для этого нам нужно:
+</p><ol>
+<li>Создать сокет на порту 58255</li>
+<li>Отправить с него пустой широковещательный запрос на порт 55777</li>
+<li>Ожидать <s>чуда</s> ответа карты</li>
+</ol><p>
+Если нам повезет, то в ответ мы получим вот такой текст:
+</p><pre><code>Transcend WiFiSD - interface=mlan0
+ip=192.168.0.16
+netmask=255.255.255.0
+router=192.168.0.1
+mode=client
+essid=WiFiSDCard
+apmac=CE:5D:4E:5B:70:48
+</code></pre><p>
+Из этого всего, нам понадобится только ip адрес. Теперь осталось запрограммировать все это дело:
+</p><pre><code class="python">import os
+import socket
+import thread
+import time
+
+class SDCard:
+	def __init__(self,home_dir=''):
+		self.home_dir=home_dir
+		self.ip=socket.gethostbyname(socket.gethostname())
+		self.card_ip=None
+				
+	def find_card(self,callback=None):
+		"""запускаем поиск в отдельном потоку"""
+		thread.start_new_thread(self.find_card_thread,(callback,))
+		
+	def find_card_thread(self,callback=None):
+		
+		while not self.card_ip:
+			"""создаем UDP сокет """
+			s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+			s.settimeout(5)
+			s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+			s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)	
+			""" и биндимся на нужный порт """
+			try:s.bind((self.ip, 58255))
+			except socket.error:
+				s.close()
+				time.sleep(1)
+				continue
+
+			"""отправляем пустой широковещательный запрос на порт 55777"""
+			s.sendto('', ('&lt;broadcast&gt;', 55777))
+			try:				
+				resp=s.recv(400)
+				s.close()
+				try:
+					"""пробуем в лоб распарсить результат"""
+					self.card_ip=resp.split('ip=')[1].split('\n')[0]
+				except IndexError:
+					"""если не получилось сообщаем об этом"""
+					if callback:callback(None)					
+				
+				"""если получилось сообщаем ip"""
+				if callback:callback(self.card_ip)			
+			except socket.timeout:
+				callback(self.card_ip)
+			finally:
+				time.sleep(2)
+
+def monitor(ip):
+	if not ip:return
+	print 'Find card on ip:',ip
+	
+		
+if __name__=='__main__':
+	HOME_DIR=os.path.expanduser('~')
+	if not os.path.exists(HOME_DIR+'/'+'ShootAndView'):
+		os.mkdir(HOME_DIR+'/'+'ShootAndView')
+	HOME_DIR=HOME_DIR+'/ShootAndView/'
+	if options.dir:HOME_DIR=options.dir	
+	
+	sd=SDCard(home_dir=HOME_DIR)
+	# мне удобнее сделать все на "коллбэках",
+	# так как с GUI потом будет проще
+	sd.find_card(callback=monitor)
+	
+	# так как поиск запускаем в отдельном потоке, 
+	# приложение не должно завершаться
+	while 1:
+		time.sleep(1)
+</code></pre>
+<p>
+На самом деле, самое сложное уже позади. Осталось только узнать, как нам получать информацию о «поступлении» новых фотографий и скачивать их. 
+
+</p><h4>Получение новых фотографий.</h4><p>
+С получением фотографий все очень просто. После того, как мы нашли карту, достаточно присоединиться к карте на порт 5566. </p><p>
+Теперь, как только фотоаппарат сделает новый кадр, через 7-8 секунд к нам через открытый сокет придет информация о новых файлах, которые появились на карте, выглядит это так:
+</p><code>&gt;/mnt/DCIM/101CANON/IMG_1754.JPG<br/>
+</code><p>
+Если сделали несколько фотографий, то в одном сообщении эти строки разделены нулевым байтом (0x00)
+</p><p>
+Хочу подчеркнуть — именно через 7-8 секунд. Почему так сделано, не совсем понятно, но повлиять на это мы не можем. Так же, приходит только информация о новых снимках в формате jpeg, причем ПО карты имеет возможность вытаскивать вшитую jpg превьюшку из RAW файла (об этом чуть ниже), но программисты предпочли лишить нас возможности снимать в jpg, заставляя снимать в RAW+jpg, либо писать RAW на одну карту, а jpg на другую. Так же, у меня не получалось копировать фотографии с кард-ридера, Shoot&amp;View реагирует только на новые снимки, сделанные камерой.
+</p><p>
+Запрограммировать все это дело проще простого. Я пожалуй начну показывать отрывки кода, а полный код вы сможете найти в конце статьи:
+</p><pre><code class="python">	def listener_thread(self,callback):
+		
+		sock=socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+		# коннектимся к карте памяти
+		sock.connect((self.card_ip, 5566))
+		while self.listen_flag:
+			message=sock.recv(1024)
+			# разделяем сообщение по нулевому байту (если пришло несколько фотографий)
+			new_files=message.split('\00')
+			for x in new_files:
+				if x:
+					# добавляем все файлы в список загрузок
+					self.all_files.append(x[1:]) # x[1:] - опускаем символ "&gt;", он нам не нужен
+			# добавляем последний файл в очередь загрузок
+			self.download_list.put(self.all_files[-1])
+
+			if callback:callback(self.all_files[-1])
+</code></pre>
+
+<h4>Загрузка фотографий с карты памяти</h4><p>
+Теперь у нас есть список новых файлов, остался самый последний шаг — загрузка фотографий на компьютер. Сама по себе загрузка реализуется через встроенный веб сервер карты. Удивительно, но факт — все что мы делали раньше, а так же загрузка фотографий и некоторые действия, такие как получение списка файлов, получение превью и пр., совершенно НЕ ТРЕБУЮТ АВТОРИЗАЦИИ. То есть если карта настроена как точка доступа, и пользователь не сменил пароль WiFi, вы можете спокойно подключиться к ней, и скачать все что там есть. Надо будет как нибудь пройтись летом по туристическим местам и поискать WiFi сети среди туристов с фотоаппаратами. 
+</p><p>
+Если заглянуть в папку cgi-bin, то мы найдем много чего интересного, что может понадобиться в других проектах. Заглянуть в нее легко, достаточно поднять на карте telnet, согласно простым </p><a href="http://wwwstud.informatik.uni-rostock.de/ad001/inf/transcend-wifi-ftpd.html">инструкциям</a><p>. А внутри у нас:
+</p><img src="https://habrastorage.org/getpro/habr/post_images/a5b/463/620/a5b463620a2c7e3ab6961adf8fbabb54.png"/>
+<p>
+Например, бинарник wifi_filelist отдаст нас список файлов в директории (в формате XML), достаточно обратиться к нему так: </p><a href="http://CARD_IP/cgi-bin/wifi_filelist?fn=DIR">CARD_IP/cgi-bin/wifi_filelist?fn=DIR</a><p>, где CARD_IP — ip адрес карты памяти, который мы уже нашли, а DIR — директория (например, /mnt/DCIM). Бинарник thumbNail отдаст нам превьюшку фотографии, достаточно скормить ему таким же образом путь к файлу. Причем на стороне сервера не делается ресурсоемкий резайс фотографии, а выдергивается вшитая в jpg или в raw превьюшка.
+</p><p>
+Но нам интересна загрузка фотографии. Получение нужной фотографии реализуется простым GET запросом на адрес </p><a href="http://CARD_IP/cgi-bin/wifi_download?fn=IMAGE_PATH">CARD_IP/cgi-bin/wifi_download?fn=IMAGE_PATH</a><p>, где IMAGE_PATH путь к фотографий, который нам приходит по сокету, который мы создали выше. Для загрузки в python'e в данном случае подходит функция urlretrieve библиотеки urllib. Она позволяет сразу же сохранять результат запроса в файл, и самое главное — получать прогресс загрузки, что потом пригодится в GUI. </p><p>
+Функция загрузки выглядит так:
+</p><pre><code class="python">	def download_thread(self,download_callback,download_complete):
+		while self.listen_flag:
+			# если очередь на загрузку не пуста
+			if not self.download_list.empty():
+				# берем путь из очереди
+				fl=self.download_list.get(block=0)
+				# и загружаем его в папку с фотографиями
+				urllib.urlretrieve('http://%s/cgi-bin/wifi_download?fn=%s'%(self.card_ip,fl),self.home_dir+fl.split('/')[-1],download_callback if download_callback else None)
+				if download_complete:download_complete(self.download_now)
+			time.sleep(0.1)
+</code></pre>
+<p>
+Теперь соединим все воедино, создав готовый модуль, заодно получив консольный клиент, который будет работать на windows, linux и macos.
+
+</p><div class="spoiler"><b class="spoiler_title">sdwificard.py</b><div class="spoiler_text"><pre><code class="python">#coding:utf-8
+"""
+    Copyright (C) 2010 Igor zalomskij &lt;igor.kaist@gmail.com&gt;
+
+    This program is free software; you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation; either version 2 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License along
+    with this program; if not, write to the Free Software Foundation, Inc.,
+    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+"""
+
+import os
+import socket
+import thread
+import time
+import ping
+import Queue
+import urllib
+import sys
+
+
+
+class SDCard:
+	def __init__(self,home_dir=''):
+		self.home_dir=home_dir
+		# выясняем ip адрес сетевого интерфейса компьютера
+		self.ip=socket.gethostbyname(socket.gethostname())
+		self.card_ip=None #переменная с ip адресом карты памяти
+		self.all_files=[] # список всех файлов
+		
+		self.download_list=Queue.Queue() # очередь для загрузки фотографий
+		self.in_queue=[] # что в очереди на загрузку, понадобится в GUI
+		
+
+		
+		
+	def find_card(self,callback=None):
+		# стартуем новый поток с поиском карты
+		thread.start_new_thread(self.find_card_thread,(callback,))
+
+		
+	def find_card_thread(self,callback=None):
+		""" поток поиска карты памяти """
+		while not self.card_ip:
+			# создаем UDP сокет
+			s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+			s.settimeout(5)
+			s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+			s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)			
+			try:s.bind((self.ip, 58255)) #биндим его на нужный порт
+			except socket.error:
+				s.close()
+				time.sleep(1)
+				continue
+
+
+			# посылаем широковещательный запрос на порт 55777
+			s.sendto('', ('&lt;broadcast&gt;', 55777))
+			try:
+				resp=s.recv(400)
+				s.close()
+				try:
+					# пробуем распарсить ответ 
+					self.card_ip=resp.split('ip=')[1].split('\n')[0]
+				except IndexError:
+					# иначе сообщаем о неудаче
+					if callback:callback(None)
+		
+				if callback:callback(self.card_ip)
+			
+			except socket.timeout:
+				callback(None)
+			finally:
+				time.sleep(2)
+			
+			
+	def start_listen(self,callback=None,download_callback=None,download_complete=None):
+		""" Запуск мониторинга новых фотографий. запускаем три потока """
+		self.listen_flag=True
+		# поток сокета, который будет слушать сокет с новыми фотографиями
+		thread.start_new_thread(self.listener_thread,(callback,))
+		
+		# время от времени советую пинговать карту, чтоб она не отвелилась.
+		thread.start_new_thread(self.ping_card,())
+		
+		# поток фоновой загрузки фотографий
+		thread.start_new_thread(self.download_thread,(download_callback,download_complete))
+		
+
+		
+	def ping_card(self):
+		# пингуем карту с переодичность 20 секунд.
+		while self.listen_flag:
+			try:
+				resp=ping.do_one(self.card_ip)
+			except socket.error: # во время загрузки фотографий карта может не отвечать на пинги, это нормально
+				
+				pass
+			time.sleep(20)
+				
+			
+	def listener_thread(self,callback):
+		# поток получения информации о новых фотографиях
+		
+		sock=socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+		# коннектимся к карте на порт 5566
+		sock.connect((self.card_ip, 5566))
+		while self.listen_flag:
+			message=sock.recv(1024)
+			new_files=message.split('\00') # разделяем сообщение по нулевому байту (если пришло несколько фотографий)
+			for x in new_files:
+				if x:
+					# добавляем все файлы в список всех файлов ;)
+					self.all_files.append(x[1:]) # x[1:] отсекаем первый символ "&gt;", он нам не нужен
+			
+			self.download_list.put(self.all_files[-1]) # добавляем последний файл в очередь на загрузку
+			self.in_queue.append(self.all_files[-1]) # добавляем так же в другой список, он нужен для GUI
+			if callback:callback(self.all_files[-1]) 
+
+			
+	def download_thread(self,download_callback,download_complete):
+		# поток загрузки фотографий
+		while self.listen_flag:
+			if not self.download_list.empty(): # если очередь не пуста
+				fl=self.download_list.get(block=0)
+				self.download_now=fl # что в данный момент загружается, нужно для GUI
+				
+				# загружаем 
+				urllib.urlretrieve('http://%s/cgi-bin/wifi_download?fn=%s'%(self.card_ip,fl),self.home_dir+fl.split('/')[-1],download_callback if download_callback else None)
+				if download_complete:download_complete(self.download_now)
+			time.sleep(0.1)
+
+
+def find_callback(ip):
+	if not ip:return
+	print 'Find card on ip:',ip
+	# если определен IP адрес карты, стартуем мониторинг новых файлов
+	sd.start_listen(download_complete=download_complete)
+	
+
+def download_complete(fname):
+	print 'New image: %s'%(HOME_DIR+fname.split('/')[-1])
+	
+		
+if __name__=='__main__':
+	""" Для консольного клиента, парсим опции. Возможно пользователь
+	захочет переопределить папку для загрузки изображений, либо ip адрес интерфейса компьютера
+	"""
+	from optparse import OptionParser
+	parser = OptionParser()
+	parser.add_option("-d", "--dir", dest="dir",default=None,help="directory for storing images")
+	parser.add_option("-i", "--ip", dest="ip",default=None,help="ip address of the computer (default %s)"%(socket.gethostbyname(socket.gethostname())))
+	(options, args) = parser.parse_args()
+	# готовим папку для загрузки изображений по умолчанию.
+	HOME_DIR=os.path.expanduser('~')
+	if not os.path.exists(HOME_DIR+'/'+'ShootAndView'):
+		os.mkdir(HOME_DIR+'/'+'ShootAndView')
+	HOME_DIR=HOME_DIR+'/ShootAndView/'
+	if options.dir:HOME_DIR=options.dir
+		
+	sd=SDCard(home_dir=HOME_DIR)	
+		
+	if options.ip:sd.ip=options.ip
+	print 'Finding sd card...'
+	# запускаем поиск карты памяти
+	sd.find_card(callback=find_callback)
+		
+	while 1:
+		time.sleep(1)
+</code></pre>
+
+</div></div>
+<p>
+Я прошу не ругать меня за возможные отступления от pep-8, сейчас я практикую программирование достаточно редко, да и люблю про себя повторять: «В голове моей опилки не-бе-да, pep-8 не читал я, да-да-да».</p><p>
+Все исходные коды вы можете взять на </p><a href="https://github.com/kaist/shoot-and-view">github.com/kaist/shoot-and-view</a>
+<p>
+Забыл упомянуть, что во время работы с картой памяти, ее желательно время от времени пинговать. В скрипте я не стал искать способов делать ping на разных платформах, тем более, консольная утилита ping на некоторых платформах требует привилегий администратора. Я просто использовал </p><a href="https://gist.github.com/pklaus/856268">реализацию</a><p> ping на чистом питоне. Этот модуль нужно поместить рядом со скриптом.
+
+</p><h4>GUI</h4><p>
+Для GUI я использовал самое простое средство в питоне, это Tkinter. Он доступен «из коробки» в windows и MacOS, и к тому же занимает мало места, если собирать standalone приложение. Процесс написания GUI, пожалуй описывать не буду, ограничусь только небольшой инструкцией:
+
+</p><ol>
+<li> Импортируйте Tkinter<br/>
+<pre><code class="python">from Tkinter import * </code></pre><br/>
+</li>
+<li> Напишите GUI<br/>
+<img src="https://habrastorage.org/getpro/habr/post_images/0ef/ad7/768/0efad776809cee2a032ed0afaf4f390c.png"/><br/>
+</li>
+</ol>
+<p>
+Консольное приложение не требует дополнительных библиотек, а вот GUI версия хочет разных плюшек, таких как чтение exif, работа с изображениями и пр. Если вы хотите запустить ее из исходников (извините, на Linux я подготовил только такой вариант), то вам потребуется:
+</p><code>sudo apt-get install python-tk python-imagetk python-imaging libimage-exiftool-perl</code><p>
+А так же, установить вручную </p><a href="https://github.com/smarnach/pyexiftool">биндинг к exiftool</a><p> (</p><code>sudo python setup.py install</code><p>)</p><p>
+В windows, кроме python 2.7 и биндинга к exiftool, требуется </p><a href="http://www.pythonware.com/products/pil/">PIL</a><p> и </p><a href="http://www.sno.phy.queensu.ca/~phil/exiftool/">exiftool</a><p>.</p><p>
+Так же установка exiftool и биндинга к нему требуется на MacOS, см. ссылки выше. 
+</p><p>
+Приложение собирается при помощи py2exe на windows и py2app на MacOS, скрипты вы сможете так же найти среди исходников.
+
+</p><h4>Итог</h4><p>
+Как и обещал, для самых ленивых доступны готовые сборки для Windows и MacOS. Взять их можно на этой </p><a href="http://shootandview.zalomskij.ru">странице</a><p>. </p><p>
+Кое что из возможностей:
+</p><ul>
+<li>История съемки — возможность клавишами влево-право просмотреть предыдущую или следующую отснятую фотографию.</li>
+<li>Зум — при нажатии клавиши «проблем», фотография зуммируется до 100%</li>
+<li>Автоматический поиск карты памяти</li>
+<li>Ну и конечно же, все бесплатно для коммерческого и некоммерческого использования. Исходники доступны по лицензии GPL v2</li>
+</ul>
+<p>
+Ну и напоследок пару скриншотов:
+
+</p><img src="https://habrastorage.org/getpro/habr/post_images/95d/4e5/8ce/95d4e58ce4cb1f782d717d30b5efeb30.jpg"/>
+
+<img src="https://habrastorage.org/getpro/habr/post_images/72b/574/bfa/72b574bfa3cf53fcab54a3a360dd5e30.jpg"/>
+
+<img src="https://habrastorage.org/getpro/habr/post_images/aba/52d/707/aba52d707c2b869f679552d285eab79a.jpg"/>
+<p>
+P.S. Я собирал приложение для MacOS впервые, прошу протестировать, работает ли, особенно не на машине python разработчиков )
+
+</p><i>Эта статья распространяется на условиях лицензии <a href="http://creativecommons.org/licenses/by/3.0/">Creative Commons Attribution 3.0 Unported (CC BY 3.0)</a></i>
+
+      
+      <p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

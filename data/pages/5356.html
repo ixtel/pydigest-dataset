@@ -1,0 +1,182 @@
+<html><body><div><div class="content">
+      
+        <h1 class="content-title">Introduction to the fast new UnQLite Python Bindings</h1>
+      
+      
+      
+  
+  
+  
+    <p><a href="http://media.charlesleifer.com/blog/photos/unqlite-python-logo.png" title="photos/unqlite-python-logo.png"><img alt="photos/unqlite-python-logo.png" class="img-responsive" src="http://m.charlesleifer.com/t/800x-/blog/photos/unqlite-python-logo.png?key=m1SD_5CkQhuMapcV4nGRVw"/></a></p>
+<p>About a year ago, <a href="/blog/python-bindings-for-unqlite-an-embedded-nosql-database-json-document-store/">I blogged</a> about some <a href="https://github.com/coleifer/unqlite-python">Python bindings</a> I wrote for the embedded NoSQL document store <a href="http://unqlite.org">UnQLite</a>. One year later I'm happy to announce that I've rewritten the library using <a href="http://cython.org">Cython</a> and operations are, in most cases, an order of magnitude faster.</p>
+<p>This was my first real attempt at using Cython and the experience was just the right mix of challenging and rewarding. I bought the <a href="http://shop.oreilly.com/product/0636920033431.do">O'Reilly Cython Book</a> which came in super handy, so if you're interested in getting started with Cython I recommend picking up a copy.</p>
+<p>In this post I'll quickly touch on the features of UnQLite, then show you how to use the Python bindings. When you're done reading you should hopefully be ready to use UnQLite in your next Python project.</p>
+<h3>What is UnQLite?</h3>
+<p><a href="http://unqlite.org">UnQLite</a> is a serverless JSON document store built on a fast key/value database. The key/value features make UnQLite kin to DBM-style databases (BerkeleyDB, KyotoCabinet), while the JSON document store is closer to something like MongoDB. UnQLite occupies an especially unique place in the NoSQL world, though, through it's use of a special scripting language to manage the JSON document store. To make an analogy, UnQLite is to MongoDB what SQLite is to Postgres, and the Jx9 scripting language serves the same purpose in UnQLite as SQL does in SQLite. (Note that although UnQLite sounds like SQLite, the projects are not affiliated).</p>
+<p>Here is a quick run-down of some of the <a href="http://unqlite.org/features.html">features</a> UnQLite's creators, <a href="http://www.symisc.net/">Symisc Systems</a>, decided were worth putting on the project's homepage:</p>
+<ul>
+<li>Serverless, NoSQL database.</li>
+<li>Transactional (ACID) database.</li>
+<li>Zero config.</li>
+<li>Single database file, no temporary files.</li>
+<li>Cross-platform file format.</li>
+<li>Self-contained C library without dependencies.</li>
+<li>Standard <a href="http://unqlite.org/features.html#kv_store">key/value store</a> with powerful disk storage engine supporting O(1) lookup time.</li>
+<li>Document store (JSON) database via <a href="http://unqlite.org/jx9.html">Jx9</a>.</li>
+<li>Cursors for linear record traversal.</li>
+<li>Supports Terabyte sized databases.</li>
+<li>BSD licensed.</li>
+</ul>
+<h3>Installing UnQLite</h3>
+<p>To get started, let's create a <a href="https://virtualenv.pypa.io/en/latest/">virtualenv</a> and install <a href="https://github.com/coleifer/unqlite-python">unqlite-python</a>. <code>unqlite-python</code> comes with a pre-generated C source-code file for the extension, but if you'd like you can install Cython and a new source file will be generated.</p>
+<div class="highlight"><pre><span class="gp">$</span> virtualenv unqlite-demo
+<span class="go">New python executable in unqlite-demo/bin/python2</span>
+<span class="go">Also creating executable in unqlite-demo/bin/python</span>
+<span class="go">Installing setuptools, pip...done.</span>
+
+<span class="gp">$</span> <span class="nb">cd</span> unqlite-demo
+<span class="gp">$</span> <span class="nb">source</span> bin/activate
+<span class="gp">(unqlite-demo) $</span> pip install Cython unqlite
+
+<span class="go">...</span>
+
+<span class="go">Successfully built Cython unqlite</span>
+<span class="go">Installing collected packages: Cython, unqlite</span>
+<span class="go">Successfully installed Cython-0.22.1 unqlite-0.4.1</span>
+</pre></div>
+<p>You can verify your install worked by running the following, which should produce no output:</p>
+<div class="highlight"><pre><span class="gp">$</span> python -c <span class="s2">"import unqlite; unqlite.UnQLite()"</span>
+</pre></div>
+<h3>Key/Value Features</h3>
+<p>If UnQLite were only a key/value store, it would still be a fantastic database thanks to it's speed, cursors and transaction support. In this section we'll take a look at how to use the key/value features of UnQLite.</p>
+<p>UnQLite databases can reside in a single file on disk, or entirely in memory. To begin working with UnQLite, the first step is to create a database object:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">unqlite</span> <span class="kn">import</span> <span class="n">UnQLite</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="n">db</span> <span class="o">=</span> <span class="n">UnQLite</span><span class="p">()</span>
+</pre></div>
+<p>The above statements will create an in-memory database. To use a file, you would instead pass in the filename when instantiating your <code>db</code> object.</p>
+<p><code>unqlite-python</code> implements a similar API to Python's <code>dict</code> object, so it should feel pretty familiar:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">db</span><span class="p">[</span><span class="s1">'foo'</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'bar'</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="k">print</span> <span class="n">db</span><span class="p">[</span><span class="s1">'foo'</span><span class="p">]</span>
+<span class="go">bar</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="s1">'foo'</span> <span class="ow">in</span> <span class="n">db</span>
+<span class="go">True</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="k">del</span> <span class="n">db</span><span class="p">[</span><span class="s1">'foo'</span><span class="p">]</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="nb">len</span><span class="p">(</span><span class="n">db</span><span class="p">)</span>
+<span class="go">0</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">db</span><span class="o">.</span><span class="n">update</span><span class="p">({</span><span class="s1">'huey'</span><span class="p">:</span> <span class="s1">'kitty'</span><span class="p">,</span> <span class="s1">'mickey'</span><span class="p">:</span> <span class="s1">'puppy'</span><span class="p">})</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="k">print</span> <span class="p">[</span><span class="n">item</span> <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">db</span><span class="p">]</span>
+<span class="go">[('huey', 'kitty'), ('mickey', 'puppy')]</span>
+</pre></div>
+<p>As shown in the example above, you can iterate directly over the database, which will yield key/value pairs. <code>unqlite-python</code> databases also support <code>keys()</code> and <code>values()</code> methods.</p>
+<p>For finer-grained iteration, you can use <a href="http://unqlite-python.readthedocs.org/en/latest/api.html#Cursor">Cursors</a>.</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">7</span><span class="p">):</span>
+<span class="gp">... </span>   <span class="n">db</span><span class="p">[</span><span class="s1">'k</span><span class="si">%s</span><span class="s1">'</span> <span class="o">%</span> <span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'v</span><span class="si">%s</span><span class="s1">'</span> <span class="o">%</span> <span class="n">i</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="k">with</span> <span class="n">db</span><span class="o">.</span><span class="n">cursor</span><span class="p">()</span> <span class="k">as</span> <span class="n">cursor</span><span class="p">:</span>
+<span class="gp">... </span>    <span class="n">cursor</span><span class="o">.</span><span class="n">seek</span><span class="p">(</span><span class="s1">'k4'</span><span class="p">)</span>
+<span class="gp">... </span>    <span class="k">print</span> <span class="n">cursor</span><span class="o">.</span><span class="n">value</span><span class="p">()</span>
+<span class="gp">... </span>    <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">cursor</span><span class="p">:</span>  <span class="c1"># Cursors are also iterable.</span>
+<span class="gp">... </span>        <span class="k">print</span> <span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="n">value</span><span class="p">)</span>
+<span class="gp">...</span>
+<span class="go">v4</span>
+<span class="go">('k4', 'v4')</span>
+<span class="go">('k5', 'v5')</span>
+<span class="go">('k6', 'v6')</span>
+</pre></div>
+<p>If you're using a file-backed database, UnQLite supports <a href="http://unqlite-python.readthedocs.org/en/latest/api.html#UnQLite.transaction">transactions</a>. The simplest way to use transactions is as a context manager:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">db</span> <span class="o">=</span> <span class="n">UnQLite</span><span class="p">(</span><span class="s1">'/tmp/test.udb'</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="k">with</span> <span class="n">db</span><span class="o">.</span><span class="n">transaction</span><span class="p">():</span>
+<span class="gp">... </span>    <span class="n">db</span><span class="p">[</span><span class="s1">'foo'</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'bar'</span>
+<span class="gp">...</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="k">print</span> <span class="n">db</span><span class="p">[</span><span class="s1">'foo'</span><span class="p">]</span>
+<span class="go">bar</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="k">with</span> <span class="n">db</span><span class="o">.</span><span class="n">transaction</span><span class="p">():</span>
+<span class="gp">... </span>    <span class="n">db</span><span class="p">[</span><span class="s1">'foo'</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'baze'</span>
+<span class="gp">... </span>    <span class="n">db</span><span class="o">.</span><span class="n">rollback</span><span class="p">()</span>  <span class="c1"># Undo the changes.</span>
+<span class="gp">...</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="k">print</span> <span class="n">db</span><span class="p">[</span><span class="s1">'foo'</span><span class="p">]</span>  <span class="c1"># Prints the original value.</span>
+<span class="go">bar</span>
+</pre></div>
+<h3>JSON Document Store</h3>
+<p>UnQLite has this <a href="http://jx9.symisc.net/">crazy scripting language</a> baked-in, which is used to query the JSON document store. Jx9 serves the same purpose in UnQLite as SQL does in SQLite, but it can also do a whole lot of crazy stuff.</p>
+<p>I took some care to make it really easy to pass Python values into the Jx9 scripts, and pull them back out after execution. Here is a silly example:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">script</span> <span class="o">=</span> <span class="s2">"""</span>
+<span class="gp">... </span><span class="s2">$my_data = {</span>
+<span class="gp">... </span><span class="s2">    os_name: uname(), // jx9 builtin function</span>
+<span class="gp">... </span><span class="s2">    date: __DATE__, // another builtin</span>
+<span class="gp">... </span><span class="s2">    foo: $py_value // just a simple key/value.</span>
+<span class="gp">... </span><span class="s2">};</span>
+<span class="gp">... </span><span class="s2">"""</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="k">with</span> <span class="n">db</span><span class="o">.</span><span class="n">vm</span><span class="p">(</span><span class="n">script</span><span class="p">)</span> <span class="k">as</span> <span class="n">jx9_vm</span><span class="p">:</span>
+<span class="gp">... </span>    <span class="n">jx9_vm</span><span class="p">[</span><span class="s1">'py_value'</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span><span class="s1">'baze'</span><span class="p">:</span> <span class="s1">'nugget'</span><span class="p">}</span>  <span class="c1"># Set the value of $py_value</span>
+<span class="gp">... </span>    <span class="n">jx9_vm</span><span class="o">.</span><span class="n">execute</span><span class="p">()</span>
+<span class="gp">... </span>    <span class="k">print</span> <span class="n">jx9_vm</span><span class="p">[</span><span class="s1">'my_data'</span><span class="p">]</span>  <span class="c1"># Extract $my_data from the executed script.</span>
+<span class="gp">...</span>
+<span class="go">{'date': '2015-07-21', 'os_name': 'Linux 4.0.7-2-ARCH #1 ... lambda x86_64', 'foo': {'baze': 'nugget'}}</span>
+</pre></div>
+<p>This procedural scripting language is used to work with <a href="http://unqlite-python.readthedocs.org/en/latest/api.html#Collection">Collections</a> of JSON documents. Rather than forcing you to write Jx9 scripts, <code>unqlite-python</code> abstracts away some of the most common operations behind a <code>Collection</code> class:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">users</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">collection</span><span class="p">(</span><span class="s1">'users'</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">users</span><span class="o">.</span><span class="n">create</span><span class="p">()</span>  <span class="c1"># Create the collection.</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="n">users</span><span class="o">.</span><span class="n">store</span><span class="p">({</span>
+<span class="gp">... </span>    <span class="s1">'name'</span><span class="p">:</span> <span class="s1">'Charlie'</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="s1">'pets'</span><span class="p">:</span> <span class="p">[{</span><span class="s1">'name'</span><span class="p">:</span> <span class="s1">'mickey'</span><span class="p">},</span> <span class="p">{</span><span class="s1">'name'</span><span class="p">:</span> <span class="s1">'huey'</span><span class="p">}],</span>
+<span class="gp">... </span>    <span class="s1">'best friends'</span><span class="p">:</span> <span class="p">[</span><span class="s1">'Leslie'</span><span class="p">,</span> <span class="s1">'Connor'</span><span class="p">],</span>
+<span class="gp">... </span><span class="p">})</span>
+<span class="go">0</span>
+</pre></div>
+<p>When we store an object, UnQLite returns the <code>__id</code> of the newly-created document. Multiple objects can be stored by passing in a list of dictionaries. To update an object, simply specify the <code>__id</code> and the dictionary of new data:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">users</span><span class="o">.</span><span class="n">store</span><span class="p">([{</span><span class="s1">'name'</span><span class="p">:</span> <span class="s1">'Leslie'</span><span class="p">},</span> <span class="p">{</span><span class="s1">'name'</span><span class="p">:</span> <span class="s1">'Connor'</span><span class="p">,</span> <span class="s1">'type'</span><span class="p">:</span> <span class="s1">'baby'</span><span class="p">}])</span>
+<span class="go">2</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">users</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="p">{</span><span class="s1">'name'</span><span class="p">:</span> <span class="s1">'Leslie'</span><span class="p">,</span> <span class="s1">'favorite_color'</span><span class="p">:</span> <span class="s1">'green'</span><span class="p">})</span>
+<span class="go">True</span>
+</pre></div>
+<p>To view the documents in a collection, you can call <code>Collection.all()</code>:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">users</span><span class="o">.</span><span class="n">all</span><span class="p">()</span>
+<span class="go">[{'__id': 0,</span>
+<span class="go">  'best friends': ['Leslie', 'Connor'],</span>
+<span class="go">  'name': 'Charlie',</span>
+<span class="go">  'pets': ['mickey', 'huey']},</span>
+<span class="go"> {'__id': 1, 'favorite color': 'green'},</span>
+<span class="go"> {'__id': 2, 'name': 'Connor', 'type': 'baby'}]</span>
+</pre></div>
+<p>Things get neat when it comes to filtering collections. To filter a collection, you write a filter function <strong>in Python</strong>, and <code>unqlite-python</code> will expose it to a Jx9 script that performs the filtering:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="k">def</span> <span class="nf">babies</span><span class="p">(</span><span class="n">document</span><span class="p">):</span>
+<span class="gp">... </span>    <span class="k">return</span> <span class="n">document</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'type'</span><span class="p">)</span> <span class="o">==</span> <span class="s1">'baby'</span>
+<span class="gp">...</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="n">users</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="n">babies</span><span class="p">)</span>
+<span class="go">[{'__id': 2, 'name': 'Connor', 'type': 'baby'}]</span>
+</pre></div>
+<p>For more information about collections, check out the <a href="http://unqlite-python.readthedocs.org/en/latest/api.html#Collection">unqlite-python documentation</a>.</p>
+<h3>Thanks for reading</h3>
+<p>Thanks for taking the time to read this post, I hope you found the content interesting. I think UnQLite is one of those weird quirky projects that would be fun to build all sorts of little apps with. It could be used as a cache, of course, but you could go deep into learning <a href="http://jx9.symisc.net/intro.html">Jx9</a> and write all sorts of crazy stuff.</p>
+<p>If you have any questions or comments, please <a href="#comments">leave a comment</a> or <a href="/contact/">contact me</a>. If you are trying out <code>unqlite-python</code> and believe you've found a bug, don't hesitate to <a href="https://github.com/coleifer/unqlite-python/issues/new">create a ticket on GitHub</a>.</p>
+<h4>Links</h4>
+<p>Here are some links you may find useful:</p>
+
+<p>Here are some related blog posts that you may enjoy:</p>
+
+  
+  
+
+  
+  
+  
+
+  
+  
+  
+
+
+<hr/>
+
+  <p>Commenting has been closed, but please feel free to <a href="/contact/">contact me</a></p>
+
+
+    </div>
+
+    </div></body></html>

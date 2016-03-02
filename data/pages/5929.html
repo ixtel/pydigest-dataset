@@ -1,0 +1,347 @@
+<html><body><div><div class="post-content">
+        
+
+        
+
+        
+        <h2>Introduction</h2>
+<p>Database tuning is often considered unnecessary, and many people leave it for the very end of development or completely skip that part. I'll be covering logging, backups, indexing and orm role, in order to give you some insight into different database related tasks.</p>
+<h2>Logging</h2>
+<p>The thing that many people don't get right when it comes to configuring postgresql properly is logging.</p>
+
+<figure class="figure-code code"><figcaption><span>
+</span></figcaption><div class="highlight"><pre><span class="gp">$ </span>vi postgresql.conf
+  log_destination <span class="o">=</span> <span class="s1">'stderr'</span> <span class="c"># replace with csvlog when you use scripts/tools to analyze logs
+</span>
+  logging_collector <span class="o">=</span> on <span class="c"># switch log functionality on
+</span>
+  log_directory <span class="o">=</span> <span class="s1">'/var/log/postgresql'</span> <span class="c"># where our logs will go
+</span>
+  log_filename <span class="o">=</span> <span class="s1">'postgresql-%Y-%m-%d.log'</span> <span class="c"># log file naming strategy
+</span>
+  log_rotation_age <span class="o">=</span> 1d <span class="c"># log files larger older than 512MB will be rotated
+</span>
+  log_rotation_size <span class="o">=</span> 512MB <span class="c"># log files larger than 512MB will be rotated
+</span>
+  log_min_duration_statement <span class="o">=</span> 50 <span class="c"># each query above 50ms will be logged
+</span>
+  log_line_prefix <span class="o">=</span> <span class="s1">'%t [%p]: [%l-1] db=%d,user=%u '</span> <span class="c"># how our logs will be written
+</span>
+  log_checkpoints <span class="o">=</span> on
+  log_connections <span class="o">=</span> on
+  log_disconnections <span class="o">=</span> on
+  log_hostname <span class="o">=</span> on
+  log_lock_waits <span class="o">=</span> on
+  log_temp_files <span class="o">=</span> 0  
+</pre></div>
+</figure><p>connections, disconnections, lock_waits, temp_files, checkpoints not only give us some overview but may be helpful to debug other configuration parameters that rely for instance on memory.</p>
+
+<p>You can rely on that logging configuration for most of you projects - having them rotated daily with reasonable metadata will surely help you analyse the problems and bottlenecks of you DB setup.</p>
+<h2>Logging - PgBadger</h2>
+<p>Logging itself is a useful little feature, but we can do better :) We can have our logs analyzed by <a href="http://dalibo.github.io/pgbadger/">pgBadger</a>. Which will not only aggregate some useful information like crud statistics, but provide a nice graphical representation of what's being done in our database.</p>
+
+<p>Typical setup involves:</p>
+
+<ol>
+<li>Downloading &amp; installing pgbadger according to official documentation.</li>
+<li>Setting up a cronjob that uses bash script which handles log files from /var/log/postgresql on a daily basis, creates pgbadger report and stores/uploads it somehwere.</li>
+</ol>
+<p>There're many tutorials and guides how to setup pgbadger and tie it with cron: <a href="http://www.antelink.com/blog/using-pgbadger-monitor-your-postgresql-activity.html">http://www.antelink.com/blog/using-pgbadger-monitor-your-postgresql-activity.html</a>. In the end You'll be able to get visual representation of database queries which may look for instance like that:</p>
+
+<p><img class="center" src="http://user-image.logdown.io/user/13708/blog/12924/post/288762/DaPZJCbqTA2Qs5xeSyBc_img.png" alt="img.png"/></p>
+<h2>Backups</h2>
+<p>There is no golden rule here, backup setup depends on project's business value and couple of other factors. For a small project having a small bash script which performs pg_dump and later pushing the output file to remote destination should be enough.</p>
+
+<figure class="figure-code code"><figcaption><span>
+</span></figcaption><div class="highlight"><pre>touch ~/scripts/database_backup.sh <span class="o">&amp;&amp;</span> vi ~/scripts/database_backup.sh
+</pre></div>
+</figure><p>Add following script to the created file.</p>
+
+<figure class="figure-code code"><figcaption><span>
+</span></figcaption><div class="highlight"><pre><span class="c">#!/bin/bash
+</span>
+pg_dump -h localhost -U &lt;user&gt; --no-password -F t &lt;database&gt; &gt; /srv/backups/database/db-backup-<span class="sb">`</span>date +<span class="s2">"%s"</span><span class="sb">`</span>.sql.tar
+</pre></div>
+</figure><p>Save the file and create a cron entry:</p>
+
+<figure class="figure-code code"><figcaption><span>
+</span></figcaption><div class="highlight"><pre>crontab -e
+<span class="c"># Database backup
+</span>
+0 0,12,19 <span class="k">*</span> <span class="k">*</span> <span class="k">*</span> sh /home/&lt;user&gt;/scripts/database_backup.sh
+</pre></div>
+</figure><p>It's an anti-pattern to store backups on the same server so either connect to your database from remote location or have it another way and create a script that will push your backups to another destination. </p>
+<h2>Backups - WAL-e</h2>
+<p><a href="https://github.com/heroku/WAL-E">WAL-e</a> is a tool created by heroku that provides continous archiving of WAL segments. To put it simply: if your app can't afford to loose transactions it's a way to go.</p>
+
+<p>All your WAL files will be stored on S3 for backups, in case You need them. WAL is basically a utility which is used by postgresql when it comes to keeping track of database changes before they're applied. Archiving WAL segments with WAL-E will allow you to restore your database to the state from just before a crash.</p>
+<h2>Flock</h2>
+<p>It's not exactly part of this tutorial, but since I've mentioned creating cronjobs I think it's a good time to introduce You to <a href="http://manpages.ubuntu.com/manpages/jaunty/man1/flock.1.html">flock</a>. Most of linux distributions have a command called flock, which will run a command only if it can get a lock on a certain file. </p>
+
+<p>So changing our entry in crontab to:</p>
+
+<figure class="figure-code code"><figcaption><span>
+</span></figcaption><div class="highlight"><pre>flock -n /tmp/database_backup.lock -c sh /home/&lt;user&gt;/scripts/database_backup.sh
+</pre></div>
+</figure><p>will prevent us from running duplicate cronjobs, which not only slows server but may lead to hard to track errors. That's how You can easily take care of problems that your cronjobs make cause. Personally, I wrap all crontab entries with flock and I recommend You to do so.</p>
+<h2>Indexes</h2>
+<p>No golden rule here. First play with EXPLAIN ANALYZE to find slow queries. If that's not an option at some point use pgbadger and logs to find queries that may suffer without indexes. </p>
+
+<p>Use partial indexes (also known as filtered) for stuff like:</p>
+
+<ul>
+<li>querying database against a column which is NULL for most of the rows</li>
+<li>querying database against some business value (salary, point of time, status or kind field)</li>
+</ul>
+<p>for instance:</p>
+
+<figure class="figure-code code"><figcaption><span>
+</span></figcaption><div class="highlight"><pre><span class="k">SELECT</span> <span class="o">*</span> <span class="k">from</span> <span class="n">orders</span> <span class="k">where</span> <span class="n">payment_deadline</span> <span class="k">IS</span> <span class="k">NOT</span> <span class="k">NULL</span><span class="p">;</span>
+</pre></div>
+</figure><p>or </p>
+
+<figure class="figure-code code"><figcaption><span>
+</span></figcaption><div class="highlight"><pre><span class="k">SELECT</span> <span class="o">*</span> <span class="k">from</span> <span class="n">orders</span> <span class="k">where</span> <span class="n">owner_id</span> <span class="k">WHERE</span> <span class="n">value</span> <span class="o">&gt;</span> <span class="mi">1000</span><span class="p">;</span>
+</pre></div>
+</figure><p>This will index only subset of rows, which will keep index size significantly smaller compared to situation in which you'd index whole table.</p>
+
+<p>Use composite indexes (known also as multicolumn) to index queries that rely constantly on same filtering conditions, like:</p>
+
+<figure class="figure-code code"><figcaption><span>
+</span></figcaption><div class="highlight"><pre><span class="k">SELECT</span> <span class="o">*</span> <span class="k">from</span> <span class="n">orders</span> <span class="k">where</span> <span class="n">owner_id</span> <span class="o">=</span> <span class="o">&lt;</span><span class="n">owner_id</span><span class="o">&gt;</span> <span class="k">AND</span> <span class="n">status</span> <span class="o">=</span> <span class="o">&lt;</span><span class="n">status</span><span class="o">&gt;</span><span class="p">;</span>
+</pre></div>
+</figure><p>Generally, indexing foreign keys can be considered good practice (some SQL databases do that automatically). For that You may find the following query useful (shamelessly borrowed from <a href="https://github.com/pgexperts/pgx_scripts/blob/master/indexes/fk_no_index.sql">here</a>):</p>
+
+<figure class="figure-code code"><figcaption><span>
+</span></figcaption><div class="highlight"><pre><span class="k">WITH</span> <span class="n">fk_actions</span> <span class="p">(</span> <span class="n">code</span><span class="p">,</span> <span class="n">action</span> <span class="p">)</span> <span class="k">AS</span> <span class="p">(</span>
+    <span class="k">VALUES</span> <span class="p">(</span> <span class="s1">'a'</span><span class="p">,</span> <span class="s1">'error'</span> <span class="p">),</span>
+        <span class="p">(</span> <span class="s1">'r'</span><span class="p">,</span> <span class="s1">'restrict'</span> <span class="p">),</span>
+        <span class="p">(</span> <span class="s1">'c'</span><span class="p">,</span> <span class="s1">'cascade'</span> <span class="p">),</span>
+        <span class="p">(</span> <span class="s1">'n'</span><span class="p">,</span> <span class="s1">'set null'</span> <span class="p">),</span>
+        <span class="p">(</span> <span class="s1">'d'</span><span class="p">,</span> <span class="s1">'set default'</span> <span class="p">)</span>
+<span class="p">),</span>
+<span class="n">fk_list</span> <span class="k">AS</span> <span class="p">(</span>
+    <span class="k">SELECT</span> <span class="n">pg_constraint</span><span class="p">.</span><span class="n">oid</span> <span class="k">as</span> <span class="n">fkoid</span><span class="p">,</span> <span class="n">conrelid</span><span class="p">,</span> <span class="n">confrelid</span> <span class="k">as</span> <span class="n">parentid</span><span class="p">,</span>
+        <span class="n">conname</span><span class="p">,</span> <span class="n">relname</span><span class="p">,</span> <span class="n">nspname</span><span class="p">,</span>
+        <span class="n">fk_actions_update</span><span class="p">.</span><span class="n">action</span> <span class="k">as</span> <span class="n">update_action</span><span class="p">,</span>
+        <span class="n">fk_actions_delete</span><span class="p">.</span><span class="n">action</span> <span class="k">as</span> <span class="n">delete_action</span><span class="p">,</span>
+        <span class="n">conkey</span> <span class="k">as</span> <span class="n">key_cols</span>
+    <span class="k">FROM</span> <span class="n">pg_constraint</span>
+        <span class="k">JOIN</span> <span class="n">pg_class</span> <span class="k">ON</span> <span class="n">conrelid</span> <span class="o">=</span> <span class="n">pg_class</span><span class="p">.</span><span class="n">oid</span>
+        <span class="k">JOIN</span> <span class="n">pg_namespace</span> <span class="k">ON</span> <span class="n">pg_class</span><span class="p">.</span><span class="n">relnamespace</span> <span class="o">=</span> <span class="n">pg_namespace</span><span class="p">.</span><span class="n">oid</span>
+        <span class="k">JOIN</span> <span class="n">fk_actions</span> <span class="k">AS</span> <span class="n">fk_actions_update</span> <span class="k">ON</span> <span class="n">confupdtype</span> <span class="o">=</span> <span class="n">fk_actions_update</span><span class="p">.</span><span class="n">code</span>
+        <span class="k">JOIN</span> <span class="n">fk_actions</span> <span class="k">AS</span> <span class="n">fk_actions_delete</span> <span class="k">ON</span> <span class="n">confdeltype</span> <span class="o">=</span> <span class="n">fk_actions_delete</span><span class="p">.</span><span class="n">code</span>
+    <span class="k">WHERE</span> <span class="n">contype</span> <span class="o">=</span> <span class="s1">'f'</span>
+<span class="p">),</span>
+<span class="n">fk_attributes</span> <span class="k">AS</span> <span class="p">(</span>
+    <span class="k">SELECT</span> <span class="n">fkoid</span><span class="p">,</span> <span class="n">conrelid</span><span class="p">,</span> <span class="n">attname</span><span class="p">,</span> <span class="n">attnum</span>
+    <span class="k">FROM</span> <span class="n">fk_list</span>
+        <span class="k">JOIN</span> <span class="n">pg_attribute</span>
+            <span class="k">ON</span> <span class="n">conrelid</span> <span class="o">=</span> <span class="n">attrelid</span>
+            <span class="k">AND</span> <span class="n">attnum</span> <span class="o">=</span> <span class="k">ANY</span><span class="p">(</span> <span class="n">key_cols</span> <span class="p">)</span>
+    <span class="k">ORDER</span> <span class="k">BY</span> <span class="n">fkoid</span><span class="p">,</span> <span class="n">attnum</span>
+<span class="p">),</span>
+<span class="n">fk_cols_list</span> <span class="k">AS</span> <span class="p">(</span>
+    <span class="k">SELECT</span> <span class="n">fkoid</span><span class="p">,</span> <span class="n">array_agg</span><span class="p">(</span><span class="n">attname</span><span class="p">)</span> <span class="k">as</span> <span class="n">cols_list</span>
+    <span class="k">FROM</span> <span class="n">fk_attributes</span>
+    <span class="k">GROUP</span> <span class="k">BY</span> <span class="n">fkoid</span>
+<span class="p">),</span>
+<span class="n">index_list</span> <span class="k">AS</span> <span class="p">(</span>
+    <span class="k">SELECT</span> <span class="n">indexrelid</span> <span class="k">as</span> <span class="n">indexid</span><span class="p">,</span>
+        <span class="n">pg_class</span><span class="p">.</span><span class="n">relname</span> <span class="k">as</span> <span class="n">indexname</span><span class="p">,</span>
+        <span class="n">indrelid</span><span class="p">,</span>
+        <span class="n">indkey</span><span class="p">,</span>
+        <span class="n">indpred</span> <span class="k">is</span> <span class="k">not</span> <span class="k">null</span> <span class="k">as</span> <span class="n">has_predicate</span><span class="p">,</span>
+        <span class="n">pg_get_indexdef</span><span class="p">(</span><span class="n">indexrelid</span><span class="p">)</span> <span class="k">as</span> <span class="n">indexdef</span>
+    <span class="k">FROM</span> <span class="n">pg_index</span>
+        <span class="k">JOIN</span> <span class="n">pg_class</span> <span class="k">ON</span> <span class="n">indexrelid</span> <span class="o">=</span> <span class="n">pg_class</span><span class="p">.</span><span class="n">oid</span>
+    <span class="k">WHERE</span> <span class="n">indisvalid</span>
+<span class="p">),</span>
+<span class="n">fk_index_match</span> <span class="k">AS</span> <span class="p">(</span>
+    <span class="k">SELECT</span> <span class="n">fk_list</span><span class="p">.</span><span class="o">*</span><span class="p">,</span>
+        <span class="n">indexid</span><span class="p">,</span>
+        <span class="n">indexname</span><span class="p">,</span>
+        <span class="n">indkey</span><span class="p">::</span><span class="n">int</span><span class="p">[]</span> <span class="k">as</span> <span class="n">indexatts</span><span class="p">,</span>
+        <span class="n">has_predicate</span><span class="p">,</span>
+        <span class="n">indexdef</span><span class="p">,</span>
+        <span class="n">array_length</span><span class="p">(</span><span class="n">key_cols</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span> <span class="k">as</span> <span class="n">fk_colcount</span><span class="p">,</span>
+        <span class="n">array_length</span><span class="p">(</span><span class="n">indkey</span><span class="p">,</span><span class="mi">1</span><span class="p">)</span> <span class="k">as</span> <span class="n">index_colcount</span><span class="p">,</span>
+        <span class="n">round</span><span class="p">(</span><span class="n">pg_relation_size</span><span class="p">(</span><span class="n">conrelid</span><span class="p">)</span><span class="o">/</span><span class="p">(</span><span class="mi">1024</span><span class="o">^</span><span class="mi">2</span><span class="p">)::</span><span class="n">numeric</span><span class="p">)</span> <span class="k">as</span> <span class="n">table_mb</span><span class="p">,</span>
+        <span class="n">cols_list</span>
+    <span class="k">FROM</span> <span class="n">fk_list</span>
+        <span class="k">JOIN</span> <span class="n">fk_cols_list</span> <span class="k">USING</span> <span class="p">(</span><span class="n">fkoid</span><span class="p">)</span>
+        <span class="k">LEFT</span> <span class="k">OUTER</span> <span class="k">JOIN</span> <span class="n">index_list</span>
+            <span class="k">ON</span> <span class="n">conrelid</span> <span class="o">=</span> <span class="n">indrelid</span>
+            <span class="k">AND</span> <span class="p">(</span><span class="n">indkey</span><span class="p">::</span><span class="n">int2</span><span class="p">[])[</span><span class="mi">0</span><span class="p">:(</span><span class="n">array_length</span><span class="p">(</span><span class="n">key_cols</span><span class="p">,</span><span class="mi">1</span><span class="p">)</span> <span class="o">-</span><span class="mi">1</span><span class="p">)]</span> <span class="o">@&gt;</span> <span class="n">key_cols</span>
+
+<span class="p">),</span>
+<span class="n">fk_perfect_match</span> <span class="k">AS</span> <span class="p">(</span>
+    <span class="k">SELECT</span> <span class="n">fkoid</span>
+    <span class="k">FROM</span> <span class="n">fk_index_match</span>
+    <span class="k">WHERE</span> <span class="p">(</span><span class="n">index_colcount</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)</span> <span class="o">&lt;=</span> <span class="n">fk_colcount</span>
+        <span class="k">AND</span> <span class="k">NOT</span> <span class="n">has_predicate</span>
+        <span class="k">AND</span> <span class="n">indexdef</span> <span class="k">LIKE</span> <span class="s1">'%USING btree%'</span>
+<span class="p">),</span>
+<span class="n">fk_index_check</span> <span class="k">AS</span> <span class="p">(</span>
+    <span class="k">SELECT</span> <span class="s1">'no index'</span> <span class="k">as</span> <span class="n">issue</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="mi">1</span> <span class="k">as</span> <span class="n">issue_sort</span>
+    <span class="k">FROM</span> <span class="n">fk_index_match</span>
+    <span class="k">WHERE</span> <span class="n">indexid</span> <span class="k">IS</span> <span class="k">NULL</span>
+    <span class="k">UNION</span> <span class="k">ALL</span>
+    <span class="k">SELECT</span> <span class="s1">'questionable index'</span> <span class="k">as</span> <span class="n">issue</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="mi">2</span>
+    <span class="k">FROM</span> <span class="n">fk_index_match</span>
+    <span class="k">WHERE</span> <span class="n">indexid</span> <span class="k">IS</span> <span class="k">NOT</span> <span class="k">NULL</span>
+        <span class="k">AND</span> <span class="n">fkoid</span> <span class="k">NOT</span> <span class="k">IN</span> <span class="p">(</span>
+            <span class="k">SELECT</span> <span class="n">fkoid</span>
+            <span class="k">FROM</span> <span class="n">fk_perfect_match</span><span class="p">)</span>
+<span class="p">),</span>
+<span class="n">parent_table_stats</span> <span class="k">AS</span> <span class="p">(</span>
+    <span class="k">SELECT</span> <span class="n">fkoid</span><span class="p">,</span> <span class="n">tabstats</span><span class="p">.</span><span class="n">relname</span> <span class="k">as</span> <span class="n">parent_name</span><span class="p">,</span>
+        <span class="p">(</span><span class="n">n_tup_ins</span> <span class="o">+</span> <span class="n">n_tup_upd</span> <span class="o">+</span> <span class="n">n_tup_del</span> <span class="o">+</span> <span class="n">n_tup_hot_upd</span><span class="p">)</span> <span class="k">as</span> <span class="n">parent_writes</span><span class="p">,</span>
+        <span class="n">round</span><span class="p">(</span><span class="n">pg_relation_size</span><span class="p">(</span><span class="n">parentid</span><span class="p">)</span><span class="o">/</span><span class="p">(</span><span class="mi">1024</span><span class="o">^</span><span class="mi">2</span><span class="p">)::</span><span class="n">numeric</span><span class="p">)</span> <span class="k">as</span> <span class="n">parent_mb</span>
+    <span class="k">FROM</span> <span class="n">pg_stat_user_tables</span> <span class="k">AS</span> <span class="n">tabstats</span>
+        <span class="k">JOIN</span> <span class="n">fk_list</span>
+            <span class="k">ON</span> <span class="n">relid</span> <span class="o">=</span> <span class="n">parentid</span>
+<span class="p">),</span>
+<span class="n">fk_table_stats</span> <span class="k">AS</span> <span class="p">(</span>
+    <span class="k">SELECT</span> <span class="n">fkoid</span><span class="p">,</span>
+        <span class="p">(</span><span class="n">n_tup_ins</span> <span class="o">+</span> <span class="n">n_tup_upd</span> <span class="o">+</span> <span class="n">n_tup_del</span> <span class="o">+</span> <span class="n">n_tup_hot_upd</span><span class="p">)</span> <span class="k">as</span> <span class="n">writes</span><span class="p">,</span>
+        <span class="n">seq_scan</span> <span class="k">as</span> <span class="n">table_scans</span>
+    <span class="k">FROM</span> <span class="n">pg_stat_user_tables</span> <span class="k">AS</span> <span class="n">tabstats</span>
+        <span class="k">JOIN</span> <span class="n">fk_list</span>
+            <span class="k">ON</span> <span class="n">relid</span> <span class="o">=</span> <span class="n">conrelid</span>
+<span class="p">)</span>
+<span class="k">SELECT</span> <span class="n">nspname</span> <span class="k">as</span> <span class="k">schema_name</span><span class="p">,</span>
+    <span class="n">relname</span> <span class="k">as</span> <span class="k">table_name</span><span class="p">,</span>
+    <span class="n">conname</span> <span class="k">as</span> <span class="n">fk_name</span><span class="p">,</span>
+    <span class="n">issue</span><span class="p">,</span>
+    <span class="n">table_mb</span><span class="p">,</span>
+    <span class="n">writes</span><span class="p">,</span>
+    <span class="n">table_scans</span><span class="p">,</span>
+    <span class="n">parent_name</span><span class="p">,</span>
+    <span class="n">parent_mb</span><span class="p">,</span>
+    <span class="n">parent_writes</span><span class="p">,</span>
+    <span class="n">cols_list</span><span class="p">,</span>
+    <span class="n">indexdef</span>
+<span class="k">FROM</span> <span class="n">fk_index_check</span>
+    <span class="k">JOIN</span> <span class="n">parent_table_stats</span> <span class="k">USING</span> <span class="p">(</span><span class="n">fkoid</span><span class="p">)</span>
+    <span class="k">JOIN</span> <span class="n">fk_table_stats</span> <span class="k">USING</span> <span class="p">(</span><span class="n">fkoid</span><span class="p">)</span>
+<span class="k">WHERE</span> <span class="n">table_mb</span> <span class="o">&gt;</span> <span class="mi">9</span>
+    <span class="k">AND</span> <span class="p">(</span> <span class="n">writes</span> <span class="o">&gt;</span> <span class="mi">1000</span>
+        <span class="k">OR</span> <span class="n">parent_writes</span> <span class="o">&gt;</span> <span class="mi">1000</span>
+        <span class="k">OR</span> <span class="n">parent_mb</span> <span class="o">&gt;</span> <span class="mi">10</span> <span class="p">)</span>
+<span class="k">ORDER</span> <span class="k">BY</span> <span class="n">issue_sort</span><span class="p">,</span> <span class="n">table_mb</span> <span class="k">DESC</span><span class="p">,</span> <span class="k">table_name</span><span class="p">,</span> <span class="n">fk_name</span><span class="p">;</span>
+</pre></div>
+</figure><p>To put it simply: this query finds foreign keys that are not indexed :)</p>
+<h2>Know Your ORM</h2>
+<p>At the very end - I don't intend to post here another ORM showdown. What I want I want to outline is that it's good to learn your ORM, consider:</p>
+
+<p>We will be playing with database with couple thousands of rows and following sqlalchemy models. Note that foreign keys are indexed already.</p>
+
+<figure class="figure-code code"><figcaption><span>
+</span></figcaption><div class="highlight"><pre><span class="k">class</span> <span class="nc">Country</span><span class="p">(</span><span class="n">Base</span><span class="p">):</span>
+    <span class="n">__tablename__</span> <span class="o">=</span> <span class="s">'countries'</span>
+
+    <span class="nb">id</span> <span class="o">=</span> <span class="n">Column</span><span class="p">(</span><span class="n">Integer</span><span class="p">,</span> <span class="n">primary_key</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+    <span class="n">name</span> <span class="o">=</span> <span class="n">Column</span><span class="p">(</span><span class="n">String</span><span class="p">(</span><span class="mi">255</span><span class="p">),</span> <span class="n">nullable</span><span class="o">=</span><span class="bp">False</span><span class="p">)</span>
+
+
+<span class="k">class</span> <span class="nc">Player</span><span class="p">(</span><span class="n">Base</span><span class="p">):</span>
+    <span class="n">__tablename__</span> <span class="o">=</span> <span class="s">'players'</span>
+
+    <span class="nb">id</span> <span class="o">=</span> <span class="n">Column</span><span class="p">(</span><span class="n">Integer</span><span class="p">,</span> <span class="n">primary_key</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+    <span class="n">name</span> <span class="o">=</span> <span class="n">Column</span><span class="p">(</span><span class="n">String</span><span class="p">(</span><span class="mi">255</span><span class="p">),</span> <span class="n">nullable</span><span class="o">=</span><span class="bp">False</span><span class="p">)</span>
+    <span class="n">country_id</span> <span class="o">=</span> <span class="n">Column</span><span class="p">(</span><span class="n">ForeignKey</span><span class="p">(</span><span class="s">u'countries.id'</span><span class="p">))</span>
+    <span class="n">team_id</span> <span class="o">=</span> <span class="n">Column</span><span class="p">(</span><span class="n">ForeignKey</span><span class="p">(</span><span class="s">u'teams.id'</span><span class="p">))</span>
+
+    <span class="n">country</span> <span class="o">=</span> <span class="n">relationship</span><span class="p">(</span><span class="s">u'Country'</span><span class="p">)</span>
+    <span class="n">team</span> <span class="o">=</span> <span class="n">relationship</span><span class="p">(</span><span class="s">u'Team'</span><span class="p">)</span>
+
+
+<span class="k">class</span> <span class="nc">Team</span><span class="p">(</span><span class="n">Base</span><span class="p">):</span>
+    <span class="n">__tablename__</span> <span class="o">=</span> <span class="s">'teams'</span>
+
+    <span class="nb">id</span> <span class="o">=</span> <span class="n">Column</span><span class="p">(</span><span class="n">Integer</span><span class="p">,</span> <span class="n">primary_key</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+    <span class="n">name</span> <span class="o">=</span> <span class="n">Column</span><span class="p">(</span><span class="n">String</span><span class="p">(</span><span class="mi">255</span><span class="p">),</span> <span class="n">nullable</span><span class="o">=</span><span class="bp">False</span><span class="p">)</span>
+</pre></div>
+</figure><p>First let's start simple. Let's fetch all player ids, names and their team_ids;</p>
+
+<figure class="figure-code code"><figcaption><span>
+</span></figcaption><div class="highlight"><pre><span class="n">djangodb</span><span class="o">=&gt;</span> <span class="k">EXPLAIN</span> <span class="k">ANALYZE</span> <span class="k">SELECT</span> <span class="n">id</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">team_id</span> <span class="k">FROM</span> <span class="n">players</span><span class="p">;</span>
+                                                   <span class="n">QUERY</span> <span class="n">PLAN</span>                                                   
+<span class="c1">----------------------------------------------------------------------------------------------------------------
+</span> <span class="n">Seq</span> <span class="n">Scan</span> <span class="k">on</span> <span class="n">players</span>  <span class="p">(</span><span class="n">cost</span><span class="o">=</span><span class="mi">0</span><span class="p">.</span><span class="mi">00</span><span class="p">..</span><span class="mi">3274</span><span class="p">.</span><span class="mi">00</span> <span class="k">rows</span><span class="o">=</span><span class="mi">200000</span> <span class="n">width</span><span class="o">=</span><span class="mi">15</span><span class="p">)</span> <span class="p">(</span><span class="n">actual</span> <span class="n">time</span><span class="o">=</span><span class="mi">0</span><span class="p">.</span><span class="mi">010</span><span class="p">..</span><span class="mi">33</span><span class="p">.</span><span class="mi">241</span> <span class="k">rows</span><span class="o">=</span><span class="mi">200000</span> <span class="n">loops</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+ <span class="n">Total</span> <span class="n">runtime</span><span class="p">:</span> <span class="mi">42</span><span class="p">.</span><span class="mi">780</span> <span class="n">ms</span>
+</pre></div>
+</figure><p>Ok, let's see how fast sqlalchemy will deal with that query</p>
+
+<figure class="figure-code code"><figcaption><span>
+</span></figcaption><div class="highlight"><pre><span class="n">session</span><span class="o">.</span><span class="n">query</span><span class="p">(</span><span class="n">Player</span><span class="p">)</span><span class="o">.</span><span class="nb">all</span><span class="p">()</span>
+</pre></div>
+</figure><p>3.5 seconds. No surprise here - we have to create objects, allocate memory ang generally process everything. But can we do better ?</p>
+
+<p>Let's try fetching particular columns first</p>
+
+<figure class="figure-code code"><figcaption><span>
+</span></figcaption><div class="highlight"><pre><span class="n">session</span><span class="o">.</span><span class="n">query</span><span class="p">(</span><span class="n">Player</span><span class="o">.</span><span class="nb">id</span><span class="p">,</span> <span class="n">Player</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="n">Player</span><span class="o">.</span><span class="n">team_id</span><span class="p">)</span><span class="o">.</span><span class="nb">all</span><span class="p">()</span>
+</pre></div>
+</figure><p>0.6 seconds. Not bad. But wait, we can drop declarative and try using core</p>
+
+<figure class="figure-code code"><figcaption><span>
+</span></figcaption><div class="highlight"><pre><span class="n">players</span> <span class="o">=</span> <span class="n">Player</span><span class="o">.</span><span class="n">__table__</span>
+<span class="n">statement</span> <span class="o">=</span> <span class="n">select</span><span class="p">([</span><span class="n">players</span><span class="o">.</span><span class="n">c</span><span class="o">.</span><span class="nb">id</span><span class="p">,</span> <span class="n">players</span><span class="o">.</span><span class="n">c</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="n">players</span><span class="o">.</span><span class="n">c</span><span class="o">.</span><span class="n">team_id</span><span class="p">])</span>
+<span class="k">return</span> <span class="n">engine</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">statement</span><span class="p">)</span><span class="o">.</span><span class="n">fetchall</span><span class="p">()</span>
+</pre></div>
+</figure><p>0.4 seconds. Now, we're talking </p>
+
+<p>Now, let's do some joining</p>
+
+<figure class="figure-code code"><figcaption><span>
+</span></figcaption><div class="highlight"><pre><span class="k">EXPLAIN</span> <span class="k">ANALYZE</span> <span class="k">SELECT</span> <span class="n">p</span><span class="p">.</span><span class="n">id</span><span class="p">,</span> <span class="n">p</span><span class="p">.</span><span class="n">name</span><span class="p">,</span> <span class="k">c</span><span class="p">.</span><span class="n">name</span><span class="p">,</span> <span class="n">t</span><span class="p">.</span><span class="n">name</span> <span class="k">FROM</span> <span class="n">players</span> <span class="n">p</span> <span class="k">LEFT</span> <span class="k">OUTER</span> <span class="k">JOIN</span> <span class="n">countries</span> <span class="k">c</span> <span class="k">ON</span> <span class="n">p</span><span class="p">.</span><span class="n">country_id</span> <span class="o">=</span> <span class="k">c</span><span class="p">.</span><span class="n">id</span> <span class="k">LEFT</span> <span class="k">OUTER</span> <span class="k">JOIN</span> <span class="n">teams</span> <span class="n">t</span> <span class="k">ON</span> <span class="n">p</span><span class="p">.</span><span class="n">team_id</span> <span class="o">=</span> <span class="n">t</span><span class="p">.</span><span class="n">id</span><span class="p">;</span>
+                                                              <span class="n">QUERY</span> <span class="n">PLAN</span>                                                              
+<span class="c1">--------------------------------------------------------------------------------------------------------------------------------------
+</span> <span class="n">Hash</span> <span class="k">Left</span> <span class="k">Join</span>  <span class="p">(</span><span class="n">cost</span><span class="o">=</span><span class="mi">13118</span><span class="p">.</span><span class="mi">00</span><span class="p">..</span><span class="mi">29534</span><span class="p">.</span><span class="mi">00</span> <span class="k">rows</span><span class="o">=</span><span class="mi">200000</span> <span class="n">width</span><span class="o">=</span><span class="mi">25</span><span class="p">)</span> <span class="p">(</span><span class="n">actual</span> <span class="n">time</span><span class="o">=</span><span class="mi">160</span><span class="p">.</span><span class="mi">197</span><span class="p">..</span><span class="mi">450</span><span class="p">.</span><span class="mi">810</span> <span class="k">rows</span><span class="o">=</span><span class="mi">200000</span> <span class="n">loops</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+   <span class="n">Hash</span> <span class="n">Cond</span><span class="p">:</span> <span class="p">(</span><span class="n">p</span><span class="p">.</span><span class="n">team_id</span> <span class="o">=</span> <span class="n">t</span><span class="p">.</span><span class="n">id</span><span class="p">)</span>
+   <span class="o">-&gt;</span>  <span class="n">Hash</span> <span class="k">Left</span> <span class="k">Join</span>  <span class="p">(</span><span class="n">cost</span><span class="o">=</span><span class="mi">6559</span><span class="p">.</span><span class="mi">00</span><span class="p">..</span><span class="mi">16404</span><span class="p">.</span><span class="mi">00</span> <span class="k">rows</span><span class="o">=</span><span class="mi">200000</span> <span class="n">width</span><span class="o">=</span><span class="mi">22</span><span class="p">)</span> <span class="p">(</span><span class="n">actual</span> <span class="n">time</span><span class="o">=</span><span class="mi">85</span><span class="p">.</span><span class="mi">288</span><span class="p">..</span><span class="mi">226</span><span class="p">.</span><span class="mi">012</span> <span class="k">rows</span><span class="o">=</span><span class="mi">200000</span> <span class="n">loops</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+         <span class="n">Hash</span> <span class="n">Cond</span><span class="p">:</span> <span class="p">(</span><span class="n">p</span><span class="p">.</span><span class="n">country_id</span> <span class="o">=</span> <span class="k">c</span><span class="p">.</span><span class="n">id</span><span class="p">)</span>
+         <span class="o">-&gt;</span>  <span class="n">Seq</span> <span class="n">Scan</span> <span class="k">on</span> <span class="n">players</span> <span class="n">p</span>  <span class="p">(</span><span class="n">cost</span><span class="o">=</span><span class="mi">0</span><span class="p">.</span><span class="mi">00</span><span class="p">..</span><span class="mi">3274</span><span class="p">.</span><span class="mi">00</span> <span class="k">rows</span><span class="o">=</span><span class="mi">200000</span> <span class="n">width</span><span class="o">=</span><span class="mi">19</span><span class="p">)</span> <span class="p">(</span><span class="n">actual</span> <span class="n">time</span><span class="o">=</span><span class="mi">0</span><span class="p">.</span><span class="mi">016</span><span class="p">..</span><span class="mi">16</span><span class="p">.</span><span class="mi">286</span> <span class="k">rows</span><span class="o">=</span><span class="mi">200000</span> <span class="n">loops</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+         <span class="o">-&gt;</span>  <span class="n">Hash</span>  <span class="p">(</span><span class="n">cost</span><span class="o">=</span><span class="mi">3082</span><span class="p">.</span><span class="mi">00</span><span class="p">..</span><span class="mi">3082</span><span class="p">.</span><span class="mi">00</span> <span class="k">rows</span><span class="o">=</span><span class="mi">200000</span> <span class="n">width</span><span class="o">=</span><span class="mi">11</span><span class="p">)</span> <span class="p">(</span><span class="n">actual</span> <span class="n">time</span><span class="o">=</span><span class="mi">85</span><span class="p">.</span><span class="mi">046</span><span class="p">..</span><span class="mi">85</span><span class="p">.</span><span class="mi">046</span> <span class="k">rows</span><span class="o">=</span><span class="mi">200000</span> <span class="n">loops</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+               <span class="n">Buckets</span><span class="p">:</span> <span class="mi">4096</span>  <span class="n">Batches</span><span class="p">:</span> <span class="mi">16</span>  <span class="n">Memory</span> <span class="k">Usage</span><span class="p">:</span> <span class="mi">558</span><span class="n">kB</span>
+               <span class="o">-&gt;</span>  <span class="n">Seq</span> <span class="n">Scan</span> <span class="k">on</span> <span class="n">countries</span> <span class="k">c</span>  <span class="p">(</span><span class="n">cost</span><span class="o">=</span><span class="mi">0</span><span class="p">.</span><span class="mi">00</span><span class="p">..</span><span class="mi">3082</span><span class="p">.</span><span class="mi">00</span> <span class="k">rows</span><span class="o">=</span><span class="mi">200000</span> <span class="n">width</span><span class="o">=</span><span class="mi">11</span><span class="p">)</span> <span class="p">(</span><span class="n">actual</span> <span class="n">time</span><span class="o">=</span><span class="mi">0</span><span class="p">.</span><span class="mi">016</span><span class="p">..</span><span class="mi">26</span><span class="p">.</span><span class="mi">853</span> <span class="k">rows</span><span class="o">=</span><span class="mi">200000</span> <span class="n">loops</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+   <span class="o">-&gt;</span>  <span class="n">Hash</span>  <span class="p">(</span><span class="n">cost</span><span class="o">=</span><span class="mi">3082</span><span class="p">.</span><span class="mi">00</span><span class="p">..</span><span class="mi">3082</span><span class="p">.</span><span class="mi">00</span> <span class="k">rows</span><span class="o">=</span><span class="mi">200000</span> <span class="n">width</span><span class="o">=</span><span class="mi">11</span><span class="p">)</span> <span class="p">(</span><span class="n">actual</span> <span class="n">time</span><span class="o">=</span><span class="mi">74</span><span class="p">.</span><span class="mi">713</span><span class="p">..</span><span class="mi">74</span><span class="p">.</span><span class="mi">713</span> <span class="k">rows</span><span class="o">=</span><span class="mi">200000</span> <span class="n">loops</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+         <span class="n">Buckets</span><span class="p">:</span> <span class="mi">4096</span>  <span class="n">Batches</span><span class="p">:</span> <span class="mi">16</span>  <span class="n">Memory</span> <span class="k">Usage</span><span class="p">:</span> <span class="mi">558</span><span class="n">kB</span>
+         <span class="o">-&gt;</span>  <span class="n">Seq</span> <span class="n">Scan</span> <span class="k">on</span> <span class="n">teams</span> <span class="n">t</span>  <span class="p">(</span><span class="n">cost</span><span class="o">=</span><span class="mi">0</span><span class="p">.</span><span class="mi">00</span><span class="p">..</span><span class="mi">3082</span><span class="p">.</span><span class="mi">00</span> <span class="k">rows</span><span class="o">=</span><span class="mi">200000</span> <span class="n">width</span><span class="o">=</span><span class="mi">11</span><span class="p">)</span> <span class="p">(</span><span class="n">actual</span> <span class="n">time</span><span class="o">=</span><span class="mi">0</span><span class="p">.</span><span class="mi">004</span><span class="p">..</span><span class="mi">23</span><span class="p">.</span><span class="mi">784</span> <span class="k">rows</span><span class="o">=</span><span class="mi">200000</span> <span class="n">loops</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+ <span class="n">Total</span> <span class="n">runtime</span><span class="p">:</span> <span class="mi">458</span><span class="p">.</span><span class="mi">158</span> <span class="n">ms</span>
+
+</pre></div>
+</figure><p>So, using all those 3 techiniques:</p>
+
+<figure class="figure-code code"><figcaption><span>
+</span></figcaption><div class="highlight"><pre><span class="n">session</span><span class="o">.</span><span class="n">query</span><span class="p">(</span><span class="n">Player</span><span class="p">)</span><span class="o">.</span>\
+            <span class="n">options</span><span class="p">(</span><span class="n">joinedload</span><span class="p">(</span><span class="s">'country'</span><span class="p">))</span><span class="o">.</span>\
+            <span class="n">options</span><span class="p">(</span><span class="n">joinedload</span><span class="p">(</span><span class="s">'team'</span><span class="p">))</span><span class="o">.</span>\
+            <span class="nb">all</span><span class="p">()</span>
+            
+<span class="n">session</span><span class="o">.</span><span class="n">query</span><span class="p">(</span><span class="n">Player</span><span class="o">.</span><span class="nb">id</span><span class="p">,</span> <span class="n">Player</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="n">Country</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="n">Team</span><span class="o">.</span><span class="n">name</span><span class="p">)</span><span class="o">.</span>\
+            <span class="n">outerjoin</span><span class="p">(</span><span class="n">Country</span><span class="p">)</span><span class="o">.</span><span class="n">outerjoin</span><span class="p">(</span><span class="n">Team</span><span class="p">)</span><span class="o">.</span><span class="nb">all</span><span class="p">()</span>
+            
+<span class="n">players</span> <span class="o">=</span> <span class="n">Player</span><span class="o">.</span><span class="n">__table__</span>
+<span class="n">countries</span> <span class="o">=</span> <span class="n">Country</span><span class="o">.</span><span class="n">__table__</span>
+<span class="n">teams</span> <span class="o">=</span> <span class="n">Team</span><span class="o">.</span><span class="n">__table__</span>
+<span class="n">statement</span> <span class="o">=</span> <span class="n">select</span><span class="p">(</span>
+    <span class="p">[</span><span class="n">players</span><span class="o">.</span><span class="n">c</span><span class="o">.</span><span class="nb">id</span><span class="p">,</span> <span class="n">players</span><span class="o">.</span><span class="n">c</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="n">countries</span><span class="o">.</span><span class="n">c</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="n">teams</span><span class="o">.</span><span class="n">c</span><span class="o">.</span><span class="n">name</span><span class="p">]</span>
+<span class="p">)</span><span class="o">.</span><span class="n">select_from</span><span class="p">(</span><span class="n">players</span><span class="o">.</span><span class="n">outerjoin</span><span class="p">(</span><span class="n">countries</span><span class="p">)</span><span class="o">.</span><span class="n">outerjoin</span><span class="p">(</span><span class="n">teams</span><span class="p">))</span>
+<span class="n">engine</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">statement</span><span class="p">)</span><span class="o">.</span><span class="n">fetchall</span><span class="p">()</span>
+</pre></div>
+</figure><p>takes respectively: 9.5, 1.3 and 0.95 seconds.</p>
+
+<p>Apart from powerful core that allows You to build low level queries, sqlalchemy also comes with yield_per, bundles, powerful join system and from_statement, which are really handy when queries need to perform slightly better.</p>
+
+<p>Stay tuned for part 3!</p>
+        
+      </div>
+
+      
+
+      
+         
+        </div></body></html>

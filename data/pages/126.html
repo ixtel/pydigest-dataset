@@ -1,0 +1,221 @@
+<html><body><div><div class="content">
+			<p><span><strong>Warning!</strong></span> This post includes some links to NSFW (<em>not suitable for work</em>) galleries. You had better study this post at home :)</p>
+<hr/>
+<p><strong>Problem</strong><br/>
+On the web you can find lots of free XXX galleries. There are also sites that collect these galleries and update their list at a daily frequence. When you visit such a gallery, you get either (1) images, or (2) links to images through thumbnails. But! Beside these relevant images, there is always some noise: banners, other thumbnails, links to other galleries, etc.</p>
+<p>How to write a universal scraper that gets the URL of a gallery and it extracts <strong>just</strong> the relevant images without any noise? How to separate real content from noise?</p>
+<p><strong>Example</strong><br/>
+Let’s see a soft gallery: <code><a href="http://biertijd.xxx/index.php?itemid=44329" rel="nofollow">http://biertijd.xxx/index.php?itemid=44329</a></code> (NSFW!). Extracting all the images we get the following list:</p>
+<div>
+<pre>  "urls": [
+    "http://biertijd.com/skins/biertijd06/mplayer/images/mplayer_logo.png", 
+    "http://biertijd.com/skins/biertijd06/mplayer/images/mplayer_titlestart.png", 
+    "http://biertijd.com/skins/biertijd06/mplayer/images/mplayer_top1.png", 
+    "http://biertijd.com/skins/biertijd06/mplayer/images/mplayer_titleend.png", 
+    "http://biertijd.com/skins/biertijd06/mplayer/images/mplayer_BGleft.png", 
+    "http://media01.biertijd.com/galleries/metart/131107_night/01.jpg", 
+    "http://media01.biertijd.com/galleries/metart/131107_night/../banners/1.jpg", 
+    "http://media01.biertijd.com/galleries/metart/131107_night/02.jpg", 
+    "http://media01.biertijd.com/galleries/metart/131107_night/03.jpg", 
+    "http://media01.biertijd.com/galleries/metart/131107_night/04.jpg", 
+    "http://media01.biertijd.com/galleries/metart/131107_night/05.jpg", 
+    "http://media01.biertijd.com/galleries/metart/131107_night/06.jpg", 
+    "http://media01.biertijd.com/galleries/metart/131107_night/07.jpg", 
+    "http://media01.biertijd.com/galleries/metart/131107_night/08.jpg", 
+    "http://media01.biertijd.com/galleries/metart/131107_night/09.jpg", 
+    "http://media01.biertijd.com/galleries/metart/131107_night/10.jpg", 
+    "http://media01.biertijd.com/galleries/metart/131107_night/11.jpg", 
+    "http://media01.biertijd.com/galleries/metart/131107_night/12.jpg", 
+    "http://media01.biertijd.com/galleries/metart/131107_night/13.jpg", 
+    "http://media01.biertijd.com/galleries/metart/131107_night/14.jpg", 
+    "http://media01.biertijd.com/galleries/metart/131107_night/15.jpg", 
+    "http://media01.biertijd.com/galleries/metart/131107_night/16.jpg", 
+    "http://media01.biertijd.com/galleries/metart/131107_night/17.jpg", 
+    "http://media01.biertijd.com/galleries/metart/131107_night/18.jpg", 
+    "http://media01.biertijd.com/galleries/metart/131107_night/19.jpg", 
+    "http://media01.biertijd.com/galleries/metart/131107_night/20.jpg", 
+    "http://media01.biertijd.com/galleries/metart/131107_night/../banners/2.jpg", 
+    "http://biertijd.com/nucleus/plugins/rating/4.gif", 
+    "http://biertijd.com/action.php?action=plugin&amp;name=Captcha&amp;type=captcha&amp;key=0da28fe49a3d6d2fa7e17d15b9a05d28", 
+    "http://biertijd.com/skins/biertijd06/mplayer/images/mplayer_BGright.png", 
+    "http://biertijd.com/skins/biertijd06/mplayer/images/mplayer_bottomleft.png", 
+    "http://biertijd.com/skins/biertijd06/mplayer/images/mplayer_bottomBG.png", 
+    "http://biertijd.com/skins/biertijd06/mplayer/images/mplayer_bottomright.png", 
+    "http://biertijd.com/skins/biertijd06/mplayer/images/mplayer_bottomfill.png", 
+    "http://s4.histats.com/stats/0.gif?37757&amp;1"
+  ]</pre>
+</div>
+<p>As you can see, the relevant images conform to this pattern: “<code><a href="http://media01.biertijd.com/galleries/metart/131107_night/" rel="nofollow">http://media01.biertijd.com/galleries/metart/131107_night/</a>{01..20}.jpg</code>“. Altogether we have 35 images of which only 20 are relevant. How to find these 20 only?</p>
+<p><strong>Solution</strong><br/>
+The good news is that the relevant images usually follow a pattern and thus they don’t differ much. As seen above, in this example just the numbering of the images were different.</p>
+<p>Relevant images can be separated from the others using text clustering. I found a great solution <a href="http://rajmak.wordpress.com/2013/04/27/clustering-text-map-reduce-in-python/">here</a> by Rajesh M. Rajesh uses this method for clustering article titles. We will use it to cluster URLs, which are also just strings.</p>
+<p>I put my solution in a class. Here it is:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+#!/usr/bin/env python
+
+# based on:
+# http://rajmak.wordpress.com/2013/04/27/clustering-text-map-reduce-in-python/
+
+from helper import lev_dist as distance
+from pprint import pprint
+
+DISTANCE = 10
+
+class Cluster(object):
+    """
+    Clustering a list of (sorted!) strings.
+
+    I use it for clustering URLs. After extracting all the links (or images)
+    from a web page, I use this class to group together similar URLs. It also
+    identifies the largest cluster.
+    """
+    def __init__(self):
+        self.clusters = {'clusters': {}}
+
+    def clustering(self, elems):
+        """
+        Clusterize the input elements.
+
+        Input: list of words (e.g. list of URLs). It MUST be sorted!
+
+        Process: build a dictionary where keys are cluster IDs (int) and
+                 values are lists (elements in the given cluster)
+        """
+        clusters = {}
+        cid = 0
+
+        for i, line in enumerate(elems):
+            if i == 0:
+                clusters[cid] = []
+                clusters[cid].append(line)
+            else:
+                last = clusters[cid][-1]
+                if distance(last, line)  maxi_v:
+                    maxi_v = len(v)
+                    maxi_k = k
+        #
+        return clusters[maxi_k]
+
+    def show(self):
+        pprint(self.clusters)
+
+def get_clusters(elems):
+    elems = sorted(elems)
+    cl = Cluster()
+    cl.clustering(elems)
+    return cl.clusters['clusters']
+
+#############################################################################
+
+if __name__ == "__main__":
+    import sys
+    template = "https://jabbalaci.herokuapp.com/all_images?url={url}?&amp;amp;clusters=1"
+    if len(sys.argv) == 1:
+        print "Usage: {0} URL".format(sys.argv[0])
+        sys.exit(1)
+    # else
+    url = template.format(url=sys.argv[1])
+    import requests
+    r = requests.get(url)
+    li = sorted(r.json()['urls'])
+
+    cl = Cluster()
+    cl.clustering(li)
+    cl.show()
+</pre>
+<p>The extracted URLs are sorted first. Then, they are put in clusters. The idea is simple. Put the first element in the current cluster, which is the first cluster. If the next element is similar, put it into the first cluster again. If it’s different, create a new cluster (it will be the current cluster) and add to it. And so on.</p>
+<p>To tell how similar two strings are, we use the <a href="http://en.wikipedia.org/wiki/Levenshtein_distance">Levenshtein distance</a>. You can find an implementation <a href="https://github.com/jabbalaci/jabbapylib/blob/master/jabbapylib/distance/dist.py">here</a>.</p>
+<p><strong>Demo</strong><br/>
+This method is implemented as a web service. It has two versions: you can cluster links, or you can cluster images. Which one to use? It depends on the gallery. If it includes the relevant images, then extract the images. If it contains thumbnails that point to images, then extract links.</p>
+
+<p>Don’t forget to switch on the “text clustering” option. In the output you will get the clusters and to facilitate your life, the largest cluster is also indicated. In most of the cases, this is the cluster that contains the relevant images!</p>
+<p>Sample output:</p>
+<div>
+<pre>...
+"clusters": {
+    "0": [
+      "http://biertijd.com/action.php?action=plugin&amp;name=Captcha&amp;type=captcha&amp;key=d079746fd366f6f3509532688d595fcb"
+    ], 
+    "1": [
+      "http://biertijd.com/nucleus/plugins/rating/4.gif"
+    ], 
+    "2": [
+      "http://biertijd.com/skins/biertijd06/mplayer/images/mplayer_BGleft.png", 
+      "http://biertijd.com/skins/biertijd06/mplayer/images/mplayer_BGright.png", 
+      "http://biertijd.com/skins/biertijd06/mplayer/images/mplayer_bottomBG.png", 
+      "http://biertijd.com/skins/biertijd06/mplayer/images/mplayer_bottomfill.png", 
+      "http://biertijd.com/skins/biertijd06/mplayer/images/mplayer_bottomleft.png", 
+      "http://biertijd.com/skins/biertijd06/mplayer/images/mplayer_bottomright.png", 
+      "http://biertijd.com/skins/biertijd06/mplayer/images/mplayer_logo.png", 
+      "http://biertijd.com/skins/biertijd06/mplayer/images/mplayer_titleend.png", 
+      "http://biertijd.com/skins/biertijd06/mplayer/images/mplayer_titlestart.png", 
+      "http://biertijd.com/skins/biertijd06/mplayer/images/mplayer_top1.png"
+    ], 
+    "3": [
+      "http://media01.biertijd.com/galleries/metart/131107_night/../banners/1.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/../banners/2.jpg"
+    ], 
+    "4": [
+      "http://media01.biertijd.com/galleries/metart/131107_night/01.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/02.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/03.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/04.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/05.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/06.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/07.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/08.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/09.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/10.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/11.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/12.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/13.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/14.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/15.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/16.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/17.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/18.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/19.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/20.jpg"
+    ], 
+    "5": [
+      "http://s4.histats.com/stats/0.gif?37757&amp;1"
+    ], 
+    "largest": [
+      "http://media01.biertijd.com/galleries/metart/131107_night/01.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/02.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/03.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/04.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/05.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/06.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/07.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/08.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/09.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/10.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/11.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/12.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/13.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/14.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/15.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/16.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/17.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/18.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/19.jpg", 
+      "http://media01.biertijd.com/galleries/metart/131107_night/20.jpg"
+    ], 
+    "number_of_clusters": 6
+  }, 
+...</pre>
+</div>
+<p><strong>Demo for the lazy pigs</strong><br/>
+I made a page that extracts relevant links/images from a gallery and presents them in a cleaned gallery. It’s available here: <a href="https://jabbalaci.herokuapp.com/gallery" rel="nofollow">https://jabbalaci.herokuapp.com/gallery</a> .</p>
+<p>Usage: insert the gallery’s URL then click on the first button. If you click on an image and it’s just a thumbnail, then click on the second button.</p>
+<p>It extracts the largest cluster and it gives good results in most cases.</p>
+<p>Feedbacks are welcome.</p>
+<p><strong>Links</strong></p>
+
+		<div id="jp-post-flair" class="sharedaddy sd-like-enabled sd-sharing-enabled"><div class="sharedaddy sd-block sd-like jetpack-likes-widget-wrapper jetpack-likes-widget-unloaded" id="like-post-wrapper-15986318-1888-56d59bc6b1faa" data-src="//widgets.wp.com/likes/#blog_id=15986318&amp;post_id=1888&amp;origin=pythonadventures.wordpress.com&amp;obj_id=15986318-1888-56d59bc6b1faa" data-name="like-post-frame-15986318-1888-56d59bc6b1faa"><h3 class="sd-title">Like this:</h3><p class="likes-widget-placeholder post-likes-widget-placeholder"><span class="button"><span>Like</span></span> <span class="loading">Loading...</span></p><span class="sd-text-color"/><a class="sd-link-color"/></div>
+<p id="jp-relatedposts" class="jp-relatedposts">
+	<h3 class="jp-relatedposts-headline"><em>Related</em></h3>
+</p></div>						<p class="fixed"/>
+		</div>
+		</div></body></html>

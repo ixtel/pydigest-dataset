@@ -1,0 +1,74 @@
+<html><body><div><div class="content html_format"><p>
+      Хочу поделиться опытом подключения платежей с проверкой на сервере к приложению из Google Play.</p>
+<p>
+Итак. У нас есть приложение, готовое для публикации (</p><a href="https://play.google.com/apps/publish/">ссылка</a><p>). Так же создан платёжный проект (</p><a href="https://console.developers.google.com/project">ссылка</a><p>) и связан с приложением.
+
+</p><img src="https://habrastorage.org/files/4d0/f7c/695/4d0f7c6959fc4d99bed94c3c5bda35c3.png"/>
+<a name="habracut"/><p>
+Далее по пунктам.</p><p>
+1. Нужно перейти на вкладку Credential;</p><p>
+2. Создать ClientID как Web-Application и указать redirect_uri на наш сервер (например, </p><a href="http://server.ru">server.ru</a><p> и Callback </p><a href="http://server.ru/callback">server.ru/callback</a><p>);</p><p>
+3. Создать ключ типа ServerKey (можно и с пустыми данными).
+
+</p><img src="https://habrastorage.org/files/e3b/f04/221/e3bf042211be49e1967b20bcebe0a55d.png"/>
+<p>
+На сервере делаем обработчик входящей переменной code по адресу </p><a href="http://server.ru/callback">server.ru/callback</a><p>.
+</p><p>
+Она придёт как GET запрос.
+</p><p>
+Вот пример обработки на языке </p><a href="http://python.org">Python</a><p> с хранением данных в </p><a href="http://redis.io">Редисе</a><p>.
+
+</p><pre><code class="python">import requests, redis
+Redis = redis.Redis()
+data = requests.post('https://accounts.google.com/o/oauth2/token',{'code':code,'grant_type':'authorization_code','client_id':client_id,'client_secret':client_secret,'redirect_uri':'http://server.ru/callback/'})
+jdata = data.json()
+if 'access_token' in jdata and 'token_type' in jdata and 'expires_in' in jdata:
+    Redis.setex('GooglePayAccess',jdata['access_token'],jdata['expires_in'])
+    Redis.setex('GooglePayType',jdata['token_type'],jdata['expires_in'])
+    if "refresh_token" in jdata:
+        Redis.set('GooglePayRefresh',jdata['refresh_token'])
+</code></pre>
+<p>
+Далее необходимо заполнить страницу «Consent screen», а так же активировать API «Google Play Android Developer API». 
+</p><p>
+Теперь нужно авторизовать сервис на нашем сервере.
+</p><p>
+Обязательно это нужно сделать с того аккаунта, с которого был создан платёжный проект.
+</p><p>
+Далее переходим под этим аккаунтом по </p><a href="https://accounts.google.com/o/oauth2/auth?scope=https://www.googleapis.com/auth/androidpublisher&amp;response_type=code&amp;access_type=offline&amp;redirect_uri=http://server.ru/callback/&amp;client_id=……………………………………">ссылке</a><p>, подставив вместо ……. наш ClientID.
+
+</p><pre><code class="bash">https://accounts.google.com/o/oauth2/auth?scope=https://www.googleapis.com/auth/androidpublisher&amp;response_type=code&amp;access_type=offline&amp;redirect_uri=http://server.ru/callback/&amp;client_id=……………………………………
+</code></pre>
+<p>
+Эта ссылка как раз и отправит на наш колбэк переменную code.
+</p><p>
+После активации аккаунта можем работать с платежами.
+</p><p>
+Передаём на сервер данные о платеже, полученные клиентом от Google, и проверяем их со своей стороны.
+
+</p><pre><code class="python">import requests, redis
+Redis = redis.Redis()
+access_token = Redis.get('GooglePayAccess')
+token_type  = Redis.get('GooglePayType')
+if not access_token or not token_type:
+			refresh_token = Redis.get('GooglePayRefresh')
+			data = requests.post('https://accounts.google.com/o/oauth2/token',{'grant_type':'refresh_token','client_id':client_id,'client_secret':client_secret,'refresh_token':refresh_token})
+			jdata = data.json()
+			if 'access_token' in jdata and 'token_type' in jdata and 'expires_in' in jdata:
+				access_token = jdata['access_token']
+				token_type = jdata['token_type']
+				Redis.setex('GooglePayAccess',access_token,jdata['expires_in'])
+				Redis.set('GooglePayType',token_type,jdata['expires_in'])
+url = 'https://www.googleapis.com/androidpublisher/v2/applications/%s/purchases/products/%s/tokens/%s?key=%s' % (packageName,productId,purchaseToken,api_key)
+response = requests.get(url,headers={"Authorization":"%s %s" % (token_type,access_token)})
+jdata2 = response.json()
+</code></pre>
+<p>
+Если принятые от клиента данные совпадают с данными от Google, то можем смело начислять пользователю виртуальную валюту.
+</p><p>
+Удачных продаж!
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

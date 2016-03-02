@@ -1,0 +1,203 @@
+<html><body><div><article id="SOKN3xmsSbLVrJxYQv" class="post  historical">
+	<time datetime="2015-02-21" class="article_time">February 21, 2015</time>
+  
+	<p>Descriptors are an esoteric but integral part of the python programming language. They are used widely in the core of the python language and a good grasp of descriptors provides a python programmer with an extra trick in his or her toolbox. To set the stage for the discussion of descriptors I describe some scenarios that a programmer may encounter in his or her daily programming activities; I then go ahead to explain what descriptors are and how they provide elegant solutions to these scenarios. For this writeup, I refer to python version using new style classes.</p>
+
+<ol>
+<li>
+<p>Consider a program in which we need to enforce strict type checking for object attributes. Python is a dynamic languages and thus does not support type checking but this does not prevent us from implementing our own version of type checking regardless of how rudimentary it may be. The conventional way to go about type checking object attributes may take the form shown below:</p>
+
+<pre><code class="prettyprint lang-python">def __init__(self, name, age):
+    if isinstance(str, name):
+        self.name = name
+    else:
+        raise TypeError("Must be a string")
+    if isinstance(int, age):
+        self.age = age
+    else:
+        raise TypeError("Must be an int")
+</code></pre>
+
+<p>The above method is one method of enforcing such type checking but as the arguments increase in number it gets cumbersome. Alternatively, we could create a <code class="prettyprint">type_check(type, val)</code> function that is called in the <code class="prettyprint">__init__</code> method before assignment but then how would we easily implement such checking when we want to set the attribute value somewhere else. A quick solution that comes to mind is the <code class="prettyprint">getters</code> and <code class="prettyprint">setters</code> present in Java but that is un-pythonic and cumbersome.</p>
+</li>
+<li><p>Consider a program in which we want to create attributes that are initialized once at run-time and then become read-only. One could also think of ways of implementing this using python special methods but once again such implementation would be unwieldy and cumbersome.</p></li>
+<li><p>Finally, imagine a program in which we wanted to somehow customize object attribute access. This maybe to log such attribute access for example. Once again, it is not too difficult to come up with a solution to this although such solution maybe unwieldy and not re-useable.</p></li>
+</ol>
+
+<p>All the above mentioned issues are all linked together by the fact that they are all related to attribute references; we are trying to customize attribute access. </p>
+<h1 id="python-descriptors_1">
+<a class="head_anchor" href="#python-descriptors_1" rel="nofollow"> </a>Python Descriptors</h1>
+<p>Descriptors provides solutions to the above listed issues that are elegant, simple, robust and re-useable. Simply put, a <em>descriptor</em> is an <strong>object</strong> that represents the value of an attribute. This means that if an account object has an attribute <code class="prettyprint">name</code>, a descriptor is another object that can be used to represent the value held by that attribute, <code class="prettyprint">name</code>.   A descriptor is any object that implements any of the <code class="prettyprint">__get__</code>, <code class="prettyprint">__set__</code> or <code class="prettyprint">__delete__</code>  special methods of the descriptor protocol. The signature for each of these methods is shown below:<br/>
+    “`python<br/>
+    descr.<strong>get</strong>(self, obj, type=None) –&gt; value</p>
+
+<pre><code class="prettyprint">descr.__set__(self, obj, value) --&gt; None
+
+descr.__delete__(self, obj) --&gt; None
+```
+</code></pre>
+
+<p>Objects implementing the <code class="prettyprint">__get__</code> method are non-data descriptors meaning they can only be read from after initialization while objects implementing the <code class="prettyprint">__get__</code> and <code class="prettyprint">__set__</code> are data descriptors which means such attribute are writable.</p>
+
+<p>To get a better understanding of descriptors we provide descriptor based solution to the issues mentioned. Implementing type checking on an object attribute using python descriptors is then a very simple task. A decorator implementing this type checking is shown below:</p>
+
+<pre><code class="prettyprint lang-python">class TypedProperty(object):
+
+    def __init__(self, name, type, default=None):
+        self.name = "_" + name
+        self.type = type
+        self.default = default if default else type()
+
+    def __get__(self, instance, cls):
+        return getattr(instance, self.name, self.default)
+
+    def __set__(self,instance,value):
+        if not isinstance(value,self.type):
+            raise TypeError("Must be a %s" % self.type) 
+        setattr(instance,self.name,value)
+
+    def __delete__(self,instance):
+        raise AttributeError("Can't delete attribute")
+
+
+class Foo(object):
+    name = TypedProperty("name",str) 
+    num = TypedProperty("num",int,42)
+
+&gt;&gt; acct = Foo()
+&gt;&gt; acct.name = "obi"
+&gt;&gt; acct.num = 1234
+&gt;&gt; print acct.num
+1234
+&gt;&gt; print acct.name 
+obi
+# trying to assign a string to number fails
+&gt;&gt; acct.num = '1234'
+TypeError: Must be a &lt;type 'int'&gt;
+</code></pre>
+
+<p>In the example, we implement a descriptor, <code class="prettyprint">TypedProperty</code> and this descriptor class enforces type checking for any attribute of a class which it is used to represent. It is important to note that descriptors can only be legally defined at the class level rather than instance level i.e. in <code class="prettyprint">__init__</code> method as shown in the example above.  </p>
+
+<p>When the any attribute of a <code class="prettyprint">Foo</code> class instance is accessed, the descriptor calls its <code class="prettyprint">__get__</code> method. Notice that the first argument to the <code class="prettyprint">__get__</code> method is the object from which the attribute the descriptor represents is being referenced. When the attribute is assigned to, the descriptor calls its <code class="prettyprint">__set__</code> method.  To understand why descriptors can be used to represent object attributes, we need to understand the way attribute reference resolution is carried out in python. For objects, the mechanics for attribute resolution is in <code class="prettyprint">object.__getattribute__()</code>. This method transforms <code class="prettyprint">b.x into type(b).__dict__['x'].__get__(b, type(b))</code>. The resolutions then searches for the attribute using a precedence chain that gives <strong>data descriptors found in class dict priority over instance variables, instance variables priority over non-data descriptors, and assigns lowest priority to <strong>getattr</strong>() if provided</strong>.  This precedence chain can be overridden by defining custom <code class="prettyprint">__getattribute__</code> methods for a given object class.</p>
+
+<p>With a firm understanding of the mechanics of descriptors, it is easy to imagine elegant solutions to the second and third issues raised in the previous section. Implementing a read only attribute with descriptors becomes a simple case of implementing a data descriptor <em>i.e descriptor with no <code class="prettyprint">__set__</code> method`</em>. The issue of customizing access, though trivial in this instance, would just involve adding the required functionality in the <code class="prettyprint">__get__</code> and <code class="prettyprint">__set__</code> methods.</p>
+<h1 id="class-properties_1">
+<a class="head_anchor" href="#class-properties_1" rel="nofollow"> </a>Class Properties</h1>
+<p>Having to define descriptor classes each time we want to use them is cumbersome. Python <strong><em>properties</em></strong> provide a concise way of adding data descriptors to attributes in python. A property signature is given below:</p>
+
+<pre><code class="prettyprint lang-python">property(fget=None, fset=None, fdel=None, doc=None) -&gt; property attribute
+</code></pre>
+
+<p><code class="prettyprint">fget</code>, <code class="prettyprint">fset</code> and <code class="prettyprint">fdel</code> are the <em>getter, setter and deleter</em> methods for such class. We illustrate creating properties with an example below:</p>
+
+<pre><code class="prettyprint lang-python">
+class Accout(object):
+    def __init__(self):
+        self._acct_num = None
+
+    def get_acct_num(self):
+        return self._acct_num
+
+    def set_acct_num(self, value):
+        self._acct_num = value
+
+    def del_acct_num(self):
+        del self._acct_num
+
+    acct_num = property(get_acct_num, set_acct_num, del_acct_num, "Account number property.")
+</code></pre>
+
+<p>If <code class="prettyprint">acct</code> is an instance of <code class="prettyprint">Account</code>, <code class="prettyprint">acct.acct_num</code> will invoke the getter, <code class="prettyprint">acct.acct_num = value</code> will invoke the setter and <code class="prettyprint">del acct_num.acct_num</code> will invoke the deleter. </p>
+
+<p>The property object and functionality can be implemented in python as illustrated in <a href="https://docs.python.org/2/howto/descriptor.html" rel="nofollow">Descriptor How-To Guide</a> using the descriptor protocol as shown below :</p>
+
+<pre><code class="prettyprint lang-python">
+class Property(object):
+    "Emulate PyProperty_Type() in Objects/descrobject.c"
+
+    def __init__(self, fget=None, fset=None, fdel=None, doc=None):
+        self.fget = fget
+        self.fset = fset
+        self.fdel = fdel
+        if doc is None and fget is not None:
+            doc = fget.__doc__
+        self.__doc__ = doc
+
+    def __get__(self, obj, objtype=None):
+        if obj is None:
+            return self
+        if self.fget is None:
+            raise AttributeError("unreadable attribute")
+        return self.fget(obj)
+
+    def __set__(self, obj, value):
+        if self.fset is None:
+            raise AttributeError("can't set attribute")
+        self.fset(obj, value)
+
+    def __delete__(self, obj):
+        if self.fdel is None:
+            raise AttributeError("can't delete attribute")
+        self.fdel(obj)
+
+    def getter(self, fget):
+        return type(self)(fget, self.fset, self.fdel, self.__doc__)
+
+    def setter(self, fset):
+        return type(self)(self.fget, fset, self.fdel, self.__doc__)
+
+    def deleter(self, fdel):
+        return type(self)(self.fget, self.fset, fdel, self.__doc__)
+</code></pre>
+
+<p>Python also provides the <code class="prettyprint">@property</code> decorator that can be used to create read only attributes. A property object has getter, setter, and deleter decorator methods that can be used to create a copy of the property with the corresponding <em>accessor</em> function set to the decorated function. This is best explained with an example:</p>
+
+<pre><code class="prettyprint lang-python">class C(object):
+    def __init__(self):
+        self._x = None
+
+    @property
+     # the x property. the decorator creates a read-only property
+    def x(self):
+        return self._x
+
+    @x.setter
+    # the x property setter makes the property writeable
+    def x(self, value):
+        self._x = value
+
+    @x.deleter
+    def x(self):
+        del self._x
+</code></pre>
+
+<p>If we wanted to make the property read-only then we would leave out the <code class="prettyprint">setter</code> method. </p>
+
+<p>Descriptors see wide application in the python language itself. Python functions, class methods, static methods are all examples of non-data descriptors.  <a href="https://docs.python.org/2/howto/descriptor.html" rel="nofollow">Descriptor How-To Guide</a> provides a basic description of how the listed python objects are implemented using descriptors.</p>
+
+<p>Further Reading</p>
+
+<ol>
+<li><p><a href="https://docs.python.org/2/howto/descriptor.html" rel="nofollow">Descriptor How-To Guide</a></p></li>
+<li><p>Python Essential Reference 4th Edition; David Beazley</p></li>
+<li><p><a href="http://www.gghh.name/dibtp/?p=489" rel="nofollow">Caching in python with a descriptor and a decorator</a></p></li>
+<li><p><a href="http://python-history.blogspot.co.uk/2010/06/inside-story-on-new-style-classes.html?m=1" rel="nofollow">Inside story on new style classes</a></p></li>
+</ol>
+
+  <figure class="postend kudo able clearfix" id="kudo_SOKN3xmsSbLVrJxYQv">
+    <a href="#kudo">
+      <p class="filling"> </p>
+    </a>
+    <p class="num">408</p>
+    <p class="txt">Kudos</p>
+  </figure>
+  <figure class="side kudo able clearfix" id="kudo_side_SOKN3xmsSbLVrJxYQv">
+    <a href="#kudo">
+      <p class="filling"> </p>
+    </a>
+    <p class="num">408</p>
+    <p class="txt">Kudos</p>
+  </figure>
+</article>
+
+</div></body></html>

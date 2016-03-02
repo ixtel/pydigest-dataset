@@ -1,0 +1,132 @@
+<html><body><div><div class="text"><p>Some of the more advanced databases implement a “geometry” datatype for <a href="http://t.umblr.com/redirect?z=http%3A%2F%2Fen.wikipedia.org%2Fwiki%2FSpatial_query&amp;t=ZWU4ODI5NTIxZmUyNzg5Yjc4MjljYTkyNWZkMjkwNjk2NGYyOWUyYSwzalJielA0Ug%3D%3D" title="Wikipedia Spatial Queries">spatial</a> queries that might involve distances, intersections, containments or areas. To efficiently optimise these queries a special spatial index is usually created. We use the graph database <a href="http://t.umblr.com/redirect?z=http%3A%2F%2Fneo4j.com%2F&amp;t=ODBjYzQ3NDYzMGViYmFlZmNkNGI1ODg2MTg3ODk3NDFlNWRjZGQwZSwzalJielA0Ug%3D%3D" title="Neo4j">Neo4j</a> which has a <a href="http://t.umblr.com/redirect?z=https%3A%2F%2Fgithub.com%2Fneo4j-contrib%2Fspatial&amp;t=N2QwZjkzNjEwOTU1MTFjMzA2OTg5Njk0ZDk1MDJlYmE3ODZhNzRkYSwzalJielA0Ug%3D%3D" title="GitHub Neo4j Spatial Server Extension">spatial server extension</a> that implements this index with an <a href="http://t.umblr.com/redirect?z=http%3A%2F%2Fen.wikipedia.org%2Fwiki%2FR-tree&amp;t=ZmQzNDU4Y2U4NzFiZTE5NWMzMTVjM2MxN2VmNzk0MDZiOGJmYWZiNSwzalJielA0Ug%3D%3D" title="Wikipedia RTree">RTree</a>.</p>
+<p>To access our graph <span>— </span>which models all the lovely homes that we manage throughout the world <span>—</span> we rely on the <a href="http://t.umblr.com/redirect?z=http%3A%2F%2Fen.wikipedia.org%2Fwiki%2FRepresentational_state_transfer&amp;t=ZjFiMTAwYmNiNDM0M2MxNTQ3MTExODJiYjFjZjkyODYyZjYxNzA4YSwzalJielA0Ug%3D%3D" title="Wikipedia explanation of REST">REST</a> library <a href="http://t.umblr.com/redirect?z=http%3A%2F%2Fpy2neo.org%2F2.0%2F&amp;t=ZmMwODlhMWZiNzRjNmVhMTVjZDI0Y2U1MDZkZmJlZDhmNjFhOGM3ZiwzalJielA0Ug%3D%3D" title="Py2neo">Py2neo</a>. For a little fun I’ve contributed an <a href="http://t.umblr.com/redirect?z=http%3A%2F%2Fpy2neo.org%2F2.0%2F_modules%2Fpy2neo%2Fext%2Fspatial%2Fplugin.html&amp;t=YjVkNzMxMjc5YzY4OWUxZjcyODY5YzFkMzhmZWZlZTIxNmU4N2IyMCwzalJielA0Ug%3D%3D" title="source code for py2neo spatial">api</a> to <a href="http://t.umblr.com/redirect?z=http%3A%2F%2Fpy2neo.org%2F2.0%2F&amp;t=ZmMwODlhMWZiNzRjNmVhMTVjZDI0Y2U1MDZkZmJlZDhmNjFhOGM3ZiwzalJielA0Ug%3D%3D" title="Py2neo">Py2neo</a> for this server extension so we can now ask questions such as “how many properties do we have in Mayfair?” or a mobile app could find the nearest dozen properties… or.. maybe just all those within a mile of the user — with a swimming pool!</p>
+<p>So let’s give it a quick go.</p>
+<p><small><strong><em>note/caution/caveats/care</em></strong>:  from here on in I assume you have Neo4j running with a disposable data store to work on, are comfortable in a bash(like) shell, the neo4j-shell and the Python (2.7.x) shell, plus are comfortable with the Neo4j web browser interface and some Cypher. Furthermore, are able to install Python dependencies, have Py2neo installed (&gt;= py2neo-2.0.3) and have some love for graphs and maps — but let none of this stop you from continuing and simply reading along.</small></p>
+<p>For this we’ll need some fun data, and what’s more fun than that of crime scenes from East London? I live in Hackney and (data on) wrongdoing here is <a href="http://t.umblr.com/redirect?z=http%3A%2F%2Fwww.police.uk%2Fmetropolitan%2F00AMGG%2Fcrime%2Fstats%2F&amp;t=ZTZmMDMxY2YwNmU2YzFlZjllODNjNmY2N2Y1OWQzNWZlZDA5NmI0NSwzalJielA0Ug%3D%3D" title="Hackney Central Crime Statistics">plentiful</a>. Data for the last year can be downloaded in CSV format which we can then import from the neo-shell using the LOAD CSV command (which, beware, does not support whitespace in headers). Given the (amended) headers:</p>
+<pre><code>CrimeID,Date,Latitude,Longitude,Location,Category,Status</code></pre>
+<p>we can create a rudimentary data model — to the <strong>neo4j-shell</strong>!</p>
+<pre><code>USING PERIODIC COMMIT 100
+LOAD CSV WITH headers FROM "file:///Users/simon/data/hackney-crime.csv" as line
+WITH line WHERE line.CrimeID &lt;&gt; ""
+MERGE (c:Crime {crime_id:line.CrimeID, latitude:line.Latitude, longitude:line.Longitude})
+MERGE (cs:CrimeScene {location:line.Location})
+CREATE (c)-[:COMMITTED_AT]-&gt;(cs)
+MERGE (date:Date {date:line.Date})
+CREATE (c)-[:COMMITTED_ON_DAY]-&gt;(date)
+MERGE (o:Offence {label:line.Category})
+CREATE (c)-[:COMMITTED_OFFENCE]-&gt;(o);
+</code></pre>
+<p><small><strong><em>note</em></strong>: do replace the file path with your own.</small></p>
+<p>Let’s check we’ve got a sensible graph by getting some crime from Dalston.</p>
+<p>To the <a href="http://t.umblr.com/redirect?z=http%3A%2F%2F127.0.0.1%3A7474%2Fbrowser%2F&amp;t=M2Q0ODY2YjkyM2E4NDI4NmRmMzEwYTc5YjUxYjEzNDIwMTM4MTE5MiwzalJielA0Ug%3D%3D" title="Neo4j Browser" target="blank"><strong>browser</strong></a>!</p>
+<pre><code>MATCH (crime:Crime)-[:COMMITTED_AT]-&gt;(crimescene),
+(date)&lt;-[:COMMITTED_ON_DAY]-(crime)-[:COMMITTED_OFFENCE]-&gt;(offence)
+WHERE crimescene.location =~ '(?i).*Dalston.*'
+WITH offence, date, crime, count(crime) as crimes, crimescene
+RETURN offence, date, crimes, crime, crimescene
+</code></pre>
+<p><img alt="image" src="http://33.media.tumblr.com/7f1d0015b3caa0528a9e09295d445443/tumblr_inline_nhcoy6onJH1smupz6.png"/></p>
+<p>As expected, we’re seeing a lot of crime here. Each of the crime Nodes (the blue ones) have two geographically aware properties (latitude and longitude) which we now want to add to a spatial index in order to be able to carry out exciting spatial queries — using <a href="http://t.umblr.com/redirect?z=http%3A%2F%2Fpy2neo.org%2F2.0%2Fext%2Fspatial.html&amp;t=M2IzZWRiZTdhMWRjZmI1ZmE1ODBkZDIzZGNkM2Y1YTkzMDVhZDk5YSwzalJielA0Ug%3D%3D" title="Py2neo Spatial API Docs">Py2neo Spatial</a>!</p>
+<p>First check that you have the Neo4j JAVA Spatial Extension installed…</p>
+<p>To the <strong>shell</strong>!</p>
+<pre><code>    curl -v http://localhost:7474/db/data/</code></pre>
+<p>On success (when the key `SpatialPlugin` is found in the `extensions` values) get a connection to the graph.</p>
+<p>Now you need Py2neo &gt;= 2.0.3 which you can pip install. You also need the dependency <a href="http://t.umblr.com/redirect?z=https%3A%2F%2Fpypi.python.org%2Fpypi%2FShapely&amp;t=YmM4M2RkOWUwZjljYjViNmM0MmI5Yjc1OTVhNzA2OWE0MzU3MmU1MywzalJielA0Ug%3D%3D" title="The excellent Python GIS toolkit, Shapely">Shapely</a>, which again, you can pip install.</p>
+<pre><code>    pip install py2neo shapely</code></pre>
+<p>Then, to the <strong>Python console</strong>!</p>
+<pre><code>    In [1]: from py2neo.core import Graph
+
+    In [2]: from py2neo.ext.spatial import Spatial
+
+    In [3]: DEFAULT_DB = "http://localhost:7474/db/data/"
+
+    In [4]: graph = Graph(DEFAULT_DB)
+
+    In [5]: spatial = Spatial(graph)</code></pre>
+<p>Now we can create a layer for our geometries which we’ll imaginatively name, “London”.</p>
+<pre><code>    In [6]: spatial.create_layer("London")</code></pre>
+<p>This has now created the magical index for you — the layer <em>is</em> the index!</p>
+<p>Let’s check what we expect to add to this layer… to the <strong>neo4j-shell</strong>!</p>
+<pre><code>neo4j-sh (?)$ MATCH (crime:Crime) RETURN count(crime);
++--------------+
+| count(crime) |
++--------------+
+| 2212         |
++--------------+
+</code></pre>
+<p>To the <strong>Python console</strong>!</p>
+<pre><code>    In [7]: from py2neo.ext.spatial.util import parse_lat_long
+
+    In [8]: query = "MATCH (crime:Crime) RETURN crime;"
+    
+    In [9]: records = graph.cypher.execute(query)
+
+    In [10]: for record in records:
+                node = record[0]
+                node_id = node._id
+                properties = node.properties
+                lat = properties['latitude']
+                long = properties['longitude']
+                crime = (lat, long)
+                shape = parse_lat_long(crime)
+                crime_id = properties['crime_id']
+                spatial.create_geometry(geometry_name=crime_id, wkt_string=shape.wkt, layer_name="London", node_id=node_id)
+                print('created {}'.format(crime_id))</code></pre>
+<p>This operation depends on the amount of crime committed and since this is London — be <em>patient</em>. Once processed we can check out what we’ve created….</p>
+<p>The “special” magical spatial index is in fact simply just another graph so all we need is some Cypher to explore it. The relationship names require prior introspection of spatial indices so I’m helping out with a litte more Cypher. This will return our new “geometry” nodes related to the “application” nodes that we initially created.</p>
+<p>To the <a href="http://t.umblr.com/redirect?z=http%3A%2F%2F127.0.0.1%3A7474%2Fbrowser%2F&amp;t=M2Q0ODY2YjkyM2E4NDI4NmRmMzEwYTc5YjUxYjEzNDIwMTM4MTE5MiwzalJielA0Ug%3D%3D" target="blank"><strong>browser</strong></a>!!</p>
+<pre><code>MATCH (spatial_root)-[:LAYER]-&gt;(london {layer:"London"})-[:RTREE_ROOT]-(layer_spatial_root)
+OPTIONAL MATCH (layer_spatial_root)-[tree_child:RTREE_CHILD]-&gt;(child),
+(geom_ref)&lt;-[tree_ref:RTREE_REFERENCE]-(child),
+(geom_ref)-[gis_related_crime:LOCATES]-&gt;(crime)
+RETURN spatial_root, london, layer_spatial_root, crime, tree_child, tree_ref, gis_related_crime</code></pre>
+<p>Expect to see something pretty like this:</p>
+<p><img alt="image" src="http://33.media.tumblr.com/de984740bd40de3769cc31beac386d27/tumblr_inline_nhcs4lH1mg1smupz6.png"/></p>
+<p>The yellow nodes that you now see are geographically aware of the blue nodes — those ghastly crimes.</p>
+<p>Well done to all those that have followed with more than just eyes. We will finish with a couple of “criminal” queries.</p>
+<p>My IP address is often approximately here: (51.561268, -0.082662).</p>
+<p>Back to the <strong>Python console</strong>!</p>
+<pre><code>    In [11]: me = (51.561268, -0.082662)
+
+    In [12: local_crime = spatial.find_closest_geometries(
+                coords=me)
+
+    In [13] len(local_crime)
+    Out[1]: 282</code></pre>
+<p>… <strong>hell</strong>! Thankfully, Church Street is quite well-to-do.</p>
+<pre><code>    In [15]: spatial.find_within_distance(
+                "London", me, distance=1)
+    Out[2]: []</code></pre>
+<p>But drag Dalston into range….</p>
+<pre><code>    In [14]: spatial.find_within_distance(
+                "London", me, distance=3)
+    Out[3]: [Anti-social behaviour,
+             Public order,
+             Drugs,
+             Drugs,
+             Theft from the person,
+             Anti-social behaviour,
+             Anti-social behaviour,
+             Bicycle theft,
+             Criminal damage and arson,
+             Drugs,
+             ...
+            ]</code></pre>
+<p><em>many</em>, <em>many</em> more lines then follow!</p>
+<p>The full <a href="http://t.umblr.com/redirect?z=http%3A%2F%2Fpy2neo.org%2F2.0%2F_modules%2Fpy2neo%2Fext%2Fspatial%2Fplugin.html&amp;t=YjVkNzMxMjc5YzY4OWUxZjcyODY5YzFkMzhmZWZlZTIxNmU4N2IyMCwzalJielA0Ug%3D%3D" title="source code for py2neo spatial">api</a> so far is:</p>
+<pre>    create_layer
+    delete_layer
+    create_geometry
+    delete_geometry
+    update_geometry
+    find_within_distance
+    find_closest_geometries
+    find_within_bounding_box</pre>
+<p>And this <a href="http://t.umblr.com/redirect?z=http%3A%2F%2Fpy2neo.org%2F2.0%2F_modules%2Fpy2neo%2Fext%2Fspatial%2Fplugin.html&amp;t=YjVkNzMxMjc5YzY4OWUxZjcyODY5YzFkMzhmZWZlZTIxNmU4N2IyMCwzalJielA0Ug%3D%3D" title="source code for py2neo spatial">api</a> is brand new and eager for people to use it so please do so for fun or for pleasure.</p>
+<p>I hope you’ve enjoyed this little journey to at least a fraction of the amount that I have had writing it. Please contact the <a href="http://t.umblr.com/redirect?z=mailto%3Anoisyboiler%40googlemail.com&amp;t=NzJiM2I5ZjY0YmU2NmE3ODA3MzEzMmIxZDFiNzcxODliYmIzMWY0YiwzalJielA0Ug%3D%3D">maintainer</a> of the Spatial extension with any comments, questions or requests. And thanks for reading to the very bottom!</p>
+
+      
+            
+      
+      
+    </div></div></body></html>

@@ -1,0 +1,67 @@
+<html><body><div><div class="entry-content">
+		<p><a href="https://github.com/LuminosoInsight/python-ftfy">ftfy</a> is a Python tool that takes in bad Unicode and outputs good Unicode. I developed it because we really needed it at Luminoso — the text we work with can be damaged in several ways by the time it gets to us. It’s become our most popular open-source project by far, as many other people have the same itch that we’re scratching.</p>
+<p>The coolest thing that ftfy does is to fix mojibake — those mix-ups in encodings that cause the word <code>más</code> to turn into <code>mÃ¡s</code> or even <code>mÃƒÂ¡s</code>. (I’ll recap why this happens and how it can be reversed below.) Mojibake is often intertwined with other problems, such as un-decoded HTML entities (<code>m&amp;aacute;s</code>), and ftfy fixes those as well. But as we worked with the ftfy 3 series, it gradually became clear that the default settings were making some changes that were unnecessary, and from time to time they would actually get in the way of the goal of cleaning up text.</p>
+<p>ftfy 4 includes interesting new fixes to creative new ways that various software breaks Unicode. But it also aims to change <em>less</em> text that doesn’t need to be changed. This is the big change that made us increase the major version number from 3 to 4, and it’s fundamentally about Unicode normalization. I’ll discuss this change below under the heading “Normalization”.</p>
+<h2>Mojibake and why it happens</h2>
+<p>Mojibake is what happens when text is written in one encoding and read as if it were a different one. It comes from the Japanese word “•¶Žš‰»‚¯” — no, sorry, “文字化け” — meaning “character corruption”. Mojibake turns everything but basic ASCII characters into nonsense.</p>
+<p>Suppose you have a word such as “más”. In UTF-8 — the encoding <a href="http://w3techs.com/technologies/overview/character_encoding/all">used by the majority of the Internet</a> — the plain ASCII letters “m” and “s” are represented by the familiar single byte that has represented them in ASCII for 50 years. The letter “á”, which is not ASCII, is represented by two bytes.</p>
+<pre class="brush: plain; title: ; notranslate" title="">
+Text:  m  á     s
+Bytes: 6d c3 a1 73
+</pre>
+<p>The problem occurs when these bytes get sent to a program that doesn’t quite understand UTF-8. This program probably thinks that every character is one byte, so it decodes each byte as a character, in a way that depends on the operating system it’s running on and the country it was set up for. (This, of course, makes no sense in an era where computers from all over the world can talk to each other.)</p>
+<p>If we decode this text using Windows’ most popular single-byte encoding, which is known as “Windows-1252” and often confused with “ISO-8859-1”, we’ll get this:</p>
+<pre class="brush: plain; title: ; notranslate" title="">
+Bytes: 6d c3 a1 73
+Text:  m  Ã  ¡  s
+</pre>
+<p>The real problem happens when this text needs to be sent back over the Internet. It may very well send the newly-weirdified text in a way that knows it needs to <em>encode</em> UTF-8:</p>
+<pre class="brush: plain; title: ; notranslate" title="">
+Intended text: m  á           s
+Actual text:   m  Ã     ¡     s
+Bytes:         6d c3 83 c2 a1 73
+</pre>
+<p>So, the word “más” was supposed to be four bytes of UTF-8, but what we have now is six bytes of what I propose to call “Double UTF-8”, or “WTF-8” for short.</p>
+<p>WTF-8 is a very common form of mojibake, and the fortunate thing is that it’s reasonably easy to detect. Most possible sequences of bytes are not UTF-8, and most mojibake forms sequences of characters that are extremely unlikely to be the intended text. So ftfy can look for sequences that would decode as UTF-8 if they were encoded as another popular encoding, and then sanity-check by making sure that the new text looks more likely than the old text. By reversing the process that creates mojibake, it turns mojibake into the correct text with a rate of false positives <a href="http://ftfy.readthedocs.org/en/latest/#accuracy">so low that it’s difficult to measure</a>.</p>
+<h2>Weird new mojibake</h2>
+<p>We test ftfy on live data from Twitter, which due to its diversity of languages and clients is a veritable petri dish of Unicode bugs. One thing I’ve found in this testing is that mojibake is becoming a bit less common. People expect their Twitter clients to be able to deal with Unicode, and the bugs are gradually getting fixed. The “you fail at Unicode” character � was 33% less common on Twitter in 2014 than it was in 2013.</p>
+<p>Some software is still very bad at Unicode — particularly Microsoft products. These days, Microsoft is in many ways making its software play nicer in a pluralistic world, but they bury their head in the sand when it comes to the dominance of UTF-8. Sadly, Microsoft’s APIs were not designed for UTF-8 and they’re not interested in changing them. They adopted Unicode during its awkward coming-of-age in the mid ’90s, when UTF-16 seemed like the only way to do it. Encoding text in UTF-16 is like dancing the Macarena — you probably could do it under duress, but you haven’t willingly done it since 1997.</p>
+<p>Because they don’t match the way the outside world uses Unicode, Microsoft products tend to make it very hard or impossible to export and import Unicode correctly, and easy to do it incorrectly. This remains a major reason that we need ftfy.</p>
+<p>Although text is getting a bit cleaner, people are getting bolder about their use of Unicode and the bugs that remain are getting weirder. ftfy has always been able to handle some cases of files that use different encodings on different lines, but what we’re seeing now is text that switches between UTF-8 and WTF-8 in the same <em>sentence</em>. There’s something out there that uses UTF-8 for its opening quotation marks and Windows-1252 for its closing quotation marks, before encoding it all in UTF-8 again, <code>â€œlike this”</code>. You can’t simply encode and decode that string to get the intended text <code>“like this”</code>.</p>
+<p>ftfy 4.0 includes a heuristic that fixes some common cases of mixed encodings in close proximity. It’s a bit conservative — it leaves some text unfixed, because if it changed all text that might possibly be in a mixed encoding, it would lead to too many false positives.</p>
+<p>Another variation of this is that ftfy looks for mojibake that some other well-meaning software has tried to fix, such as by replacing byte A0 with a space, because in Windows-1252 A0 is a non-breaking space. Previously, ftfy would have to leave the mojibake unfixed if one of its characters was changed. But if the sequence is clear enough, ftfy will put back the A0 byte so that it can fix the original mojibake.</p>
+<p>Does this seem gratuitous? These are things that show up both in ftfy’s testing stream and in real data that we’ve had to handle. We want to minimize the cases where we have to tell a customer “sorry, your text is busted” and maximize the cases where we just deal with it.</p>
+<h2>Normalization</h2>
+<p>NFC (the Normalization Form that uses Composition) is a process that should be applied to basically all Unicode input. Unicode is flexible enough that it has multiple ways to write exactly the same text, and NFC merges them into the same sensible way. Here are two ways to write <code>más</code>, as illustrated by the <code>ftfy.explain_unicode</code> function.</p>
+<p>This is the NFC normalized way:</p>
+<pre class="brush: plain; title: ; notranslate" title="">
+U+006D  m       [Ll] LATIN SMALL LETTER M
+U+00E1  á       [Ll] LATIN SMALL LETTER A WITH ACUTE
+U+0073  s       [Ll] LATIN SMALL LETTER S
+</pre>
+<p>And this is a different way that’s not NFC-normalized (it’s NFD-normalized instead):</p>
+<pre class="brush: plain; title: ; notranslate" title="">
+U+006D  m       [Ll] LATIN SMALL LETTER M
+U+0061  a       [Ll] LATIN SMALL LETTER A
+U+0301  ́        [Mn] COMBINING ACUTE ACCENT
+U+0073  s       [Ll] LATIN SMALL LETTER S
+</pre>
+<p>If you want the same text to be represented by the same data, running everything through NFC normalization is a good idea. ftfy does that (unless you ask it not to).</p>
+<p>Previous versions of ftfy were, by default, not just using NFC normalization, but the more aggressive NFKC normalization (whose acronym is quite unsatisfying because the K stands for “Compatibility”). For a while, it seemed like normalizing even more was even better. NFKC does things like convert <code>﻿﻿ｆｕｌｌｗｉｄｔｈ  ｌｅｔｔｅｒｓ</code> into normal letters, and convert the single ellipsis character <code>…</code> into three periods.</p>
+<p>But NFKC also loses meaningful information. If you were to ask me what the leading cause of mojibake is, I might answer “Excel™”. After NFKC normalization, I’d instead be blaming something called “ExcelTM”. In cases like this, NFKC is hitting the text with too blunt a hammer. Even when it seems appropriate to normalize aggressively because we’re going to be performing machine learning on text, the resulting words such as “exceltm” are not helpful.</p>
+<p>So in ftfy 4.0, we switched the default normalization to NFC. We didn’t want to lose the nice parts of NFKC, such as normalizing fullwidth letters and breaking up the kind of ligatures that can make the word “ﬂuﬃeﬆ” appear to be five characters long. So we added those back in as separate fixes. By not applying NFKC bluntly to all the text, we change less text that doesn’t need to be changed, even as we apply more kinds of fixes. It’s a significant change in the default behavior of ftfy, but we hope you agree that this is a good thing. A side benefit is that ftfy 4.0 is faster overall than 3.x, because NFC normalization can run <em>very</em> quickly in common cases.</p>
+<h2>Future-proofing emoji and other changes</h2>
+<p>ftfy’s heuristics depend on knowing what kind of characters it’s looking at, so it includes a table where it can quickly look up Unicode character classes. This table normally doesn’t change very much, but we update it as Python’s <code>unicodedata</code> gets updated with new characters, making the same table available even in previous versions of Python.</p>
+<p>One part of the table is changing really fast, though, in a way that Python may never catch up with. Apple is <a href="http://blog.emojipedia.org/apple-2015-emoji-changelog-ios-os-x">rapidly adding new emoji and modifiers</a> to the Unicode block that’s set aside for them, such as 🖖🏽, which should be a brown-skinned Vulcan salute. Unicode will publish them in a standard eventually, but people are using them now.</p>
+<p>Instead of waiting for Unicode and then Python to catch up, ftfy just assumes that any character in this block is an emoji, even if it doesn’t appear to be assigned yet. When <a href="http://emojipedia.org/burrito/">emoji burritos</a> arrive, ftfy will be ready for them.</p>
+<p>Developers who like to use the UNIX command line will be happy to know that ftfy can be used as a pipe now, as in:</p>
+<pre><code>curl http://example.com/api/data.txt | ftfy | sort | uniq -c
+</code></pre>
+<p>The details of all the changes can be found, of course, in the <a href="https://github.com/LuminosoInsight/python-ftfy/blob/20b6698a7f2cc565bd240121fba586cf6c6f3bc5/CHANGELOG.md">CHANGELOG</a>.</p>
+<p>Has ftfy solved a problem for you? Have you stumped it with a particularly bizarre case of mojibake? Let us know in the comments or <a href="https://twitter.com/luminosoinsight">on Twitter</a>.</p>
+<div id="jp-post-flair" class="sharedaddy sd-like-enabled sd-sharing-enabled"><div class="sharedaddy sd-block sd-like jetpack-likes-widget-wrapper jetpack-likes-widget-unloaded" id="like-post-wrapper-26373703-718-56d5b457eaa1b" data-src="//widgets.wp.com/likes/#blog_id=26373703&amp;post_id=718&amp;origin=luminosoinsight.wordpress.com&amp;obj_id=26373703-718-56d5b457eaa1b" data-name="like-post-frame-26373703-718-56d5b457eaa1b"><h3 class="sd-title">Like this:</h3><p class="likes-widget-placeholder post-likes-widget-placeholder"><span class="button"><span>Like</span></span> <span class="loading">Loading...</span></p><span class="sd-text-color"/><a class="sd-link-color"/></div>
+<p id="jp-relatedposts" class="jp-relatedposts">
+	<h3 class="jp-relatedposts-headline"><em>Related</em></h3>
+</p></div>			</div>
+
+	</div></body></html>

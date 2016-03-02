@@ -1,0 +1,44 @@
+<html><body><div><div class="post-text" itemprop="text">
+<p>The default I/O stack in Python 2 is layered over CRT <code>FILE</code> streams. On Windows these are built on top of a POSIX emulation API that uses file descriptors (which in turn is layered over the user-mode Windows API, which is layered over the kernel-mode I/O system, which itself is a deeply layered system based on I/O request packets; the hardware is down there somewhere...). In the POSIX layer, opening a file with <code>_O_RDWR | _O_TEXT</code> mode (as in "r+"), requires seeking to the end of the file to remove CTRL+Z, if it's present. Here's a quote from the CRT's <a href="https://msdn.microsoft.com/en-us/library/yeby3zcb%28v=vs.90%29.aspx"><code>fopen</code></a> documentation:</p>
+
+<blockquote>
+  <p>Open in text (translated) mode. In this mode, CTRL+Z is interpreted as
+  an end-of-file character on input. In files opened for reading/writing
+  with "a+", fopen checks for a CTRL+Z at the end of the file and
+  removes it, if possible. This is done because using fseek and ftell to
+  move within a file that ends with a CTRL+Z, may cause fseek to behave
+  improperly near the end of the file.</p>
+</blockquote>
+
+<p>The problem here is that the above check calls the 32-bit <a href="https://msdn.microsoft.com/en-us/library/1yee101t%28v=vs.90%29.aspx"><code>_lseek</code></a> (bear in mind that <code>sizeof long</code> is 4 bytes on 64-bit Windows, unlike most other 64-bit platforms), instead of <code>_lseeki64</code>. Obviously this fails for an 11 GB file. Specifically, <a href="https://msdn.microsoft.com/en-us/library/aa365541"><code>SetFilePointer</code></a> fails because it gets called with a <code>NULL</code> value for <code>lpDistanceToMoveHigh</code>. Here's the return value and <code>LastErrorValue</code> for the latter call:</p>
+
+<pre class="lang-none prettyprint-override"><code>0:000&gt; kc 2
+Call Site
+KERNELBASE!SetFilePointer
+MSVCR90!lseek_nolock
+
+0:000&gt; r rax                       
+rax=00000000ffffffff
+
+0:000&gt; dt _TEB @$teb LastErrorValue
+ntdll!_TEB
+   +0x068 LastErrorValue : 0x57
+</code></pre>
+
+<p>The error code 0x57 is <a href="https://msdn.microsoft.com/en-us/library/ms681382#ERROR_INVALID_PARAMETER"><code>ERROR_INVALID_PARAMETER</code></a>. This is referring to <code>lpDistanceToMoveHigh</code> being <code>NULL</code> when trying to seek from the end of a large file.</p>
+
+<p>To work around this problem with CRT <code>FILE</code> streams, I recommend opening the file using <a href="https://docs.python.org/2/library/io.html#module-interface"><code>io.open</code></a> instead. This is  a backported implementation of Python 3's I/O stack. It always opens files in raw binary mode (<code>_O_BINARY</code>), and it implements its own buffering and text-mode layers on top of the raw layer.</p>
+
+<pre><code>&gt;&gt;&gt; import io                    
+&gt;&gt;&gt; f = io.open('a.csv', 'r+')
+&gt;&gt;&gt; f     
+&lt;_io.TextIOWrapper name='a.csv' encoding='cp1252'&gt;
+&gt;&gt;&gt; f.buffer   
+&lt;_io.BufferedRandom name='a.csv'&gt;
+&gt;&gt;&gt; f.buffer.raw
+&lt;_io.FileIO name='a.csv' mode='rb+'&gt;
+&gt;&gt;&gt; f.seek(0, os.SEEK_END)
+11811160064L
+</code></pre>
+    </div>
+    </div></body></html>

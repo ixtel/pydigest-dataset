@@ -1,0 +1,103 @@
+<html><body><div><div class="content html_format">
+      <img src="https://habrastorage.org/files/709/00b/af4/70900baf4859445b99ff06d1fef66f1d.jpg"/>
+<p>
+Позвольте мне для начала немного пофилософствовать на тему технологий. Технологии позволяют нам концентрироваться на результате, на конечной цели, дают ощущение контроля. Вот вы в белоснежном кителе на мостике своего технологичного лайнера выходите в очередной плавание. Ваш лайнер снаряжен всем необходимым, чтобы противостоять любой проблеме. Вам не страшны волны, айсберги и даже пьяные боцманы.
+</p><p>
+Вообще лирическое вступление было навеяно вполне конкретной историей про сломанный гитхаб. Сделанная на заре одного из проектов синхронизация домашнего репо в гитхаб решила проблему переезда. Потом про костыль забыли. Древнее зло уснуло и терпеливо ждало своего часа. В один прекрасный день </p><s>скайнет</s><p> новый сотрудник решил привести в порядок тот самый домашний репозиторий. И самым популярным вопросом среди программистов в тот день было «коллега, а вы не видели мою ветку 0022? ну такая, с багфиксами». Руководство опс-тим было спокойно как никогда: гит — это распределенная система, версия кода хранится на персональном компьютере каждого разработчика. Давайте уже как-нибудь разберитесь между собой и не отвлекайте нас от сборки наших ядер и тюнингов сетевых стеков.
+
+</p><h5>И все же зачем..?</h5><p>
+Действительно, можно нафантазировать большое количество количество возможных проблем, например:
+
+</p><ul>
+<li>Недоступность удаленного репозитория и отсутсвие актуальной локальной копии</li>
+<li>Злоумышленники с помощью украденного пароля испортили/удалили репозитории</li>
+<li>Ошибки в манипуляциях с репозиториями</li>
+</ul>
+
+<h5>Итак, что и как бэкапить...</h5><a name="habracut"/><p>
+Вот вкратце наш хитрый план действий:
+
+</p><ol>
+<li>Получаем список репозиториев для организации</li>
+<li>Клонируем репозитории поз полученного списка </li>
+<li>Архивируем</li>
+<li>Кладем в AWS S3</li>
+</ol>
+
+<h5>Немного больше конкретики в случае использования github.com</h5>
+<p>
+Разумно завести для процедуры бэкапа отдельного readonly-пользователя. Так же необходимо сгенерировать для него </p><b>token</b><p>(Settings -&gt; Personal Access Tokens -&gt; Generate new token).
+</p><p>
+Для начала с помощью pygithub3 получаем репозитории, которые мы впоследствии собираемся бэкапить:
+</p><pre><code class="python">from pygithub3 import Github
+
+def get_repos(args):
+    config = {'token': args.token}
+    gh = Github(**config)
+
+    return gh.repos.list_by_org(args.organization).all()
+</code></pre>
+<p>
+Для клонирования будем использовать консольный git:
+</p><pre><code class="python">def clone_repo(repo_list,args):
+
+    if os.path.isdir(args.directory):
+        shutil.rmtree(args.directory)
+
+    os.mkdir(args.directory)
+
+    if args.mirror is True:
+        args.git += " --mirror"
+
+    for repo in repo_list:
+        repo_url = "https://%(token)s:x-oauth-basic@github.com/%(organization)s/%(repo)s.git" % {'token': args.token,
+                                                                                                 'organization': args.organization,
+                                                                                                 'repo': repo.name}
+
+        os.system('git clone %(arguments)s %(repo_url)s %(directory)s/%(repo)s' % {'arguments': args.git,
+                                                                                   'repo_url': repo_url,
+                                                                                   'directory': args.directory, 'repo': repo.name})
+</code></pre><p>
+Обратите внимание на опцию "--mirror" — с помощью нее создается зеркальная копия удаленного репозитория. 
+
+</p><h5>Кстати, в случае использования bitbucket.org...</h5>
+<p>
+Получаем список репозиториев:
+</p><pre><code class="python">def _get_repositories(owner, username, password):
+    auth_value = ('%s:%s' % (username, password)).encode('base64').strip()
+    headers = {'Authorization': 'Basic %s' % auth_value}
+    url = 'https://bitbucket.org/api/2.0/repositories/%s?role=member' % owner
+    values = []
+
+    while url is not None:
+        request = urllib2.Request(url, None, headers)
+        data = json.loads(urllib2.urlopen(request).read())
+        values = values + data['values']
+        url = data.get('next')
+
+    return values
+</code></pre>
+<p>
+И клонируем:
+</p><pre><code class="python">def _git_clone(username, password, directory, sub_dir_name, owner, slug, verbose=False):
+    os.chdir(directory)
+    cmd = 'git clone --mirror https://%s:%s@bitbucket.org/%s/%s.git %s' % (username, password,
+                                                                  owner, slug, sub_dir_name)
+    proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE)
+    ret_value = proc.wait()
+    msg = proc.stdout.read()
+    sys.stdout.write('%s%s%s%s' % (sub_dir_name, os.linesep,
+                                   '=' * len(sub_dir_name), os.linesep))
+    sys.stdout.write("%s%s" % (msg, os.linesep))
+    return ret_value
+</code></pre><p>
+Кстати, </p><a href="https://confluence.atlassian.com/bitbucket/what-is-a-slug-224395839.html">slug</a><p> — это url-friendly название вашего репо в bitbucket.
+</p><p>
+Готовый скрипт для github можно найти </p><a href="https://github.com/aleksandrmironov/utilities/tree/master/github_backup">тут</a><p>.
+
+      
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

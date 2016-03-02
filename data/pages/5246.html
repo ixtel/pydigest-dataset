@@ -1,0 +1,127 @@
+<html><body><div><div class="post-text" itemprop="text">
+
+<p>I'm trying to get rid of explicit binding between my models. Thus instead of using <code>ForeignKey</code>, I'll use <code>IntegerField</code> to just store the primary key of target model as a field. Thus I'll handle the relationship manually at code level. This is because, I'll have to move my some schemas to different database instances. So they can't have linkage.</p>
+
+<p>Now, I'm facing issue with my nested serializer. I'm trying to create an instance of the below model:</p>
+
+<pre><code> 17 class Customer(models.Model):
+ 18     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+ 19     phone_no = models.CharField(max_length=15, unique=True)
+</code></pre>
+
+<p>And this is my <code>CustomerAddress</code> model, which references the <code>Customer</code> model:</p>
+
+<pre><code> 47 class CustomerAddress(models.Model):
+ 48     # customer = models.ForeignKey(Customer, related_name='cust_addresses')
+ 49     customer_id = models.UUIDField(default=uuid.uuid4)
+ 50     address = models.CharField(max_length=1000)
+</code></pre>
+
+<p>Below is my serializers:</p>
+
+<pre><code>  7 class CustomerAddressSerializer(serializers.ModelSerializer):
+  8
+  9     class Meta:
+ 10         model = CustomerAddress
+ 11         depth = 1
+
+ 31 class CustomerSerializer(serializers.ModelSerializer):
+ 32     cust_addresses = CustomerAddressSerializer(many=True)
+ 33
+ 34     class Meta:
+ 35         model = Customer
+ 36         depth = 1
+ 37         fields = ('id', 'phone_no', 'cust_addresses',)
+ 38
+ 39     def create(self, validated_data):
+ 40         cust = Customer.objects.create(id=uuid.uuid4())
+ 41
+ 42         for addr in validated_data['cust_addresses']:
+ 43             address = addr['address']
+ 44             cust_addr = CustomerAddress.objects.create(address=address, customer_id=cust.id)
+ 45
+ 46         return cust
+</code></pre>
+
+<p>My views:</p>
+
+<pre><code> 12 class CustomerView(generics.RetrieveAPIView, generics.CreateAPIView):
+ 13     serializer_class = CustomerSerializer
+ 14
+ 22     def get_object(self):
+ 23         session = self.request.session
+ 24         if session.has_key('uuid'):
+ 25             id = session['uuid']
+ 26             cust = Customer.objects.get(pk=uuid.UUID(id))
+ 27             return cust
+ 28         return None
+</code></pre>
+
+<p>When I try to fire the post request to above view from my test:</p>
+
+<pre><code> 71     def test_create_customer_address(self):
+ 72         cust_url = reverse('user_v1:customer')
+ 73         # Now we create a customer, and use it's UID in the "customer" data of /cust-address/
+ 74         cust_data = {"first_name": "Rohit", "last_name": "Jain", "phone_no": "xxxxxx", "email_id": "test@gmail.com", "cust_addresses": [{"city_id": 1, "address": "addr", "pin_code": "123124", "address_tag": "XYZ"}]}
+ 75         cust_response = self.client.post(cust_url, cust_data, format='json')
+ 76         print 'Post Customer'
+ 77         print cust_response
+ 78         self.assertEqual(cust_response.data['id'], str(cust_id))
+</code></pre>
+
+<p>My test is failing with the following error trace:</p>
+
+<pre><code>======================================================================
+ERROR: test_create_customer_address (app.tests.CustomerViewTest)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/ubuntu/src/django-proj/app/tests.py", line 75, in test_create_customer_address
+    cust_response = self.client.post(cust_url, cust_data, format='json')
+  File "/home/ubuntu/Envs/rj-venv/local/lib/python2.7/site-packages/rest_framework/test.py", line 168, in post
+    path, data=data, format=format, content_type=content_type, **extra)
+  File "/home/ubuntu/Envs/rj-venv/local/lib/python2.7/site-packages/rest_framework/test.py", line 90, in post
+    return self.generic('POST', path, data, content_type, **extra)
+  File "/home/ubuntu/Envs/rj-venv/local/lib/python2.7/site-packages/rest_framework/compat.py", line 231, in generic
+    return self.request(**r)
+  File "/home/ubuntu/Envs/rj-venv/local/lib/python2.7/site-packages/rest_framework/test.py", line 157, in request
+    return super(APIClient, self).request(**kwargs)
+  File "/home/ubuntu/Envs/rj-venv/local/lib/python2.7/site-packages/rest_framework/test.py", line 109, in request
+    request = super(APIRequestFactory, self).request(**kwargs)
+  File "/home/ubuntu/Envs/rj-venv/local/lib/python2.7/site-packages/django/test/client.py", line 466, in request
+    six.reraise(*exc_info)
+  File "/home/ubuntu/Envs/rj-venv/local/lib/python2.7/site-packages/django/core/handlers/base.py", line 132, in get_response
+    response = wrapped_callback(request, *callback_args, **callback_kwargs)
+  File "/home/ubuntu/Envs/rj-venv/local/lib/python2.7/site-packages/django/views/decorators/csrf.py", line 58, in wrapped_view
+    return view_func(*args, **kwargs)
+  File "/home/ubuntu/Envs/rj-venv/local/lib/python2.7/site-packages/django/views/generic/base.py", line 71, in view
+    return self.dispatch(request, *args, **kwargs)
+  File "/home/ubuntu/Envs/rj-venv/local/lib/python2.7/site-packages/rest_framework/views.py", line 456, in dispatch
+    response = self.handle_exception(exc)
+  File "/home/ubuntu/Envs/rj-venv/local/lib/python2.7/site-packages/rest_framework/views.py", line 453, in dispatch
+    response = handler(request, *args, **kwargs)
+  File "/home/ubuntu/Envs/rj-venv/local/lib/python2.7/site-packages/rest_framework/generics.py", line 190, in post
+    return self.create(request, *args, **kwargs)
+  File "/home/ubuntu/Envs/rj-venv/local/lib/python2.7/site-packages/rest_framework/mixins.py", line 21, in create
+    headers = self.get_success_headers(serializer.data)
+  File "/home/ubuntu/Envs/rj-venv/local/lib/python2.7/site-packages/rest_framework/serializers.py", line 470, in data
+    ret = super(Serializer, self).data
+  File "/home/ubuntu/Envs/rj-venv/local/lib/python2.7/site-packages/rest_framework/serializers.py", line 217, in data
+    self._data = self.to_representation(self.instance)
+  File "/home/ubuntu/Envs/rj-venv/local/lib/python2.7/site-packages/rest_framework/serializers.py", line 430, in to_representation
+    attribute = field.get_attribute(instance)
+  File "/home/ubuntu/Envs/rj-venv/local/lib/python2.7/site-packages/rest_framework/fields.py", line 317, in get_attribute
+    raise type(exc)(msg)
+AttributeError: Got AttributeError when attempting to get a value for field `cust_addresses` on serializer `CustomerSerializer`.
+The serializer field might be named incorrectly and not match any attribute or key on the `Customer` instance.
+Original exception text was: 'Customer' object has no attribute 'cust_addresses'.
+
+----------------------------------------------------------------------
+</code></pre>
+
+<p>All this was working fine when I had my <code>CustomerAddress</code> have <code>ForeignKey</code> binding to <code>Customer</code>. I'm not getting any clue on how to fix this thing. I tried to look through the source code to see whether some customization needs to be done. But I'm at loss. I feel like I've to somehow tweak with my serializer, by may be overriding <code>to_representation</code> method, but I'm not sure.</p>
+
+<p>BTW, error only comes while creating the model instance. For <code>GET</code> request, I get the proper json, with nested serializer.</p>
+
+<p>Have anyone else tried to do something like this and succeeded? What should be done to make this work? And yes, I've to remove the explicit foreign key binding.</p>
+    </div>
+    </div></body></html>

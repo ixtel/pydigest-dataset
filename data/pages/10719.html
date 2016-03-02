@@ -1,0 +1,424 @@
+<html><body><div><div class="content html_format"><p>
+      Хочу поделиться практическим опытом по установке готового проекта на Django на VPS от Reg.ru. Данное руководство рассчитано на новичков, оно содержит ряд не самых лучших решений, но с ним вы сможете запустить своей проект на Django в течение часа.</p>
+<p>
+Инструкция не содержит настроек безопасности. Она была создана на базе англоязычных инструкций и боли, много боли (ссылки в конце статьи). Инструкция актуальна для настроек: centOS 7, Django 1.9.2 и Python 3.4.3
+</p><p>
+Ремарка: благодарю Филиппа Торчинского за предоставление продакт-версии PyCharm для создания проекта на Django.
+
+</p><h3>Что у нас есть</h3><p>
+Мы имеем готовый проект на Django в среде разработки PyCharm для локального компьютера. Т.е. settings.py имеет базу данных sqlite3, битые пути к статите и пустой ALLOWED_HOSTS. Это нормально.</p><a name="habracut"/>
+
+<h3>Мы начинаем</h3>
+<h5>Этап 1</h5>
+<p>
+Покупаем доменное имя на сайте Reg.ru. Стандартная процедура, ничего необычного.
+</p><p>
+Покупаем на Reg.ru VPS H-XEN-2 с виртуализацией XEN. Это нужно для того, чтобы не иметь проблем с конфигурацией ядра и распределением нагрузки. В качестве операционной системы выбираем CentOS 7. Тариф достаточно слабый, поэтому лучу взять её, нежели Ubuntu. Debian не берется, так как его сложнее настроить.
+</p><p>
+После покупке VPS нам придет письмо cо всеми данными. Там же нам предложат связать VPS и домен. В качестве решения вам предложат использовать панель управления DNSAdmin. Однако по какой-то причине эта штука не работает, поэтому пропускаем и переходим в панель управления Reg.ru в настройки вашего доменного имени.
+</p><p>
+ — Ваш домен — DNS-Сервера. Ставим настройки согласно скриншоту:
+
+</p><img src="https://habrastorage.org/files/750/40f/bf3/75040fbf3381407eb9ecb1e54fc033c4.png"/>
+<p>
+ — Ваш домен — Управление зоной — добавить запись «A» Например: (Ip-меняем на ваш)
+
+</p><img src="https://habrastorage.org/files/162/06a/926/16206a92608e4018bd03a888a41af43c.png"/>
+<p>
+Готово, мы привязали доменное имя к хостингу. На обновление потребуется какое-то время.
+
+</p><h5>Этап 2</h5>
+<p>
+Для работы с CentOS 7 нам понадобится программа: </p><a href="http://www.chiark.greenend.org.uk/~sgtatham/putty/">PuTTY</a><p>. Скачиваем запускам и приступаем к работе.
+
+</p><b>Первичная настройка хостига.</b>
+<p>
+Для начала нам нужно будет добавить еще одного пользователя и назначить для него права на изменения конфигов. Это делается для того, чтобы вы по ошибке через root-пользователя не сломали всю систему.
+</p><p>
+1) подключаемся через PuTTY через root-пользователя и набираем следующие команды:
+</p><p>
+ — добавляем юзера: </p><code>adduser habrauser<br/>
+</code><p>
+ — добавляем юзеру пароль: </p><code>passwd habrauser<br/>
+</code><p>
+ — добавляем пользователю habrauser права: </p><code>gpasswd -a habrauser wheel<br/>
+</code><p>
+ — отключаемся от сеанса под root-пользователем: </p><code>exit<br/>
+</code>
+<p>
+После этого мы сможем запускать команды пользователем habrauser от имени администратора через приставку sudo
+</p><p>
+2) Подключаемся через PuTTY под пользователем habrauser и набираем следующие команды:
+</p><p>
+ — Ставим тайм-зону серверу: </p><code>sudo timedatectl set-timezone Europe/Moscow<br/>
+</code><p>
+ — Подтверждаем: </p><code>sudo timedatectl<br/>
+</code><p>
+ — Ставим синхронизатор времени: </p><code>sudo yum install ntp<br/>
+</code><p>
+ — Ставим автозапуск синхронизатора:
+ </p><code> sudo systemctl start ntpd<br/>
+ sudo systemctl enable ntpd<br/>
+ </code>
+
+<h5>Этап 3</h5>
+<p>
+ — Ставим необходимые дополнительные пакеты для centOS 7
+
+</p><code>sudo yum install epel-release<br/>
+</code>
+
+<code>sudo yum install python-pip python-devel postgresql-server postgresql-devel postgresql-contrib gcc nginx <br/>
+</code>
+<p>
+Теперь мы сможем использовать pip, чтобы ставить необходимые питон пакеты.
+</p><p>
+ — Ставим редактор
+</p><code>sudo yum install nano<br/>
+</code>
+
+<b>Настраиваем PostgreSQL</b>
+<p>
+ — Инициализируем PostgreSQL:
+
+</p><code>sudo postgresql-setup initdb<br/>
+</code>
+<p>
+ — Запускаем сервис PostgreSQL:
+
+</p><code>sudo systemctl start postgresql<br/>
+</code>
+<p>
+ — Открываем конфигурационный файл:
+
+</p><code>sudo nano /var/lib/pgsql/data/pg_hba.conf<br/>
+</code>
+<p>
+ — Редактируем так, чтобы база работала с авторизированными пользователями.
+
+</p><code>. . .<br/>
+<br/>
+# TYPE DATABASE USER ADDRESS METHOD<br/>
+<br/>
+# "local" is for Unix domain socket connections only<br/>
+local all all peer<br/>
+# IPv4 local connections:<br/>
+#host all all 127.0.0.1/32 ident<br/>
+host all all 127.0.0.1/32 md5<br/>
+# IPv6 local connections:<br/>
+#host all all ::1/128 ident<br/>
+host all all ::1/128 md5<br/>
+</code>
+<p>
+Чтобы сохранить файл, нам нужно нажать ctrl+O, далее enter и yes. Чтобы выйти нажимаем ctrl+X.
+</p><p>
+ — Перезапускаем сервис
+
+</p><code>sudo systemctl restart postgresql<br/>
+</code>
+<p>
+ — Ставим автозапуск:
+
+</p><code>sudo systemctl enable postgresql<br/>
+</code>
+
+<b>Создание базы данных PostgreSQL:</b>
+<p>
+ — входим в сервис:
+
+</p><code>sudo su - postgres<br/>
+</code>
+<p>
+-входим в локальный сеанс: 
+
+</p><code>psql<br/>
+</code>
+<p>
+ — создаем базу данных habradb:
+
+</p><code>CREATE DATABASE habradb;<br/>
+</code>
+<p>
+ — создаем пользователя баз данных:
+
+</p><code>CREATE USER user WITH PASSWORD 'password';<br/>
+</code>
+<p>
+ — даем пользователю user права на использование базы данных habradb:
+
+</p><code>GRANT ALL PRIVILEGES ON DATABASE habradb TO user;<br/>
+</code>
+<p>
+ — завершаем сеанс работы с базой:
+
+</p><code>\q<br/>
+</code>
+
+<code>exit<br/>
+</code>
+
+<h5>Этап 4</h5>
+<p>
+Наш проект рассчитан на использование Python3.4.3, поэтому мы будем ставить в виртуальное окружение именно его.
+</p><p>
+ — ставим Python 3.4.3
+
+</p><code>sudo yum install python34-devel<br/>
+</code>
+<p>
+ — ставим виртуальное окружение: 
+
+</p><code>sudo pip install virtualenv<br/>
+</code>
+<p>
+ — создаем в корне системы папку проекта apifolder (укажите такое название, которое у вас используется в самом проекте в PyCharm):
+
+</p><code>mkdir ~/apifolder<br/>
+</code>
+<p>
+ — переходим в данную папку:
+
+</p><code>cd ~/apifolder<br/>
+</code>
+<p>
+-создаем виртуальное окружение djangoen с питоном python 3.4.3
+
+</p><code>mkvirtualenv -p /usr/bin/python3.4 djangoen <br/>
+</code>
+<p>
+p.s. чтобы правильно указать путь к питону, можно использовать команду </p><code>which python3.4<br/>
+</code>
+<p>
+ — активируем виртуальное окружение и входим в него
+
+</p><code>source myprojectenv/bin/activate<br/>
+</code>
+<p>
+ — ставим джангу, юникорн и обработчик базы
+
+</p><code>pip install django gunicorn psycopg2<br/>
+</code>
+<p>
+Чтобы поставить другую версию django, используйте команду: </p><code>pip install django==1.9.2 #указав нужную версию<br/>
+</code>
+
+<h5>Этап 5</h5>
+<p>
+начинаем создавать наш проект Django:
+</p><p>
+ — Создаем проект Django в текущей папке (имя проекта то же самое, что и имеет мое в PyCharm):
+
+</p><code>django-admin.py startproject apifolder . # точка говорит нам о том, что мы ставим в текущую папку, в данном случае в папку apifolder.<br/>
+</code>
+<p>
+ — Копируем наш проект с локальной машины.
+</p><p>
+По идее проект нужно пушами копировать с вашего репозитория git, но если вы не знаете, что такое git, пуш и так далее, то есть более примитивный способ.
+</p><ul>
+<li>Подключаемся вашему серверу через SFTP: <a href="https://www.reg.ru/support/hosting-i-servery/hosting-sajtov/nachalo-raboty-i-dostupy/kak-podklyuchitsya-po-sftp">инструкция</a></li>
+<li>Открываем папку home/habrauser/apifolder</li>
+<li>Открываем ваш проект на локальной машине</li>
+<li>Обычным перетаскиваем дополняем и заменяем файлы созданного ранее проекта apifolder, вашим проектом c локальной машины (его имя также должно быть apifolder, либо то, что вы задали ранее).</li>
+</ul>
+<p>
+ — Открываем файл settings.py и вносим в него изменения
+
+</p><code>nano apifoldert/settings.py <br/>
+</code>
+<p>
+Либо можно изменять его конфиг в IDE, а потом обновить его через SFTP.
+
+</p><code>DATABASES = {<br/>
+ 'default': {<br/>
+ 'ENGINE': 'django.db.backends.postgresql', # так должно быть с версии django 1,8 и выше.<br/>
+ 'NAME': 'habradb',<br/>
+ 'USER': 'user',<br/>
+ 'PASSWORD': 'password',<br/>
+ 'HOST': 'localhost',<br/>
+ 'PORT': '',<br/>
+ }<br/>
+}<br/>
+<br/>
+#Предполагается, что у вас папка static будет лежать в корне проекта, а не в каждом отдельном приложении.<br/>
+<br/>
+STATIC_URL = '/static/'<br/>
+MEDIA_URL = '/media/'<br/>
+STATIC_ROOT = os.path.join(BASE_DIR, "static")<br/>
+MEDIA_ROOT = os.path.join(BASE_DIR, "media")<br/>
+STATICFILES_DIRS = (<br/>
+)<br/>
+<br/>
+#Это пригодится вам для отладки. ALLOWED_HOSTS в самом конце нужно будет сменить на ваш домен.<br/>
+<br/>
+DEBUG = True<br/>
+<br/>
+ALLOWED_HOSTS = [<br/>
+ '*',<br/>
+ ]<br/>
+</code>
+<p>
+ — Ставим релевантные пакеты. Например, в моем случае, чтобы проект поддерживал модель ImageFiled, мне нужно было установить Pillow
+
+</p><code>sudo yum install libtiff-devel libjpeg-devel libzip-devel freetype-devel lcms2-devel libwebp-devel tcl-devel tk-devel<br/>
+</code>
+
+<code>pip install Pillow<br/>
+</code>
+<p>
+ — Проверяем базу данных, делаем миграцию (Статику пока собрать не получится, так как у нас её еще ничего не отдает).
+
+</p><code>cd ~/apifolder<br/>
+./manage.py makemigrations<br/>
+./manage.py migrate<br/>
+</code>
+<p>
+Иногда эти команды не работают, и нужно использовать: </p><code>python manage.py makemigrations<br/>
+</code><p> итд
+</p><p>
+Также можно создать пользователя
+
+</p><code>./manage.py createsuperuser<br/>
+</code>
+<p>
+ — Запускаем проект и проверяем его работу:
+</p><p>
+./manage.py runserver 0.0.0.0:8000
+</p><p>
+Сайт будет доступен по адресу: </p><a href="http://server_domain_or_IP">server_domain_or_IP</a><p>:8000
+</p><p>
+ — чекаем все моменты и делаем отладку. Если на этом этапе не проверить все странички, админку и прочее, то в дальнейшем может появиться много проблем. Чаще всего забываются какие-то мелочи: пакеты, url, локальные конфиги.
+</p><p>
+ — отключаемся
+
+</p><code>deactivate<br/>
+</code>
+
+<h5>Этап 6</h5>
+<p>
+ — создаем конфиг Юникорна:
+
+</p><code>sudo nano /etc/systemd/system/gunicorn.service<br/>
+</code>
+
+<code>[Unit]<br/>
+Description=gunicorn daemon<br/>
+After=network.target<br/>
+<br/>
+[Service]<br/>
+User=habrauser<br/>
+Group=nginx<br/>
+WorkingDirectory=/home/habrauser/apifolder<br/>
+ExecStart=/home/habrauser/apifolder/djangoen/bin/gunicorn --workers 3 --bind unix:/home/habrauser/apifolder/apifolder.sock apifolder.wsgi:application<br/>
+<br/>
+[Install]<br/>
+WantedBy=multi-user.target<br/>
+</code>
+<p>
+ — запускаем юникорн и делаем ему автозапуск:
+
+</p><code>sudo systemctl start gunicorn<br/>
+sudo systemctl enable gunicorn<br/>
+</code>
+<p>
+ — Подключаем Nginx
+
+</p><code>sudo nano /etc/nginx/nginx.conf<br/>
+</code>
+<p>
+sudo nano /etc/nginx/nginx.conf
+</p><p>
+Вставляем новый конфиг в:
+
+</p><code>http {<br/>
+ . . .<br/>
+<br/>
+include /etc/nginx/conf.d/*.conf;<br/>
+<br/>
+#Вот сюда <br/>
+<br/>
+server {<br/>
+ listen 80 default_server;<br/>
+<br/>
+. . .<br/>
+</code>
+<p>
+сам конфиг
+
+</p><code>server {<br/>
+ listen 80;<br/>
+ server_name example.ru www.example.ru;<br/>
+<br/>
+location = /favicon.ico { access_log off; log_not_found off; }<br/>
+ location /static/ {<br/>
+ root /home/habrauser/apifolder;<br/>
+ }<br/>
+<br/>
+location / {<br/>
+ proxy_set_header Host $http_host;<br/>
+ proxy_set_header X-Real-IP $remote_addr;<br/>
+ proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;<br/>
+ proxy_set_header X-Forwarded-Proto $scheme;<br/>
+ proxy_pass http://unix:/home/habrauser/apifolder/apifolder.sock;<br/>
+ }<br/>
+}<br/>
+</code>
+<p>
+ — добавляем nginx юзеру:
+
+</p><code>sudo usermod -a -G habrauser nginx<br/>
+</code>
+<p>
+ — ставим права:
+
+</p><code>chmod 710 /home/habrauser<br/>
+</code>
+<p>
+ — проверяем конфиг nginx (должно отдать две успешные строки):
+
+</p><code>sudo nginx -t<br/>
+</code>
+<p>
+ — Ставим автозапуск:
+
+</p><code>sudo systemctl start nginx<br/>
+<br/>
+sudo systemctl enable nginx<br/>
+</code>
+
+<h5>Этап 7</h5>
+<p>
+Основная часть работы сделана, теперь нам нужно собрать статику и перезагрузить машину:
+</p><p>
+ — идем к нашей папке
+
+</p><code>cd ~/apifolder<br/>
+</code>
+<p>
+ — активируем окружение:
+
+</p><code>source djangoen/bin/activate<br/>
+</code>
+<p>
+ — Собираем статику:
+
+</p><code>./manage.py collectstatic<br/>
+</code>
+<p>
+ — ставим в файлике setting.py ALLOWED_HOSTS = ваш домен, и DEBUG = False
+</p><p>
+ — перезагружаем сервер: reg.ru — мои хостинг и услуги — ваш VPS — Перезагрузить сервер
+</p><p>
+Иногда одного раза не хватает (не все начинает работать так, как нужно), поэтому приходится грузить несколько раз.
+</p><p>
+___________________________________
+</p><p>
+Запуск сервера </p><a href="https://www.digitalocean.com/community/tutorials/initial-server-setup-with-centos-7">www.digitalocean.com/community/tutorials/initial-server-setup-with-centos-7</a><p>
+Дополнительные настройки </p><a href="https://www.digitalocean.com/community/tutorials/additional-recommended-steps-for-new-centos-7-servers">www.digitalocean.com/community/tutorials/additional-recommended-steps-for-new-centos-7-servers</a><p>
+Сам конфиг </p><a href="https://www.digitalocean.com/community/tutorials/how-to-set-up-django-with-postgres-nginx-and-gunicorn-on-centos-7">www.digitalocean.com/community/tutorials/how-to-set-up-django-with-postgres-nginx-and-gunicorn-on-centos-7</a>
+
+      
+      <p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

@@ -1,0 +1,405 @@
+<html><body><div><div class="body">
+        
+  <h1 class="title">The Python I Would Like To See</h1>
+
+  
+  <p class="date">written on Saturday, August 16, 2014
+  
+
+  </p><p>It's no secret that I'm not a fan of Python 3 or where the language is
+currently going.  This has led to a bunch of emails flying my way over the
+last few months about questions about what exactly I would prefer Python
+would do.  So I figured I might share some of my thoughts publicly to
+maybe leave some food for thought for future language designers :)</p>
+<p>Python is definitely a language that is not perfect.  However I think what
+frustrates me about the language are largely problems that have to do with
+tiny details in the interpreter and less the language itself.  These
+interpreter details however are becoming part of the language and this is
+why they are important.</p>
+<p>I want to take you on a journey that starts with a small oddity in the
+interpreter (slots) and ends up with the biggest mistake in the language
+design.  If the reception is good there will be more posts like this.</p>
+<p>In general though these posts will be an exploration about design
+decisions in the interpreter and what consequences they have on both the
+interpreter and the resulting language.  I believe this is more
+interesting from a general language design point of view than as a
+recommendation about how to go forward with Python.</p>
+<div class="section" id="language-vs-implementation">
+<h2>Language vs Implementation</h2>
+<p>I added this particular paragraph after I wrote the initial version of
+this article because I think it has been largely missed that Python as a
+language and CPython as the interpreter are not nearly as separate as
+developers might believe.  There is a language specification but in many
+cases it just codifies what the interpreter does or is even lacking.</p>
+<p>In this particular case this obscure implementation detail of the
+interpreter changed or influenced the language design and also forced
+other Python implementations to adopt.  For instance PyPy does not know
+anything about slots (I presume) but it still has to operate as if slots
+were part of the interpreter.</p>
+</div>
+<div class="section" id="slots">
+<h2>Slots</h2>
+<p>By far my biggest problem with the language is the stupid slot system.  I
+do not mean the <tt class="docutils literal">__slots__</tt> but the internal type slots for special
+methods.  These slots are a "feature" of the language which is largely
+missed because it is something you rarely need to be concerned with.  That
+said, the fact that slots exist is in my opinion the biggest problem of
+the language.</p>
+<p>So what's a slot?  A slot is the side effect of how the interpreter is
+implemented internally.  Every Python programmer knows about "dunder
+methods": things like <tt class="docutils literal">__add__</tt>.  These methods start with two
+underscores, the name of the special method, and two underscores again.
+As each developer knows, <tt class="docutils literal">a + b</tt> is something like <tt class="docutils literal">a.__add__(b)</tt>.</p>
+<p>Unfortunately that is a lie.</p>
+<p>Python does not actually work that way.  Python internally does actually
+not work that way at all (nowadays).  Instead here is roughly how the
+interpreter works:</p>
+<ol class="arabic">
+<li><p class="first">When a type gets created the interpreter finds all descriptors on the
+class and will look for special methods like <tt class="docutils literal">__add__</tt>.</p>
+</li>
+<li><p class="first">For each special method the interpreter finds it puts a reference to
+the descriptor into a predefined slot on the type object.</p>
+<p>For instance the special method <tt class="docutils literal">__add__</tt> corresponds to two
+internal slots: <tt class="docutils literal"><span class="pre">tp_as_number-&gt;nb_add</span></tt> and
+<tt class="docutils literal"><span class="pre">tp_as_sequence-&gt;sq_concat</span></tt>.</p>
+</li>
+<li><p class="first">When the interpreter wants to evaluate <tt class="docutils literal">a + b</tt> it will invoke
+something like <tt class="docutils literal"><span class="pre">TYPE_OF(a)-&gt;tp_as_number-&gt;nb_add(a,</span> b)</tt> (more
+complicated than that because <tt class="docutils literal">__add__</tt> actually has multiple
+slots).</p>
+</li>
+</ol>
+<p>So on the surface <tt class="docutils literal">a + b</tt> does something like <tt class="docutils literal"><span class="pre">type(a).__add__(a,</span> b)</tt>
+but even that is not correct as you can see from the slot handling.  You
+can easily verify that yourself by implementing <tt class="docutils literal">__getattribute__</tt> on a
+metaclass and attempting to hook a custom <tt class="docutils literal">__add__</tt> in.  You will notice
+that it's never invoked.</p>
+<p>The slot system in my mind is absolutely ridiculous.  It's an optimization
+that helps for some very specific types in the interpreter (like integers)
+but it actually makes no sense for other types.</p>
+<p>To demonstrate this, consider this completely pointless type (<tt class="docutils literal">x.py</tt>):</p>
+<div class="highlight"><pre><span class="k">class</span> <span class="nc">A</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">__add__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">other</span><span class="p">):</span>
+        <span class="k">return</span> <span class="mi">42</span>
+</pre></div>
+<p>Since we have an <tt class="docutils literal">__add__</tt> method the interpreter will set this up in a
+slot.  So how fast is it?  When we do <tt class="docutils literal">a + b</tt> we will use the slots, so
+here is what it times it as:</p>
+<pre class="literal-block">
+$ python3 -mtimeit -s 'from x import A; a = A(); b = A()' 'a + b'
+1000000 loops, best of 3: 0.256 usec per loop
+</pre>
+<p>If we do however <tt class="docutils literal">a.__add__(b)</tt> we bypass the slot system.  Instead the
+interpreter is looking in the instance dictionary (where it will not find
+anything) and then looks in the type's dictionary where it will find the
+method.  Here is where that clocks in at:</p>
+<pre class="literal-block">
+$ python3 -mtimeit -s 'from x import A; a = A(); b = A()' 'a.__add__(b)'
+10000000 loops, best of 3: 0.158 usec per loop
+</pre>
+<p>Can you believe it: the version without slots is actually faster.  What
+magic is that?  I'm not entirely sure what the reason for this is, but it
+has been like this for a long, long time.  In fact, old style classes
+(which did not have slots) where much faster than new style classes for
+operators and had more features.</p>
+<p>More features?  Yes, because old style classes could do this (Python
+2.7):</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">original</span> <span class="o">=</span> <span class="mi">42</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="k">class</span> <span class="nc">FooProxy</span><span class="p">:</span>
+<span class="gp">... </span> <span class="k">def</span> <span class="nf">__getattr__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+<span class="gp">... </span>  <span class="k">return</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">original</span><span class="p">,</span> <span class="n">x</span><span class="p">)</span>
+<span class="gp">...</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">proxy</span> <span class="o">=</span> <span class="n">FooProxy</span><span class="p">()</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">proxy</span>
+<span class="go">42</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="mi">1</span> <span class="o">+</span> <span class="n">proxy</span>
+<span class="go">43</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">proxy</span> <span class="o">+</span> <span class="mi">1</span>
+<span class="go">43</span>
+</pre></div>
+<p>Yes.  We have less features today than we had in Python 2 for a more
+complex type system.  Because the code above cannot be done with new style
+classes and more.  It's actually worse than that if you consider how
+lightweight oldstyle classes were:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span> <span class="nn">sys</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="k">class</span> <span class="nc">OldStyleClass</span><span class="p">:</span>
+<span class="gp">... </span> <span class="k">pass</span>
+<span class="gp">...</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="k">class</span> <span class="nc">NewStyleClass</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
+<span class="gp">... </span> <span class="k">pass</span>
+<span class="gp">...</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">sys</span><span class="o">.</span><span class="n">getsizeof</span><span class="p">(</span><span class="n">OldStyleClass</span><span class="p">)</span>
+<span class="go">104</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">sys</span><span class="o">.</span><span class="n">getsizeof</span><span class="p">(</span><span class="n">NewStyleClass</span><span class="p">)</span>
+<span class="go">904</span>
+</pre></div>
+</div>
+<div class="section" id="where-do-slots-come-from">
+<h2>Where do Slots Come From?</h2>
+<p>This raises the question why slots exist.  As far as I can tell the slot
+system exists because of legacy more than anything else.  When the Python
+interpreter was created initially, builtin types like strings and others
+were implemented as global and statically allocated structs which held all
+the special methods a type needs to have.  This was before <tt class="docutils literal">__add__</tt> was
+a thing.  If you check out a Python from 1990 you can see how objects were
+built back then.</p>
+<p>This for instance is how integers looked:</p>
+<div class="highlight"><pre><span class="k">static</span> <span class="n">number_methods</span> <span class="n">int_as_number</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="n">intadd</span><span class="p">,</span> <span class="cm">/*tp_add*/</span>
+    <span class="n">intsub</span><span class="p">,</span> <span class="cm">/*tp_subtract*/</span>
+    <span class="n">intmul</span><span class="p">,</span> <span class="cm">/*tp_multiply*/</span>
+    <span class="n">intdiv</span><span class="p">,</span> <span class="cm">/*tp_divide*/</span>
+    <span class="n">intrem</span><span class="p">,</span> <span class="cm">/*tp_remainder*/</span>
+    <span class="n">intpow</span><span class="p">,</span> <span class="cm">/*tp_power*/</span>
+    <span class="n">intneg</span><span class="p">,</span> <span class="cm">/*tp_negate*/</span>
+    <span class="n">intpos</span><span class="p">,</span> <span class="cm">/*tp_plus*/</span>
+<span class="p">};</span>
+
+<span class="n">typeobject</span> <span class="n">Inttype</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="n">OB_HEAD_INIT</span><span class="p">(</span><span class="o">&amp;</span><span class="n">Typetype</span><span class="p">)</span>
+    <span class="mi">0</span><span class="p">,</span>
+    <span class="s">"int"</span><span class="p">,</span>
+    <span class="k">sizeof</span><span class="p">(</span><span class="n">intobject</span><span class="p">),</span>
+    <span class="mi">0</span><span class="p">,</span>
+    <span class="n">free</span><span class="p">,</span>       <span class="cm">/*tp_dealloc*/</span>
+    <span class="n">intprint</span><span class="p">,</span>   <span class="cm">/*tp_print*/</span>
+    <span class="mi">0</span><span class="p">,</span>          <span class="cm">/*tp_getattr*/</span>
+    <span class="mi">0</span><span class="p">,</span>          <span class="cm">/*tp_setattr*/</span>
+    <span class="n">intcompare</span><span class="p">,</span> <span class="cm">/*tp_compare*/</span>
+    <span class="n">intrepr</span><span class="p">,</span>    <span class="cm">/*tp_repr*/</span>
+    <span class="o">&amp;</span><span class="n">int_as_number</span><span class="p">,</span> <span class="cm">/*tp_as_number*/</span>
+    <span class="mi">0</span><span class="p">,</span>          <span class="cm">/*tp_as_sequence*/</span>
+    <span class="mi">0</span><span class="p">,</span>          <span class="cm">/*tp_as_mapping*/</span>
+<span class="p">};</span>
+</pre></div>
+<p>As you can see, even in the first version of Python that was ever
+released, <tt class="docutils literal">tp_as_number</tt> was a thing.  Unfortunately at one point the
+repo probably got corrupted for old revisions so in those very old
+releases of Python important things (such as the actual interpreter) are
+missing so we need to look at little bit into the future to see how these
+objects were implemented.  By 1993 this is what the interpreter's add
+opcode callback looked like:</p>
+<div class="highlight"><pre><span class="k">static</span> <span class="n">object</span> <span class="o">*</span>
+<span class="n">add</span><span class="p">(</span><span class="n">v</span><span class="p">,</span> <span class="n">w</span><span class="p">)</span>
+    <span class="n">object</span> <span class="o">*</span><span class="n">v</span><span class="p">,</span> <span class="o">*</span><span class="n">w</span><span class="p">;</span>
+<span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">v</span><span class="o">-&gt;</span><span class="n">ob_type</span><span class="o">-&gt;</span><span class="n">tp_as_sequence</span> <span class="o">!=</span> <span class="nb">NULL</span><span class="p">)</span>
+        <span class="k">return</span> <span class="p">(</span><span class="o">*</span><span class="n">v</span><span class="o">-&gt;</span><span class="n">ob_type</span><span class="o">-&gt;</span><span class="n">tp_as_sequence</span><span class="o">-&gt;</span><span class="n">sq_concat</span><span class="p">)(</span><span class="n">v</span><span class="p">,</span> <span class="n">w</span><span class="p">);</span>
+    <span class="k">else</span> <span class="nf">if</span> <span class="p">(</span><span class="n">v</span><span class="o">-&gt;</span><span class="n">ob_type</span><span class="o">-&gt;</span><span class="n">tp_as_number</span> <span class="o">!=</span> <span class="nb">NULL</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">object</span> <span class="o">*</span><span class="n">x</span><span class="p">;</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">coerce</span><span class="p">(</span><span class="o">&amp;</span><span class="n">v</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">w</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">)</span>
+            <span class="k">return</span> <span class="nb">NULL</span><span class="p">;</span>
+        <span class="n">x</span> <span class="o">=</span> <span class="p">(</span><span class="o">*</span><span class="n">v</span><span class="o">-&gt;</span><span class="n">ob_type</span><span class="o">-&gt;</span><span class="n">tp_as_number</span><span class="o">-&gt;</span><span class="n">nb_add</span><span class="p">)(</span><span class="n">v</span><span class="p">,</span> <span class="n">w</span><span class="p">);</span>
+        <span class="n">DECREF</span><span class="p">(</span><span class="n">v</span><span class="p">);</span>
+        <span class="n">DECREF</span><span class="p">(</span><span class="n">w</span><span class="p">);</span>
+        <span class="k">return</span> <span class="n">x</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="n">err_setstr</span><span class="p">(</span><span class="n">TypeError</span><span class="p">,</span> <span class="s">"bad operand type(s) for +"</span><span class="p">);</span>
+    <span class="k">return</span> <span class="nb">NULL</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>So when were <tt class="docutils literal">__add__</tt> and others implemented?  From what I can see they
+appear in 1.1.  I actually managed to get a Python 1.1 to compile on OS X
+10.9 with a bit of fiddling:</p>
+<pre class="literal-block">
+$ ./python -v
+Python 1.1 (Aug 16 2014)
+Copyright 1991-1994 Stichting Mathematisch Centrum, Amsterdam
+</pre>
+<p>Sure.  It likes to crash and not everything works, but it gives you an
+idea of how Python was like back then.  For instance there was a huge
+split between types implemented in C and Python:</p>
+<pre class="literal-block">
+$ ./python test.py
+Traceback (innermost last):
+  File "test.py", line 1, in ?
+    print dir(1 + 1)
+TypeError: dir() argument must have __dict__ attribute
+</pre>
+<p>As you can see, no introspection of builtin types such as integers.  In
+fact, while <tt class="docutils literal">__add__</tt> was supported for custom classes, it was a whole
+feature of custom classes:</p>
+<pre class="literal-block">
+&gt;&gt;&gt; (1).__add__(2)
+Traceback (innermost last):
+  File "&lt;stdin&gt;", line 1, in ?
+TypeError: attribute-less object
+</pre>
+<p>So this is the heritage we even today have in Python.  The general layout
+of a Python type has not changed but it was patched on top for many, many
+years.</p>
+</div>
+<div class="section" id="a-modern-pyobject">
+<h2>A Modern PyObject</h2>
+<p>So today many would argue the difference between a Python object
+implemented in the C interpreter and a Python object implemented in actual
+Python code is very minimal.  In Python 2.7 the biggest difference seemed
+to be that the <tt class="docutils literal">__repr__</tt> that was provided by default reported
+<tt class="docutils literal">class</tt> for types implemented in Python and <tt class="docutils literal">type</tt> for types
+implemented in C.  In fact this difference in the repr indicated if a type
+was statically allocated (<tt class="docutils literal">type</tt>) or on dynamically on the heap
+(<tt class="docutils literal">class</tt>).  It did not make a practical difference and is entirely gone
+in Python 3.  Special methods are replicated to slots and vice versa.  For
+the most part, the difference between Python and C classes seems to have
+disappeared.</p>
+<p>However they are still very different unfortunately.  Let's have a look.</p>
+<p>As every Python developer knows, Python classes as "open".  You can look
+into them, see all the state they store, detach and reattach method on
+them even after the class declaration finished.  This dynamic nature is
+not available for interpreter classes.  Why is that?</p>
+<p>There is no technical restriction in itself of why you could not attach
+another method to, say, the <tt class="docutils literal">dict</tt> type.  The reason the interpreter
+does not let you do that actually has very little to do with programmer
+sanity in the first place as the fact that builtin types are not on the
+heap.  To understand the wide ranging consequences of this you need to
+understand how the Python language starts the interpreter.</p>
+</div>
+<div class="section" id="the-damn-interpreter">
+<h2>The Damn Interpreter</h2>
+<p>In Python the intepreter startup is a very expensive process.  Whenever
+you start the Python executable you invoke a huge machinery that does
+pretty much everything.  Among other things it will bootstrap the internal
+types, it will setup the import machinery, it will import some required
+modules, work with the OS to handle signals and to accept the command line
+parameters, setup internal state etc.  When it's finally done it will run
+your code and shut down.  This is also something that Python is doing like
+this for 25 years now.</p>
+<p>In pseudocode this is how this looks like:</p>
+<div class="highlight"><pre><span class="cm">/* called once */</span>
+<span class="n">bootstrap</span><span class="p">()</span>
+
+<span class="cm">/* these three could be called in a loop if you prefer */</span>
+<span class="n">initialize</span><span class="p">()</span>
+<span class="n">rv</span> <span class="o">=</span> <span class="n">run_code</span><span class="p">()</span>
+<span class="n">finalize</span><span class="p">()</span>
+
+<span class="cm">/* called once */</span>
+<span class="n">shutdown</span><span class="p">()</span>
+</pre></div>
+<p>The problem with this, is that Python's interpreter has a huge amount of
+global state.  In fact, you can only have one interpreter.  A much better
+design would be to setup the interpreter and run something on it:</p>
+<div class="highlight"><pre><span class="n">interpreter</span> <span class="o">*</span><span class="n">iptr</span> <span class="o">=</span> <span class="n">make_interpreter</span><span class="p">();</span>
+<span class="n">interpreter_run_code</span><span class="p">(</span><span class="n">iptr</span><span class="p">)</span><span class="o">:</span>
+<span class="n">finalize_interpreter</span><span class="p">(</span><span class="n">iptr</span><span class="p">);</span>
+</pre></div>
+<p>This is in fact how many other dynamic languages work.  For instance this
+is how lua implementations operate, how javascript engines work etc.  The
+clear advantage is that you can have two interpreters.  What a novel
+concept.</p>
+<p>Who needs multiple interpreters?  You would be surprised.  Even Python
+needs them or at least thought they are useful.  For instance those exist
+so that an application embedding Python can have things run independently
+(for instance think web applications implemented in <tt class="docutils literal">mod_python</tt>.  They
+want to run in isolation).  So in Python there are sub interpreters.  They
+work within the interpreter but because there is so much global state.
+The biggest piece of global state is also the most controversial one: the
+global interpreter lock.  Python already decided on this one interpreter
+concept so there is lots of data shared between subinterpreters.  As those
+are shared there needs to be a lock around all of them, so that lock is on
+the actual interpreter.  What data is shared?</p>
+<p>If you look at the code I pasted above you can see these huge structs
+sitting around.  These structs are actually sitting around as global
+variables.  In fact the interpreter exposes those type structs directly to
+the Python code.  This is enabled by the <tt class="docutils literal"><span class="pre">OB_HEAD_INIT(&amp;Typetype)</span></tt> macro
+which gives this struct the necessary header so that the interpreter can
+work with it.  For instance in there is the refcount of the type.</p>
+<p>Now you can see where this is going.  These objects are shared between sub
+interpreters.  So imagine you could modify this object in your Python
+code.  Two completely independent pieces of Python code that have nothing
+to do with each other could change each other's state.  Imagine this was
+in JavaScript and the Facebook tab would be able to change the
+implementation of the builtin array type and the Google tab would
+immediately see the effects of this.</p>
+<p>This design decision from 1990 or so still has ripples that can be felt
+today.</p>
+<p>On the bright side, the immutability of builtin types has generally been
+accepted as a good feature by the community.  The problems of mutable
+builtin types has been demonstrated by other programming languages and
+it's not something we missed much.</p>
+<p>There is more though.</p>
+</div>
+<div class="section" id="what-s-a-vtable">
+<h2>What's a VTable?</h2>
+<p>So Python types coming from C are largely immutable.  What else is
+different though?  The other big difference also has to do with the open
+nature of classes in Python.  Classes implemented in Python have their
+methods as "virtual".  While there is no "real" C++ style vtable, all
+methods are stored on the class dictionary and there is a lookup
+algorithm, it boils down to pretty much the same.  The consequences are
+quite clear.  When you subclass something and you override a method, there
+is a good chance another method will be indirectly modified in the process
+because it's calling into it.</p>
+<p>A good example are collections.  Lots of collections have convenience
+methods.  As an example a dictionary in Python has two methods to retrieve
+an object from it: <tt class="docutils literal">__getitem__()</tt> and <tt class="docutils literal">get()</tt>.  When you implement a
+class in Python you will usually implement one through the other by doing
+something like <tt class="docutils literal">return self.__getitem__(key)</tt> in <tt class="docutils literal">get(key)</tt>.</p>
+<p>For types implemented by the interpreter that is different.  The reason is
+again the difference between slots and the dictionary.  Say you want to
+implement a dictionary in the interpreter.  Your goal is to reuse code
+still, so you want to call <tt class="docutils literal">__getitem__</tt> from <tt class="docutils literal">get</tt>.  How do you go
+about this?</p>
+<p>A Python method in C is just a C function with a specific signature.  That
+is the first problem.  That function's first purpose is to handle the
+Python level parameters and convert them into something you can use on the
+C layer.  At the very least you need to pull the individual arguments from
+a Python tuple or dict (args and kwargs) into local variables.  So a
+common pattern is that <tt class="docutils literal">dict__getitem__</tt> internally does just the
+argument parsing and then calls into something like <tt class="docutils literal">dict_do_getitem</tt>
+with the actual parameters.  You can see where this is going.
+<tt class="docutils literal">dict__getitem__</tt> and <tt class="docutils literal">dict_get</tt> both would call into <tt class="docutils literal">dict_get</tt>
+which is an internal static function.  You cannot override that.</p>
+<p>There really is no good way around this.  The reason for this is related
+to the slot system.  There is no good way from the interpreter internally
+issue a call through the vtable without going crazy.  The reason for this
+is related to the global interpreter lock.  When you are a dictionary your
+API contract to the outside world is that your operations are atomic.
+That contract completely goes out of the window when your internal call
+goes through a vtable.  Why?  Because that call might now go through
+Python code which needs to manage the global interpreter lock itself or
+you will run into massive problems.</p>
+<p>Imagine the pain of a dictionary subclass overriding an internal <tt class="docutils literal">dict_get</tt>
+which would kick off a lazy import.  You throw all your guarantees out of
+the window.  Then again, maybe we should have done that a long time ago.</p>
+</div>
+<div class="section" id="for-future-reference">
+<h2>For Future Reference</h2>
+<p>In recent years there is a clear trend of making Python more complex as a
+language.  I would like to see the inverse of that trend.</p>
+<p>I would like to see an internal interpreter design could be based on
+interpreters that work independent of each other, with local base types
+and more, similar to how JavaScript works.  This would immediately open up
+the door again for embedding and concurrency based on message passing.
+CPUs won't get any faster :)</p>
+<p>Instead of having slots and dictionaries as a vtable thing, let's
+experiment with just dictionaries.  Objective-C as a language is entirely
+based on messages and it has made huge advances in making their calls
+fast.  Their calls are from what I can see much faster than Python's calls
+in the best case.  Strings are interned anyways in Python, making
+comparisons very fast.  I bet you it's not slower and even if it was a
+tiny bit slower, it's a much simpler system that would be easier to
+optimize.</p>
+<p>You should have a look through the Python codebase how much extra logic is
+required to handle the slot system.  It's pretty incredible.</p>
+<p>I am very much convinced the slot system was a bad idea and should have
+been ripped out a long ago.  The removal might even have benefited PyPy
+because I'm pretty sure they need to go out of the way to restrict their
+interpreter to work like the CPython one to achieve compatibility.</p>
+</div>
+
+
+  
+  <p class="tags">This entry was tagged
+    
+      <a href="/tags/python/">python</a> and 
+      <a href="/tags/thoughts/">thoughts</a>
+  
+
+  
+
+
+        
+      </p></div>
+      </div></body></html>

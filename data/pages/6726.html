@@ -1,0 +1,390 @@
+<html><body><div><div class="post-text" itemprop="text">
+
+<p>One of the major issues in Cython is the lack of template support from within python files. I have a simulation system written in C++, and I wrap the various classes with Cython and run them using python.</p>
+
+<p>When a c++ method is templated, one can't send the template class to the wrapper method from within python - instead, I end up sending strings to Cython, which then has to check the string against known values, manually passing the C++ class to the underlying C++ method. This makes absolute sense, as Cython does need to know the possible template arguments in order to compile the C++, but it is an issue nonetheless.</p>
+
+<p>This is becoming a real annoyance as the list of candidates for these templated methods is growing - especially in the case of two or three templates to the one c++ method, where I have to do two or three layers of if statements within cython.</p>
+
+<p>Fortunately, I'm in the lucky position of being the only writer and user of this codebase at the moment. I am very happy to refactor, and want to take the opportunity to do so to save headaches in the future. I'm in particular looking for advice as to some of the ways I can avoid the use of templating on the C++ side (as a design pattern problem), rather than relying on some kind of hacky approach on the cython side. If cython has these limitations on templates.</p>
+
+<p>I have written up a minimal working example to highlight the kind of process that occurs in my program. In reality, though, it's a condensed matter simulation which benefits greatly from parallel processing (using OMP), and this is where my templating seems, to me, necessary. Whilst trying to keep it minimal as in simplicity, it compiles and produces output so that you can see what's going on. It's compiled with g++, and I link against OMP using -lgomp (or remove the pragmas and include) and use the std=c++11 flag.</p>
+
+<pre><code>#include &lt;vector&gt;
+#include &lt;map&gt;
+#include &lt;algorithm&gt;
+#include &lt;omp.h&gt;
+#include &lt;iostream&gt;
+#include &lt;iomanip&gt;
+
+/*
+ * Just a class containing some components to run through
+ * a Modifier (see below)
+ */
+class ToModify{
+public:
+    std::vector&lt;double&gt; Components;
+    ToModify(std::vector&lt;double&gt; components) : Components(components){}
+};
+
+/*
+ * An abstract class which handles the modification of ToModify
+ * components in an arbitrary way.
+ * It is, however, known that child classes have a parameter
+ * (here, unimaginatively called Parameter).
+ * These parameters have a minimum and maximum value, which is
+ * to be determined by the child class.
+ */
+class Modifier{
+protected:
+    double Parameter;
+public:
+    Modifier(double parameter = 0) : Parameter(parameter){}
+    void setParameter(double parameter){
+        Parameter = parameter;
+    }
+    double getParameter(){
+        return Parameter;
+    }
+    virtual double getResult(double component) = 0;
+};
+
+/*
+ * Compute component ratios with a pre-factor.
+ * The minimum is zero, such that getResult(component) == 0 for all components.
+ * The maximum is such that getResult(component) &lt;= 1 for all components.
+ */
+class RatioModifier : public Modifier{
+public:
+    RatioModifier(double parameter = 0) : Modifier(parameter){}
+    double getResult(double component){
+        return Parameter * component;
+    }
+
+    static double getMaxParameter(const ToModify toModify){
+        double maxComponent = *std::max_element(toModify.Components.begin(), toModify.Components.end());
+        return 1.0 / maxComponent;
+    }
+    static double getMinParameter(const ToModify toModify){
+        return 0;
+    }
+};
+
+/*
+ * Compute the multiple of components with a factor f.
+ * The minimum parameter is the minimum of the components,
+ *     such that f(min(components)) == min(components)^2.
+ * The maximum parameter is the maximum of the components,
+ *     such that f(max(components)) == max(components)^2.
+ */
+class MultipleModifier : public Modifier{
+public:
+    MultipleModifier(double parameter = 0) : Modifier(parameter){}
+
+    double getResult(double component){
+        return Parameter * component;
+    }
+
+    static double getMaxParameter(const ToModify toModify){
+        return *std::max_element(toModify.Components.begin(), toModify.Components.end());
+    }
+    static double getMinParameter(const ToModify toModify){
+        return *std::min_element(toModify.Components.begin(), toModify.Components.end());
+    }
+
+};
+
+/*
+ * A class to handle the mass-calculation of a ToModify objects' components
+ * through a given Modifier child class, across a range of parameters.
+ * The use of parallel processing highlights
+ * my need to generate multiple classes of a given type, and
+ * hence my (apparent) need to use templating.
+ */
+class ModifyManager{
+protected:
+    const ToModify Modify;
+public:
+    ModifyManager(ToModify modify) : Modify(modify){}
+
+    template&lt;class ModifierClass&gt;
+    std::map&lt;double, std::vector&lt;double&gt;&gt; scanModifiers(unsigned steps){
+        double min = ModifierClass::getMinParameter(Modify);
+        double max = ModifierClass::getMaxParameter(Modify);
+        double step = (max - min)/(steps-1);
+
+        std::map&lt;double, std::vector&lt;double&gt;&gt; result;
+
+        #pragma omp parallel for
+        for(unsigned i = 0; i &lt; steps; ++i){
+            double parameter = min + step*i;
+            ModifierClass modifier(parameter);
+            std::vector&lt;double&gt; currentResult;
+            for(double m : Modify.Components){
+                currentResult.push_back(modifier.getResult(m));
+            }
+            #pragma omp critical
+            result[parameter] = currentResult;
+        }
+        return result;
+    }
+
+    template&lt;class ModifierClass&gt;
+    void outputScan(unsigned steps){
+        std::cout &lt;&lt; std::endl &lt;&lt; "-----------------" &lt;&lt; std::endl;
+        std::cout &lt;&lt; "original: " &lt;&lt; std::endl;
+        std::cout &lt;&lt; std::setprecision(3);
+        for(double component : Modify.Components){
+            std::cout &lt;&lt; component &lt;&lt; "\t";
+        }
+        std::cout &lt;&lt; std::endl &lt;&lt; "-----------------" &lt;&lt; std::endl;
+        std::map&lt;double, std::vector&lt;double&gt;&gt; scan = scanModifiers&lt;ModifierClass&gt;(steps);
+        for(std::pair&lt;double,std::vector&lt;double&gt;&gt; valueSet : scan){
+            std::cout &lt;&lt; "parameter: " &lt;&lt; valueSet.first &lt;&lt; ": ";
+            std::cout &lt;&lt; std::endl &lt;&lt; "-----------------" &lt;&lt; std::endl;
+            for(double component : valueSet.second){
+                std::cout &lt;&lt; component &lt;&lt; "\t";
+            }
+            std::cout &lt;&lt; std::endl &lt;&lt; "-----------------" &lt;&lt; std::endl;
+        }
+    }
+};
+
+int main(){
+    ToModify m({1,2,3,4,5});
+    ModifyManager manager(m);
+    manager.outputScan&lt;RatioModifier&gt;(10);
+    return 0;
+}
+</code></pre>
+
+<p>I do hope this isn't too much code - I felt that a usage example was necessary. I can make a stripped down version if it helps.</p>
+
+<p>In order to use this kind of thing in python, I would (in my current approach) have to pass <code>"RatioModifier"</code> or <code>"MultipleModifier"</code> to cython via an argument, which then checks the string against known values and then runs <code>scanModifier</code> with the corresponding class as a template. This is all well and good, but is problematic on the cython side when I go and add a type of modifier, or have multiple templates - it's especially bad if I have a few variations of <code>scanModifier</code> with different arguments.</p>
+
+<p>The general idea is that I have a set of modifiers (in the real application, these simulate magnetic/electric fields and strain on lattices, rather than just doing basic math operations on a list of numbers) which act on values held within an object. These modifiers have a range of potential values, and it's important that the modifiers have a state (The 'parameter' used and accessed elsewhere, in uses other than scanning over ranges). The ToModify (lattice) object takes up a lot of RAM, so creating copies isn't possible.</p>
+
+<p>Each modifier class has a different range of values for a given ToModify object. This is determined by the nature of the modification, not on the instance themselves, and so I can't (semantically) justify setting them as non-static methods of the objects. It seems too hacky to send an instance of the Modifier classes to the scanning method, as its state isn't meaningful.</p>
+
+<p>I have considered using a factory pattern - but again, as it has no reason to hold any kind of state, it would be static - and passing a static class to a method still requires templating, which brings me back to the template translation problem in cython. I could create a factory class that accepts class name strings and chooses the correct class to use, but this seems to simply translate my issue to the C++ side.</p>
+
+<p>Because I always aim to write meaningful code, I'm having a bit of a dilemma. It seems the simplest way to get around the problem is to give state to objects which do not need it, but I don't like that approach at all. What other approaches exist around this kind of problem? Should I change the way the scanning method actually works, or move it into its own kind of class? To that end, I'm stuck.</p>
+
+<h2>Edit</h2>
+
+<p>I think it would be a good idea to provide an example of the cython side, to show how this can be such a nightmare.</p>
+
+<p>Imagine I have a method such as the one above, but with two template parameters. Say, for example, one is to be a child of Modifier, and the other is a SecondaryModifier which further modifies the result (for the use of any interested: in the case of the actual program, one 'Modifier' is an EdgeManager which modifies an edge weight to simulate the effect of strain or an external magnetic field; the other can be a SimulationType - for example, a tight-binding model approach to finding energies/states, or something more involved).</p>
+
+<p>And say my modifiers are <code>ModifierA1</code>, <code>ModifierA2</code>, <code>ModifierA3</code>, and my secondary modifiers are <code>ModifierB1</code>, <code>ModifierB2</code>, <code>ModifierB3</code>. And, for the sake of getting really ugly, let us have three methods which use two template arguments, <code>method1</code>, <code>method2</code>, <code>method3</code>, and give them two signatures (one taking a double, and one taking an integer). This, in a normal C++ setting, is very common and doesn't require the horrific code that follows.</p>
+
+<pre><code>cdef class SimulationManager:
+    cdef SimulationManager_Object* pointer
+
+    def __cinit__(self, ToModify toModify):
+        self.pointer = new SimulationManager_Object(&lt;ToModify_Object*&gt;(toModify.pointer))
+
+    def method1(self, str ModifierA, str ModifierB, someParameter):
+
+        useInt = False
+
+        if isinstance(someParameter, int):
+            useInt = True
+        elif not isinstance(someParameter, str):
+            raise NotImplementedError("Third argument to method1 must be an int or a string")
+
+        if ModifierA not in ["ModifierA1", "ModifierA2", "ModifierA3"]:
+            raise NotImplementedError("ModifierA '%s' not handled in SimulationManager.method1" % ModifierA)
+        if ModifierB not in ["ModifierB1", "ModifierB2", "ModifierB3"]:
+            raise NotImplementedError("ModifierB '%s' not handled in SimulationManager.method1" % ModifierB)
+
+        if ModifierA == "ModifierA1":
+            if ModifierB == "ModifierB1":
+                if useInt:
+                    return self.pointer.method1[ModifierA1, ModifierB1](&lt;int&gt;someParameter)
+                else:
+                    return self.pointer.method1[ModifierA1, ModifierB1](&lt;str&gt;someParameter)                    
+            elif ModifierB == "ModifierB2":
+                if useInt:
+                    return self.pointer.method1[ModifierA1, ModifierB2](&lt;int&gt;someParameter)
+                else:
+                    return self.pointer.method1[ModifierA1, ModifierB2](&lt;str&gt;someParameter)      
+            else:
+                if useInt:
+                    return self.pointer.method1[ModifierA1, ModifierB3](&lt;int&gt;someParameter)
+                else:
+                    return self.pointer.method1[ModifierA1, ModifierB3](&lt;str&gt;someParameter)
+
+        elif ModifierA == "ModifierA2":
+            if ModifierB == "ModifierB1":
+                if useInt:
+                    return self.pointer.method1[ModifierA2, ModifierB1](&lt;int&gt;someParameter)
+                else:
+                    return self.pointer.method1[ModifierA2, ModifierB1](&lt;str&gt;someParameter)                    
+            elif ModifierB == "ModifierB2":
+                if useInt:
+                    return self.pointer.method1[ModifierA2, ModifierB2](&lt;int&gt;someParameter)
+                else:
+                    return self.pointer.method1[ModifierA2, ModifierB2](&lt;str&gt;someParameter)
+            else:
+                if useInt:
+                    return self.pointer.method1[ModifierA2, ModifierB3](&lt;int&gt;someParameter)
+                else:
+                    return self.pointer.method1[ModifierA2, ModifierB3](&lt;str&gt;someParameter)
+
+        elif ModifierA == "ModifierA3":
+            if ModifierB == "ModifierB1":
+                if useInt:
+                    return self.pointer.method1[ModifierA3, ModifierB1](&lt;int&gt;someParameter)
+                else:
+                    return self.pointer.method1[ModifierA3, ModifierB1](&lt;str&gt;someParameter)                    
+            elif ModifierB == "ModifierB2":
+                if useInt:
+                    return self.pointer.method1[ModifierA3, ModifierB2](&lt;int&gt;someParameter)
+                else:
+                    return self.pointer.method1[ModifierA3, ModifierB2](&lt;str&gt;someParameter)
+            else:
+                if useInt:
+                    return self.pointer.method1[ModifierA3, ModifierB3](&lt;int&gt;someParameter)
+                else:
+                    return self.pointer.method1[ModifierA3, ModifierB3](&lt;str&gt;someParameter)
+
+    def method2(self, str ModifierA, str ModifierB, someParameter):
+
+        useInt = False
+
+        if isinstance(someParameter, int):
+            useInt = True
+        elif not isinstance(someParameter, str):
+            raise NotImplementedError("Third argument to method2 must be an int or a string")
+
+        if ModifierA not in ["ModifierA1", "ModifierA2", "ModifierA3"]:
+            raise NotImplementedError("ModifierA '%s' not handled in SimulationManager.method2" % ModifierA)
+        if ModifierB not in ["ModifierB1", "ModifierB2", "ModifierB3"]:
+            raise NotImplementedError("ModifierB '%s' not handled in SimulationManager.method2" % ModifierB)
+
+        if ModifierA == "ModifierA1":
+            if ModifierB == "ModifierB1":
+                if useInt:
+                    return self.pointer.method2[ModifierA1, ModifierB1](&lt;int&gt;someParameter)
+                else:
+                    return self.pointer.method2[ModifierA1, ModifierB1](&lt;str&gt;someParameter)
+            elif ModifierB == "ModifierB2":
+                if useInt:
+                    return self.pointer.method2[ModifierA1, ModifierB2](&lt;int&gt;someParameter)
+                else:
+                    return self.pointer.method2[ModifierA1, ModifierB2](&lt;str&gt;someParameter)
+            else:
+                if useInt:
+                    return self.pointer.method2[ModifierA1, ModifierB3](&lt;int&gt;someParameter)
+                else:
+                    return self.pointer.method2[ModifierA1, ModifierB3](&lt;str&gt;someParameter)
+
+        elif ModifierA == "ModifierA2":
+            if ModifierB == "ModifierB1":
+                if useInt:
+                    return self.pointer.method2[ModifierA2, ModifierB1](&lt;int&gt;someParameter)
+                else:
+                    return self.pointer.method2[ModifierA2, ModifierB1](&lt;str&gt;someParameter)                    
+            elif ModifierB == "ModifierB2":
+                if useInt:
+                    return self.pointer.method2[ModifierA2, ModifierB2](&lt;int&gt;someParameter)
+                else:
+                    return self.pointer.method2[ModifierA2, ModifierB2](&lt;str&gt;someParameter)
+            else:
+                if useInt:
+                    return self.pointer.method2[ModifierA2, ModifierB3](&lt;int&gt;someParameter)
+                else:
+                    return self.pointer.method2[ModifierA2, ModifierB3](&lt;str&gt;someParameter)
+
+        elif ModifierA == "ModifierA3":
+            if ModifierB == "ModifierB1":
+                if useInt:
+                    return self.pointer.method2[ModifierA3, ModifierB1](&lt;int&gt;someParameter)
+                else:
+                    return self.pointer.method2[ModifierA3, ModifierB1](&lt;str&gt;someParameter)                    
+            elif ModifierB == "ModifierB2":
+                if useInt:
+                    return self.pointer.method2[ModifierA3, ModifierB2](&lt;int&gt;someParameter)
+                else:
+                    return self.pointer.method2[ModifierA3, ModifierB2](&lt;str&gt;someParameter)
+            else:
+                if useInt:
+                    return self.pointer.method2[ModifierA3, ModifierB3](&lt;int&gt;someParameter)
+                else:
+                    return self.pointer.method2[ModifierA3, ModifierB3](&lt;str&gt;someParameter)
+
+
+    def method3(self, str ModifierA, str ModifierB, someParameter):
+
+        useInt = False
+
+        if isinstance(someParameter, int):
+            useInt = True
+        elif not isinstance(someParameter, str):
+            raise NotImplementedError("Third argument to method3 must be an int or a string")
+
+        if ModifierA not in ["ModifierA1", "ModifierA2", "ModifierA3"]:
+            raise NotImplementedError("ModifierA '%s' not handled in SimulationManager.method3" % ModifierA)
+        if ModifierB not in ["ModifierB1", "ModifierB2", "ModifierB3"]:
+            raise NotImplementedError("ModifierB '%s' not handled in SimulationManager.method3" % ModifierB)
+
+        if ModifierA == "ModifierA1":
+            if ModifierB == "ModifierB1":
+                if useInt:
+                    return self.pointer.method3[ModifierA1, ModifierB1](&lt;int&gt;someParameter)
+                else:
+                    return self.pointer.method3[ModifierA1, ModifierB1](&lt;str&gt;someParameter)
+            elif ModifierB == "ModifierB2":
+                if useInt:
+                    return self.pointer.method3[ModifierA1, ModifierB2](&lt;int&gt;someParameter)
+                else:
+                    return self.pointer.method3[ModifierA1, ModifierB2](&lt;str&gt;someParameter)
+            else:
+                if useInt:
+                    return self.pointer.method3[ModifierA1, ModifierB3](&lt;int&gt;someParameter)
+                else:
+                    return self.pointer.method3[ModifierA1, ModifierB3](&lt;str&gt;someParameter)
+
+        elif ModifierA == "ModifierA2":
+            if ModifierB == "ModifierB1":
+                if useInt:
+                    return self.pointer.method3[ModifierA2, ModifierB1](&lt;int&gt;someParameter)
+                else:
+                    return self.pointer.method3[ModifierA2, ModifierB1](&lt;str&gt;someParameter)                    
+            elif ModifierB == "ModifierB2":
+                if useInt:
+                    return self.pointer.method3[ModifierA2, ModifierB2](&lt;int&gt;someParameter)
+                else:
+                    return self.pointer.method3[ModifierA2, ModifierB2](&lt;str&gt;someParameter)
+            else:
+                if useInt:
+                    return self.pointer.method3[ModifierA2, ModifierB3](&lt;int&gt;someParameter)
+                else:
+                    return self.pointer.method3[ModifierA2, ModifierB3](&lt;str&gt;someParameter)
+
+        elif ModifierA == "ModifierA3":
+            if ModifierB == "ModifierB1":
+                if useInt:
+                    return self.pointer.method3[ModifierA3, ModifierB1](&lt;int&gt;someParameter)
+                else:
+                    return self.pointer.method3[ModifierA3, ModifierB1](&lt;str&gt;someParameter)                    
+            elif ModifierB == "ModifierB2":
+                if useInt:
+                    return self.pointer.method3[ModifierA3, ModifierB2](&lt;int&gt;someParameter)
+                else:
+                    return self.pointer.method3[ModifierA3, ModifierB2](&lt;str&gt;someParameter)
+            else:
+                if useInt:
+                    return self.pointer.method3[ModifierA3, ModifierB3](&lt;int&gt;someParameter)
+                else:
+                    return self.pointer.method3[ModifierA3, ModifierB3](&lt;str&gt;someParameter)
+</code></pre>
+
+<p>This amount of code is not only ridiculous for the functionality, but it means that I now need to edit the .h files, the .cpp files, the .pxd files AND the .pyx file <em>just to add one new type of modifier</em>. Considering we programmers have an in-built obsession with efficiency, this kind of process just isn't acceptable to me.</p>
+
+<p>Again, I acknowledge that this is a kind-of necessary process with cython (although I can think of many ways this process can be improved upon. Perhaps when I have more free time I'll join the community effort). What I'm asking is purely on the C++ side (unless there IS a workaround in cython that myself and Google are unaware of).</p>
+
+<p>One thing I hadn't previously considered was a factory whose state indicates the type of objects to be created, and pass this along. This seems slightly wasteful, though, and again is just sweeping the problem under the rug. If anything, I'm really asking for ideas (or design patterns), and I don't mind how crazy or incomplete they are; I just want to get some creativity flowing.</p>
+    </div>
+    </div></body></html>

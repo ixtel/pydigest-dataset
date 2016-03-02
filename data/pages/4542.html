@@ -1,0 +1,74 @@
+<html><body><div><div class="content html_format"><p>
+      Обсуждение статьи "</p><a href="http://habrahabr.ru/post/257513/">Не совсем крутой Ruby</a><p>" зашло достаточно далеко: недостатки и достоинства Ruby между делом перетекали в обсуждение недостатков и достоинств Python. Не сильно удивило то, что передача </p><code>self</code><p> в качестве первого аргумента метода класса, некоторым хабравчанам кажется лишней. Ну что ж, не хотите явного </p><code>self</code><p>, будет вам неявный </p><code>this</code><p>! Под катом, немного магии на чистом Python. 
+</p><a name="habracut"/><p>
+Но сначала, давайте всё-таки поговорим о том, почему </p><code>self</code><p> передаётся явным образом. Как мне кажется, причины на то две. Первая — это </p><a href="https://www.python.org/dev/peps/pep-0020/">The Zen of Python</a><p>, в котором чёрным по белому написано: </p><blockquote>Explicit is better than implicit (явное лучше неявного).</blockquote><p> Это относится и к передачи данного объекта в метод явным образом, через </p><code>self</code><p>. 
+</p><p>
+Вторая причина не менее важна — это дескрипторы. ООП в Python реализован на уровне функций, которые привязываются к объекту динамически посредством механизма дескрипторов (обязательно прочтите статью </p><a href="http://habrahabr.ru/post/122082/">Руководство к дескрипторам</a><p>). Итак, вернёмся к функциям: многие ли из нас любят волшебные переменные, через которые могут передаваться аргументы функции? Это например </p><code>$</code><p> в Perl, </p><code>arguments</code><p> в JS, </p><code>func_get_args()</code><p> в PHP. В Python нет таких волшебных переменных, всё, что передаётся в функцию, передаётся явным образом (в т.ч. и через </p><code>*args</code><p> и </p><code>**kwargs</code><p>). Так почему же для методов, которые Python обрабатывает как обыкновенные функции, должно быть сделано исключение в виде неявной передачи </p><code>self</code><p>?
+</p><p>
+Однако, в качестве упражнения сделать это совсем несложно. Давайте начнём с простого декоратора:
+
+</p><pre><code class="python"># Все примеры на Python 3!
+
+def add_this(f):
+    def wrapped(self, *args, **kwargs):
+        f.__globals__['this'] = self
+        return f(*args, **kwargs)
+    return wrapped
+
+class C:
+    name = 'Alex'
+
+    @add_this
+    def say(phrase):
+        print("{} says: {}".format(this.name, phrase))
+
+c = C()
+c.say('Can you believe it? There is no `self` here!')
+</code></pre><p>
+На выходе:
+
+</p><pre><code class="python">Alex says: Can you believe it? There is no `self` here!
+</code></pre><p>
+Как видите, декоратор </p><code>add_this</code><p> добавляет переменную </p><code>this</code><p> в область видимости функции, и присваивает ей значение </p><code>self</code><p>. Вспомните, что </p><code>__globals__</code><p> — это поле ссылающееся на словарь содержащий глобальные переменные функции, т.е. глобальное пространство имён модуля, в котором эта функция объявлена. Таким образом, вышенаписанный код — это грязнющий хак, добавляющий (и затирающий!) переменную </p><code>this</code><p> в глобальное пространство модуля. Всё это подойдёт для наших экспериментов, но упаси вас писать такое в настоящем коде!
+</p><p>
+Предвкушая комментарии аудитории о том, что так каждую функцию придётся обрамлять в декоратор, предлагаю взвалить эту задачу на плечи метакласса:
+
+</p><pre><code class="python">import types
+
+class AddThisMeta(type):
+    def __new__(cls, name, bases, classdict):
+        new_classdict = {
+            key: add_this(val) if isinstance(val, types.FunctionType) else val
+            for key, val in classdict.items()
+        }
+        new_class = type.__new__(cls, name, bases, new_classdict)
+        return new_class
+
+class D(metaclass=AddThisMeta):
+    name = 'Daniel'
+
+    def say(phrase):
+        print("{} says: {}".format(this.name, phrase))
+
+    def run():
+        print("{} runs away :)".format(this.name))
+
+d = D()
+d.say('And now, there is only AddThisMeta!')
+d.run()
+</code></pre><p>
+На выходе:
+
+</p><pre><code class="python">Daniel says: And now, there is only AddThisMeta!
+Daniel runs away :)
+</code></pre><p>
+Метакласс проходит по всем полям класса и их значениям, выбирает подходящие по типу (важный момент: простая проверка на </p><code>callable()</code><p> не подойдёт, т.к. она также сработает для </p><code>classmethod</code><p> и </p><code>staticmethod</code><p>) и обрамляет эти функции декоратором </p><code>add_this</code><p>.
+</p><p>
+Как вы видите, добавить неявный </p><code>self</code><p> (или </p><code>this</code><p>) в методы классa совсем не сложно. Но прошу вас, ради всего хорошего, что есть в Python, никогда, </p><b>никогда</b><p>, </p><b><u>никогда</u></b><p> не делайте этого.
+
+      
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

@@ -1,0 +1,352 @@
+<html><body><div><div class="section" id="stateful-testing">
+<h1>Stateful testing<a class="headerlink" href="#stateful-testing" title="Permalink to this headline">¶</a></h1>
+<p>Hypothesis offers support for a stateful style of test, where instead of
+trying to produce a single data value that causes a specific test to fail, it
+tries to generate a program that errors. In many ways, this sort of testing is
+to classical property based testing as property based testing is to normal
+example based testing.</p>
+<p>The idea doesn’t originate with Hypothesis, though Hypothesis’s implementation
+and approach is mostly not based on an existing implementation and should be
+considered some mix of novel and independent reinventions.</p>
+<p>This style of testing is useful both for programs which involve some sort
+of mutable state and for complex APIs where there’s no state per se but the
+actions you perform involve e.g. taking data from one function and feeding it
+into another.</p>
+<p>The idea is that you teach Hypothesis how to interact with your program: Be it
+a server, a python API, whatever. All you need is to be able to answer the
+question “Given what I’ve done so far, what could I do now?”. After that,
+Hypothesis takes over and tries to find sequences of actions which cause a
+test failure.</p>
+<p>Right now the stateful testing is a bit new and experimental and should be
+considered as a semi-public API: It may break between minor versions but won’t
+break between patch releases, and there are still some rough edges in the API
+that will need to be filed off.</p>
+<p>This shouldn’t discourage you from using it. Although it’s not as robust as the
+rest of Hypothesis, it’s still pretty robust and more importantly is extremely
+powerful. I found a number of really subtle bugs in Hypothesis by turning the
+stateful testing onto a subset of the Hypothesis API, and you likely will find
+the same.</p>
+<p>Enough preamble, lets see how to use it.</p>
+<p>The first thing to note is that there are two levels of API: The low level
+but more flexible API and the higher level rule based API which is both
+easier to use and also produces a much better display of data due to its
+greater structure. We’ll start with the more structured one.</p>
+<div class="section" id="rule-based-state-machines">
+<h2>Rule based state machines<a class="headerlink" href="#rule-based-state-machines" title="Permalink to this headline">¶</a></h2>
+<p>Rule based state machines are the ones you’re most likely to want to use.
+They’re significantly more user friendly and should be good enough for most
+things you’d want to do.</p>
+<p>A rule based state machine is a collection of functions (possibly with side
+effects) which may depend on both values that Hypothesis can generate and
+also on values that have resulted from previous function calls.</p>
+<p>You define a rule based state machine as follows:</p>
+<div class="code python highlight-python"><div class="highlight"><pre><span class="kn">import</span> <span class="nn">unittest</span>
+<span class="kn">from</span> <span class="nn">collections</span> <span class="kn">import</span> <span class="n">namedtuple</span>
+
+<span class="kn">from</span> <span class="nn">hypothesis</span> <span class="kn">import</span> <span class="n">strategies</span> <span class="k">as</span> <span class="n">st</span>
+<span class="kn">from</span> <span class="nn">hypothesis.stateful</span> <span class="kn">import</span> <span class="n">RuleBasedStateMachine</span><span class="p">,</span> <span class="n">Bundle</span><span class="p">,</span> <span class="n">rule</span>
+
+
+<span class="n">Leaf</span> <span class="o">=</span> <span class="n">namedtuple</span><span class="p">(</span><span class="s">'Leaf'</span><span class="p">,</span> <span class="p">(</span><span class="s">'label'</span><span class="p">,))</span>
+<span class="n">Split</span> <span class="o">=</span> <span class="n">namedtuple</span><span class="p">(</span><span class="s">'Split'</span><span class="p">,</span> <span class="p">(</span><span class="s">'left'</span><span class="p">,</span> <span class="s">'right'</span><span class="p">))</span>
+
+
+<span class="k">class</span> <span class="nc">BalancedTrees</span><span class="p">(</span><span class="n">RuleBasedStateMachine</span><span class="p">):</span>
+    <span class="n">trees</span> <span class="o">=</span> <span class="n">Bundle</span><span class="p">(</span><span class="s">'BinaryTree'</span><span class="p">)</span>
+
+    <span class="nd">@rule</span><span class="p">(</span><span class="n">target</span><span class="o">=</span><span class="n">trees</span><span class="p">,</span> <span class="n">x</span><span class="o">=</span><span class="n">st</span><span class="o">.</span><span class="n">integers</span><span class="p">())</span>
+    <span class="k">def</span> <span class="nf">leaf</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">Leaf</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+
+    <span class="nd">@rule</span><span class="p">(</span><span class="n">target</span><span class="o">=</span><span class="n">trees</span><span class="p">,</span> <span class="n">left</span><span class="o">=</span><span class="n">trees</span><span class="p">,</span> <span class="n">right</span><span class="o">=</span><span class="n">trees</span><span class="p">)</span>
+    <span class="k">def</span> <span class="nf">split</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">left</span><span class="p">,</span> <span class="n">right</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">Split</span><span class="p">(</span><span class="n">left</span><span class="p">,</span> <span class="n">right</span><span class="p">)</span>
+
+    <span class="nd">@rule</span><span class="p">(</span><span class="n">tree</span><span class="o">=</span><span class="n">trees</span><span class="p">)</span>
+    <span class="k">def</span> <span class="nf">check_balanced</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">tree</span><span class="p">):</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">tree</span><span class="p">,</span> <span class="n">Leaf</span><span class="p">):</span>
+            <span class="k">return</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">assert</span> <span class="nb">abs</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">(</span><span class="n">tree</span><span class="o">.</span><span class="n">left</span><span class="p">)</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">(</span><span class="n">tree</span><span class="o">.</span><span class="n">right</span><span class="p">))</span> <span class="o">&lt;=</span> <span class="mi">1</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">check_balanced</span><span class="p">(</span><span class="n">tree</span><span class="o">.</span><span class="n">left</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">check_balanced</span><span class="p">(</span><span class="n">tree</span><span class="o">.</span><span class="n">right</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">size</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">tree</span><span class="p">):</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">tree</span><span class="p">,</span> <span class="n">Leaf</span><span class="p">):</span>
+            <span class="k">return</span> <span class="mi">1</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">return</span> <span class="mi">1</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">(</span><span class="n">tree</span><span class="o">.</span><span class="n">left</span><span class="p">)</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">(</span><span class="n">tree</span><span class="o">.</span><span class="n">right</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>In this we declare a Bundle, which is a named collection of previously generated
+values. We define two rules which put data onto this bundle - one which just
+generates leaves with integer labels, the other of which takes two previously
+generated values and returns a new one.</p>
+<p>We can then integrate this into our test suite by getting a unittest TestCase
+from it:</p>
+<div class="code python highlight-python"><div class="highlight"><pre><span class="n">TestTrees</span> <span class="o">=</span> <span class="n">BalancedTrees</span><span class="o">.</span><span class="n">TestCase</span>
+
+<span class="k">if</span> <span class="n">__name__</span> <span class="o">==</span> <span class="s">'__main__'</span><span class="p">:</span>
+    <span class="n">unittest</span><span class="o">.</span><span class="n">main</span><span class="p">()</span>
+</pre></div>
+</div>
+<p>(these will also be picked up by py.test if you prefer to use that). Running
+this we get:</p>
+<div class="code bash highlight-python"><div class="highlight"><pre>Step #1: v1 = leaf(x=0)
+Step #2: v2 = split(left=v1, right=v1)
+Step #3: v3 = split(left=v2, right=v1)
+Step #4: check_balanced(tree=v3)
+F
+======================================================================
+FAIL: runTest (hypothesis.stateful.BalancedTrees.TestCase)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+(...)
+assert abs(self.size(tree.left) - self.size(tree.right)) &lt;= 1
+AssertionError
+</pre></div>
+</div>
+<p>Note how it’s printed out a very short program that will demonstrate the
+problem.</p>
+<p>...the problem of course being that we’ve not actually written any code to
+balance this tree at <em>all</em>, so of course it’s not balanced.</p>
+<p>So lets balance some trees.</p>
+<div class="code python highlight-python"><div class="highlight"><pre><span class="kn">from</span> <span class="nn">collections</span> <span class="kn">import</span> <span class="n">namedtuple</span>
+
+<span class="kn">from</span> <span class="nn">hypothesis</span> <span class="kn">import</span> <span class="n">strategies</span> <span class="k">as</span> <span class="n">st</span>
+<span class="kn">from</span> <span class="nn">hypothesis.stateful</span> <span class="kn">import</span> <span class="n">RuleBasedStateMachine</span><span class="p">,</span> <span class="n">Bundle</span><span class="p">,</span> <span class="n">rule</span>
+
+
+<span class="n">Leaf</span> <span class="o">=</span> <span class="n">namedtuple</span><span class="p">(</span><span class="s">'Leaf'</span><span class="p">,</span> <span class="p">(</span><span class="s">'label'</span><span class="p">,))</span>
+<span class="n">Split</span> <span class="o">=</span> <span class="n">namedtuple</span><span class="p">(</span><span class="s">'Split'</span><span class="p">,</span> <span class="p">(</span><span class="s">'left'</span><span class="p">,</span> <span class="s">'right'</span><span class="p">))</span>
+
+
+<span class="k">class</span> <span class="nc">BalancedTrees</span><span class="p">(</span><span class="n">RuleBasedStateMachine</span><span class="p">):</span>
+    <span class="n">trees</span> <span class="o">=</span> <span class="n">Bundle</span><span class="p">(</span><span class="s">'BinaryTree'</span><span class="p">)</span>
+    <span class="n">balanced_trees</span> <span class="o">=</span> <span class="n">Bundle</span><span class="p">(</span><span class="s">'balanced BinaryTree'</span><span class="p">)</span>
+
+    <span class="nd">@rule</span><span class="p">(</span><span class="n">target</span><span class="o">=</span><span class="n">trees</span><span class="p">,</span> <span class="n">x</span><span class="o">=</span><span class="n">st</span><span class="o">.</span><span class="n">integers</span><span class="p">())</span>
+    <span class="k">def</span> <span class="nf">leaf</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">Leaf</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+
+    <span class="nd">@rule</span><span class="p">(</span><span class="n">target</span><span class="o">=</span><span class="n">trees</span><span class="p">,</span> <span class="n">left</span><span class="o">=</span><span class="n">trees</span><span class="p">,</span> <span class="n">right</span><span class="o">=</span><span class="n">trees</span><span class="p">)</span>
+    <span class="k">def</span> <span class="nf">split</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">left</span><span class="p">,</span> <span class="n">right</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">Split</span><span class="p">(</span><span class="n">left</span><span class="p">,</span> <span class="n">right</span><span class="p">)</span>
+
+    <span class="nd">@rule</span><span class="p">(</span><span class="n">tree</span><span class="o">=</span><span class="n">balanced_trees</span><span class="p">)</span>
+    <span class="k">def</span> <span class="nf">check_balanced</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">tree</span><span class="p">):</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">tree</span><span class="p">,</span> <span class="n">Leaf</span><span class="p">):</span>
+            <span class="k">return</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">assert</span> <span class="nb">abs</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">(</span><span class="n">tree</span><span class="o">.</span><span class="n">left</span><span class="p">)</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">(</span><span class="n">tree</span><span class="o">.</span><span class="n">right</span><span class="p">))</span> <span class="o">&lt;=</span> <span class="mi">1</span><span class="p">,</span> \
+                <span class="nb">repr</span><span class="p">(</span><span class="n">tree</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">check_balanced</span><span class="p">(</span><span class="n">tree</span><span class="o">.</span><span class="n">left</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">check_balanced</span><span class="p">(</span><span class="n">tree</span><span class="o">.</span><span class="n">right</span><span class="p">)</span>
+
+    <span class="nd">@rule</span><span class="p">(</span><span class="n">target</span><span class="o">=</span><span class="n">balanced_trees</span><span class="p">,</span> <span class="n">tree</span><span class="o">=</span><span class="n">trees</span><span class="p">)</span>
+    <span class="k">def</span> <span class="nf">balance_tree</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">tree</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">split_leaves</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">flatten</span><span class="p">(</span><span class="n">tree</span><span class="p">))</span>
+
+    <span class="k">def</span> <span class="nf">size</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">tree</span><span class="p">):</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">tree</span><span class="p">,</span> <span class="n">Leaf</span><span class="p">):</span>
+            <span class="k">return</span> <span class="mi">1</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">(</span><span class="n">tree</span><span class="o">.</span><span class="n">left</span><span class="p">)</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">size</span><span class="p">(</span><span class="n">tree</span><span class="o">.</span><span class="n">right</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">flatten</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">tree</span><span class="p">):</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">tree</span><span class="p">,</span> <span class="n">Leaf</span><span class="p">):</span>
+            <span class="k">return</span> <span class="p">(</span><span class="n">tree</span><span class="o">.</span><span class="n">label</span><span class="p">,)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">flatten</span><span class="p">(</span><span class="n">tree</span><span class="o">.</span><span class="n">left</span><span class="p">)</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">flatten</span><span class="p">(</span><span class="n">tree</span><span class="o">.</span><span class="n">right</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">split_leaves</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">leaves</span><span class="p">):</span>
+        <span class="k">assert</span> <span class="n">leaves</span>
+        <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">leaves</span><span class="p">)</span> <span class="o">==</span> <span class="mi">1</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">Leaf</span><span class="p">(</span><span class="n">leaves</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">mid</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">leaves</span><span class="p">)</span> <span class="o">//</span> <span class="mi">2</span>
+            <span class="k">return</span> <span class="n">Split</span><span class="p">(</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">split_leaves</span><span class="p">(</span><span class="n">leaves</span><span class="p">[:</span><span class="n">mid</span><span class="p">]),</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">split_leaves</span><span class="p">(</span><span class="n">leaves</span><span class="p">[</span><span class="n">mid</span><span class="p">:]),</span>
+            <span class="p">)</span>
+</pre></div>
+</div>
+<p>We’ve now written a really noddy tree balancing implementation.  This takes
+trees and puts them into a new bundle of data, and we only assert that things
+in the balanced_trees bundle are actually balanced.</p>
+<p>If you run this it will sit their silently for a while (you can turn on
+<a class="reference internal" href="settings.html#verbose-output"><span>verbose output</span></a> to get slightly more information about
+what’s happening. debug will give you all the intermediate programs being run)
+and then run, telling you your test has passed! Our balancing algorithm worked.</p>
+<p>Now lets break it to make sure the test is still valid:</p>
+<p>Changing the split to mid = max(len(leaves) // 3, 1) this should no longer
+balance, which gives us the following counter-example:</p>
+<div class="code python highlight-python"><div class="highlight"><pre><span class="n">v1</span> <span class="o">=</span> <span class="n">leaf</span><span class="p">(</span><span class="n">x</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">v2</span> <span class="o">=</span> <span class="n">split</span><span class="p">(</span><span class="n">left</span><span class="o">=</span><span class="n">v1</span><span class="p">,</span> <span class="n">right</span><span class="o">=</span><span class="n">v1</span><span class="p">)</span>
+<span class="n">v3</span> <span class="o">=</span> <span class="n">balance_tree</span><span class="p">(</span><span class="n">tree</span><span class="o">=</span><span class="n">v1</span><span class="p">)</span>
+<span class="n">v4</span> <span class="o">=</span> <span class="n">split</span><span class="p">(</span><span class="n">left</span><span class="o">=</span><span class="n">v2</span><span class="p">,</span> <span class="n">right</span><span class="o">=</span><span class="n">v2</span><span class="p">)</span>
+<span class="n">v5</span> <span class="o">=</span> <span class="n">balance_tree</span><span class="p">(</span><span class="n">tree</span><span class="o">=</span><span class="n">v4</span><span class="p">)</span>
+<span class="n">check_balanced</span><span class="p">(</span><span class="n">tree</span><span class="o">=</span><span class="n">v5</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>Note that the example could be shrunk further by deleting v3. Due to some
+technical limitations, Hypothesis was unable to find that particular shrink.
+In general it’s rare for examples produced to be long, but they won’t always be
+minimal.</p>
+<p>You can control the detailed behaviour with a settings object on the TestCase
+(this is a normal hypothesis settings object using the defaults at the time
+the TestCase class was first referenced). For example if you wanted to run
+fewer examples with larger programs you could change the settings to:</p>
+<div class="code python highlight-python"><div class="highlight"><pre><span class="n">TestTrees</span><span class="o">.</span><span class="n">settings</span> <span class="o">=</span> <span class="n">settings</span><span class="p">(</span><span class="n">max_examples</span><span class="o">=</span><span class="mi">100</span><span class="p">,</span> <span class="n">stateful_step_count</span><span class="o">=</span><span class="mi">100</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>Which doubles the number of steps each program runs and halves the number of
+runs relative to the example. settings.timeout will also be respected as usual.</p>
+<div class="section" id="preconditions">
+<h3>Preconditions<a class="headerlink" href="#preconditions" title="Permalink to this headline">¶</a></h3>
+<p>While it’s possible to use <code class="docutils literal"><span class="pre">assume</span></code> in RuleBasedStateMachine rules, if you
+use it in only a few rules you can quickly run into a situation where few or
+none of your rules pass their assumptions. Thus, Hypothesis provides a
+<code class="docutils literal"><span class="pre">precondition</span></code> decorator to avoid this problem. The <code class="docutils literal"><span class="pre">precondition</span></code>
+decorator is used on <code class="docutils literal"><span class="pre">rule</span></code>-decorated functions, and must be given a function
+that returns True or False based on the RuleBasedStateMachine instance.</p>
+<div class="code python highlight-python"><div class="highlight"><pre><span class="kn">from</span> <span class="nn">hypothesis.stateful</span> <span class="kn">import</span> <span class="n">RuleBasedStateMachine</span><span class="p">,</span> <span class="n">rule</span><span class="p">,</span> <span class="n">precondition</span>
+
+<span class="k">class</span> <span class="nc">NumberModifier</span><span class="p">(</span><span class="n">RuleBasedStateMachine</span><span class="p">):</span>
+
+    <span class="n">num</span> <span class="o">=</span> <span class="mi">0</span>
+
+    <span class="nd">@rule</span><span class="p">()</span>
+    <span class="k">def</span> <span class="nf">add_one</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">num</span> <span class="o">+=</span> <span class="mi">1</span>
+
+    <span class="nd">@precondition</span><span class="p">(</span><span class="k">lambda</span> <span class="bp">self</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">num</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">)</span>
+    <span class="nd">@rule</span><span class="p">()</span>
+    <span class="k">def</span> <span class="nf">divide_with_one</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">num</span> <span class="o">=</span> <span class="mi">1</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">num</span>
+</pre></div>
+</div>
+<p>By using <code class="docutils literal"><span class="pre">precondition</span></code> here instead of <code class="docutils literal"><span class="pre">assume</span></code>, Hypothesis can filter the
+inapplicable rules before running them. This makes it much more likely that a
+useful sequence of steps will be generated.</p>
+<p>Note that currently preconditions can’t access bundles; if you need to use
+preconditions, you should store relevant data on the instance instead.</p>
+</div>
+</div>
+<div class="section" id="generic-state-machines">
+<h2>Generic state machines<a class="headerlink" href="#generic-state-machines" title="Permalink to this headline">¶</a></h2>
+<p>The class GenericStateMachine is the underlying machinery of stateful testing
+in Hypothesis. In execution it looks much like the RuleBasedStateMachine but
+it allows the set of steps available to depend in essentially arbitrary
+ways on what has happened so far. For example, if you wanted to
+use Hypothesis to test a game, it could choose each step in the machine based
+on the game to date and the set of actions the game program is telling it it
+has available.</p>
+<p>It essentially executes the following loop:</p>
+<div class="code python highlight-python"><div class="highlight"><pre><span class="n">machine</span> <span class="o">=</span> <span class="n">MyStateMachine</span><span class="p">()</span>
+<span class="k">try</span><span class="p">:</span>
+  <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_steps</span><span class="p">):</span>
+    <span class="n">step</span> <span class="o">=</span> <span class="n">machine</span><span class="o">.</span><span class="n">steps</span><span class="p">()</span><span class="o">.</span><span class="n">example</span><span class="p">()</span>
+    <span class="n">machine</span><span class="o">.</span><span class="n">execute_step</span><span class="p">(</span><span class="n">step</span><span class="p">)</span>
+<span class="k">finally</span><span class="p">:</span>
+  <span class="n">machine</span><span class="o">.</span><span class="n">teardown</span><span class="p">()</span>
+</pre></div>
+</div>
+<p>Where steps() and execute_step() are methods you must implement, and teardown
+is a method you can implement if you need to clean something up at the end.
+steps  returns a strategy, which is allowed to depend arbitrarily on the
+current state of the test execution. <em>Ideally</em> a good steps implementation
+should be robust against minor changes in the state. Steps that change a lot
+between slightly different executions will tend to produce worse quality
+examples because they’re hard to simplify.</p>
+<p>The steps method <em>may</em> depend on external state, but it’s not advisable and
+may produce flaky tests.</p>
+<p>If any of execute_step or teardown produces an error, Hypothesis will try to
+find a minimal sequence of values steps such that the following throws an
+exception:</p>
+<div class="code python highlight-python"><div class="highlight"><pre><span class="k">try</span><span class="p">:</span>
+  <span class="n">machine</span> <span class="o">=</span> <span class="n">MyStateMachine</span><span class="p">()</span>
+  <span class="k">for</span> <span class="n">step</span> <span class="ow">in</span> <span class="n">steps</span><span class="p">:</span>
+    <span class="n">machine</span><span class="o">.</span><span class="n">execute_step</span><span class="p">(</span><span class="n">step</span><span class="p">)</span>
+<span class="k">finally</span><span class="p">:</span>
+  <span class="n">machine</span><span class="o">.</span><span class="n">teardown</span><span class="p">()</span>
+</pre></div>
+</div>
+<p>and such that at every point, the step executed is one that could plausible
+have come from a call to steps() in the current state.</p>
+<p>Here’s an example of using stateful testing to test a broken implementation
+of a set in terms of a list (note that you could easily do something close to
+this example with the rule based testing instead, and probably should. This
+is mostly for illustration purposes):</p>
+<div class="code python highlight-python"><div class="highlight"><pre><span class="kn">import</span> <span class="nn">unittest</span>
+
+<span class="kn">from</span> <span class="nn">hypothesis.stateful</span> <span class="kn">import</span> <span class="n">GenericStateMachine</span>
+<span class="kn">from</span> <span class="nn">hypothesis.strategies</span> <span class="kn">import</span> <span class="n">tuples</span><span class="p">,</span> <span class="n">sampled_from</span><span class="p">,</span> <span class="n">just</span><span class="p">,</span> <span class="n">integers</span>
+
+
+<span class="k">class</span> <span class="nc">BrokenSet</span><span class="p">(</span><span class="n">GenericStateMachine</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">data</span> <span class="o">=</span> <span class="p">[]</span>
+
+    <span class="k">def</span> <span class="nf">steps</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">add_strategy</span> <span class="o">=</span> <span class="n">tuples</span><span class="p">(</span><span class="n">just</span><span class="p">(</span><span class="s">"add"</span><span class="p">),</span> <span class="n">integers</span><span class="p">())</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">data</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">add_strategy</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">return</span> <span class="p">(</span>
+                <span class="n">add_strategy</span> <span class="o">|</span>
+                <span class="n">tuples</span><span class="p">(</span><span class="n">just</span><span class="p">(</span><span class="s">"delete"</span><span class="p">),</span> <span class="n">sampled_from</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">data</span><span class="p">)))</span>
+
+    <span class="k">def</span> <span class="nf">execute_step</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">step</span><span class="p">):</span>
+        <span class="n">action</span><span class="p">,</span> <span class="n">value</span> <span class="o">=</span> <span class="n">step</span>
+        <span class="k">if</span> <span class="n">action</span> <span class="o">==</span> <span class="s">'delete'</span><span class="p">:</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">data</span><span class="o">.</span><span class="n">remove</span><span class="p">(</span><span class="n">value</span><span class="p">)</span>
+            <span class="k">except</span> <span class="ne">ValueError</span><span class="p">:</span>
+                <span class="k">pass</span>
+            <span class="k">assert</span> <span class="n">value</span> <span class="ow">not</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">data</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">assert</span> <span class="n">action</span> <span class="o">==</span> <span class="s">'add'</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">data</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">value</span><span class="p">)</span>
+            <span class="k">assert</span> <span class="n">value</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">data</span>
+
+
+<span class="n">TestSet</span> <span class="o">=</span> <span class="n">BrokenSet</span><span class="o">.</span><span class="n">TestCase</span>
+
+<span class="k">if</span> <span class="n">__name__</span> <span class="o">==</span> <span class="s">'__main__'</span><span class="p">:</span>
+    <span class="n">unittest</span><span class="o">.</span><span class="n">main</span><span class="p">()</span>
+</pre></div>
+</div>
+<p>Note that the strategy changes each time based on the data that’s currently
+in the state machine.</p>
+<p>Running this gives us the following:</p>
+<div class="code bash highlight-python"><div class="highlight"><pre>Step #1: ('add', 0)
+Step #2: ('add', 0)
+Step #3: ('delete', 0)
+F
+======================================================================
+FAIL: runTest (hypothesis.stateful.BrokenSet.TestCase)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+(...)
+    assert value not in self.data
+AssertionError
+</pre></div>
+</div>
+<p>So it adds two elements, then deletes one, and throws an assertion when it
+finds out that this only deleted one of the copies of the element.</p>
+</div>
+<div class="section" id="more-fine-grained-control">
+<h2>More fine grained control<a class="headerlink" href="#more-fine-grained-control" title="Permalink to this headline">¶</a></h2>
+<p>If you want to bypass the TestCase infrastructure you can invoke these
+manually. The stateful module exposes the function run_state_machine_as_test,
+which takes an arbitrary function returning a GenericStateMachine and an
+optional settings parameter and does the same as the class based runTest
+provided.</p>
+<p>In particular this may be useful if you wish to pass parameters to a custom
+__init__ in your subclass.</p>
+</div>
+</div>
+
+
+           </div></body></html>

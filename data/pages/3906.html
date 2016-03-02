@@ -1,0 +1,464 @@
+<html><body><div><div class="post-body entry-content">
+<p/><p>
+<b>Update</b>: It turns out that there's a similar technique being used by <a href="http://pyparsing.wikispaces.com/">pyparsing</a>.  I hadn't seen it before and when I first saw it I thought had reinvted the wheel and wasted my time.  But upon further inspection, Pysec does a few things a much better than pyparsing, which happen to be the exact things that I need.  There's no coincedence, of course, that Pysec matches my needs well.  I'll be covering this in more detail in a future article.  
+
+</p><p>
+<b>Update 2</b>: I got <a href="http://www.valuedlessons.com/2008/01/monads-in-python-with-nice-syntax.html">@do syntax</a> to work! Again, stay tuned for another article on how.
+
+</p><p>
+I've talked about monads in the past, but I never really covered what purpose they serve.   I covered the "how" in <a href="http://www.valuedlessons.com/2008/01/monads-in-python-with-nice-syntax.html">Python</a> and <a href="http://www.valuedlessons.com/2008/01/monads-in-ruby-with-nice-syntax.html">Ruby</a>, but I doubt I'll ever full cover the "why" because it's simply too big of a subject.  But today, I'd like to share with you one example of how monads are useful.  In fact, it's the example that motivated me to do all of the monad stuff in the first place: parsing.
+
+</p><p>
+Parsing is a topic that's been around pretty much forever in computer science and most people thing it's pretty much "solved".  My experience is that we've still got a long way to go.  Specifically, I'm writing an application with lots of distributed concurrency, which requires lots of data serialization and deserialization (aka parsing).   There are very few good serialization libraries out there, and I've been through three or four versions of various techniques.  <b>Finally, I think I have found a parsing technique that works well: monadic combinatoric parsing</b>.  And it's in Python.
+
+</p><p>
+What the heck does that mean?  "monadic" means we're using monads.  "combinatoric" means we can take monad parsers and combine them to make new monad parsers, which is extremly powerful.  I call it Pysec. The design is a copy of <a href="http://legacy.cs.uu.nl/daan/parsec.html">Parsec</a> brought to Python.  Notice how I said "design"; I didn't bother looking at any of their code; The design described on their web page was good enough guidance for me.  But, I'm sure that their implementation is WAY better than mine.  If you want to see real monadic parsing, look at Parsec.  If you're interested in monadic parsing for Python, keep reading.
+
+</p><p>
+Here's an example of Pysec for parsing a subset of JSON:
+
+</p><pre class="code">
+from Pysec import Parser, choice, quoted_chars, group_chars, option_chars, digits, between, pair, spaces, match, quoted_collection
+
+# json_choices is a hack to get around mutual recursion 
+# a json is value is one of text, number, mapping, and collection
+# text is any characters between quotes
+# a number is like the regular expression -?[0-9]+(\.[0-9]+)?
+# "parser &gt;&gt; Parser.lift(func)" means "pass the parsed value into func and return a new Parser"
+# quoted_collection(start, space, inner, joiner, end)
+#   means "a list of inner separated by joiner surrounded by start and end"
+# we have to put a lot of "spaces" in since JSON allows lot of optional whitespace
+
+json_choices = []
+json         = choice(json_choices)
+text         = quoted_chars("'", "'")
+number       = group_chars([option_chars(["-"]), digits, option_chars([".", digits])]) &gt;&gt; Parser.lift(float)
+joiner       = between(spaces, match(","), spaces)
+mapping_pair = pair(text, spaces &amp; match(":") &amp; spaces &amp; json)
+collection   = quoted_collection("[", spaces, json,         joiner, "]") &gt;&gt; Parser.lift(list)
+mapping      = quoted_collection("{", spaces, mapping_pair, joiner, "}") &gt;&gt; Parser.lift(dict)
+json_choices.extend([text, number, mapping, collection])
+
+print json.parseString("{'a' : -1.0, 'b' : 2.0, 'z' : {'c' : [1.0, [2.0, [3.0]]]}}")
+</pre>
+
+<p>
+Like most monadic or functional code, it's pretty dense, so don't feel bad if you go cross-eyed looking at it the first time.  Realize that most of the code is building a Parser monad called "json", which parses the test string at the end.  I tried to comment each individual part to explain what's going on.
+
+</p><p>
+You may be thinking "why would I want to write code like this?".  One response is to look at the code: it's the bulk of JSON parsing in 15 lines that look like a grammar definition! Another response I can give is a challange: go write a parser to parse that string and then compare your code to this code.  Which is shorter?  Which is easier to read?  Which is more elegant?  While in college, I had a team project to write a compiler for a subset of Pascal.  We were smart enough to use Python, but dumb enough to use Yacc and Flex.  I'm sure the parser portion was pretty fast, but it was incredibly painful to get it right.  Once we did, we dared not touch it for fear of breaking it.  I really wish I had Parse/Pysec back then (ok, Parsec was around back then, but I hadn't even heard of Haskell or monads).
+
+</p><p>
+But <b>monadic combinatoric parsing isn't just about making your code look like a grammar definition</b>.  It makes it possible to combine parsers in incredibly flexible ways.  For example, let's say that on a differnt project, you wrote a simplified CSV parser for numbers like this one:
+
+</p><pre class="code">
+def line(cell):
+    return sep_end_by(cell, match(","))
+
+def csv(cell):
+    return sep_end_by(line(cell), match("\n"))
+
+print csv(number).parseString("1,2,3\n4,5,6")
+</pre>
+
+<p>
+And now you realize you'd really like to put whole JSON values in your simplified CSV.  In other words, you want to combine the CVS and JSON parsers.  I think that you'll find that doing so really isn't as easy as it sounds.  Imagine trying to combine two Yacc grammars.  It hurts just thinking about that.  Luckily, monadic combinatoric parsers make this incredibly easy:
+
+</p><pre class="code">
+print csv(json).parseString("{'a' : 'A'},[1, 2, 3],'zzz'\n-1.0,2.0,-3.0")
+</pre>
+
+<p>
+While this is a slighly contrived example, you must understand that with this technique <b>you can combine any two parsers</b> in a similar fasion.  I don't know about you, but that really feels right to me.  I haven't seen any parsing techniques as elegant as that.  
+
+</p><p>
+Everything it's perfect of course, especially since making this work in Python is a bit of a hack.  Here are some downsides to this approach:
+
+</p><ul>
+  <li>It's hard to debug when you do something wrong.</li>
+  <li>It's annoying to import so many things from Pysec.</li>
+  <li>You have to hack around mutual recursion of values in a strict language like python.</li>
+  <li>There's probably a performance hit.</li>
+</ul>
+
+<p>
+Most of these can be either fixed or worked around, though, so I think long-term monadic parsing is good bet.  I'd like to see what you can do with it or to make it better.  
+
+</p><p>
+I know how much you all like a working example, so here's some code that you can just cut, paste, and run (in Python 2.5;  older versions of Python may require some tweaking).  Please ignore the top half.  It's mostly stuff I've covered in other articles, like <a href="http://www.valuedlessons.com/2007/12/immutable-data-in-python-record-or.html">Immutable Records</a> and <a href="http://www.valuedlessons.com/2008/01/monads-in-python-with-nice-syntax.html">monad base classes</a>.  The meat starts where it says "Parser Monad".  
+
+</p><p>
+I'd like to talk about it in more detail, but I'll save that for another article.  For now, please play around with it and see what you think.
+
+  
+</p><pre class="code">
+##### Base Libraries included here for convenience ###########
+
+def Record(*props):
+    class cls(RecordBase):
+        pass
+
+    cls.setProps(props)
+
+    return cls
+
+class RecordBase(tuple):
+    PROPS = ()
+
+    def __new__(cls, *values):
+        if cls.prepare != RecordBase.prepare:
+            values = cls.prepare(*values)
+        return cls.fromValues(values)
+
+    @classmethod
+    def fromValues(cls, values):
+        return tuple.__new__(cls, values)
+
+    def __repr__(self):
+        return self.__class__.__name__ + tuple.__repr__(self)
+
+    ## overridable
+    @classmethod
+    def prepare(cls, *args):
+        return args
+
+    ## setting up getters and setters
+    @classmethod
+    def setProps(cls, props):
+        for index, prop in enumerate(props):
+            cls.setProp(index, prop)
+        cls.PROPS = props
+
+    @classmethod
+    def setProp(cls, index, prop):
+        getter_name = prop
+        setter_name = "set" + prop[0].upper() + prop[1:]
+
+        setattr(cls, getter_name, cls.makeGetter(index, prop))
+        setattr(cls, setter_name, cls.makeSetter(index, prop))
+
+    @classmethod
+    def makeGetter(cls, index, prop):
+        return property(fget = lambda self : self[index])
+
+    @classmethod
+    def makeSetter(cls, index, prop):
+        def setter(self, value):
+            values = (value if current_index == index
+                            else current_value
+                      for current_index, current_value
+                      in enumerate(self))
+            return self.fromValues(values)
+        return setter
+
+class ByteStream(Record("bytes", "index")):
+    @classmethod
+    def prepare(cls, bytes, index = 0):
+        return (bytes, index)
+
+    def get(self, count):
+        start = self.index
+        end   = start + count
+        bytes = self.bytes[start : end]
+        return bytes, (self.setIndex(end) if bytes else self)
+
+def make_decorator(func, *dec_args):
+    def decorator(undecorated):
+        def decorated(*args, **kargs):
+            return func(undecorated, args, kargs, *dec_args) 
+        
+        decorated.__name__ = undecorated.__name__
+        return decorated
+    
+    decorator.__name__ = func.__name__
+    return decorator
+
+decorator = make_decorator
+
+class Monad:
+    ## Must be overridden
+    def bind(self, func):
+        raise NotImplementedError
+
+    @classmethod
+    def unit(cls, val):
+        raise NotImplementedError
+
+    @classmethod
+    def lift(cls, func):
+        return (lambda val : cls.unit(func(val)))
+
+    ## useful defaults that should probably NOT be overridden
+    def __rshift__(self, bindee):
+        return self.bind(bindee)
+
+    def __and__(self, monad):
+        return self.shove(monad)
+        
+    ## could be overridden if useful or if more efficient
+    def shove(self, monad):
+        return self.bind(lambda _ : monad)
+
+class StateChanger(Record("changer", "bindees"), Monad):
+    @classmethod
+    def prepare(cls, changer, bindees = ()):
+        return (changer, bindees)
+
+    # binding can be slow since it happens at bind time rather than at run time
+    def bind(self, bindee):
+        return self.setBindees(self.bindees + (bindee,))
+
+    def __call__(self, state):
+        return self.run(state)
+
+    def run(self, state0):
+        value, state = self.changer(state0) if callable(self.changer) else self.changer
+        state        = state0 if state is None else state
+
+        for bindee in self.bindees:
+            value, state = bindee(value).run(state)
+        return (value, state)
+
+    @classmethod
+    def unit(cls, value):
+        return cls((value, None))
+
+######## Parser Monad ###########
+
+class ParserState(Record("stream", "position")):
+    @classmethod
+    def prepare(cls, stream, position = 0):
+        return (stream, position)
+
+    def read(self, count):
+        collection, stream = self.stream.get(count)
+        return collection, self.fromValues((stream, self.position + count))
+
+class Parser(StateChanger):
+    def parseString(self, bytes):
+        return self.parseStream(ByteStream(bytes))
+        
+    def parseStream(self, stream):
+        state = ParserState(stream)
+        value, state = self.run(state)
+        return value
+
+class ParseFailed(Exception):
+    def __init__(self, message, state):
+        self.message = message
+        self.state   = state
+        Exception.__init__(self, message)
+
+@decorator
+def parser(func, func_args, func_kargs):
+    def changer(state):
+        return func(state, *func_args, **func_kargs)
+    changer.__name__ = func.__name__
+    return Parser(changer)
+
+##### combinatoric functions #########
+
+@parser
+def tokens(state0, count, process):
+    tokens, state1 = state0.read(count)
+
+    passed, value = process(tokens)
+    if passed:
+        return (value, state1)
+    else:
+        raise ParseFailed(value, state0)
+    
+def read(count):
+    return tokens(count, lambda values : (True, values))
+
+@parser
+def skip(state0, parser):
+    value, state1 = parser(state0)
+    return (None, state1)
+
+@parser
+def option(state, default_value, parser):
+    try:
+        return parser(state)
+    except ParseFailed, failure:
+        if failure.state == state:
+            return (default_value, state)
+        else:
+            raise
+        
+@parser
+def choice(state, parsers):
+    for parser in parsers:
+        try:
+            return parser(state)
+        except ParseFailed, failure:
+            if failure.state != state:
+                raise failure
+    raise ParseFailed("no choices were found", state)
+
+@parser
+def match(state0, expected):
+    actual, state1 = read(len(expected))(state0)
+    if actual == expected:
+        return actual, state1
+    else:
+        raise ParseFailed("expected %r" % (expected,), state0)
+
+def between(before, inner, after):
+    return before &amp; inner &gt;&gt; (lambda value : after &amp; Parser.unit(value))
+
+def quoted(before, inner, after):
+    return between(match(before), inner, match(after))
+
+def quoted_collection(start, space, inner, joiner, end):
+    return quoted(start, space &amp; sep_end_by(inner, joiner), end)
+
+@parser
+def many(state, parser, min_count = 0):
+    values = []
+
+    try:
+        while True:
+            value, state = parser(state)
+            values.append(value)
+    except ParseFailed:
+        if len(values) &gt; (lambda value1 : parser2 &gt;&gt; (lambda value2 : Parser.unit((value1, value2))))
+
+@parser
+def skip_many(state, parser):
+    try:
+        while True:
+            value, state = parser(state)
+    except ParseFailed:
+        return (None, state)
+
+def skip_before(before, parser):
+    return skip(before) &amp; parser
+
+@parser
+def skip_after(state0, parser, after):
+    value, state1 = parser(state0)
+    _,     state2 = after(state1)
+    return value, state2
+
+@parser
+def option_many(state0, first, repeated, min_count = 0):
+    try:
+        first_value, state1 = first(state0)
+    except ParseFailed:
+        if min_count &gt; 0:
+            raise
+        else:
+            return [], state0
+    else:
+        values, state2 = many(repeated, min_count-1)(state1)
+        values.insert(0, first_value)
+        return values, state2
+
+# parser separated and ended by sep
+def end_by(parser, sep_parser, min_count = 0):
+    return many(skip_after(parser, sep_parser), min_count)
+
+# parser separated by sep
+def sep_by(parser, sep_parser, min_count = 0):
+    return option_many(parser, skip_before(sep_parser, parser), min_count)
+    
+# parser separated and optionally ended by sep
+def sep_end_by(parser, sep_parser, min_count = 0):
+    return skip_after(sep_by(parser, sep_parser, min_count), option(None, sep_parser))
+
+##### char-specific parsing ###########
+
+def satisfy(name, passes):
+    return tokens(1, lambda char : (True, char) if passes(char) else (False, "not " + name))
+
+def one_of(chars):
+    char_set = frozenset(chars)
+    return satisfy("one of %r" % chars, lambda char : char in char_set)
+
+def none_of(chars):
+    char_set = frozenset(chars)
+    return satisfy("not one of %r" % chars, lambda char : char and char not in char_set)
+
+def maybe_match_parser(parser):
+    return match(parser) if isinstance(parser, str) else parser
+
+def maybe_match_parsers(parsers):
+    return tuple(maybe_match_parser(parser) for parser in parsers)
+
+def many_chars(parser, min_count = 0):
+    return join_chars(many(parser, min_count))
+
+def option_chars(parsers):
+    return option("", group_chars(parsers))
+
+def group_chars(parsers):
+    return join_chars(group(maybe_match_parsers(parsers)))
+    #return join_chars(group(parsers))
+
+def join_chars(parser):
+    return parser &gt;&gt; Parser.lift("".join)
+
+def while_one_of(chars, min_count = 0):
+    return many_chars(one_of(chars), min_count)
+
+def until_one_of(chars, min_count = 0):
+    return many_chars(none_of(chars), min_count)
+
+def char_range(begin, end):
+    return "".join(chr(num) for num in xrange(ord(begin), ord(end)))
+
+def quoted_chars(start, end):
+    assert len(end) == 1, "end string must be exactly 1 character"
+    return quoted(start, many_chars(none_of(end)), end)
+
+digit  = one_of(char_range("0", "9"))
+digits = many_chars(digit, min_count = 1)
+space  = one_of(" \v\f\t\r\n")
+spaces = skip_many(space)
+
+
+############# simplified JSON ########################
+
+#from Pysec import Parser, choice, quoted_chars, group_chars, option_chars, digits, between, pair, spaces, match, quoted_collection, sep_end_by
+
+#HACK: json_choices is used to get around mutual recursion 
+#a json is value is one of text, number, mapping, and collection, which we define later 
+json_choices = []
+json         = choice(json_choices)
+
+#text is any characters between quotes
+text         = quoted_chars("'", "'")
+
+#sort of like the regular expression -?[0-9]+(\.[0-9]+)?
+#in case you're unfamiliar with monads, "parser &gt;&gt; Parser.lift(func)" means "pass the parsed value into func but give me a new Parser back"
+number       = group_chars([option_chars(["-"]), digits, option_chars([".", digits])]) &gt;&gt; Parser.lift(float)
+
+#quoted_collection(start, space, inner, joiner, end) means "a list of inner separated by joiner surrounded by start and end"
+#also, we have to put a lot of spaces in there since JSON allows lot of optional whitespace
+joiner       = between(spaces, match(","), spaces)
+mapping_pair = pair(text, spaces &amp; match(":") &amp; spaces &amp; json)
+collection   = quoted_collection("[", spaces, json,         joiner, "]") &gt;&gt; Parser.lift(list)
+mapping      = quoted_collection("{", spaces, mapping_pair, joiner, "}") &gt;&gt; Parser.lift(dict)
+
+#HACK: finish the work around mutual recursion
+json_choices.extend([text, number, mapping, collection])
+
+
+############# simplified CSV ########################
+
+def line(cell):
+    return sep_end_by(cell, match(","))
+
+def csv(cell):
+    return sep_end_by(line(cell), match("\n"))
+
+############# testing ####################
+
+print json.parseString("{'a' : -1.0, 'b' : 2.0, 'z' : {'c' : [1.0, [2.0, [3.0]]]}}")
+print csv(number).parseString("1,2,3\n4,5,6")
+print csv(json).parseString("{'a' : 'A'},[1, 2, 3],'zzz'\n-1.0,2.0,-3.0")
+</pre>
+<p/>
+</div>
+</div></body></html>

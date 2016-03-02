@@ -1,0 +1,368 @@
+<html><body><div><div class="highlight"><pre><span class="c">#!/usr/bin/env python</span>
+<span class="c"># -*- coding: utf-8 -*-</span>
+<span class="sd">"""</span>
+<span class="sd">IPv4 Whois data collection and analysis tool</span>
+
+<span class="sd">Usage:</span>
+<span class="sd">    ./whois.py collect &lt;elastic_search_url&gt; &lt;index_name&gt; &lt;doc_name&gt;</span>
+<span class="sd">                       [--sleep_min=&lt;n&gt;] [--sleep_max=&lt;n&gt;] [--threads=&lt;n&gt;]</span>
+<span class="sd">    ./whois.py stats   &lt;elastic_search_url&gt; &lt;index_name&gt;</span>
+<span class="sd">    ./whois.py test</span>
+<span class="sd">    ./whois.py (-h | --help)</span>
+
+<span class="sd">Options:</span>
+<span class="sd">    -h, --help         Show this screen and exit.</span>
+<span class="sd">    --sleep_min=&lt;n&gt;    Least number of seconds to sleep for [Default: 1]</span>
+<span class="sd">    --sleep_max=&lt;n&gt;    Most number of seconds to sleep for [Default: 5]</span>
+<span class="sd">    --threads=&lt;n&gt;      Number of threads [Default: 8]</span>
+
+<span class="sd">Examples:</span>
+
+<span class="sd">    ./whois.py collect http://127.0.0.1:9200/ netblocks netblock</span>
+<span class="sd">    ./whois.py stats http://127.0.0.1:9200/ netblocks</span>
+
+<span class="sd">License:</span>
+
+<span class="sd">The MIT License (MIT)</span>
+
+<span class="sd">Copyright (c) 2014 Mark Litwintschik</span>
+
+<span class="sd">Permission is hereby granted, free of charge, to any person obtaining a copy</span>
+<span class="sd">of this software and associated documentation files (the "Software"), to deal</span>
+<span class="sd">in the Software without restriction, including without limitation the rights</span>
+<span class="sd">to use, copy, modify, merge, publish, distribute, sublicense, and/or sell</span>
+<span class="sd">copies of the Software, and to permit persons to whom the Software is</span>
+<span class="sd">furnished to do so, subject to the following conditions:</span>
+
+<span class="sd">The above copyright notice and this permission notice shall be included in</span>
+<span class="sd">all copies or substantial portions of the Software.</span>
+
+<span class="sd">THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR</span>
+<span class="sd">IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,</span>
+<span class="sd">FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE</span>
+<span class="sd">AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER</span>
+<span class="sd">LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,</span>
+<span class="sd">OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN</span>
+<span class="sd">THE SOFTWARE.</span>
+<span class="sd">"""</span>
+<span class="kn">import</span> <span class="nn">json</span>
+<span class="kn">from</span> <span class="nn">random</span> <span class="kn">import</span> <span class="n">randint</span>
+<span class="kn">import</span> <span class="nn">socket</span>
+<span class="kn">import</span> <span class="nn">struct</span>
+<span class="kn">import</span> <span class="nn">sys</span>
+
+<span class="kn">from</span> <span class="nn">docopt</span> <span class="kn">import</span> <span class="n">docopt</span>
+<span class="kn">import</span> <span class="nn">ipcalc</span>
+<span class="kn">from</span> <span class="nn">ipwhois</span> <span class="kn">import</span> <span class="n">IPWhois</span>
+<span class="kn">import</span> <span class="nn">gevent</span>
+<span class="kn">from</span> <span class="nn">pyelasticsearch</span> <span class="kn">import</span> <span class="n">ElasticSearch</span>
+<span class="kn">from</span> <span class="nn">pyelasticsearch.exceptions</span> <span class="kn">import</span> \
+     <span class="n">ElasticHttpError</span><span class="p">,</span> <span class="n">ElasticHttpNotFoundError</span>
+<span class="kn">import</span> <span class="nn">requests</span>
+
+
+<span class="k">def</span> <span class="nf">ip2long</span><span class="p">(</span><span class="n">ip</span><span class="p">):</span>
+        <span class="sd">"""</span>
+<span class="sd">        Convert IPv4 address in string format into an integer</span>
+
+<span class="sd">        :param str ip: ipv4 address</span>
+
+<span class="sd">        :return: ipv4 address</span>
+<span class="sd">        :rtype: integer</span>
+<span class="sd">        """</span>
+        <span class="n">packed_ip</span> <span class="o">=</span> <span class="n">socket</span><span class="o">.</span><span class="n">inet_aton</span><span class="p">(</span><span class="n">ip</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">struct</span><span class="o">.</span><span class="n">unpack</span><span class="p">(</span><span class="s">"!L"</span><span class="p">,</span> <span class="n">packed_ip</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span>
+
+
+<span class="k">def</span> <span class="nf">get_next_ip</span><span class="p">(</span><span class="n">ip_address</span><span class="p">):</span>
+    <span class="sd">"""</span>
+<span class="sd">    :param str ip_address: ipv4 address</span>
+
+<span class="sd">    :return: next ipv4 address</span>
+<span class="sd">    :rtype: str</span>
+
+<span class="sd">    &gt;&gt;&gt; get_next_ip('0.0.0.0')</span>
+<span class="sd">    '0.0.0.1'</span>
+
+<span class="sd">    &gt;&gt;&gt; get_next_ip('24.24.24.24')</span>
+<span class="sd">    '24.24.24.25'</span>
+
+<span class="sd">    &gt;&gt;&gt; get_next_ip('24.24.255.255')</span>
+<span class="sd">    '24.25.0.0'</span>
+
+<span class="sd">    &gt;&gt;&gt; get_next_ip('255.255.255.255') is None</span>
+<span class="sd">    True</span>
+<span class="sd">    """</span>
+    <span class="k">assert</span> <span class="n">ip_address</span><span class="o">.</span><span class="n">count</span><span class="p">(</span><span class="s">'.'</span><span class="p">)</span> <span class="o">==</span> <span class="mi">3</span><span class="p">,</span> \
+           <span class="s">'Must be an IPv4 address in str representation'</span>
+
+    <span class="k">if</span> <span class="n">ip_address</span> <span class="o">==</span> <span class="s">'255.255.255.255'</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">None</span>
+
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">socket</span><span class="o">.</span><span class="n">inet_ntoa</span><span class="p">(</span><span class="n">struct</span><span class="o">.</span><span class="n">pack</span><span class="p">(</span><span class="s">'!L'</span><span class="p">,</span> <span class="n">ip2long</span><span class="p">(</span><span class="n">ip_address</span><span class="p">)</span> <span class="o">+</span> <span class="mi">1</span><span class="p">))</span>
+    <span class="k">except</span> <span class="ne">Exception</span><span class="p">,</span> <span class="n">error</span><span class="p">:</span>
+        <span class="k">print</span> <span class="s">'Unable to get next IP for </span><span class="si">%s</span><span class="s">'</span> <span class="o">%</span> <span class="n">ip_address</span>
+        <span class="k">raise</span> <span class="n">error</span>
+
+
+<span class="k">def</span> <span class="nf">get_netrange_end</span><span class="p">(</span><span class="n">asn_cidr</span><span class="p">):</span>
+    <span class="sd">"""</span>
+<span class="sd">    :param str asn_cidr: ASN CIDR</span>
+
+<span class="sd">    :return: ipv4 address of last IP in netrange</span>
+<span class="sd">    :rtype: str</span>
+<span class="sd">    """</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">last_in_netrange</span> <span class="o">=</span> \
+            <span class="n">ip2long</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">ipcalc</span><span class="o">.</span><span class="n">Network</span><span class="p">(</span><span class="n">asn_cidr</span><span class="p">)</span><span class="o">.</span><span class="n">host_first</span><span class="p">()))</span> <span class="o">+</span> \
+            <span class="n">ipcalc</span><span class="o">.</span><span class="n">Network</span><span class="p">(</span><span class="n">asn_cidr</span><span class="p">)</span><span class="o">.</span><span class="n">size</span><span class="p">()</span> <span class="o">-</span> <span class="mi">2</span>
+    <span class="k">except</span> <span class="ne">ValueError</span><span class="p">,</span> <span class="n">error</span><span class="p">:</span>
+        <span class="k">print</span> <span class="s">'Issue calculating size of </span><span class="si">%s</span><span class="s"> network'</span> <span class="o">%</span> <span class="n">asn_cidr</span>
+        <span class="k">raise</span> <span class="n">error</span>
+
+    <span class="k">return</span> <span class="n">socket</span><span class="o">.</span><span class="n">inet_ntoa</span><span class="p">(</span><span class="n">struct</span><span class="o">.</span><span class="n">pack</span><span class="p">(</span><span class="s">'!L'</span><span class="p">,</span> <span class="n">last_in_netrange</span><span class="p">))</span>
+
+
+<span class="k">def</span> <span class="nf">get_next_undefined_address</span><span class="p">(</span><span class="n">ip</span><span class="p">):</span>
+    <span class="sd">"""</span>
+<span class="sd">    Get the next non-private IPv4 address if the address sent is private</span>
+
+<span class="sd">    :param str ip: IPv4 address</span>
+
+<span class="sd">    :return: ipv4 address of net non-private address</span>
+<span class="sd">    :rtype: str</span>
+
+<span class="sd">    &gt;&gt;&gt; get_next_undefined_address('0.0.0.0')</span>
+<span class="sd">    '1.0.0.0'</span>
+
+<span class="sd">    &gt;&gt;&gt; get_next_undefined_address('24.24.24.24')</span>
+<span class="sd">    '24.24.24.24'</span>
+
+<span class="sd">    &gt;&gt;&gt; get_next_undefined_address('127.0.0.1')</span>
+<span class="sd">    '128.0.0.0'</span>
+
+<span class="sd">    &gt;&gt;&gt; get_next_undefined_address('255.255.255.256') is None</span>
+<span class="sd">    True</span>
+<span class="sd">    """</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="c"># Should weed out many invalid IP addresses</span>
+        <span class="n">ipcalc</span><span class="o">.</span><span class="n">Network</span><span class="p">(</span><span class="n">ip</span><span class="p">)</span>
+    <span class="k">except</span> <span class="ne">ValueError</span><span class="p">,</span> <span class="n">error</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">None</span>
+
+    <span class="n">defined_networks</span> <span class="o">=</span> <span class="p">(</span>
+        <span class="s">'0.0.0.0/8'</span><span class="p">,</span>
+        <span class="s">'10.0.0.0/8'</span><span class="p">,</span>
+        <span class="s">'127.0.0.0/8'</span><span class="p">,</span>
+        <span class="s">'169.254.0.0/16'</span><span class="p">,</span>
+        <span class="s">'192.0.0.0/24'</span><span class="p">,</span>
+        <span class="s">'192.0.2.0/24'</span><span class="p">,</span>
+        <span class="s">'192.88.99.0/24'</span><span class="p">,</span>
+        <span class="s">'192.168.0.0/16'</span><span class="p">,</span>
+        <span class="s">'198.18.0.0/15'</span><span class="p">,</span>
+        <span class="s">'198.51.100.0/24'</span><span class="p">,</span>
+        <span class="s">'203.0.113.0/24'</span><span class="p">,</span>
+        <span class="s">'224.0.0.0/4'</span><span class="p">,</span>
+        <span class="s">'240.0.0.0/4'</span><span class="p">,</span>
+        <span class="s">'255.255.255.255/32'</span><span class="p">,</span>
+    <span class="p">)</span>
+
+    <span class="k">for</span> <span class="n">network_cidr</span> <span class="ow">in</span> <span class="n">defined_networks</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">ip</span> <span class="ow">in</span> <span class="n">ipcalc</span><span class="o">.</span><span class="n">Network</span><span class="p">(</span><span class="n">network_cidr</span><span class="p">):</span>
+            <span class="k">return</span> <span class="n">get_next_ip</span><span class="p">(</span><span class="n">get_netrange_end</span><span class="p">(</span><span class="n">network_cidr</span><span class="p">))</span>
+
+    <span class="k">return</span> <span class="n">ip</span>
+
+
+<span class="k">def</span> <span class="nf">break_up_ipv4_address_space</span><span class="p">(</span><span class="n">num_threads</span><span class="o">=</span><span class="mi">8</span><span class="p">):</span>
+    <span class="sd">"""</span>
+<span class="sd">    &gt;&gt;&gt; break_up_ipv4_address_space() == \</span>
+<span class="sd">     [('0.0.0.0', '31.255.255.255'), ('32.0.0.0', '63.255.255.255'),\</span>
+<span class="sd">     ('64.0.0.0', '95.255.255.255'), ('96.0.0.0', '127.255.255.255'),\</span>
+<span class="sd">     ('128.0.0.0', '159.255.255.255'), ('160.0.0.0', '191.255.255.255'),\</span>
+<span class="sd">     ('192.0.0.0', '223.255.255.255'), ('224.0.0.0', '255.255.255.255')]</span>
+<span class="sd">    True</span>
+<span class="sd">    """</span>
+    <span class="n">ranges</span> <span class="o">=</span> <span class="p">[]</span>
+
+    <span class="n">multiplier</span> <span class="o">=</span> <span class="mi">256</span> <span class="o">/</span> <span class="n">num_threads</span>
+
+    <span class="k">for</span> <span class="n">marker</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">num_threads</span><span class="p">):</span>
+        <span class="n">starting_class_a</span> <span class="o">=</span> <span class="p">(</span><span class="n">marker</span> <span class="o">*</span> <span class="n">multiplier</span><span class="p">)</span>
+        <span class="n">ending_class_a</span> <span class="o">=</span> <span class="p">((</span><span class="n">marker</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">*</span> <span class="n">multiplier</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span>
+        <span class="n">ranges</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="s">'</span><span class="si">%d</span><span class="s">.0.0.0'</span> <span class="o">%</span> <span class="n">starting_class_a</span><span class="p">,</span>
+                       <span class="s">'</span><span class="si">%d</span><span class="s">.255.255.255'</span> <span class="o">%</span> <span class="n">ending_class_a</span><span class="p">))</span>
+
+    <span class="k">return</span> <span class="n">ranges</span>
+
+
+<span class="k">def</span> <span class="nf">get_netranges</span><span class="p">(</span><span class="n">starting_ip</span><span class="o">=</span><span class="s">'1.0.0.0'</span><span class="p">,</span>
+                  <span class="n">last_ip</span><span class="o">=</span><span class="s">'2.0.0.0'</span><span class="p">,</span>
+                  <span class="n">elastic_search_url</span><span class="o">=</span><span class="s">'http://127.0.0.1:9200/'</span><span class="p">,</span>
+                  <span class="n">index_name</span><span class="o">=</span><span class="s">'netblocks'</span><span class="p">,</span>
+                  <span class="n">doc_name</span><span class="o">=</span><span class="s">'netblock'</span><span class="p">,</span> <span class="n">sleep_min</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">sleep_max</span><span class="o">=</span><span class="mi">5</span><span class="p">):</span>
+    <span class="n">connection</span> <span class="o">=</span> <span class="n">ElasticSearch</span><span class="p">(</span><span class="n">elastic_search_url</span><span class="p">)</span>
+    <span class="n">current_ip</span> <span class="o">=</span> <span class="n">starting_ip</span>
+
+    <span class="k">while</span> <span class="bp">True</span><span class="p">:</span>
+        <span class="c"># See if we've finished the range of work</span>
+        <span class="k">if</span> <span class="n">ip2long</span><span class="p">(</span><span class="n">current_ip</span><span class="p">)</span> <span class="o">&gt;</span> <span class="n">ip2long</span><span class="p">(</span><span class="n">last_ip</span><span class="p">):</span>
+            <span class="k">return</span>
+
+        <span class="n">current_ip</span> <span class="o">=</span> <span class="n">get_next_undefined_address</span><span class="p">(</span><span class="n">current_ip</span><span class="p">)</span>
+
+        <span class="k">if</span> <span class="n">current_ip</span> <span class="o">==</span> <span class="bp">None</span><span class="p">:</span> <span class="c"># No more undefined ip addresses</span>
+            <span class="k">return</span>
+
+        <span class="k">print</span> <span class="n">current_ip</span>
+
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">whois_resp</span> <span class="o">=</span> <span class="n">IPWhois</span><span class="p">(</span><span class="n">current_ip</span><span class="p">)</span><span class="o">.</span><span class="n">lookup_rws</span><span class="p">()</span>
+        <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">error</span><span class="p">:</span>
+            <span class="sd">"""</span>
+<span class="sd">            If a message like: 'STDERR: getaddrinfo(whois.apnic.net): Name or</span>
+<span class="sd">            service not known' appears' then print it out and try the next</span>
+<span class="sd">            IP address.</span>
+<span class="sd">            """</span>
+            <span class="k">print</span> <span class="nb">type</span><span class="p">(</span><span class="n">error</span><span class="p">),</span> <span class="n">error</span>
+            <span class="n">current_ip</span> <span class="o">=</span> <span class="n">get_next_ip</span><span class="p">(</span><span class="n">current_ip</span><span class="p">)</span>
+
+            <span class="k">if</span> <span class="n">current_ip</span> <span class="ow">is</span> <span class="bp">None</span><span class="p">:</span>
+                <span class="k">return</span> <span class="c"># No more undefined ip addresses</span>
+            <span class="n">gevent</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="n">randint</span><span class="p">(</span><span class="n">sleep_min</span><span class="p">,</span> <span class="n">sleep_max</span><span class="p">))</span>
+            <span class="k">continue</span>
+
+        <span class="k">if</span> <span class="s">'asn_cidr'</span> <span class="ow">in</span> <span class="n">whois_resp</span> <span class="ow">and</span> \
+            <span class="n">whois_resp</span><span class="p">[</span><span class="s">'asn_cidr'</span><span class="p">]</span> <span class="ow">is</span> <span class="ow">not</span> <span class="bp">None</span> <span class="ow">and</span> \
+            <span class="n">whois_resp</span><span class="p">[</span><span class="s">'asn_cidr'</span><span class="p">]</span><span class="o">.</span><span class="n">count</span><span class="p">(</span><span class="s">'.'</span><span class="p">)</span> <span class="o">==</span> <span class="mi">3</span><span class="p">:</span>
+            <span class="n">last_netrange_ip</span> <span class="o">=</span> <span class="n">get_netrange_end</span><span class="p">(</span><span class="n">whois_resp</span><span class="p">[</span><span class="s">'asn_cidr'</span><span class="p">])</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="n">last_netrange_ip</span> <span class="o">=</span> \
+                    <span class="n">whois_resp</span><span class="p">[</span><span class="s">'nets'</span><span class="p">][</span><span class="mi">0</span><span class="p">][</span><span class="s">'range'</span><span class="p">]</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s">'-'</span><span class="p">)[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+                <span class="k">assert</span> <span class="n">last_netrange_ip</span><span class="o">.</span><span class="n">count</span><span class="p">(</span><span class="s">'.'</span><span class="p">)</span> <span class="o">==</span> <span class="mi">3</span>
+            <span class="k">except</span><span class="p">:</span>
+                <span class="c"># No match found for n + 192.0.1.0.</span>
+                <span class="k">print</span> <span class="s">'Missing ASN CIDR in whois resp: </span><span class="si">%s</span><span class="s">'</span> <span class="o">%</span>  <span class="n">whois_resp</span>
+                <span class="n">current_ip</span> <span class="o">=</span> <span class="n">get_next_ip</span><span class="p">(</span><span class="n">current_ip</span><span class="p">)</span>
+
+                <span class="k">if</span> <span class="n">current_ip</span> <span class="ow">is</span> <span class="bp">None</span><span class="p">:</span>
+                    <span class="k">return</span> <span class="c"># No more undefined ip addresses</span>
+
+                <span class="n">gevent</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="n">randint</span><span class="p">(</span><span class="n">sleep_min</span><span class="p">,</span> <span class="n">sleep_max</span><span class="p">))</span>
+                <span class="k">continue</span>
+
+        <span class="k">assert</span> <span class="n">last_netrange_ip</span> <span class="ow">is</span> <span class="ow">not</span> <span class="bp">None</span> <span class="ow">and</span> \
+               <span class="n">last_netrange_ip</span><span class="o">.</span><span class="n">count</span><span class="p">(</span><span class="s">'.'</span><span class="p">)</span> <span class="o">==</span> <span class="mi">3</span><span class="p">,</span> \
+               <span class="s">'Unable to find last netrange ip for </span><span class="si">%s</span><span class="s">: </span><span class="si">%s</span><span class="s">'</span> <span class="o">%</span> <span class="p">(</span><span class="n">current_ip</span><span class="p">,</span>
+                                                               <span class="n">whois_resp</span><span class="p">)</span>
+
+        <span class="c"># Save current_ip and whois_resp</span>
+        <span class="n">entry</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s">'netblock_start'</span><span class="p">:</span> <span class="n">current_ip</span><span class="p">,</span>
+            <span class="s">'netblock_end'</span><span class="p">:</span> <span class="n">last_netrange_ip</span><span class="p">,</span>
+            <span class="s">'block_size'</span><span class="p">:</span> <span class="n">ip2long</span><span class="p">(</span><span class="n">last_netrange_ip</span><span class="p">)</span> <span class="o">-</span> <span class="n">ip2long</span><span class="p">(</span><span class="n">current_ip</span><span class="p">)</span> <span class="o">+</span> <span class="mi">1</span><span class="p">,</span>
+            <span class="s">'whois'</span><span class="p">:</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">whois_resp</span><span class="p">),</span>
+        <span class="p">}</span>
+
+        <span class="n">keys</span> <span class="o">=</span> <span class="p">(</span><span class="s">'cidr'</span><span class="p">,</span> <span class="s">'name'</span><span class="p">,</span> <span class="s">'handle'</span><span class="p">,</span> <span class="s">'range'</span><span class="p">,</span> <span class="s">'description'</span><span class="p">,</span>
+                <span class="s">'country'</span><span class="p">,</span> <span class="s">'state'</span><span class="p">,</span> <span class="s">'city'</span><span class="p">,</span> <span class="s">'address'</span><span class="p">,</span> <span class="s">'postal_code'</span><span class="p">,</span>
+                <span class="s">'abuse_emails'</span><span class="p">,</span> <span class="s">'tech_emails'</span><span class="p">,</span> <span class="s">'misc_emails'</span><span class="p">,</span> <span class="s">'created'</span><span class="p">,</span>
+                <span class="s">'updated'</span><span class="p">)</span>
+
+        <span class="k">for</span> <span class="n">_key</span> <span class="ow">in</span> <span class="n">keys</span><span class="p">:</span>
+            <span class="n">entry</span><span class="p">[</span><span class="n">_key</span><span class="p">]</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">whois_resp</span><span class="p">[</span><span class="s">'nets'</span><span class="p">][</span><span class="mi">0</span><span class="p">][</span><span class="n">_key</span><span class="p">])</span> \
+                          <span class="k">if</span> <span class="n">_key</span> <span class="ow">in</span> <span class="n">whois_resp</span><span class="p">[</span><span class="s">'nets'</span><span class="p">][</span><span class="mi">0</span><span class="p">]</span> <span class="ow">and</span> \
+                             <span class="n">whois_resp</span><span class="p">[</span><span class="s">'nets'</span><span class="p">][</span><span class="mi">0</span><span class="p">][</span><span class="n">_key</span><span class="p">]</span> <span class="k">else</span> <span class="bp">None</span>
+
+            <span class="k">if</span> <span class="n">_key</span> <span class="o">==</span> <span class="s">'city'</span> <span class="ow">and</span> <span class="n">entry</span><span class="p">[</span><span class="n">_key</span><span class="p">]</span> <span class="ow">and</span> <span class="s">' '</span> <span class="ow">in</span> <span class="n">entry</span><span class="p">[</span><span class="n">_key</span><span class="p">]:</span>
+                <span class="n">entry</span><span class="p">[</span><span class="n">_key</span><span class="p">]</span> <span class="o">=</span> <span class="n">entry</span><span class="p">[</span><span class="n">_key</span><span class="p">]</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s">' '</span><span class="p">,</span> <span class="s">'_'</span><span class="p">)</span>
+
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">connection</span><span class="o">.</span><span class="n">index</span><span class="p">(</span><span class="n">index_name</span><span class="p">,</span> <span class="n">doc_name</span><span class="p">,</span> <span class="n">entry</span><span class="p">)</span>
+        <span class="k">except</span> <span class="n">ElasticHttpError</span><span class="p">,</span> <span class="n">error</span><span class="p">:</span>
+            <span class="k">print</span> <span class="s">'At </span><span class="si">%s</span><span class="s">. Unable to save record: </span><span class="si">%s</span><span class="s">'</span> <span class="o">%</span> <span class="p">(</span><span class="n">current_ip</span><span class="p">,</span> <span class="n">entry</span><span class="p">)</span>
+            <span class="k">raise</span> <span class="n">error</span>
+
+        <span class="n">current_ip</span> <span class="o">=</span> <span class="n">get_next_ip</span><span class="p">(</span><span class="n">last_netrange_ip</span><span class="p">)</span>
+
+        <span class="k">if</span> <span class="n">current_ip</span> <span class="ow">is</span> <span class="bp">None</span><span class="p">:</span>
+            <span class="k">return</span> <span class="c"># No more undefined ip addresses</span>
+
+        <span class="n">gevent</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="n">randint</span><span class="p">(</span><span class="n">sleep_min</span><span class="p">,</span> <span class="n">sleep_max</span><span class="p">))</span>
+
+
+<span class="k">def</span> <span class="nf">stats</span><span class="p">(</span><span class="n">elastic_search_url</span><span class="p">,</span> <span class="n">index_name</span><span class="p">,</span> <span class="n">doc_name</span><span class="p">):</span>
+    <span class="n">fields</span> <span class="o">=</span> <span class="p">(</span><span class="s">'country'</span><span class="p">,</span> <span class="s">'city'</span><span class="p">)</span>
+    <span class="n">url</span> <span class="o">=</span> <span class="s">'</span><span class="si">%s</span><span class="s">/</span><span class="si">%s</span><span class="s">/_search?fields=aggregations'</span> <span class="o">%</span> <span class="p">(</span><span class="n">elastic_search_url</span><span class="p">,</span> <span class="n">index_name</span><span class="p">)</span>
+
+    <span class="k">for</span> <span class="n">field</span> <span class="ow">in</span> <span class="n">fields</span><span class="p">:</span>
+        <span class="n">data</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s">"aggs"</span><span class="p">:</span> <span class="p">{</span>
+                <span class="n">field</span><span class="p">:</span> <span class="p">{</span>
+                    <span class="s">"terms"</span><span class="p">:</span> <span class="p">{</span>
+                        <span class="s">"field"</span><span class="p">:</span> <span class="n">field</span><span class="p">,</span>
+                        <span class="s">"order"</span><span class="p">:</span> <span class="p">{</span><span class="s">"total_ips"</span><span class="p">:</span> <span class="s">"desc"</span><span class="p">}</span>
+                    <span class="p">},</span>
+                    <span class="s">"aggs"</span><span class="p">:</span> <span class="p">{</span>
+                        <span class="s">"total_ips"</span><span class="p">:</span> <span class="p">{</span><span class="s">"sum"</span><span class="p">:</span> <span class="p">{</span><span class="s">"field"</span><span class="p">:</span> <span class="s">"block_size"</span><span class="p">}}</span>
+                    <span class="p">}</span>
+                <span class="p">}</span>
+            <span class="p">}</span>
+        <span class="p">}</span>
+        <span class="n">resp</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">url</span><span class="p">,</span> <span class="n">data</span><span class="o">=</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">data</span><span class="p">))</span>
+        <span class="k">assert</span> <span class="n">resp</span><span class="o">.</span><span class="n">status_code</span> <span class="o">==</span> <span class="mi">200</span><span class="p">,</span> \
+            <span class="s">'Did not get HTTP 200 back: </span><span class="si">%s</span><span class="s">'</span> <span class="o">%</span> <span class="n">resp</span><span class="o">.</span><span class="n">status_code</span>
+        <span class="n">_stats</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">resp</span><span class="o">.</span><span class="n">content</span><span class="p">)[</span><span class="s">"aggregations"</span><span class="p">][</span><span class="n">field</span><span class="p">][</span><span class="s">"buckets"</span><span class="p">]</span>
+        <span class="n">_stats</span> <span class="o">=</span> <span class="p">{</span><span class="n">stat</span><span class="p">[</span><span class="s">'key'</span><span class="p">]:</span> <span class="nb">int</span><span class="p">(</span><span class="n">stat</span><span class="p">[</span><span class="s">'total_ips'</span><span class="p">][</span><span class="s">'value'</span><span class="p">])</span>
+                  <span class="k">for</span> <span class="n">stat</span> <span class="ow">in</span> <span class="n">_stats</span><span class="p">}</span>
+
+        <span class="k">print</span> <span class="s">'Top 10 netblock locations by </span><span class="si">%s</span><span class="s">'</span> <span class="o">%</span> <span class="n">field</span>
+        <span class="k">for</span> <span class="n">_key</span> <span class="ow">in</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">_stats</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="n">_stats</span><span class="o">.</span><span class="n">get</span><span class="p">,</span> <span class="n">reverse</span><span class="o">=</span><span class="bp">True</span><span class="p">):</span>
+            <span class="k">print</span> <span class="s">"{:14,d}"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">_stats</span><span class="p">[</span><span class="n">_key</span><span class="p">]),</span> <span class="n">_key</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s">'_'</span><span class="p">,</span> <span class="s">' '</span><span class="p">)</span>
+        <span class="k">print</span>
+
+
+<span class="k">def</span> <span class="nf">main</span><span class="p">(</span><span class="n">argv</span><span class="p">):</span>
+    <span class="sd">"""</span>
+<span class="sd">    :param dict argv: command line arguments</span>
+<span class="sd">    """</span>
+    <span class="n">opt</span> <span class="o">=</span> <span class="n">docopt</span><span class="p">(</span><span class="n">__doc__</span><span class="p">,</span> <span class="n">argv</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">opt</span><span class="p">[</span><span class="s">'collect'</span><span class="p">]:</span>
+        <span class="n">sleep_min</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">opt</span><span class="p">[</span><span class="s">'--sleep_min'</span><span class="p">])</span> \
+                    <span class="k">if</span> <span class="n">opt</span><span class="p">[</span><span class="s">'--sleep_min'</span><span class="p">]</span> <span class="ow">is</span> <span class="ow">not</span> <span class="bp">None</span> <span class="k">else</span> <span class="n">randint</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">5</span><span class="p">)</span>
+        <span class="n">sleep_max</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">opt</span><span class="p">[</span><span class="s">'--sleep_max'</span><span class="p">])</span> \
+                    <span class="k">if</span> <span class="n">opt</span><span class="p">[</span><span class="s">'--sleep_max'</span><span class="p">]</span> <span class="ow">is</span> <span class="ow">not</span> <span class="bp">None</span> <span class="k">else</span> <span class="n">randint</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">5</span><span class="p">)</span>
+
+        <span class="n">num_threads</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">opt</span><span class="p">[</span><span class="s">'--threads'</span><span class="p">])</span>
+
+        <span class="k">if</span> <span class="n">sleep_min</span> <span class="o">&gt;</span> <span class="n">sleep_max</span><span class="p">:</span>
+            <span class="n">sleep_min</span><span class="p">,</span> <span class="n">sleep_max</span> <span class="o">=</span> <span class="n">sleep_max</span><span class="p">,</span> <span class="n">sleep_min</span>
+
+        <span class="n">threads</span> <span class="o">=</span> <span class="p">[</span><span class="n">gevent</span><span class="o">.</span><span class="n">spawn</span><span class="p">(</span><span class="n">get_netranges</span><span class="p">,</span> <span class="n">starting_id</span><span class="p">,</span> <span class="n">ending_ip</span><span class="p">,</span>
+                   <span class="n">opt</span><span class="p">[</span><span class="s">'&lt;elastic_search_url&gt;'</span><span class="p">],</span> <span class="n">opt</span><span class="p">[</span><span class="s">'&lt;index_name&gt;'</span><span class="p">],</span>
+                   <span class="n">opt</span><span class="p">[</span><span class="s">'&lt;doc_name&gt;'</span><span class="p">],</span> <span class="n">sleep_min</span><span class="p">,</span> <span class="n">sleep_max</span><span class="p">)</span>
+                   <span class="k">for</span> <span class="n">starting_id</span><span class="p">,</span> <span class="n">ending_ip</span> <span class="ow">in</span>
+                   <span class="n">break_up_ipv4_address_space</span><span class="p">(</span><span class="n">num_threads</span><span class="p">)]</span>
+
+        <span class="n">gevent</span><span class="o">.</span><span class="n">joinall</span><span class="p">(</span><span class="n">threads</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">opt</span><span class="p">[</span><span class="s">'stats'</span><span class="p">]:</span>
+        <span class="n">stats</span><span class="p">(</span><span class="n">opt</span><span class="p">[</span><span class="s">'&lt;elastic_search_url&gt;'</span><span class="p">],</span>
+              <span class="n">opt</span><span class="p">[</span><span class="s">'&lt;index_name&gt;'</span><span class="p">],</span>
+              <span class="n">opt</span><span class="p">[</span><span class="s">'&lt;doc_name&gt;'</span><span class="p">])</span>
+
+    <span class="k">if</span> <span class="n">opt</span><span class="p">[</span><span class="s">'test'</span><span class="p">]:</span>
+        <span class="kn">import</span> <span class="nn">doctest</span>
+        <span class="n">doctest</span><span class="o">.</span><span class="n">testmod</span><span class="p">()</span>
+
+
+<span class="k">if</span> <span class="n">__name__</span> <span class="o">==</span> <span class="s">"__main__"</span><span class="p">:</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">main</span><span class="p">(</span><span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">:])</span>
+    <span class="k">except</span> <span class="ne">KeyboardInterrupt</span><span class="p">:</span>
+        <span class="k">pass</span>
+</pre></div>
+</div></body></html>

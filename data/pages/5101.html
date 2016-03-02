@@ -1,0 +1,202 @@
+<html><body><div><div class="post-text" itemprop="text">
+<p><strong>TL; DR</strong></p>
+
+<p>It is a bug. If you don't believe it, try this:</p>
+
+<pre><code>In [1]: from sympy import factor, Symbol
+
+In [2]: factor(1e-20*Symbol('t')-7.292115e-5)
+Out[2]: -2785579325.00000
+</code></pre>
+
+<hr/>
+
+<p>Two years ago, the default value for the parameter <code>tol</code> in <code>RealField.__init__</code> was changed from <code>None</code> to <code>False</code> in commit <a href="https://github.com/sympy/sympy/commit/24649916b2c6552dd42f20f1e3b575ed8231c433#diff-8756675b7147afd7ae0afab7c6c7b936" rel="nofollow">polys: Disabled automatic reduction to zero in RR and CC</a>.<br/>
+Later, <code>tol</code> was reverted back to <code>None</code> to fix a simplification issue, in commit <a href="https://github.com/sympy/sympy/commit/f09894593aca1558375285dec30b7fb2879fb4c8#diff-7dc8bbd13c2a551135f6c559f707c68c" rel="nofollow">Changed tol on Complex and Real field to None</a>.<br/>
+It seems the developers didn't expect this reversion would bring some other issue.</p>
+
+<p>If you modify <code>tol=None</code> at <a href="https://github.com/sympy/sympy/blob/sympy-0.7.6/sympy/polys/domains/realfield.py#L48" rel="nofollow"><code>RealField.__init__</code></a> in <code>realfield.py</code>, to <code>tol=False</code>, you will get the correct result for <code>SE_fl</code>.</p>
+
+<pre><code>Matrix([
+[3.3881317890172e-21*sin(0.0001458423*t),                     -7.29211495242194e-5, 0],
+[                    7.29211495242194e-5, -3.3881317890172e-21*sin(0.0001458423*t), 0],
+[                                      0,                                        0, 0]])
+</code></pre>
+
+<hr/>
+
+<p>The change of <code>tol</code> can explain why you've got a wrong result, but I don't thint it is the root of the issue.<br/>
+IMHO, there is a deficiency in the polynomial factorization in SymPy. I'll illustrate this deficiency.<br/>
+For convenience, let us do some preparation work.<br/>
+Add the followings to your example.</p>
+
+<pre><code>from sympy import simplify, expand, S
+from sympy.polys import factor
+from sympy.polys.domains import QQ, RR, RealField
+from sympy.polys.factortools import dup_convert
+from sympy.polys.polytools import Poly
+from sympy.polys.polytools import _symbolic_factor_list, _poly_from_expr
+from sympy.polys.polyerrors import PolificationFailed
+from sympy.polys import polyoptions as options
+from sympy.simplify.fu import TR6
+
+def new_opt():
+    args = dict()
+    options.allowed_flags(args, [])
+    opt = options.build_options((), args)
+    return opt
+
+def my_symbolic_factor_list(base):
+    opt = new_opt()
+    try:
+        poly, _ = _poly_from_expr(base, opt)
+    except PolificationFailed as exc:
+        print(exc)
+        print(exc.expr)
+    else:
+        _coeff, _factors = poly.factor_list()
+        print(poly)
+        print(_coeff, _factors)
+        return poly
+</code></pre>
+
+<p>We don't need to study the whole matrices. Let us focus on one element, element at row 1 and column 2. It has already shown the result is incorrect.</p>
+
+<pre><code>In [8]: elm_sy = (RE_sy.diff(t) * RE_sy.T)[1]
+
+In [9]: elm_fl = (RE_fl.diff(t) * RE_fl.T)[1]
+
+In [10]: elm_sy
+Out[10]: -7.292115e-5*sin(0.267955555555556*pi)**2*sin(7.292115e-5*t)**2 - 7.292115e-5*sin(7.292115e
+-5*t)**2*cos(0.267955555555556*pi)**2 - 7.292115e-5*cos(7.292115e-5*t)**2
+
+In [11]: elm_fl
+Out[11]: -7.292115e-5*sin(7.292115e-5*t)**2 - 7.292115e-5*cos(7.292115e-5*t)**2
+
+In [12]: simplify(elm_sy)
+Out[12]: -7.29211500000000e-5
+
+In [13]: simplify(elm_fl)
+Out[13]: -2785579325.00000
+</code></pre>
+
+<p>When we call <code>simplify</code>, in this case, it's almost equivalent to a combination of <code>TR6</code> and <code>factor</code>.</p>
+
+<pre><code>In [15]: expr_sy = TR6(elm_sy)
+
+In [16]: expr_fl = TR6(elm_fl)
+
+In [17]: expr_fl
+Out[17]: 1.35525271560688e-20*sin(7.292115e-5*t)**2 - 7.292115e-5
+
+In [18]: factor(expr_fl)
+Out[18]: -2785579325.00000
+</code></pre>
+
+<p>Now, we know wrong results would be produced during the invocation of <code>factor()</code>.<br/>
+Actually, <code>factor</code> is just a wrapper, the major work is done by <a href="https://github.com/sympy/sympy/blob/sympy-0.7.6/sympy/polys/polytools.py#L5548" rel="nofollow"><code>_symbolic_factor_list</code></a>.</p>
+
+<pre><code>In [20]: _symbolic_factor_list(expr_fl, opt, 'factor')
+Out[20]: (-2785579325.00000, [])
+</code></pre>
+
+<p>Let us take a look at <a href="https://github.com/sympy/sympy/blob/sympy-0.7.6/sympy/polys/polytools.py#L5548" rel="nofollow"><code>_symbolic_factor_list</code></a>. The key part is:</p>
+
+<pre><code>        try:
+            poly, _ = _poly_from_expr(base, opt)
+        except PolificationFailed as exc:
+            factors.append((exc.expr, exp))
+        else:
+            func = getattr(poly, method + '_list')
+
+            _coeff, _factors = func()
+</code></pre>
+
+<p>We use the above <code>my_symbolic_factor_list</code> to simulate this procedure.</p>
+
+<pre><code>In [22]: expand(expr_sy)
+Out[22]: -7.29211500000000e-5
+
+In [23]: my_symbolic_factor_list(expr_sy)
+can't construct a polynomial from -7.292115e-5*sin(0.267955555555556*pi)**2*sin(7.292115e-5*t)**2 -
+7.292115e-5*(-sin(0.267955555555556*pi)**2 + 1)*sin(7.292115e-5*t)**2 + 7.292115e-5*sin(7.292115e-5*
+t)**2 - 7.292115e-5
+-7.29211500000000e-5
+
+In [24]: my_symbolic_factor_list(S(1))
+can't construct a polynomial from 1
+1
+
+In [25]: expr_fl
+Out[25]: 1.35525271560688e-20*sin(7.292115e-5*t)**2 - 7.292115e-5    
+
+In [26]: poly_fl = my_symbolic_factor_list(expr_fl)
+Poly(-7.292115e-5, sin(7.292115e-5*t), domain='RR')
+(-2785579325.00000, [])
+</code></pre>
+
+<p>By design, the constant polynomial should execute <code>except PolificationFailed as exc:</code> suite, while the other polynomials should execute <code>else:</code> suite.<br/>
+<code>expr_sy</code>, which is a number after <code>expand()</code>, and <code>1</code> are both constant polynomials, thus <code>PolificationFailed</code>s were thrown.<br/>
+<code>poly_fl</code> is <code>-7.292115e-5 * sin(7.292115e-5*t) ** 0</code>, namely, <code>-7.292115e-5</code>, a constant polynomial, whereas <code>expr_fl</code> is not. They were supposed to be the same polynomial, just different representation. Now they are not.<br/>
+This is the <strong>deficiency</strong> I mentioned.  </p>
+
+<p>Where is the missing <code>1.35525271560688e-20*sin(7.292115e-5*t)**2</code>?<br/>
+Let us recall: <code>tol</code> was reverted back to <code>None</code>, which means automatic reduction to zero in <code>RR</code> is enabled again.<br/>
+<code>1.35525271560688e-20</code> was reduced to zero. Thus, <code>poly_fl</code> became a constant polynomial.<br/>
+If <code>tol</code> is <code>False</code>, this won't happen.</p>
+
+<pre><code>In [31]: arg2 = expr_fl.args[1].args[0]
+
+In [32]: arg2
+Out[32]: 1.35525271560688e-20
+
+In [33]: RR.from_sympy(arg2)
+Out[33]: 0.0
+
+In [34]: R = RealField(tol=False)
+
+In [35]: R.from_sympy(arg2)
+Out[35]: 1.35525271560688e-20
+</code></pre>
+
+<p>Now, we can explain why you've got <code>-2785579325.0</code>. In the <code>else:</code> suite, <a href="https://github.com/sympy/sympy/blob/sympy-0.7.6/sympy/polys/polytools.py#L3068" rel="nofollow"><code>Poly.factor_list</code></a> is called.<br/>
+According to <a href="http://docs.sympy.org/dev/modules/polys/reference.html#sympy.polys.polytools.Poly.factor_list" rel="nofollow">docs</a>:</p>
+
+<blockquote>
+  <p>factor_list(f)[source]</p>
+  
+  <p>Returns a list of irreducible factors of f.</p>
+</blockquote>
+
+<p><code>poly_fl</code> is supposed to be a non constant polynomial, but it is just a number.
+Thus, SymPy was tring to use a rational number to approximate <code>poly_fl</code>. The numerator is kept, while the denominator is discarded.</p>
+
+<pre><code>In [42]: poly_fl.factor_list()
+Out[42]: (-2785579325.00000, [])
+
+In [43]: dup_convert(poly_fl.coeffs(), RR, QQ)
+Out[43]: [-2785579325/38199881995827]
+
+In [44]: Poly([S(1.25)], t, domain='RR').factor_list()
+Out[44]: (5.00000000000000, [])
+
+In [45]: dup_convert(Poly([S(1.25)], t, domain='RR').coeffs(), RR, QQ)
+Out[45]: [5/4]
+
+In [46]: Poly((RE_fl.diff(t) * RE_fl.T)[3].args[0].args[0], t).factor_list()
+Out[46]: (1767051195.00000, [])
+</code></pre>
+
+<p>I don't think we should blame mixing Sympy and float/Numpy data types. This problem is not caused by those <a href="http://docs.sympy.org/latest/gotchas.html" rel="nofollow">pitfalls</a> SymPy mentioned.<br/>
+Even a very simple factorization can produce a counterintuitive result. </p>
+
+<pre><code>In [47]: factor(1e-20*t-1.2345e-5)
+Out[47]: -539023891.000000
+
+In [48]: factor(S(1e-20)*t-S(1.2345e-5))
+Out[48]: -539023891.000000
+</code></pre>
+
+<p>So it is a bug. Just let the developers fix it.</p>
+    </div>
+    </div></body></html>

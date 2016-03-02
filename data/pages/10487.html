@@ -1,0 +1,212 @@
+<html><body><div><div class="post-text" itemprop="text">
+
+<p>The problem is a bit complex. 
+In fact, I am not trying to re-invent the wheel and since the back-end dev left I am trying my best not to destroy his code.</p>
+
+<p>But, I think this time I will need to change a lot of things. Or maybe the answer is quite simple and my lake of experience play against me.</p>
+
+<p>Basically, I have a list of articles that you can sort by categories.</p>
+
+<p>I sorted those this way in the URLs:</p>
+
+<pre><code>urlpatterns = patterns(
+  '',
+  url(r'^$', ArticleListView.as_view(), name='articles-list'),
+  url(r'^source/(?P&lt;source&gt;[\w\.@+-]+)/$', SourceEntriesView.as_view(), name='articles-source'),
+  url(r'^date/(?P&lt;daterealization&gt;[\w\.@+-]+)/$', DateEntriesView.as_view(), name='articles-date'),
+  url(r'^country/(?P&lt;region&gt;[\w\.@+-]+)/$', RegionEntriesView.as_view(), name='articles-region'),
+  url(r'^global/$', GlobalEntriesView.as_view(), name='articles-global'),
+)
+</code></pre>
+
+<p>and the main URL is <code>mydomain.com/en/press/</code></p>
+
+<p>So basically, when I try to sort my articles by sources, for example, I have my article by this category displaying. But the pagination still has all the article.</p>
+
+<p>So, if there is only one article in the category, this only article is showing but my "loadMore button" isn't disabled since it's considering that there are more articles behind.</p>
+
+<p>Here are the principals views.py base-class view, first the base:</p>
+
+<pre><code>class BaseArticleListView(ListView):
+"""
+Base article list view for manage ajax navigation
+"""
+model = Article
+context_object_name = 'article_list'
+template_name = 'base_templates/template_press.html'
+paginate_by = get_setting('PAGINATION')
+
+def get_load_more_url(self, request, context):
+    args = request.GET.copy()
+    page_obj = context.get('page_obj', None)
+
+    if not page_obj or not page_obj.has_next():
+        return ''
+
+    args[self.page_kwarg] = page_obj.next_page_number()
+
+    return '?{}'.format(args.urlencode())
+
+def render_to_json_response(self, context, **response_kwargs):
+    if 'current_app' not in context:
+        context['current_app'] = resolve(self.request.path).namespace
+
+    c = RequestContext(self.request, context)
+
+    html_items_list = render_to_string(
+        'base_templates/template_press.html',
+        context,
+        context_instance=c)
+
+    html_items_list = html_items_list.strip()
+
+    json_response = {
+        'html_items_list': html_items_list,
+        'load_more_url': self.get_load_more_url(
+            self.request,
+            context)
+    }
+
+    return JsonResponse(json_response)
+</code></pre>
+
+<p>And the generic list entry view :</p>
+
+<pre><code>#Main article display view 
+class ArticleListView(FormMixin, BaseArticleView, BaseArticleListView, ContextSourcesMixin):
+  model = Article
+  view_url_name = 'djangocms_press:articles-list'
+  form_class = SourcesRegionsFilterForm
+
+  def get_form_kwargs(self):
+    return {
+        'initial': self.get_initial(),
+        'prefix': self.get_prefix(),
+        'data': self.request.GET or None,
+        'request': self.request,
+    }
+
+  def get(self, request, *args, **kwargs):
+    """
+    Handle the form submissions to filter by Sources and regions
+    First_object is use for pagination
+    """
+    context = {}
+
+    self.object_list = self.get_queryset().order_by("-date_realization")
+
+    first_object = 0
+
+    if 'article' in self.request.GET:
+        try:
+            project_id = int(request.GET['article'])
+            context['article_render'] = self.object_list.get(pk=project_id)
+        except (Article.DoesNotExist, ValueError):
+            pass
+
+    form = self.get_form(self.form_class)
+
+    if form.is_valid():
+        if form.cleaned_data['regions']:
+            self.object_list = self.object_list.filter(
+                Q(regions__continent=form.cleaned_data['regions']) | Q(global_regions=True)).distinct()
+
+    context.update(self.get_context_data(form=form))
+
+    context[self.context_object_name] = context['object_list']
+
+    source_qs = ArticleSource.objects.active_translations(get_language()).order_by('translations__name')
+    date_realization_for_articles = Article.objects.values_list('date_realization',
+                                                        flat=True).distinct()
+    region_for_articles = Country.objects.exclude(regions_press_article=None).order_by('name')
+
+    context['load_more_url'] = self.get_load_more_url(request, context)
+    context['dates_realization'] = date_realization_for_articles.dates('date_realization', 'month', order="DESC")
+    context['sources_list'] = source_qs
+    context['regions_list'] = region_for_articles
+
+    return self.render_to_response(context)
+
+  def render_to_json_response(self, context, **response_kwargs):
+    if 'current_app' not in context:
+        context['current_app'] = resolve(self.request.path).namespace
+
+    c = RequestContext(self.request, context)
+
+    html_items_list = render_to_string(
+        'base_templates/template_press.html',
+        context,
+        context_instance=c)
+
+    html_items_list = html_items_list.strip()
+
+    json_response = {
+        'html_items_list': html_items_list,
+        'load_more_url': self.get_load_more_url(self.request, context),
+    }
+
+    return JsonResponse(json_response)
+
+  def render_to_response(self, context):
+    if self.request.is_ajax():
+        response = self.render_to_json_response(context)
+    else:
+        response = super(ArticleListView, self).render_to_response(context)
+    return response
+</code></pre>
+
+<p>And you can see that the loadmore button is update at this line :</p>
+
+<p><code>context['load_more_url'] = self.get_load_more_url(request, context)</code></p>
+
+<p>end FINALLY the class that manage the sources sorted :</p>
+
+<pre><code>class SourceEntriesView(ContextSourcesMixin, BaseArticleView, BaseArticleListView):
+  context_object_name = 'article_list'
+  template_name = 'base_templates/template_press.html'
+  _source = None
+  view_url_name = 'djangocms_press:articles-source'
+
+  def get(self, *args, **kwargs):
+    # submit object to cms toolbar to get correct language switcher behavior
+    if hasattr(self.request, 'toolbar'):
+        self.request.toolbar.set_object(self.source)
+    return super(SourceEntriesView, self).get(*args, **kwargs)
+
+  @property
+  def source(self):
+    if not self._source:
+        try:
+            source_qs = ArticleSource.objects.active_translations(
+                get_language(),
+                slug=self.kwargs['source']
+            )
+
+            #source_qs = source_qs.filter(site=Site.objects.get_current().pk)
+            self._source = source_qs.latest('pk')
+
+        except ArticleSource.DoesNotExist:
+            raise Http404("ArticleSource does not exist for this site")
+    return self._source
+
+  def get_queryset(self):
+    qs = super(SourceEntriesView, self).get_queryset()
+    if 'source' in self.kwargs:
+        qs = qs.filter(sources__pk=self.source.pk)
+    return qs
+
+  def get_context_data(self, **kwargs):
+    kwargs['source'] = self.source
+    context = super(SourceEntriesView, self).get_context_data(**kwargs)
+    return context
+</code></pre>
+
+<p>So, this last class is call in ajax - from the URL - when you select a source. But how to update the load more button from here? I am so lost.</p>
+
+<p>After reading documentation about pagination and base-class view, my conclusion would be to delete those line. But I am afraid to break everything and that I won't be able to make it work properly.</p>
+
+<p><strong>So, my question is</strong> what would be the best way of updating a pagination for sorting by some categories an object?</p>
+
+<p>Thank you in advance, at least for the time spent on my request.</p>
+    </div>
+    </div></body></html>

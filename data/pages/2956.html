@@ -1,0 +1,173 @@
+<html><body><div><div class="post-text" itemprop="text">
+
+<p>I'm not sure if this is either a bug in <code>Django</code> or <a href="https://docs.djangoproject.com/en/1.7/ref/models/querysets/#prefetch-related"><code>prefetch_related</code></a> is just not supposed to work with <a href="https://docs.djangoproject.com/en/1.7/ref/contrib/contenttypes/#django.contrib.contenttypes.fields.GenericRelation"><code>GenericRelation</code></a></p>
+
+<p>Here is an example model structure:</p>
+
+<pre><code>from django.db import models
+from django.contrib.contenttypes.fields import GenericForeignKey, GenericRelation
+from django.contrib.contenttypes.models import ContentType
+
+
+class TaggedItem(models.Model):
+    tag = models.SlugField()
+    content_type = models.ForeignKey(ContentType)
+    object_id = models.PositiveIntegerField()
+    content_object = GenericForeignKey('content_type', 'object_id')
+
+    def __unicode__(self):
+        return self.tag
+
+
+class Director(models.Model):
+    name = models.CharField(max_length=100)
+
+    def __unicode__(self):
+        return self.name
+
+
+class Movie(models.Model):
+    name = models.CharField(max_length=100)
+    director = models.ForeignKey(Director)
+    tags = GenericRelation(TaggedItem, related_query_name='movies')
+
+    def __unicode__(self):
+        return self.name
+
+
+class Author(models.Model):
+    name = models.CharField(max_length=100)
+
+    def __unicode__(self):
+        return self.name
+
+
+class Book(models.Model):
+    name = models.CharField(max_length=100)
+    author = models.ForeignKey(Author)
+    tags = GenericRelation(TaggedItem, related_query_name='books')
+
+    def __unicode__(self):
+        return self.name
+</code></pre>
+
+<p>And some initial data:</p>
+
+<pre><code>&gt;&gt;&gt; from tags.models import Book, Movie, Author, Director, TaggedItem
+&gt;&gt;&gt; a = Author.objects.create(name='E L James')
+&gt;&gt;&gt; b1 = Book.objects.create(name='Fifty Shades of Grey', author=a)
+&gt;&gt;&gt; b2 = Book.objects.create(name='Fifty Shades Darker', author=a)
+&gt;&gt;&gt; b3 = Book.objects.create(name='Fifty Shades Freed', author=a)
+&gt;&gt;&gt; d = Director.objects.create(name='James Gunn')
+&gt;&gt;&gt; m1 = Movie.objects.create(name='Guardians of the Galaxy', director=d)
+&gt;&gt;&gt; t1 = TaggedItem.objects.create(content_object=b1, tag='roman')
+&gt;&gt;&gt; t2 = TaggedItem.objects.create(content_object=b2, tag='roman')
+&gt;&gt;&gt; t3 = TaggedItem.objects.create(content_object=b3, tag='roman')
+&gt;&gt;&gt; t4 = TaggedItem.objects.create(content_object=m1, tag='action movie')
+</code></pre>
+
+<p>So as the <a href="https://docs.djangoproject.com/en/1.7/ref/contrib/contenttypes/#reverse-generic-relations">docs</a> show we can do stuff like this.</p>
+
+<pre><code>&gt;&gt;&gt; b1.tags.all()
+[&lt;TaggedItem: roman&gt;]
+&gt;&gt;&gt; m1.tags.all()
+[&lt;TaggedItem: action movie&gt;]
+&gt;&gt;&gt; TaggedItem.objects.filter(books__author__name='E L James')
+[&lt;TaggedItem: roman&gt;, &lt;TaggedItem: roman&gt;, &lt;TaggedItem: roman&gt;]
+&gt;&gt;&gt; TaggedItem.objects.filter(movies__director__name='James Gunn')
+[&lt;TaggedItem: action movie&gt;]
+&gt;&gt;&gt; Book.objects.all().prefetch_related('tags')
+[&lt;Book: Fifty Shades of Grey&gt;, &lt;Book: Fifty Shades Darker&gt;, &lt;Book: Fifty Shades Freed&gt;]
+&gt;&gt;&gt; Book.objects.filter(tags__tag='roman')
+[&lt;Book: Fifty Shades of Grey&gt;, &lt;Book: Fifty Shades Darker&gt;, &lt;Book: Fifty Shades Freed&gt;]
+</code></pre>
+
+<p>But, if we try to <code>prefetch</code> some <code>related data</code> of <code>TaggedItem</code> via this <code>reverse generic relation</code>, we are going to get some <strong>interesting</strong> (atleast for me) <strong>AttributeError: 'Book' object has no attribute 'object_id'</strong>.</p>
+
+<pre><code>&gt;&gt;&gt; TaggedItem.objects.all().prefetch_related('books')
+Traceback (most recent call last):
+  ...
+AttributeError: 'Book' object has no attribute 'object_id'
+</code></pre>
+
+<p>Some of you may ask, why I just don't use <code>content_object</code> instead of <code>books</code> here? The reason is, because this only work when we want to:</p>
+
+<p>1) <code>prefetch</code> only one level deep from <code>querysets</code> containing different type of <code>content_object</code>. </p>
+
+<pre><code>&gt;&gt;&gt; TaggedItem.objects.all().prefetch_related('content_object')
+[&lt;TaggedItem: roman&gt;, &lt;TaggedItem: roman&gt;, &lt;TaggedItem: roman&gt;, &lt;TaggedItem: action movie&gt;]
+</code></pre>
+
+<p>2) <code>prefetch</code> many levels but from <code>querysets</code> containing only one type of <code>content_object</code>.</p>
+
+<pre><code>&gt;&gt;&gt; TaggedItem.objects.filter(books__author__name='E L James').prefetch_related('content_object__author')
+[&lt;TaggedItem: roman&gt;, &lt;TaggedItem: roman&gt;, &lt;TaggedItem: roman&gt;]
+</code></pre>
+
+<p>But, if we want both 1) and 2) (to <code>prefetch</code> many levels from <code>queryset</code> containing different types of <code>content_objects</code>, we can't use <code>content_object</code>.</p>
+
+<pre><code>&gt;&gt;&gt; TaggedItem.objects.all().prefetch_related('content_object__author')
+Traceback (most recent call last):
+  ...
+AttributeError: 'Movie' object has no attribute 'author_id'
+</code></pre>
+
+<p>Now imagine the situation where we want to <code>prefetch</code> not only the <code>books</code> with their <code>author</code>, but to <code>prefetch</code> also the <code>movies</code> with their <code>director</code>.</p>
+
+<p>Here are few attempts.</p>
+
+<pre><code>&gt;&gt;&gt; TaggedItem.objects.all().prefetch_related(
+...     'content_object__author',
+...     'content_object__director',
+... )
+Traceback (most recent call last):
+  ...
+AttributeError: 'Movie' object has no attribute 'author_id'
+&gt;&gt;&gt;
+&gt;&gt;&gt;
+&gt;&gt;&gt; TaggedItem.objects.all().prefetch_related(
+...     Prefetch('content_object', queryset=Book.objects.all().select_related('author')),
+...     Prefetch('content_object', queryset=Movie.objects.all().select_related('director')),
+... )
+Traceback (most recent call last):
+  ...
+ValueError: Custom queryset can't be used for this lookup.
+</code></pre>
+
+<p>Some solutions of this problem are shown <a href="http://stackoverflow.com/questions/12466945/django-prefetch-related-objects-of-a-genericforeignkey">here</a>. But that's a lot of massage over the data which I want to avoid.
+I really like the API coming from the <code>reversed generic relations</code>, it would be very nice to be able to do <code>prefetchs</code> like that:</p>
+
+<pre><code>&gt;&gt;&gt; TaggedItem.objects.all().prefetch_related(
+...     'books__author',
+...     'movies__director',
+... )
+Traceback (most recent call last):
+  ...
+AttributeError: 'Book' object has no attribute 'object_id'
+</code></pre>
+
+<p>Or like that:</p>
+
+<pre><code>&gt;&gt;&gt; TaggedItem.objects.all().prefetch_related(
+...     Prefetch('books', queryset=Book.objects.all().select_related('author')),
+...     Prefetch('movies', queryset=Movie.objects.all().select_related('director')),
+... )
+Traceback (most recent call last):
+  ...
+AttributeError: 'Book' object has no attribute 'object_id'
+</code></pre>
+
+<p>But as you can see, we aways get that AttributeError.
+I'm using Django <code>1.7.3</code> and Python <code>2.7.6</code>. And i'm curious why Django is throwing that error? Why is Django searching for an <code>object_id</code> in the <code>Book</code> model?
+<strong>Why I think this may be a bug?</strong>
+Usually when we ask <code>prefetch_related</code> to resolve something it can't, we see:</p>
+
+<pre><code>&gt;&gt;&gt; TaggedItem.objects.all().prefetch_related('some_field')
+Traceback (most recent call last):
+  ...
+AttributeError: Cannot find 'some_field' on TaggedItem object, 'some_field' is an invalid parameter to prefetch_related()
+</code></pre>
+
+<p>But here, it is different. Django actually tries to resolve the relation... and fails. Is this a bug which should be reported? I have never reported anything to Django so that's why I'm asking here first. I'm unable to trace the error and decide for myself if this is a bug, or a feature which could be implemented.</p>
+    </div>
+    </div></body></html>

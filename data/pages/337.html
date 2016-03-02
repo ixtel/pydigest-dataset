@@ -1,0 +1,213 @@
+<html><body><div><section class="post-content">
+                        <p>Inspired by <a href="http://www.dabeaz.com/">David Beazley</a>'s <a href="http://pyvideo.org/video/659/keynote-david-beazley">Keynote</a> at <a href="https://us.pycon.org/2012/">PyCon</a>, I've been digging around in code objects in Python lately. I don't have a particular axe to grind, nor some particular task to solve (yet?), so consider this post just some notes and ramblings that might be of interest (and my apologies if not).</p>
+<p><em>Disclaimer:</em> This post is about CPython version 2.7, though much of it is also likely true for other CPython versions (including 3.x). I make no claims to its accuracy or applicability to PyPy, Jython, IronPython, etc.</p>
+
+
+<h1>Step 0: What?</h1>
+<p>So first of all, what is a code object? Many people (particularly Python <a href="http://www.flickr.com/photos/mjstewart/3024478976/">haters</a>) claim that Python is an interpreted language, but all your Python code is actually compiled before it is ever executed. This goes even for code you write interactively in the Python shell. CPython implements a virtual machine that executes a stack-based bytecode. At runtime, executable things (functions, methods, modules, class bodies, lambdas, statements, expressions, etc) are all executed as bytecode by the Python virtual machine.</p>
+<p>Code objects, then, are Python objects which represent some piece of bytecode, along with all that it needs to execute: a declaration of the expected argument types and counts, a list (not dictionary! more about which later) of locals, information about the source code from which the bytecode was generated (for debugging and printing stack traces), etc -- oh, and also (perhaps obviously), the bytecode itself, as a <code>str</code> (or, in Python3, <code>bytes</code>).</p>
+<p>Though code objects represent some piece of executable code, they are not, by themselves, directly callable. To execute a code object, you must use the <code>exec</code> keyword or <code>eval()</code> function.</p>
+<h1>Step 1: Make some Code</h1>
+<p>Most of the time, you won't encounter code objects in ordinary Python programming. When you do, there's a very good chance that they were created and are managed for you by Python, without any special attention. In some cases, you might want to create code objects yourself, like in this post where we'll be experimenting with them:</p>
+<div class="highlight"><pre><span class="o">&gt;&gt;&gt;</span> <span class="n">code_str</span> <span class="o">=</span> <span class="s">"""</span>
+<span class="s">... print "Hello, world"</span>
+<span class="s">... """</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">code_obj</span> <span class="o">=</span> <span class="nb">compile</span><span class="p">(</span><span class="n">code_str</span><span class="p">,</span> <span class="s">'&lt;string&gt;'</span><span class="p">,</span> <span class="s">'exec'</span><span class="p">)</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">code_obj</span>
+<span class="o">&lt;</span><span class="n">code</span> <span class="nb">object</span> <span class="o">&lt;</span><span class="n">module</span><span class="o">&gt;</span> <span class="n">at</span> <span class="mh">0x1054c74b0</span><span class="p">,</span> <span class="nb">file</span> <span class="s">"&lt;string&gt;"</span><span class="p">,</span> <span class="n">line</span> <span class="mi">2</span><span class="o">&gt;</span>
+</pre></div>
+
+
+<blockquote>
+<p>Woohoo, your first code object!</p>
+</blockquote>
+<p>The first argument to <a href="http://docs.python.org/library/functions.html#compile"><code>compile()</code></a> is the string of Python code to be compiled, which should be obvious. The second defines the "filename" of the piece of code (here, as is conventional, we use <code>&lt;string&gt;</code> to indicate code attained from the interactive shell). The third is the type of compilation, which most often will be <code>exec</code> as you see here. The other choices for mode are <code>eval</code>, which is used for strings containing only a single expression, or <code>single</code>, in which the generated code object is expected to contain a single statement, whose return value is printed if it is not <code>None</code> (like in the interactive shell).</p>
+<p>When using <code>eval</code> mode, if the code contains statements (as our example above does, it contains a <code>print</code> statement), compilation will fail with a syntax error:</p>
+<div class="highlight"><pre><span class="o">&gt;&gt;&gt;</span> <span class="n">code_str</span> <span class="o">=</span> <span class="s">"""</span>
+<span class="s">... print "Hello, world"</span>
+<span class="s">... """</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">code_obj</span> <span class="o">=</span> <span class="nb">compile</span><span class="p">(</span><span class="n">code_str</span><span class="p">,</span> <span class="s">'&lt;string&gt;'</span><span class="p">,</span> <span class="s">'eval'</span><span class="p">)</span>
+<span class="n">Traceback</span> <span class="p">(</span><span class="n">most</span> <span class="n">recent</span> <span class="n">call</span> <span class="n">last</span><span class="p">):</span>
+  <span class="n">File</span> <span class="s">"&lt;stdin&gt;"</span><span class="p">,</span> <span class="n">line</span> <span class="mi">1</span><span class="p">,</span> <span class="ow">in</span> <span class="o">&lt;</span><span class="n">module</span><span class="o">&gt;</span>
+  <span class="n">File</span> <span class="s">"&lt;string&gt;"</span><span class="p">,</span> <span class="n">line</span> <span class="mi">2</span>
+    <span class="k">print</span> <span class="s">"Hello, world"</span>
+        <span class="o">^</span>
+<span class="ne">SyntaxError</span><span class="p">:</span> <span class="n">invalid</span> <span class="n">syntax</span>
+</pre></div>
+
+
+<p>When using <code>single</code>, only a single statement is processed; multiple statements (or non-statements) will be ignored:</p>
+<div class="highlight"><pre><span class="o">&gt;&gt;&gt;</span> <span class="n">code_str</span> <span class="o">=</span> <span class="s">"""</span>
+<span class="s">... print "Hello, world"</span>
+<span class="s">... print "Goodbye, world"</span>
+<span class="s">... """</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">code_obj</span> <span class="o">=</span> <span class="nb">compile</span><span class="p">(</span><span class="n">code_str</span><span class="p">,</span> <span class="s">'&lt;string&gt;'</span><span class="p">,</span> <span class="s">'single'</span><span class="p">)</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="k">exec</span> <span class="n">code_obj</span>
+<span class="n">Hello</span><span class="p">,</span> <span class="n">world</span>
+</pre></div>
+
+
+<blockquote>
+<p>What happened to my "goodbye"?</p>
+</blockquote>
+<p>For the rest of the post, we'll stick with <code>exec</code>, which is the type of compilation Python does for you when importing modules.</p>
+<h1>Step 2: Open 'er Up</h1>
+<p>Let's go back to our first example, and have a look inside the code object to see what we have:</p>
+<div class="highlight"><pre><span class="o">&gt;&gt;&gt;</span> <span class="n">code_str</span> <span class="o">=</span> <span class="s">"""</span>
+<span class="s">... print "Hello, world"</span>
+<span class="s">... """</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">code_obj</span> <span class="o">=</span> <span class="nb">compile</span><span class="p">(</span><span class="n">code_str</span><span class="p">,</span> <span class="s">'&lt;string&gt;'</span><span class="p">,</span> <span class="s">'exec'</span><span class="p">)</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="nb">dir</span><span class="p">(</span><span class="n">code_obj</span><span class="p">)</span>
+<span class="c"># dunder attributes excluded for readability</span>
+<span class="p">[</span><span class="s">'co_argcount'</span><span class="p">,</span> <span class="s">'co_cellvars'</span><span class="p">,</span> <span class="s">'co_code'</span><span class="p">,</span> <span class="s">'co_consts'</span><span class="p">,</span> <span class="s">'co_filename'</span><span class="p">,</span>
+ <span class="s">'co_firstlineno'</span><span class="p">,</span> <span class="s">'co_flags'</span><span class="p">,</span> <span class="s">'co_freevars'</span><span class="p">,</span> <span class="s">'co_lnotab'</span><span class="p">,</span> <span class="s">'co_name'</span><span class="p">,</span>
+ <span class="s">'co_names'</span><span class="p">,</span> <span class="s">'co_nlocals'</span><span class="p">,</span> <span class="s">'co_stacksize'</span><span class="p">,</span> <span class="s">'co_varnames'</span><span class="p">]</span>
+</pre></div>
+
+
+<p>These attributes are documented in <a href="http://docs.python.org/library/inspect.html">the <code>inspect</code> module</a>, but I'll highlight a few cool ones here:</p>
+<p>First, we can see where our second argument to <code>compile()</code> ended up:</p>
+<div class="highlight"><pre><span class="o">&gt;&gt;&gt;</span> <span class="n">code_obj</span><span class="o">.</span><span class="n">co_filename</span>
+<span class="s">'&lt;string&gt;'</span>
+</pre></div>
+
+
+<p>And, perhaps surprisingly, our code represents an anonymous module (code compiled with <code>exec</code> mode is always treated as module-level code, though, of course, it can contain function or class definitions, or any other valid Python):</p>
+<div class="highlight"><pre><span class="o">&gt;&gt;&gt;</span> <span class="n">code_obj</span><span class="o">.</span><span class="n">co_name</span>
+<span class="s">'&lt;module&gt;'</span>
+</pre></div>
+
+
+<p>And, as we expect, a code object representing a Python module (that's effectively what our code string was -- a series of statements at the top-most level, that is, not indented at all) takes no arguments:</p>
+<div class="highlight"><pre><span class="o">&gt;&gt;&gt;</span> <span class="n">code_obj</span><span class="o">.</span><span class="n">co_argcount</span>
+<span class="mi">0</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">code_obj</span><span class="o">.</span><span class="n">co_varnames</span>
+<span class="p">()</span>
+</pre></div>
+
+
+<p>If we were to take a piece of code from a function which does have arguments, we'd see them here:</p>
+<div class="highlight"><pre><span class="o">&gt;&gt;&gt;</span> <span class="k">def</span> <span class="nf">foo</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">):</span>
+<span class="o">...</span>     <span class="k">print</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span>
+<span class="o">...</span> 
+<span class="o">&gt;&gt;&gt;</span> <span class="n">foo</span><span class="o">.</span><span class="n">func_code</span>
+<span class="o">&lt;</span><span class="n">code</span> <span class="nb">object</span> <span class="n">foo</span> <span class="n">at</span> <span class="mh">0x1054b9830</span><span class="p">,</span> <span class="nb">file</span> <span class="s">"&lt;stdin&gt;"</span><span class="p">,</span> <span class="n">line</span> <span class="mi">1</span><span class="o">&gt;</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">foo</span><span class="o">.</span><span class="n">func_code</span><span class="o">.</span><span class="n">co_varnames</span>
+<span class="p">(</span><span class="s">'x'</span><span class="p">,</span> <span class="s">'y'</span><span class="p">)</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">foo</span><span class="o">.</span><span class="n">func_code</span><span class="o">.</span><span class="n">co_argcount</span>
+<span class="mi">2</span>
+</pre></div>
+
+
+<p>If you're curious, you can also see the raw bytecode that will be processed by the Python virtual machine:</p>
+<div class="highlight"><pre><span class="o">&gt;&gt;&gt;</span> <span class="n">code_obj</span><span class="o">.</span><span class="n">co_code</span>
+<span class="s">'d</span><span class="se">\x00\x00</span><span class="s">GHd</span><span class="se">\x01\x00</span><span class="s">S'</span>
+</pre></div>
+
+
+<p>I don't recommend trying to learn to read that directly, there's an easier way (hint: see the next section).</p>
+<p>Finally, we have one constant object within scope, the string "Hello, world", which is printed by our code:</p>
+<div class="highlight"><pre><span class="o">&gt;&gt;&gt;</span> <span class="n">code_obj</span><span class="o">.</span><span class="n">co_consts</span>
+<span class="p">(</span><span class="s">'Hello, world'</span><span class="p">,</span> <span class="bp">None</span><span class="p">)</span>
+</pre></div>
+
+
+<p>Wait. Where's that <code>None</code> coming from?</p>
+<h2>A Detour into Code Disassembly</h2>
+<p>We can see exactly what's going on in our code object with the <a href="http://docs.python.org/library/dis.html"><code>dis</code></a> module, which disassembles code objects into a human readable series of bytecode instructions:</p>
+<div class="highlight"><pre><span class="o">&gt;&gt;&gt;</span> <span class="n">dis</span><span class="o">.</span><span class="n">dis</span><span class="p">(</span><span class="n">code_obj</span><span class="p">)</span>
+  <span class="mi">2</span>           <span class="mi">0</span> <span class="n">LOAD_CONST</span>           <span class="mi">0</span> <span class="p">(</span><span class="s">'Hello, world'</span><span class="p">)</span>
+              <span class="mi">3</span> <span class="n">PRINT_ITEM</span>
+              <span class="mi">4</span> <span class="n">PRINT_NEWLINE</span>
+              <span class="mi">5</span> <span class="n">LOAD_CONST</span>           <span class="mi">1</span> <span class="p">(</span><span class="bp">None</span><span class="p">)</span>
+              <span class="mi">8</span> <span class="n">RETURN_VALUE</span>
+</pre></div>
+
+
+<p>Reading disassembled Python code requires a bit of experience, so let me walk you through it. The <code>LOAD_CONST</code> instruction reads a value from the <code>co_consts</code> tuple, and pushes it onto the top of the stack. The <code>PRINT_ITEM</code> instruction pops the top of the stack, and prints the string representation. <code>PRINT_NEWLINE</code> should be pretty self-explanatory.</p>
+<p>Next we see the mysterious <code>None</code>. It turns out this is a bit of a quirk of the implementation details of the CPython virtual machine. Since function calls in Python (including "hidden" function calls, like those behind an <code>import</code> statement) are implemented with function calls in C in the Python virtual machine, modules actually have a return value -- this indicates to the Python virtual machine that execution of the module has completed, and control can be returned to the calling scope (i.e. the module in which the <code>import</code> statement appeared). I won't embarrass myself by trying to explain this further -- if you are interested, see <a href="http://www.larryhastings.com/">Larry Hastings</a>s PyCon presentation <a href="http://pyvideo.org/video/635/stepping-through-cpython">Stepping through CPython</a> around 44:22 -- that video covers Python 3.x, but Python 2.7 does the same thing. If you're interested in this sort of implementation detail, then you should definitely watch the entirety of this video, and David Beazley's keynote as well.</p>
+<h1>Step 3: Interesting Internals</h1>
+<p>Many of the features we've looked at are clearly useful for a running Python virtual machine, but what about the human side of the story? What if we want to interactively debug code (using <code>pdb</code> or a similar tool), or get helpful, readable tracebacks from exceptions?</p>
+<p>It turns out, code objects support this as well. As we've already seen, code objects indicate from which file they were generated, and this will obviously help in looking up source code; they also indicate the line number on which the source code for this code object begins:</p>
+<div class="highlight"><pre><span class="o">&gt;&gt;&gt;</span> <span class="n">code_obj</span><span class="o">.</span><span class="n">co_firstlineno</span>
+<span class="mi">2</span>
+</pre></div>
+
+
+<p>And the mysterious <code>co_lnotab</code> attribute. To illustrate its purpose, we'll need a larger code snippet:</p>
+<div class="highlight"><pre><span class="o">&gt;&gt;&gt;</span> <span class="n">code_str</span> <span class="o">=</span> <span class="s">"""</span>
+<span class="s">... x = 1</span>
+<span class="s">... y = 2</span>
+<span class="s">... print x + y</span>
+<span class="s">... """</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">code_obj</span> <span class="o">=</span> <span class="nb">compile</span><span class="p">(</span><span class="n">code_str</span><span class="p">,</span> <span class="s">'&lt;string&gt;'</span><span class="p">,</span> <span class="s">'exec'</span><span class="p">)</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">code_obj</span><span class="o">.</span><span class="n">co_lnotab</span>
+<span class="s">'</span><span class="se">\x06\x01\x06\x01</span><span class="s">'</span>
+</pre></div>
+
+
+<p>Hm, so what are we to make of this? Perhaps the <code>dis</code> module can help here again:</p>
+<div class="highlight"><pre><span class="o">&gt;&gt;&gt;</span> <span class="n">dis</span><span class="o">.</span><span class="n">dis</span><span class="p">(</span><span class="n">code_obj</span><span class="p">)</span>
+  <span class="mi">2</span>           <span class="mi">0</span> <span class="n">LOAD_CONST</span>           <span class="mi">0</span> <span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+              <span class="mi">3</span> <span class="n">STORE_NAME</span>           <span class="mi">0</span> <span class="p">(</span><span class="n">x</span><span class="p">)</span>
+
+  <span class="mi">3</span>           <span class="mi">6</span> <span class="n">LOAD_CONST</span>           <span class="mi">1</span> <span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+              <span class="mi">9</span> <span class="n">STORE_NAME</span>           <span class="mi">1</span> <span class="p">(</span><span class="n">y</span><span class="p">)</span>
+
+  <span class="mi">4</span>          <span class="mi">12</span> <span class="n">LOAD_NAME</span>            <span class="mi">0</span> <span class="p">(</span><span class="n">x</span><span class="p">)</span>
+             <span class="mi">15</span> <span class="n">LOAD_NAME</span>            <span class="mi">1</span> <span class="p">(</span><span class="n">y</span><span class="p">)</span>
+             <span class="mi">18</span> <span class="n">BINARY_ADD</span>
+             <span class="mi">19</span> <span class="n">PRINT_ITEM</span>
+             <span class="mi">20</span> <span class="n">PRINT_NEWLINE</span>
+             <span class="mi">21</span> <span class="n">LOAD_CONST</span>           <span class="mi">2</span> <span class="p">(</span><span class="bp">None</span><span class="p">)</span>
+             <span class="mi">24</span> <span class="n">RETURN_VALUE</span>
+</pre></div>
+
+
+<p>At the far left of (some) lines, is the line number of the Python source from which this code object was created (notice that 2 here corresponds to the value of <code>code_obj.co_firstlineno</code>). The next column is the offset into the code of the bytecode instruction, 0 bytes for the first instruction, 3 bytes for the second, and so on. The third column is the instruction name itself, and the fourth is the argument to the instruction, if any, along with the value of the argument in parentheses.</p>
+<p>Now we can put this together with the <code>co_lnotab</code> (which stands for "line number table", by the way) to see how Python makes sense of the code objects' relation to their original source code:</p>
+<div class="highlight"><pre><span class="o">&gt;&gt;&gt;</span> <span class="n">code_obj</span><span class="o">.</span><span class="n">co_lnotab</span>
+<span class="s">'</span><span class="se">\x06\x01\x06\x01</span><span class="s">'</span>
+</pre></div>
+
+
+<p>After a little tinkering and trial and error, I realized that this is a series of pairs of bytes: the first is a length offset into the bytecode (6 bytes, which advances us to the second <code>LOAD_CONST</code> as seen in our disassembly), followed by a number of source lines of code that the skipped instructions appeared on.</p>
+<p>We can confirm this theory by slightly modifying our source code, recompiling, and examining the <code>co_lnotab</code> attribute of the resulting code object:</p>
+<div class="highlight"><pre><span class="o">&gt;&gt;&gt;</span> <span class="n">code_str2</span> <span class="o">=</span> <span class="s">"""</span>
+<span class="s">... x = 1</span>
+<span class="s">... </span>
+<span class="s">... y = 2</span>
+<span class="s">... print x + y</span>
+<span class="s">... """</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">code_obj2</span> <span class="o">=</span> <span class="nb">compile</span><span class="p">(</span><span class="n">code_str2</span><span class="p">,</span> <span class="s">'&lt;string&gt;'</span><span class="p">,</span> <span class="s">'exec'</span><span class="p">)</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">code_obj2</span><span class="o">.</span><span class="n">co_lnotab</span>
+<span class="s">'</span><span class="se">\x06\x02\x06\x01</span><span class="s">'</span>
+</pre></div>
+
+
+<p>We've moved the second assignment down one line, so we see that in the second byte of <code>co_lnotab</code>, we are incrementing the "current line number" by two instead of by one.</p>
+<p>We can also verify that the bytecode resulting from these two (slightly) different source codes is identical:</p>
+<div class="highlight"><pre><span class="o">&gt;&gt;&gt;</span> <span class="n">code_obj2</span><span class="o">.</span><span class="n">co_code</span> <span class="o">==</span> <span class="n">code_obj</span><span class="o">.</span><span class="n">co_code</span>
+<span class="bp">True</span>
+</pre></div>
+
+
+<p>Since both the bytecode offset and line number offset at single (unsigned) bytes, one might wonder what happens if you have, say, 257 (or more) blank lines between statements in a Python source file? Let's see:</p>
+<div class="highlight"><pre><span class="o">&gt;&gt;&gt;</span> <span class="n">thousand_blanks</span> <span class="o">=</span> <span class="s">'</span><span class="se">\n</span><span class="s">'</span> <span class="o">*</span> <span class="mi">1000</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">code_str</span> <span class="o">=</span> <span class="s">"""</span>
+<span class="s">... x = 1</span>
+<span class="s">... """</span> <span class="o">+</span> <span class="n">thousand_blanks</span> <span class="o">+</span> <span class="s">"""</span>
+<span class="s">... y = 2</span>
+<span class="s">... print x + y</span>
+<span class="s">... """</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">code_obj</span> <span class="o">=</span> <span class="nb">compile</span><span class="p">(</span><span class="n">code_str</span><span class="p">,</span> <span class="s">'&lt;string&gt;'</span><span class="p">,</span> <span class="s">'exec'</span><span class="p">)</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">code_obj</span><span class="o">.</span><span class="n">co_lnotab</span>
+<span class="s">'</span><span class="se">\x06\xff\x00\xff\x00\xff\x00\xec\x06\x01</span><span class="s">'</span>
+</pre></div>
+
+
+<p>Since both the bytecode offsets and line offsets are, well, offsets, having large empty spaces just means that some of the interleaved offsets are 0-length offsets. Here we have a 6-byte offset into bytecode, followed by a 255-line offset into the source code, then a 0-byte offset into the bytecode, another 255 lines of source, another 0 bytes into the bytecode, yet another 255 lines of source, one more 0-byte offset into bytecode, and a final 236 lines of offset into the source code (then the usual, expected 6 bytes of bytecode and 1 line of source code for the final <code>print</code> statement). Neat!</p>
+<h1>Wrapping Up</h1>
+<p>I started by apologizing for the rambling nature of this post, but I hope it's been interesting. Stay tuned for an examination of the nature of <code>exec</code> and its usage in <a href="http://late.am/post/2011/11/27/keystone-a-simple-python-web-framework">Keystone</a> in the near future.</p>
+                    </section>
+                    </div></body></html>

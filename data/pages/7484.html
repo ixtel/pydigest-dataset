@@ -1,0 +1,159 @@
+<html><body><div><div class="content html_format"><p>
+      Как-то меня осенила мысль: «Зачем на работе постоянно прятать вкладку браузера с ВК от начальства, если можно ее замаскировать?»</p>
+<p>
+И несмотря на то, что моему начальству в целом пофиг на социальные сети во время работы, через несколько минут проблема была решена довольно интересным способом, о котором я сейчас вам и расскажу.
+</p><a name="habracut"/><p>
+Нам понадобятся:
+
+</p><ul>
+<li>Стандартные Python модули: os, sys, json, urllib2 </li>
+<li>Модуль для авторизации из этой <a href="http://habrahabr.ru/post/143972/">статьи</a></li>
+</ul><p>
+Писать код мы будем собственно для Python версии 2.7, но при желании его можно оптимизировать и до третьей версии. Для нетерпеливых сразу дам ссылку на </p><a href="https://github.com/AndreyPerelygin/vkConsole">GitHub</a><p>.
+
+</p><h4>Итак, начнем</h4><p>
+Первое и самое главное, что нам понадобится, это получить токен. Пример получения:
+
+</p><pre><code class="python">import vk_auth
+app_id = "4925055"
+access_token = vk_auth.auth(YOUR_LOGIN, YOUR_PASSWORD, app_id, "offline,messages")[0]
+</code></pre>
+<i>Предполагается, что выше указанный модуль авторизации лежит в одной директории с нашим скриптом и называется vk_auth.py</i>
+<p>
+Теперь у нас есть токен и мы даже можем сделать какой-нибудь запрос. Давайте для примера получим JSON из 10 наших последних диалогов, преобразуем его в словарь и красиво выведем на экран: 
+
+</p><pre><code class="python">import urllib2
+import json
+import vk_auth
+app_id = "4925055"
+login = raw_input(u"Enter your login: ")
+password = raw_input(u"Enter your pass: ")
+
+access_token = vk_auth.auth(login, password, app_id, "offline,messages")[0]
+dialogs = json.loads(urllib2.urlopen("https://api.vk.com/method/messages.getDialogs?count=10&amp;access_token=%s&amp;v=5.33" % (access_token)).read().decode("utf-8"))
+layer = ""
+for item in reversed(dialogs["response"]["items"]):
+	user = json.loads(urllib2.urlopen("https://api.vk.com/method/users.get?user_id=%s&amp;fields=contacts,online&amp;access_token%s&amp;v=5.8" % (item["message"]["user_id"],access_token)).read().decode("utf-8"))["response"][0];
+	if (user["online"] == 1):
+		user["online"] = "online"
+	else:
+		user["online"] = "offline"
+	layer+= "%s %s [%s] (%s):\n" % (user["first_name"], user["last_name"], user["online"], item["message"]["user_id"])
+	layer+= "%s \n" % item["message"]["body"]
+	layer+= "--------------------------------------------\n"
+
+print (layer)
+</code></pre><p>
+Теперь мы можем при запуске скрипта ввести свои данные для авторизации и получить список из 10 последних диалогов с пометкой в виде имени собеседника и его статусом.
+</p><p>
+Но ведь хотелось бы иметь возможность читать сообщения внутри конкретного диалога и отправлять сообщения. Хорошо, для этого мы создадим класс Connect, в котором опишем 3 метода для взаимодействия с API (получение диалогов, получение сообщений из диалога, отправка сообщения в рамках выбранного диалога) и метод-контроллер для возможности управлять вышеупомянутым функционалом.
+</p><p>
+Собственно весь код:
+
+</p><pre><code class="python">import os
+import sys
+import json
+import urllib2
+import vk_auth
+
+os.system("clear")
+
+app_id = "4925055"
+login = raw_input(u"Enter your login: ")
+password = raw_input(u"Enter your pass: ")
+
+class Connect:
+	def __init__(self,app_id,login,password):
+		self.access_token = vk_auth.auth(login, password, app_id, "offline,messages")[0]
+		print(self.access_token)
+		self.layer = ""
+		self.uid = ""
+		self.section = ""
+
+	def dialog(self, uid=False):
+		if uid != self.uid and uid:
+			self.uid = uid
+		self.layer = ""
+		self.section = "dialog"
+		dialog = json.loads(urllib2.urlopen("https://api.vk.com/method/messages.getHistory?count=20&amp;user_id=%s&amp;access_token=%s&amp;v=5.33" % (self.uid, self.access_token)).read().decode("utf-8"))
+		for item in reversed(dialog["response"]["items"]):
+			user = json.loads(urllib2.urlopen("https://api.vk.com/method/users.get?user_id=%s&amp;fields=contacts&amp;access_token%s&amp;v=5.8" % (item["from_id"],self.access_token)).read().decode("utf-8"))["response"][0];
+			self.layer+= "%s %s (%s):\n" % (user["first_name"], user["last_name"], item["user_id"])
+			self.layer+= "%s \n" % item["body"]
+			self.layer+= "-------------------------------------------- \n"
+
+	def dialogs(self):
+		self.layer = ""
+		self.section = "dialogs"
+		dialogs = json.loads(urllib2.urlopen("https://api.vk.com/method/messages.getDialogs?count=10&amp;access_token=%s&amp;v=5.33" % (self.access_token)).read().decode("utf-8"))
+		for item in reversed(dialogs["response"]["items"]):
+			user = json.loads(urllib2.urlopen("https://api.vk.com/method/users.get?user_id=%s&amp;fields=contacts,online&amp;access_token%s&amp;v=5.8" % (item["message"]["user_id"],self.access_token)).read().decode("utf-8"))["response"][0];
+			if (user["online"] == 1):
+				user["online"] = "online"
+			else:
+				user["online"] = "offline"
+			self.layer+= "%s %s [%s] (%s):\n" % (user["first_name"], user["last_name"], user["online"], item["message"]["user_id"])
+			self.layer+= "%s \n" % item["message"]["body"]
+			self.layer+= "--------------------------------------------\n"	
+
+	def send(self, message):
+		message = urllib2.quote(message).encode('utf8')
+		dialog = json.loads(urllib2.urlopen("https://api.vk.com/method/messages.send?user_id=%s&amp;message=%s&amp;access_token=%s&amp;v=5.33" % (self.uid, message, self.access_token)).read().decode("utf-8"))
+		self.controll("r")
+
+	def controll(self, input):
+		print ("====LOADING====")
+		if input == "d":
+			self.dialogs()
+		elif input == "exit":
+			os.system("clear")
+			sys.exit(0)
+		elif input == "":
+			self.layer = ""
+		elif self.section == "dialogs":
+			if input == "r":
+				self.dialogs()
+			else:
+				self.dialog(input)
+		elif self.section == "dialog":
+			if input == "r":
+				self.dialog()
+			else:
+				self.send(input)
+		os.system("clear")
+		print (self.layer)
+		self.controll("%s" % raw_input("Enter command: \n"))
+
+
+vk = Connect(app_id,login,password)
+vk.controll("")
+</code></pre><p>
+Итак, как это работает:
+</p><p>
+1. Мы вводим свой логин и пароль, которые сохраняются в переменные login и password соотвественно;</p><p>
+2. Создается объект класса Connect, в инициализирующий метод которого передаются логин, пароль и id приложение ВК;</p><p>
+3. В методе инициализации происходит получение токена и сохранение его в локальной переменной класса;</p><p>
+4. Происходит вызов метода controll класса Connect с параметром пустой строки, который очищает экран консоли;</p><p>
+5. Далее скрипт ждет нашей команды.
+</p><p>
+Команды таковы:
+
+</p><ul>
+<li>загрузка и отображение последних 10 диалогов осуществляется указанием «d»</li>
+<li>обновление текущего раздела — «r»</li>
+<li>пустая строка — очищает экран, чтобы никто не увидел ничего лишнего :)</li>
+<li>для перехода к конкретному диалогу указываем ID нужного юзера</li>
+<li>находясь внутри диалога, любой текст, не равный «r», «d», «» будет отправлен юзеру</li>
+</ul>
+<p>
+Вот в целом и все. Конечно, этот скрипт не претендует на звание какой-то крутой фичи, но все же в некоторых моментах может оказаться полезным.</p><p>
+На текущий момент работают только текстовые сообщения. Чуть позже добавлю вывод ссылок на изображения, аудио, видео, отображение репостов и поддержку конференций, а если не добавлю, то это может сделать каждый, форкнув этот код.
+</p><p>
+Дублирую ссылку на </p><a href="https://github.com/AndreyPerelygin/vkConsole">GitHub</a><p>.
+</p><p>
+Спасибо за внимание!
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

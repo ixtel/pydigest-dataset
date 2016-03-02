@@ -1,0 +1,387 @@
+<html><body><div><article class="post-content" itemprop="ArticleBody">
+    <p>In this post I’m doing some simple data analytics of job market for python
+programmes. I will be using <a href="http://pandas.pydata.org/">Python Pandas</a></p>
+
+<p>My dataset comes from <a href="http://www.reed.co.uk/jobs?keywords=python">reed.co.uk</a> - UK
+job board. I created simple <a href="http://scrapy.org/">Scrapy</a> project that crawls reed.co.uk 
+python job section, and parses all ads it finds.  While
+crawling I set high download delay of 2 seconds, low number of max
+concurrent requests per domain and added descriptive user agent header 
+linking back to my blog. If you are interested in source code for spider let me know.</p>
+
+<p>I’ve chosen this specific job board because in contrast with other sites of this 
+type it displays interesting information about each post.
+Aside from boring marketing speech describing how exciting each 
+position is, reed shows more interesting facts about each position such as
+salary range and number of applications. I was curious if one can find some patterns
+in all this, also analyzing this data is good way to learn/demonstrate
+some Python Pandas functions.</p>
+
+<p>My data is stored in .csv file that has 615 records, all job ads found when searching
+for Python, you can <a href="https://docs.google.com/uc?id=0B6myg3n6dqcVblo5MzBzZjQ3TEk&amp;export=download">download it here</a></p>
+
+<p>Let’s feed our data to Pandas.</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">In</span> <span class="p">[</span><span class="mi">1</span><span class="p">]:</span> <span class="kn">import</span> <span class="nn">pandas</span> <span class="kn">as</span> <span class="nn">pd</span>
+<span class="n">In</span> <span class="p">[</span><span class="mi">2</span><span class="p">]:</span> <span class="n">data</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">read_csv</span><span class="p">(</span><span class="s">'reed.csv'</span><span class="p">)</span>
+<span class="n">In</span> <span class="p">[</span><span class="mi">3</span><span class="p">]:</span> <span class="n">data</span><span class="o">.</span><span class="n">columns</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">3</span><span class="p">]:</span> <span class="n">Index</span><span class="p">([</span><span class="s">u'salary_min'</span><span class="p">,</span> <span class="s">u'description'</span><span class="p">,</span> <span class="s">u'title'</span><span class="p">,</span> <span class="s">u'salary_max'</span><span class="p">,</span> <span class="s">u'applications'</span><span class="p">,</span> <span class="s">u'page_number'</span><span class="p">,</span> <span class="s">u'location'</span><span class="p">,</span> <span class="s">u'published'</span><span class="p">,</span> <span class="s">u'link'</span><span class="p">,</span> <span class="s">u'found'</span><span class="p">,</span> <span class="s">u'id'</span><span class="p">],</span> <span class="n">dtype</span><span class="o">=</span><span class="s">'object'</span><span class="p">)</span></code></pre></div>
+
+<p>Since my data comes from Internet it made sense to do some normalization
+at the level of extraction. What you get in .csv is not exactly raw data, it is 
+partly processed. For example dates on reed are displayed either as 
+specific date in ‘day month’ format (e.g. ‘24 December’), or as string ‘just now’ or ‘yesterday’, so 
+I had to use some regular expressions to extract proper data and then format all 
+as ISO date string. Similarly with salary data it could be either posted as string 
+‘From 20 000 to 30 000’ or just ‘20 000 per annum’.
+I decided to use two fields: “salary_max” which is higher value of salary range, and
+“salary_min” as lower value. If there was only one value posted I assumed value
+present is salary_max.</p>
+
+<h3 id="location-location-location">Location, location, location</h3>
+
+<p>First of all it makes sense to ask: where are Python positions located?</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">In</span> <span class="p">[</span><span class="mi">37</span><span class="p">]:</span> <span class="n">data</span><span class="o">.</span><span class="n">location</span><span class="o">.</span><span class="n">value_counts</span><span class="p">()</span><span class="o">.</span><span class="n">head</span><span class="p">(</span><span class="mi">10</span><span class="p">)</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">37</span><span class="p">]:</span> 
+<span class="n">London</span>         <span class="mi">203</span>
+<span class="n">Cambridge</span>       <span class="mi">42</span>
+<span class="n">Reading</span>         <span class="mi">19</span>
+<span class="n">Bristol</span>         <span class="mi">19</span>
+<span class="n">Manchester</span>      <span class="mi">16</span>
+<span class="n">Devon</span>           <span class="mi">15</span>
+<span class="n">Berkhamsted</span>     <span class="mi">15</span>
+<span class="n">Oxford</span>          <span class="mi">11</span>
+<span class="n">Cardiff</span>          <span class="mi">8</span>
+<span class="n">USA</span>              <span class="mi">8</span>
+<span class="n">dtype</span><span class="p">:</span> <span class="n">int64</span></code></pre></div>
+
+<p>If you know UK job market you’re probably not suprised by domination of London. 
+Almost 1/3 of all jobs are in London. Cambridge’s second spot is interesting, 
+as is high position of Bristol and Reading.</p>
+
+<p>Given high amount of open positions in each city, one wonders if market is 
+perhaps saturated in London or Cambridge. 
+How many applications per position do we have in top 10 locations?</p>
+
+<p>Let’s create smaller data set with job ads only from top 10 cities for
+Python programmers:</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">In</span> <span class="p">[</span><span class="mi">113</span><span class="p">]:</span> <span class="n">toplocations</span> <span class="o">=</span> <span class="n">data</span><span class="o">.</span><span class="n">location</span><span class="o">.</span><span class="n">value_counts</span><span class="p">()</span><span class="o">.</span><span class="n">head</span><span class="p">(</span><span class="mi">10</span><span class="p">)</span>
+<span class="n">In</span> <span class="p">[</span><span class="mi">114</span><span class="p">]:</span> <span class="n">mask</span> <span class="o">=</span> <span class="n">data</span><span class="o">.</span><span class="n">location</span><span class="o">.</span><span class="n">isin</span><span class="p">(</span><span class="n">toplocations</span><span class="o">.</span><span class="n">keys</span><span class="p">())</span>
+<span class="n">In</span> <span class="p">[</span><span class="mi">115</span><span class="p">]:</span> <span class="n">tops</span> <span class="o">=</span> <span class="n">data</span><span class="p">[</span><span class="n">mask</span><span class="p">]</span></code></pre></div>
+
+<p>and now let’s see how many applications are there per job post</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">In</span> <span class="p">[</span><span class="mi">183</span><span class="p">]:</span> <span class="n">applications</span> <span class="o">=</span> <span class="n">tops</span><span class="o">.</span><span class="n">groupby</span><span class="p">(</span><span class="s">'location'</span><span class="p">)</span><span class="o">.</span><span class="n">applications</span><span class="o">.</span><span class="n">sum</span><span class="p">()</span>
+<span class="n">In</span> <span class="p">[</span><span class="mi">184</span><span class="p">]:</span> <span class="n">ads</span> <span class="o">=</span> <span class="n">tops</span><span class="o">.</span><span class="n">groupby</span><span class="p">(</span><span class="s">'location'</span><span class="p">)</span><span class="o">.</span><span class="n">id</span><span class="o">.</span><span class="n">count</span><span class="p">()</span>
+<span class="n">In</span> <span class="p">[</span><span class="mi">185</span><span class="p">]:</span> <span class="n">applications</span> <span class="o">/</span> <span class="n">ads</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">185</span><span class="p">]:</span> 
+<span class="n">location</span>
+<span class="n">Berkhamsted</span>    <span class="mf">2.333333</span>
+<span class="n">Bristol</span>        <span class="mf">4.157895</span>
+<span class="n">Cambridge</span>      <span class="mf">2.523810</span>
+<span class="n">Cardiff</span>        <span class="mf">3.250000</span>
+<span class="n">Devon</span>          <span class="mf">7.666667</span>
+<span class="n">London</span>         <span class="mf">7.935961</span>
+<span class="n">Manchester</span>     <span class="mf">2.125000</span>
+<span class="n">Oxford</span>         <span class="mf">4.181818</span>
+<span class="n">Reading</span>        <span class="mf">3.631579</span>
+<span class="n">USA</span>            <span class="mf">5.375000</span>
+<span class="n">dtype</span><span class="p">:</span> <span class="n">float64</span></code></pre></div>
+
+<p>Seems like everyone wants to work in London and no one wants work in Manchester 
+and Cambridge. Bristol attracts talent as does Oxford, but keep in mind low 
+number of positions there. Devon has unusually high number of applications
+per ad, which seems interesting.</p>
+
+<p>Let’s check if our calculations are correct (as you read my post please feel free
+to check all my calculations, also let me know if there is some smarter, easier way
+of getting some specific result).</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">In</span> <span class="p">[</span><span class="mi">371</span><span class="p">]:</span> <span class="n">cam</span> <span class="o">=</span> <span class="n">data</span><span class="p">[</span><span class="n">data</span><span class="o">.</span><span class="n">location</span><span class="o">==</span><span class="s">'Cambridge'</span><span class="p">]</span><span class="o">.</span><span class="n">applications</span><span class="o">.</span><span class="n">sum</span><span class="p">()</span> <span class="o">/</span> <span class="nb">float</span><span class="p">(</span><span class="n">data</span><span class="p">[</span><span class="n">data</span><span class="o">.</span><span class="n">location</span> <span class="o">==</span> <span class="s">'Cambridge'</span><span class="p">]</span><span class="o">.</span><span class="n">id</span><span class="o">.</span><span class="n">count</span><span class="p">())</span>
+<span class="n">In</span> <span class="p">[</span><span class="mi">372</span><span class="p">]:</span> <span class="n">cam</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">372</span><span class="p">]:</span> <span class="mf">2.5238095238095237</span></code></pre></div>
+
+<h3 id="what-determines-number-of-applications">What determines number of applications</h3>
+
+<p>When browsing data you quickly notice uneven distribution of applications.
+Some positions have zero applications, and some have relatively high number. For
+example this query will give you number of applicantions for each Cambridge job.</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">In</span> <span class="p">[</span><span class="mi">373</span><span class="p">]:</span> <span class="n">data</span><span class="p">[</span><span class="n">data</span><span class="o">.</span><span class="n">location</span> <span class="o">==</span> <span class="s">'Cambridge'</span><span class="p">][[</span><span class="s">'location'</span><span class="p">,</span> <span class="s">'applications'</span><span class="p">]]</span></code></pre></div>
+
+<p>You can see lots of ads with zero applications and some unusually popular posts.
+One position is particularly attractive, it attract 17 applicants.</p>
+
+<p>Why are there so many applications there?</p>
+
+<p>Is it the salary?</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">In</span> <span class="p">[</span><span class="mi">222</span><span class="p">]:</span> <span class="n">data</span><span class="p">[</span><span class="n">data</span><span class="o">.</span><span class="n">applications</span> <span class="o">==</span> <span class="n">top_ad</span><span class="p">][</span><span class="n">data</span><span class="o">.</span><span class="n">location</span> <span class="o">==</span> <span class="s">'Cambridge'</span><span class="p">][[</span><span class="s">'applications'</span><span class="p">,</span> <span class="s">'salary_max'</span><span class="p">,</span> <span class="s">'salary_min'</span><span class="p">]]</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">222</span><span class="p">]:</span> 
+     <span class="n">applications</span>  <span class="n">salary_max</span>  <span class="n">salary_min</span>
+<span class="mi">445</span>            <span class="mi">17</span>         <span class="n">NaN</span></code></pre></div>
+
+<p>No, salary is not given. Actually nothing in my data 
+explains why this position is so popular so I had to follow link (I store all links to
+job records in link columns, this is mostly for testing of accuracy of data
+extraction), perhaps I missed something?</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">In</span> <span class="p">[</span><span class="mi">238</span><span class="p">]:</span> <span class="n">data</span><span class="p">[</span><span class="n">data</span><span class="o">.</span><span class="n">applications</span> <span class="o">==</span> <span class="n">top_ad</span><span class="p">][</span><span class="n">data</span><span class="o">.</span><span class="n">location</span> <span class="o">==</span> <span class="s">'Cambridge'</span><span class="p">]</span><span class="o">.</span><span class="n">link</span><span class="o">.</span><span class="n">values</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">238</span><span class="p">]:</span> <span class="n">array</span><span class="p">([</span> <span class="s">'http://www.reed.co.uk/jobs/senior-graduate-software-engineers-web-developers-iot/25336524#/jobs?keywords=python&amp;cached=True&amp;pageno=18'</span><span class="p">],</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">object</span><span class="p">)</span></code></pre></div>
+
+<p>If you follow <a href="http://www.reed.co.uk/jobs/senior-graduate-software-engineers-web-developers-iot/25336524#/jobs?keywords=python&amp;cached=True&amp;pageno=18">link</a> and read description you’ll see
+that it’s just entry level position, keywords “graduate” probably attract
+people without experience with Python, so this would explain high application
+rate.</p>
+
+<p>This got me thinking: is there a strong link between a post being
+entry level position and high number of applicants? We could do some
+natural language processing to identify entry level positions, but 
+this would probably require separate blog article, so for now, let’s just
+try checking if some keyword is present in description, for example
+keyword ‘graduate’.</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">In</span> <span class="p">[</span><span class="mi">389</span><span class="p">]:</span> <span class="nb">filter</span> <span class="o">=</span> <span class="n">data</span><span class="o">.</span><span class="n">description</span><span class="o">.</span><span class="n">str</span><span class="o">.</span><span class="n">contains</span><span class="p">(</span><span class="s">'graduate'</span><span class="p">,</span> <span class="n">case</span><span class="o">=</span><span class="bp">False</span><span class="p">)</span>
+<span class="c"># mean of applications if there is keyword 'graduate' in description</span>
+<span class="n">In</span> <span class="p">[</span><span class="mi">390</span><span class="p">]:</span> <span class="n">data</span><span class="p">[</span><span class="nb">filter</span><span class="p">]</span><span class="o">.</span><span class="n">applications</span><span class="o">.</span><span class="n">mean</span><span class="p">()</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">390</span><span class="p">]:</span> <span class="mf">12.0</span>
+<span class="c"># 'graduate' not present in description</span>
+<span class="n">In</span> <span class="p">[</span><span class="mi">391</span><span class="p">]:</span> <span class="n">data</span><span class="p">[</span><span class="nb">filter</span> <span class="o">==</span> <span class="bp">False</span><span class="p">]</span><span class="o">.</span><span class="n">applications</span><span class="o">.</span><span class="n">mean</span><span class="p">()</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">391</span><span class="p">]:</span> <span class="mf">4.3551236749116606</span>
+<span class="c"># mean salary if 'graduate' in description</span>
+<span class="n">In</span> <span class="p">[</span><span class="mi">392</span><span class="p">]:</span> <span class="n">data</span><span class="p">[</span><span class="nb">filter</span><span class="p">]</span><span class="o">.</span><span class="n">salary_max</span><span class="o">.</span><span class="n">mean</span><span class="p">()</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">392</span><span class="p">]:</span> <span class="mf">27714.285714285714</span>
+<span class="c"># mean salary if 'graduate' not in description</span>
+<span class="n">In</span> <span class="p">[</span><span class="mi">393</span><span class="p">]:</span> <span class="n">data</span><span class="p">[</span><span class="nb">filter</span> <span class="o">==</span> <span class="bp">False</span><span class="p">]</span><span class="o">.</span><span class="n">salary_max</span><span class="o">.</span><span class="n">mean</span><span class="p">()</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">393</span><span class="p">]:</span> <span class="mf">62014.893506493507</span></code></pre></div>
+
+<p>Which in nutshell means: if you have some experience in Python 
+you have on average 4 competitors to your position. Given that the most of the 
+time recruiters are inviting 4-5 people to interview, you should probably get to interview 
+if you worked with Python before.</p>
+
+<h3 id="salaries">Salaries</h3>
+
+<p>To get data about salary grouped by location:</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">In</span> <span class="p">[</span><span class="mi">244</span><span class="p">]:</span> <span class="n">tops</span><span class="o">.</span><span class="n">groupby</span><span class="p">(</span><span class="s">'location'</span><span class="p">)</span><span class="o">.</span><span class="n">salary_max</span><span class="o">.</span><span class="n">mean</span><span class="p">()</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">244</span><span class="p">]:</span> 
+<span class="n">location</span>
+<span class="n">Berkhamsted</span>    <span class="mf">203714.285714</span>
+<span class="n">Bristol</span>         <span class="mf">52352.941176</span>
+<span class="n">Cambridge</span>       <span class="mf">46720.000000</span>
+<span class="n">Cardiff</span>         <span class="mf">36714.285714</span>
+<span class="n">Devon</span>                    <span class="n">NaN</span>
+<span class="n">London</span>          <span class="mf">62846.376812</span>
+<span class="n">Manchester</span>      <span class="mf">74733.333333</span>
+<span class="n">Oxford</span>          <span class="mf">56666.666667</span>
+<span class="n">Reading</span>         <span class="mf">41642.857143</span>
+<span class="n">USA</span>            <span class="mf">154285.714286</span>
+<span class="n">Name</span><span class="p">:</span> <span class="n">salary_max</span><span class="p">,</span> <span class="n">dtype</span><span class="p">:</span> <span class="n">float64</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">245</span><span class="p">]:</span> <span class="n">tops</span><span class="o">.</span><span class="n">groupby</span><span class="p">(</span><span class="s">'location'</span><span class="p">)</span><span class="o">.</span><span class="n">salary_min</span><span class="o">.</span><span class="n">mean</span><span class="p">()</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">245</span><span class="p">]:</span> 
+<span class="n">location</span>
+<span class="n">Berkhamsted</span>    <span class="mf">177142.857143</span>
+<span class="n">Bristol</span>         <span class="mf">38294.117647</span>
+<span class="n">Cambridge</span>       <span class="mf">36400.000000</span>
+<span class="n">Cardiff</span>         <span class="mf">27285.714286</span>
+<span class="n">Devon</span>                    <span class="n">NaN</span>
+<span class="n">London</span>          <span class="mf">47963.768116</span>
+<span class="n">Manchester</span>      <span class="mf">59866.666667</span>
+<span class="n">Oxford</span>          <span class="mf">46000.000000</span>
+<span class="n">Reading</span>         <span class="mf">32428.571429</span>
+<span class="n">USA</span>            <span class="mf">127857.142857</span>
+<span class="n">Name</span><span class="p">:</span> <span class="n">salary_min</span><span class="p">,</span> <span class="n">dtype</span><span class="p">:</span> <span class="n">float64</span></code></pre></div>
+
+<p>Two things are strange here, unusually high values for Berkhamsted
+and USA and absolutely no wage data for Devon. Are people really getting
+that much in Berhamsted and USA?</p>
+
+<p>As a side note, the fact that we have USA in our data set is because
+of inconsitency in job postings on reed. For UK posts location is specified
+as city, for US posts we get USA as location, without adding city. To get
+actual US city where position is located we would have to parse description
+which would be difficult to do, so I decided to keep it as it is without
+normalizing this to city string.</p>
+
+<p>Are these wages in Berkhamsted so high? I suspected either cheating here
+or error in my script extracting data, so to actually check this I had to
+follow those links and see raw data.</p>
+
+<p>Turns out it’s <a href="http://www.reed.co.uk/jobs/payroll-superstar/26069681#/jobs?keywords=python&amp;cached=True&amp;pageno=22">cheating on agency side</a>.
+Payroll superstar title hides rather small wages of 20k per annum. Since
+agency that uses this trick is responsible for 10 job postings
+out of all 15 Python jobs in Berkhamsted it is natural that it distorts
+results. What’s more this job is actually not work of Python 
+programmer, but was caught in our results because of reed indexing
+which caught reference to monty python.</p>
+
+<p>And for USA jobs? Are they really getting so much more then UK engineers?
+Let’s look at descriptions…</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">In</span><span class="p">[</span><span class="mi">260</span><span class="p">]:</span> <span class="n">tops</span><span class="p">[</span><span class="n">tops</span><span class="o">.</span><span class="n">location</span><span class="o">==</span><span class="s">'USA'</span><span class="p">]</span><span class="o">.</span><span class="n">description</span><span class="o">.</span><span class="n">values</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">260</span><span class="p">]:</span> 
+<span class="n">array</span><span class="p">([</span> <span class="s">'Software Developer - C &amp; Linux/Unix - San Francisco - To c.$150,000 + bonus + relocation + bens. This role will involve designing and developing systems for the delivery of media content to consumers on a variety of devices, worldwide. This role offers a starting salary of up to $150,000 (possibly...'</span><span class="p">,</span>
+       <span class="s">'  Senior Data Scientist / Manager   New York / New Jersey   $150,000 - $200,000 base salary + performance related annual bonus and exceptional benefits  Are you interested in working as a Senior Data Scientist / Manager for a hugely exciting, fast-paced, dynamic and globally renowned financial services...'</span><span class="p">,</span>
+       <span class="s">'Software Developer - iOS, C/C++ and/or Java - San Francisco - To c.$130,000 + bonus + relocation + bens. This role will involve designing and developing SDKs and APIs that are used by iPhone, iPad and iOS developers around the world. This role offers a starting salary of up to $130,000 (possibly higher...'</span><span class="p">,</span>
+       <span class="s">'Software Developer - C &amp; Linux/Unix - San Francisco - To c.$150,000 + bonus + relocation + bens. This role will involve designing and developing systems for the delivery of media content to consumers on a variety of devices, worldwide. This role offers a starting salary of up to $150,000 (possibly...'</span><span class="p">,</span>
+       <span class="s">'Software Developer - C &amp; Linux/Unix - San Francisco - To c.$150,000 + bonus + relocation + bens. This role will involve designing and developing systems for the delivery of media content to consumers on a variety of devices, worldwide. This role offers a starting salary of up to $150,000 (possibly...'</span><span class="p">,</span>
+       <span class="s">'  Data Scientist, Analytics   New York City, New York   $100,000 - $150,000 base salary + performance related annual bonus  Are you interested in working as a Data Scientist for a forward thinking, dynamic, innovative and customer focused online retailer where exceptional levels of career progression...'</span><span class="p">,</span>
+       <span class="s">'Cloud Engineer - C/C++, Linux, AWS, Openstack - San Francisco - To c.$150,000 + bonus + relocation + bens. This role will involve designing and developing cloud software applications to improve the delivery of media content to consumers on a variety of devices, worldwide. This role offers a starting salary...'</span><span class="p">,</span>
+       <span class="s">'  Algorithm Engineer New York City, New York $120,000 - $150,000 base salary + performance related annual bonus + benefits  The opportunity to work for the coolest, most innovative and cutting-edge digital media organization in New York City and arguably across the entire globe should not be passed upon...'</span><span class="p">],</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">object</span><span class="p">)</span></code></pre></div>
+
+<p>All salaries are given in dollars not in pounds! Actual difference is not as
+big as it seems. Yet even after adjusting to pound it seems that US salaries
+are much higher at around 84-100k per annum. Whether actual take home wages
+are higher in US is not completely evident. When comparing salaries between
+two countries you have to ask yourself if you really compare apple to apples. 
+Taxes, social security contributions and health care make a big difference to
+actual take home pay and it is not clear if they are always specified in same way.
+Perhaps they publish salaries without tax in US and with tax in UK, 
+just like they publish prices of goods with tax in UK and without tax in US.</p>
+
+<p>Finally aggregate data for UK as a whole:</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">In</span> <span class="p">[</span><span class="mi">263</span><span class="p">]:</span> <span class="n">data</span><span class="o">.</span><span class="n">salary_max</span><span class="o">.</span><span class="n">mean</span><span class="p">()</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">263</span><span class="p">]:</span> <span class="mf">59689.428571428572</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">264</span><span class="p">]:</span> <span class="n">data</span><span class="o">.</span><span class="n">salary_min</span><span class="o">.</span><span class="n">mean</span><span class="p">()</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">264</span><span class="p">]:</span> <span class="mf">46540.220338983054</span></code></pre></div>
+
+<h3 id="position-without-applicants">Position without applicants</h3>
+
+<p>One interesting thing about job market for Python programmers is unusually
+high number of positions for which there is no applications.</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">In</span> <span class="p">[</span><span class="mi">88</span><span class="p">]:</span> <span class="n">zeros</span> <span class="o">=</span> <span class="n">data</span><span class="p">[</span><span class="n">data</span><span class="o">.</span><span class="n">applications</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="mi">0</span><span class="p">)]</span>
+<span class="n">In</span> <span class="p">[</span><span class="mi">89</span><span class="p">]:</span> <span class="n">zeros</span><span class="o">.</span><span class="n">id</span><span class="o">.</span><span class="n">count</span><span class="p">()</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">89</span><span class="p">]:</span> <span class="mi">101</span></code></pre></div>
+
+<p>One out of six jobs has zero applications. It has to be difficult to find
+experienced python dev these days.</p>
+
+<p>But one can also ask why some positions don’t get any interest.
+First of all maybe they were just recently published and noone had the time 
+to apply yet. Luckily I’m storing date published and date found in my data, 
+so we can get number of days each add is on market from these fields. 
+My script stores both dates as isoformat string. To get number of days
+we need to convert isoformat date to timedelta and then to integer.</p>
+
+<p>With pandas we can actually easily add new columns to DataFrame, so let’s do this.
+I will add new column “daysOn” - that contains timedelta between date published
+and date found by my spider.</p>
+
+<p>Adding new column is simple, just assign another series to DataFrame:</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">In</span> <span class="p">[</span><span class="mi">291</span><span class="p">]:</span> <span class="n">zeros</span><span class="p">[</span><span class="s">"daysOn"</span><span class="p">]</span> <span class="o">=</span> <span class="n">zeros</span><span class="o">.</span><span class="n">found</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">datetime64</span><span class="p">)</span> <span class="o">-</span> <span class="n">zeros</span><span class="o">.</span><span class="n">published</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">datetime64</span><span class="p">)</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">292</span><span class="p">]:</span> <span class="n">zeros</span><span class="p">[[</span><span class="s">"found"</span><span class="p">,</span> <span class="s">"published"</span><span class="p">,</span> <span class="s">"daysOn"</span><span class="p">]]</span><span class="o">.</span><span class="n">head</span><span class="p">(</span><span class="mi">3</span><span class="p">)</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">292</span><span class="p">]:</span> 
+                        <span class="n">found</span>                   <span class="n">published</span>  \
+<span class="mi">0</span>  <span class="mi">2014</span><span class="o">-</span><span class="mi">12</span><span class="o">-</span><span class="mi">26</span><span class="n">T21</span><span class="p">:</span><span class="mi">54</span><span class="p">:</span><span class="mf">34.050102</span>  <span class="mi">2014</span><span class="o">-</span><span class="mi">12</span><span class="o">-</span><span class="mi">22</span><span class="n">T21</span><span class="p">:</span><span class="mi">54</span><span class="p">:</span><span class="mf">34.049654</span>   
+<span class="mi">2</span>  <span class="mi">2014</span><span class="o">-</span><span class="mi">12</span><span class="o">-</span><span class="mi">26</span><span class="n">T21</span><span class="p">:</span><span class="mi">54</span><span class="p">:</span><span class="mf">34.054577</span>  <span class="mi">2014</span><span class="o">-</span><span class="mi">12</span><span class="o">-</span><span class="mi">22</span><span class="n">T21</span><span class="p">:</span><span class="mi">54</span><span class="p">:</span><span class="mf">34.054197</span>   
+<span class="mi">5</span>  <span class="mi">2014</span><span class="o">-</span><span class="mi">12</span><span class="o">-</span><span class="mi">26</span><span class="n">T21</span><span class="p">:</span><span class="mi">54</span><span class="p">:</span><span class="mf">34.063716</span>  <span class="mi">2014</span><span class="o">-</span><span class="mi">12</span><span class="o">-</span><span class="mi">26</span><span class="n">T21</span><span class="p">:</span><span class="mi">54</span><span class="p">:</span><span class="mf">34.063350</span>   
+
+                  <span class="n">daysOn</span>  
+<span class="mi">0</span> <span class="mi">4</span> <span class="n">days</span> <span class="mo">00</span><span class="p">:</span><span class="mo">00</span><span class="p">:</span><span class="mf">00.000448</span>  
+<span class="mi">2</span> <span class="mi">4</span> <span class="n">days</span> <span class="mo">00</span><span class="p">:</span><span class="mo">00</span><span class="p">:</span><span class="mf">00.000380</span>  
+<span class="mi">5</span> <span class="mi">0</span> <span class="n">days</span> <span class="mo">00</span><span class="p">:</span><span class="mo">00</span><span class="p">:</span><span class="mf">00.000366</span></code></pre></div>
+
+<p>At this point we have extra column “daysOn” which contains timedelta object
+representing time that passed between date of publication and date when
+each ad was found. Note that we’re using <a href="http://docs.scipy.org/doc/numpy/reference/arrays.datetime.html">numpy datetime</a> which exposes
+slighly different api from python’s native datetime.timedelta object
+To actually get number of days we need to cast our timedelta to int
+and representing number of days.o</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">In</span> <span class="p">[</span><span class="mi">293</span><span class="p">]:</span> <span class="n">zeros</span><span class="o">.</span><span class="n">daysOn</span> <span class="o">=</span> <span class="n">zeros</span><span class="o">.</span><span class="n">daysOn</span><span class="o">.</span><span class="n">apply</span><span class="p">(</span><span class="k">lambda</span> <span class="n">a</span><span class="p">:</span><span class="n">np</span><span class="o">.</span><span class="n">timedelta64</span><span class="p">(</span><span class="n">a</span><span class="p">,</span> <span class="s">'D'</span><span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="nb">int</span><span class="p">))</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">294</span><span class="p">]:</span> <span class="n">zeros</span><span class="p">[[</span><span class="s">"found"</span><span class="p">,</span> <span class="s">"published"</span><span class="p">,</span> <span class="s">"daysOn"</span><span class="p">]]</span><span class="o">.</span><span class="n">head</span><span class="p">(</span><span class="mi">3</span><span class="p">)</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">294</span><span class="p">]:</span> 
+                        <span class="n">found</span>                   <span class="n">published</span>  <span class="n">daysOn</span>
+<span class="mi">0</span>  <span class="mi">2014</span><span class="o">-</span><span class="mi">12</span><span class="o">-</span><span class="mi">26</span><span class="n">T21</span><span class="p">:</span><span class="mi">54</span><span class="p">:</span><span class="mf">34.050102</span>  <span class="mi">2014</span><span class="o">-</span><span class="mi">12</span><span class="o">-</span><span class="mi">22</span><span class="n">T21</span><span class="p">:</span><span class="mi">54</span><span class="p">:</span><span class="mf">34.049654</span>       <span class="mi">4</span>
+<span class="mi">2</span>  <span class="mi">2014</span><span class="o">-</span><span class="mi">12</span><span class="o">-</span><span class="mi">26</span><span class="n">T21</span><span class="p">:</span><span class="mi">54</span><span class="p">:</span><span class="mf">34.054577</span>  <span class="mi">2014</span><span class="o">-</span><span class="mi">12</span><span class="o">-</span><span class="mi">22</span><span class="n">T21</span><span class="p">:</span><span class="mi">54</span><span class="p">:</span><span class="mf">34.054197</span>       <span class="mi">4</span>
+<span class="mi">5</span>  <span class="mi">2014</span><span class="o">-</span><span class="mi">12</span><span class="o">-</span><span class="mi">26</span><span class="n">T21</span><span class="p">:</span><span class="mi">54</span><span class="p">:</span><span class="mf">34.063716</span>  <span class="mi">2014</span><span class="o">-</span><span class="mi">12</span><span class="o">-</span><span class="mi">26</span><span class="n">T21</span><span class="p">:</span><span class="mi">54</span><span class="p">:</span><span class="mf">34.063350</span>       <span class="mi">0</span></code></pre></div>
+
+<p>Now let’s eliminate those ads which are on job market only for zero days</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">In</span> <span class="p">[</span><span class="mi">307</span><span class="p">]:</span> <span class="n">zeros</span> <span class="o">=</span> <span class="n">zeros</span><span class="p">[</span><span class="n">zeros</span><span class="o">.</span><span class="n">daysOn</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span> <span class="o">==</span> <span class="bp">False</span><span class="p">]</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">309</span><span class="p">]:</span> <span class="n">zeros</span><span class="p">[[</span><span class="s">"found"</span><span class="p">,</span> <span class="s">"published"</span><span class="p">,</span> <span class="s">"daysOn"</span><span class="p">]]</span><span class="o">.</span><span class="n">head</span><span class="p">(</span><span class="mi">3</span><span class="p">)</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">309</span><span class="p">]:</span> 
+                         <span class="n">found</span>                   <span class="n">published</span>  <span class="n">daysOn</span>
+<span class="mi">0</span>   <span class="mi">2014</span><span class="o">-</span><span class="mi">12</span><span class="o">-</span><span class="mi">26</span><span class="n">T21</span><span class="p">:</span><span class="mi">54</span><span class="p">:</span><span class="mf">34.050102</span>  <span class="mi">2014</span><span class="o">-</span><span class="mi">12</span><span class="o">-</span><span class="mi">22</span><span class="n">T21</span><span class="p">:</span><span class="mi">54</span><span class="p">:</span><span class="mf">34.049654</span>       <span class="mi">4</span>
+<span class="mi">2</span>   <span class="mi">2014</span><span class="o">-</span><span class="mi">12</span><span class="o">-</span><span class="mi">26</span><span class="n">T21</span><span class="p">:</span><span class="mi">54</span><span class="p">:</span><span class="mf">34.054577</span>  <span class="mi">2014</span><span class="o">-</span><span class="mi">12</span><span class="o">-</span><span class="mi">22</span><span class="n">T21</span><span class="p">:</span><span class="mi">54</span><span class="p">:</span><span class="mf">34.054197</span>       <span class="mi">4</span>
+<span class="mi">12</span>  <span class="mi">2014</span><span class="o">-</span><span class="mi">12</span><span class="o">-</span><span class="mi">26</span><span class="n">T21</span><span class="p">:</span><span class="mi">54</span><span class="p">:</span><span class="mf">34.081788</span>         <span class="mi">2014</span><span class="o">-</span><span class="mi">12</span><span class="o">-</span><span class="mi">17</span><span class="n">T00</span><span class="p">:</span><span class="mo">00</span><span class="p">:</span><span class="mo">00</span>       <span class="mi">9</span></code></pre></div>
+
+<p>At this point ‘zeros’ frame contains only ads that are on market for more then 
+one day, and no one had applied for them yet.</p>
+
+<p>Average time on market is two weeks.</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">In</span> <span class="p">[</span><span class="mi">337</span><span class="p">]:</span> <span class="n">zeros</span><span class="o">.</span><span class="n">daysOn</span><span class="o">.</span><span class="n">mean</span><span class="p">()</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">337</span><span class="p">]:</span> <span class="mf">14.329787234042554</span></code></pre></div>
+
+<p>Where are those positions located?</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">In</span> <span class="p">[</span><span class="mi">311</span><span class="p">]:</span> <span class="n">zeros</span><span class="o">.</span><span class="n">location</span><span class="o">.</span><span class="n">value_counts</span><span class="p">()</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">311</span><span class="p">]:</span> 
+<span class="n">London</span>             <span class="mi">25</span>
+<span class="n">Cambridge</span>          <span class="mi">13</span>
+<span class="n">Manchester</span>          <span class="mi">6</span>
+<span class="n">Southampton</span>         <span class="mi">3</span>
+<span class="n">Surrey</span>              <span class="mi">3</span>
+<span class="n">Bristol</span>             <span class="mi">2</span>
+<span class="n">Cheltenham</span>          <span class="mi">2</span></code></pre></div>
+
+<p>Fun fact: salary for those position is actually higher from average.</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">In</span> <span class="p">[</span><span class="mi">315</span><span class="p">]:</span> <span class="n">zeros</span><span class="o">.</span><span class="n">salary_max</span><span class="o">.</span><span class="n">describe</span><span class="p">()</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">315</span><span class="p">]:</span> 
+<span class="n">count</span>        <span class="mf">58.000000</span>
+<span class="n">mean</span>      <span class="mf">66736.793103</span>
+<span class="n">std</span>       <span class="mf">46585.508446</span>
+<span class="nb">min</span>       <span class="mf">28000.000000</span>
+<span class="mi">25</span><span class="o">%</span>       <span class="mf">40000.000000</span>
+<span class="mi">50</span><span class="o">%</span>       <span class="mf">56300.000000</span>
+<span class="mi">75</span><span class="o">%</span>       <span class="mf">75000.000000</span>
+<span class="nb">max</span>      <span class="mf">276000.000000</span>
+<span class="n">Name</span><span class="p">:</span> <span class="n">salary_max</span><span class="p">,</span> <span class="n">dtype</span><span class="p">:</span> <span class="n">float64</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">316</span><span class="p">]:</span> <span class="n">data</span><span class="o">.</span><span class="n">salary_max</span><span class="o">.</span><span class="n">describe</span><span class="p">()</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">316</span><span class="p">]:</span> 
+<span class="n">count</span>       <span class="mf">413.000000</span>
+<span class="n">mean</span>      <span class="mf">59689.428571</span>
+<span class="n">std</span>       <span class="mf">43279.344537</span>
+<span class="nb">min</span>       <span class="mf">22000.000000</span>
+<span class="mi">25</span><span class="o">%</span>       <span class="mf">36000.000000</span>
+<span class="mi">50</span><span class="o">%</span>       <span class="mf">50000.000000</span>
+<span class="mi">75</span><span class="o">%</span>       <span class="mf">65000.000000</span>
+<span class="nb">max</span>      <span class="mf">276000.000000</span>
+<span class="n">Name</span><span class="p">:</span> <span class="n">salary_max</span><span class="p">,</span> <span class="n">dtype</span><span class="p">:</span> <span class="n">float64</span></code></pre></div>
+
+<p>What types of jobs are these? Probably those that require lots 
+of experience, we can tell that only two of them contain
+word graduate. Juding by presence of some keywords like: 
+“lead” or “experience” and salary above mean they are probably 
+roles for experienced devs, and description seems scares people off.</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="c"># probably not entry level positions, only two of 101 contain 'graduate'</span>
+<span class="n">In</span> <span class="p">[</span><span class="mi">351</span><span class="p">]:</span> <span class="n">zeros</span><span class="p">[</span><span class="n">zeros</span><span class="o">.</span><span class="n">description</span><span class="o">.</span><span class="n">str</span><span class="o">.</span><span class="n">contains</span><span class="p">(</span><span class="s">'graduate'</span><span class="p">)]</span><span class="o">.</span><span class="n">id</span><span class="o">.</span><span class="n">count</span><span class="p">()</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">351</span><span class="p">]:</span> <span class="mi">2</span>
+<span class="c"># which keywords are present? 'lead'...</span>
+<span class="n">In</span> <span class="p">[</span><span class="mi">358</span><span class="p">]:</span> <span class="n">zeros</span><span class="p">[</span><span class="n">zeros</span><span class="o">.</span><span class="n">description</span><span class="o">.</span><span class="n">str</span><span class="o">.</span><span class="n">contains</span><span class="p">(</span><span class="s">'lead'</span><span class="p">,</span> <span class="n">case</span><span class="o">=</span><span class="bp">False</span><span class="p">)]</span><span class="o">.</span><span class="n">id</span><span class="o">.</span><span class="n">count</span><span class="p">()</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">358</span><span class="p">]:</span> <span class="mi">42</span>
+<span class="c"># ... 'experience' </span>
+<span class="n">In</span> <span class="p">[</span><span class="mi">359</span><span class="p">]:</span> <span class="n">zeros</span><span class="p">[</span><span class="n">zeros</span><span class="o">.</span><span class="n">description</span><span class="o">.</span><span class="n">str</span><span class="o">.</span><span class="n">contains</span><span class="p">(</span><span class="s">'experience'</span><span class="p">,</span> <span class="n">case</span><span class="o">=</span><span class="bp">False</span><span class="p">)]</span><span class="o">.</span><span class="n">id</span><span class="o">.</span><span class="n">count</span><span class="p">()</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">359</span><span class="p">]:</span> <span class="mi">40</span></code></pre></div>
+
+<p>I think we’ve got quite an insight into Python job market at this point. There are still 
+some interesting questions to ask but I think we can safely leave them for part two</p>
+
+  </article>
+
+</div></body></html>

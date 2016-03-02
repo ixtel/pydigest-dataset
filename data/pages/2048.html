@@ -1,0 +1,210 @@
+<html><body><div><section class="post_content clearfix" itemprop="articleBody">
+                            <p class="shareaholic-canvas" data-app-id="18930042" data-app="share_buttons" data-title="Stealthy Django Deployments" data-link="https://www.safaribooksonline.com/blog/2014/11/13/stealthy-django-deployments/" data-summary=""/><p>One of the trickier parts of maintaining a frequently updated web application is deploying those updates without annoying the site’s users.  Updating the software that runs a web site can involve uploading new code, upgrading dependencies, changing the database schema, restarting several servers, working around long-running background tasks, and more.  Doing all this in the most obvious, straightforward manner typically means stopping everything, doing the deployment, and then restarting it all (which means the site is unavailable in the meantime).  Many sites used to handle this by scheduling downtime for updates late at night when not many people are using the site, but this has several drawbacks:<span id="more-16642"/></p>
+<ul>
+<li>Sites with a global audience don’t really have a time when anywhere near all their users are asleep</li>
+<li>It becomes a big deal to deploy new features (because it means taking the site down), so pressure to do it infrequently conflicts with pressure to fix bugs and release new features quickly</li>
+<li>Nobody really wants to be up at 3 AM deploying new code when most of the people who could help if something goes wrong are asleep</li>
+</ul>
+<p>So what you really want is a way to deploy a new version of the site without any of your users even noticing until they spot the improvements.  Given the huge number of web sites out there implemented in different languages, frameworks, and operating systems, people have come up with a variety of ways to attempt this.  What I’m going to outline here is what we’re currently doing to quickly deploy new versions of our main Django application in the middle of the day, while most of the company is online and working, without interrupting any user requests or long-running tasks.<br/>
+</p>
+<h2>Tools</h2>
+<p>First, a quick overview of what we’re working with:</p>
+<ul>
+<li><a href="https://www.safaribooksonline.com/library/view/django-essentials/9781783983704/">Django</a> is our web application framework, and contains utilities for collecting static assets for deployment, etc.</li>
+<li><a href="https://www.safaribooksonline.com/library/view/web-development-with/9781783286898/ch10s10.html">Fabric</a> for breaking the deployment into steps and executing each one on an assortment of remote servers with different roles</li>
+<li><a href="https://www.safaribooksonline.com/library/view/chef-essentials/9781783983049/">Chef</a> for updating server configurations and system dependencies</li>
+<li><a href="https://www.safaribooksonline.com/library/view/practical-data-science/9781783980246/ch01s09.html">Virtualenv</a> for maintaining a set of Python libraries using exactly the versions we want, independent of what our operating system currently packages by default</li>
+<li><a href="https://www.safaribooksonline.com/library/view/web-development-with/9781783286898/ch02s08.html">South</a> for updating the database schema (soon to be replaced with Django 1.7’s built-in migrations)</li>
+<li><a href="https://www.safaribooksonline.com/library/view/mastering-nginx/9781849517447/ch06s08.html">uWSGI</a> for linking our web application processes to our web server</li>
+<li><a href="https://www.safaribooksonline.com/library/view/parallel-programming-with/9781783288397/ch07.html">Celery</a> for running scheduled and asynchronous tasks that don’t need to finish in the duration of a single web request</li>
+</ul>
+<p>There’s actually a lot more software than this involved in running the site, but these are some of the key tools that make it possible to perform seamless deployments.  The main deployment Fabric task will end up looking something like this:</p>
+
+		<div id="crayon-56d5aa1733895063615125" class="crayon-syntax crayon-theme-classic crayon-font-monaco crayon-os-mac print-yes notranslate" data-settings=" minimize scroll-mouseover">
+		
+			
+			<p class="crayon-info"/>
+			<p class="crayon-plain-wrap"/>
+			<div class="crayon-main">
+				<table class="crayon-table">
+					<tr class="crayon-row">
+				<td class="crayon-nums " data-settings="show">
+					
+				</td>
+						<td class="crayon-code"><div class="crayon-pre"><p class="crayon-line" id="crayon-56d5aa1733895063615125-1"><span class="crayon-sy">@</span><span class="crayon-i">task</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa1733895063615125-2"><span class="crayon-sy">@</span><span class="crayon-e">runs_once</span></p><p class="crayon-line" id="crayon-56d5aa1733895063615125-3"><span class="crayon-r">def</span><span class="crayon-h"> </span><span class="crayon-e">deploy</span><span class="crayon-sy">(</span><span class="crayon-sy">)</span><span class="crayon-o">:</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa1733895063615125-4"><span class="crayon-h">    </span><span class="crayon-s">"""Perform the entire process of deploying code to a server farm (starting</span></p><p class="crayon-line" id="crayon-56d5aa1733895063615125-5"><span class="crayon-s">    from preparing to create a tarball and proceeding through restarting</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa1733895063615125-6"><span class="crayon-s">    services to use the newly uploaded code)."""</span></p><p class="crayon-line" id="crayon-56d5aa1733895063615125-7"><span class="crayon-h">    </span><span class="crayon-c"># Use execute() to run sub-tasks in parallel or serial as appropriate,</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa1733895063615125-8"><span class="crayon-h">    </span><span class="crayon-c"># ignoring this task's host and role assignment</span></p><p class="crayon-line" id="crayon-56d5aa1733895063615125-9"><span class="crayon-h">    </span><span class="crayon-e">execute</span><span class="crayon-sy">(</span><span class="crayon-v">build_archive</span><span class="crayon-sy">)</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa1733895063615125-10"><span class="crayon-h">    </span><span class="crayon-e">execute</span><span class="crayon-sy">(</span><span class="crayon-v">deliver_tar</span><span class="crayon-sy">)</span></p><p class="crayon-line" id="crayon-56d5aa1733895063615125-11"><span class="crayon-h">    </span><span class="crayon-e">execute</span><span class="crayon-sy">(</span><span class="crayon-v">stop_celery</span><span class="crayon-sy">)</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa1733895063615125-12"><span class="crayon-h">    </span><span class="crayon-e">execute</span><span class="crayon-sy">(</span><span class="crayon-v">update_packages</span><span class="crayon-sy">)</span></p><p class="crayon-line" id="crayon-56d5aa1733895063615125-13"><span class="crayon-h">    </span><span class="crayon-e">execute</span><span class="crayon-sy">(</span><span class="crayon-v">migrate_db</span><span class="crayon-sy">)</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa1733895063615125-14"><span class="crayon-h">    </span><span class="crayon-e">execute</span><span class="crayon-sy">(</span><span class="crayon-v">update_deployment_link</span><span class="crayon-sy">)</span></p><p class="crayon-line" id="crayon-56d5aa1733895063615125-15"><span class="crayon-h">    </span><span class="crayon-e">execute</span><span class="crayon-sy">(</span><span class="crayon-v">chef_client</span><span class="crayon-sy">)</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa1733895063615125-16"><span class="crayon-h">    </span><span class="crayon-e">execute</span><span class="crayon-sy">(</span><span class="crayon-v">restart</span><span class="crayon-sy">)</span></p></div></td>
+					</tr>
+				</table>
+			</div>
+		</div>
+
+<p> </p>
+<h2>Deployment: Getting the Code to the Servers</h2>
+<p>The first steps in our Fabric script for performing deployments are to prepare an archive of the new code (<code>build_archive</code>) and get it to all the servers that need to run it (<code>deliver_tar</code>).  This is really the easy part, as long as we upload the code someplace other than where the current code is running.</p>
+
+		<div id="crayon-56d5aa17338af670124583" class="crayon-syntax crayon-theme-classic crayon-font-monaco crayon-os-mac print-yes notranslate" data-settings=" minimize scroll-mouseover">
+		
+			
+			<p class="crayon-info"/>
+			<p class="crayon-plain-wrap"/>
+			<div class="crayon-main">
+				<table class="crayon-table">
+					<tr class="crayon-row">
+				<td class="crayon-nums " data-settings="show">
+					
+				</td>
+						<td class="crayon-code"><div class="crayon-pre"><p class="crayon-line" id="crayon-56d5aa17338af670124583-1"><span class="crayon-sy">@</span><span class="crayon-i">task</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338af670124583-2"><span class="crayon-sy">@</span><span class="crayon-e">runs_once</span></p><p class="crayon-line" id="crayon-56d5aa17338af670124583-3"><span class="crayon-r">def</span><span class="crayon-h"> </span><span class="crayon-e">build_archive</span><span class="crayon-sy">(</span><span class="crayon-sy">)</span><span class="crayon-o">:</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338af670124583-4"><span class="crayon-h">    </span><span class="crayon-s">"""Create the archive(s) to be copied to servers."""</span></p><p class="crayon-line" id="crayon-56d5aa17338af670124583-5"><span class="crayon-h">    </span><span class="crayon-sy">.</span><span class="crayon-sy">.</span><span class="crayon-sy">.</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338af670124583-6"> </p><p class="crayon-line" id="crayon-56d5aa17338af670124583-7"> </p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338af670124583-8"><span class="crayon-sy">@</span><span class="crayon-i">task</span></p><p class="crayon-line" id="crayon-56d5aa17338af670124583-9"><span class="crayon-sy">@</span><span class="crayon-e">parallel</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338af670124583-10"><span class="crayon-r">def</span><span class="crayon-h"> </span><span class="crayon-e">deliver_tar</span><span class="crayon-sy">(</span><span class="crayon-sy">)</span><span class="crayon-o">:</span></p><p class="crayon-line" id="crayon-56d5aa17338af670124583-11"><span class="crayon-h">    </span><span class="crayon-s">"""Move and unpack a tar file to a remote directory.</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338af670124583-12"> </p><p class="crayon-line" id="crayon-56d5aa17338af670124583-13"><span class="crayon-s">    If you call this function twice for the same tar file and directory</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338af670124583-14"><span class="crayon-s">    on the same host, only the first one will actually copy anything.</span></p><p class="crayon-line" id="crayon-56d5aa17338af670124583-15"><span class="crayon-s">    """</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338af670124583-16"><span class="crayon-h">    </span><span class="crayon-sy">.</span><span class="crayon-sy">.</span><span class="crayon-sy">.</span></p></div></td>
+					</tr>
+				</table>
+			</div>
+		</div>
+
+<p>We only need to build the archive to be uploaded once (no matter how many different servers we’re deploying it too), and we can upload it to all the servers it needs to go to in parallel.  So far we haven’t done anything to interrupt the normal operation of the site.  Implementation details of the tasks have been omitted here to make the high-level organization more clear (and because they can vary a lot between sites depending on how things have been configured).</p>
+<h2>Pause Asynchronous Tasks</h2>
+<p>Before we start making changes that could potentially impact how the site behaves, we’re going to pause all our asynchronous task processing.</p>
+
+		<div id="crayon-56d5aa17338bb825169503" class="crayon-syntax crayon-theme-classic crayon-font-monaco crayon-os-mac print-yes notranslate" data-settings=" minimize scroll-mouseover">
+		
+			
+			<p class="crayon-info"/>
+			<p class="crayon-plain-wrap"/>
+			<div class="crayon-main">
+				<table class="crayon-table">
+					<tr class="crayon-row">
+				<td class="crayon-nums " data-settings="show">
+					<div class="crayon-nums-content"><p class="crayon-num" data-line="crayon-56d5aa17338bb825169503-1">1</p><p class="crayon-num crayon-striped-num" data-line="crayon-56d5aa17338bb825169503-2">2</p><p class="crayon-num" data-line="crayon-56d5aa17338bb825169503-3">3</p><p class="crayon-num crayon-striped-num" data-line="crayon-56d5aa17338bb825169503-4">4</p><p class="crayon-num" data-line="crayon-56d5aa17338bb825169503-5">5</p><p class="crayon-num crayon-striped-num" data-line="crayon-56d5aa17338bb825169503-6">6</p><p class="crayon-num" data-line="crayon-56d5aa17338bb825169503-7">7</p><p class="crayon-num crayon-striped-num" data-line="crayon-56d5aa17338bb825169503-8">8</p><p class="crayon-num" data-line="crayon-56d5aa17338bb825169503-9">9</p><p class="crayon-num crayon-striped-num" data-line="crayon-56d5aa17338bb825169503-10">10</p><p class="crayon-num" data-line="crayon-56d5aa17338bb825169503-11">11</p><p class="crayon-num crayon-striped-num" data-line="crayon-56d5aa17338bb825169503-12">12</p><p class="crayon-num" data-line="crayon-56d5aa17338bb825169503-13">13</p><p class="crayon-num crayon-striped-num" data-line="crayon-56d5aa17338bb825169503-14">14</p><p class="crayon-num" data-line="crayon-56d5aa17338bb825169503-15">15</p><p class="crayon-num crayon-striped-num" data-line="crayon-56d5aa17338bb825169503-16">16</p><p class="crayon-num" data-line="crayon-56d5aa17338bb825169503-17">17</p><p class="crayon-num crayon-striped-num" data-line="crayon-56d5aa17338bb825169503-18">18</p><p class="crayon-num" data-line="crayon-56d5aa17338bb825169503-19">19</p><p class="crayon-num crayon-striped-num" data-line="crayon-56d5aa17338bb825169503-20">20</p></div>
+				</td>
+						<td class="crayon-code"><div class="crayon-pre"><p class="crayon-line" id="crayon-56d5aa17338bb825169503-1"><span class="crayon-r">def</span><span class="crayon-h"> </span><span class="crayon-e">only_roles</span><span class="crayon-sy">(</span><span class="crayon-o">*</span><span class="crayon-v">roles</span><span class="crayon-sy">)</span><span class="crayon-o">:</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338bb825169503-2"><span class="crayon-h">    </span><span class="crayon-s">"""Decorator to make a tasklet run only on hosts that have certain roles."""</span></p><p class="crayon-line" id="crayon-56d5aa17338bb825169503-3"><span class="crayon-h">    </span><span class="crayon-r">def</span><span class="crayon-h"> </span><span class="crayon-e">_dec</span><span class="crayon-sy">(</span><span class="crayon-v">fn</span><span class="crayon-sy">)</span><span class="crayon-o">:</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338bb825169503-4"><span class="crayon-h">        </span><span class="crayon-sy">@</span><span class="crayon-k ">functools</span><span class="crayon-sy">.</span><span class="crayon-e">wraps</span><span class="crayon-sy">(</span><span class="crayon-v">fn</span><span class="crayon-sy">)</span></p><p class="crayon-line" id="crayon-56d5aa17338bb825169503-5"><span class="crayon-h">        </span><span class="crayon-r">def</span><span class="crayon-h"> </span><span class="crayon-e">_wrapped</span><span class="crayon-sy">(</span><span class="crayon-o">*</span><span class="crayon-v">args</span><span class="crayon-sy">,</span><span class="crayon-h"> </span><span class="crayon-o">*</span><span class="crayon-o">*</span><span class="crayon-v">kwargs</span><span class="crayon-sy">)</span><span class="crayon-o">:</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338bb825169503-6"><span class="crayon-h">            </span><span class="crayon-st">for</span><span class="crayon-h"> </span><span class="crayon-e">role </span><span class="crayon-st">in</span><span class="crayon-h"> </span><span class="crayon-v">roles</span><span class="crayon-o">:</span></p><p class="crayon-line" id="crayon-56d5aa17338bb825169503-7"><span class="crayon-h">                </span><span class="crayon-st">if</span><span class="crayon-h"> </span><span class="crayon-v">env</span><span class="crayon-sy">.</span><span class="crayon-e">host_string </span><span class="crayon-st">in</span><span class="crayon-h"> </span><span class="crayon-v">env</span><span class="crayon-sy">.</span><span class="crayon-v">roledefs</span><span class="crayon-sy">.</span><span class="crayon-e">get</span><span class="crayon-sy">(</span><span class="crayon-v">role</span><span class="crayon-sy">,</span><span class="crayon-h"> </span><span class="crayon-sy">(</span><span class="crayon-sy">)</span><span class="crayon-sy">)</span><span class="crayon-o">:</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338bb825169503-8"><span class="crayon-h">                    </span><span class="crayon-st">return</span><span class="crayon-h"> </span><span class="crayon-e">fn</span><span class="crayon-sy">(</span><span class="crayon-o">*</span><span class="crayon-v">args</span><span class="crayon-sy">,</span><span class="crayon-h"> </span><span class="crayon-o">*</span><span class="crayon-o">*</span><span class="crayon-v">kwargs</span><span class="crayon-sy">)</span></p><p class="crayon-line" id="crayon-56d5aa17338bb825169503-9"><span class="crayon-h">        </span><span class="crayon-st">return</span><span class="crayon-h"> </span><span class="crayon-e">_wrapped</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338bb825169503-10"><span class="crayon-e">    </span><span class="crayon-st">return</span><span class="crayon-h"> </span><span class="crayon-i">_dec</span></p><p class="crayon-line" id="crayon-56d5aa17338bb825169503-11"> </p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338bb825169503-12"><span class="crayon-sy">@</span><span class="crayon-i">task</span></p><p class="crayon-line" id="crayon-56d5aa17338bb825169503-13"><span class="crayon-sy">@</span><span class="crayon-i">parallel</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338bb825169503-14"><span class="crayon-sy">@</span><span class="crayon-e">only_roles</span><span class="crayon-sy">(</span><span class="crayon-s">'celery'</span><span class="crayon-sy">)</span></p><p class="crayon-line" id="crayon-56d5aa17338bb825169503-15"><span class="crayon-r">def</span><span class="crayon-h"> </span><span class="crayon-e">stop_celery</span><span class="crayon-sy">(</span><span class="crayon-sy">)</span><span class="crayon-o">:</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338bb825169503-16"><span class="crayon-h">    </span><span class="crayon-s">"""Stop the celery workers gracefully (allow them to finish in-progress</span></p><p class="crayon-line" id="crayon-56d5aa17338bb825169503-17"><span class="crayon-s">    tasks).  The time to be allowed before resorting to a kill signal should</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338bb825169503-18"><span class="crayon-s">    be specified via the "kill timeout" entry in /etc/init/celeryd.conf.  This</span></p><p class="crayon-line" id="crayon-56d5aa17338bb825169503-19"><span class="crayon-s">    function won't return until they've been stopped one way or the other."""</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338bb825169503-20"><span class="crayon-h">    </span><span class="crayon-sy">.</span><span class="crayon-sy">.</span><span class="crayon-sy">.</span></p></div></td>
+					</tr>
+				</table>
+			</div>
+		</div>
+
+<p>The <code>only_roles</code> decorator here lets us perform certain tasks only on the servers for which they’re relevant, even though the overall deployment task is being executed on a larger set of servers (app servers, Celery servers, etc.).  Stopping Celery this early is actually overkill, but our site has been designed such that anything in a Celery task can wait for minutes or even hours without inconveniencing anybody too badly; they’re things that we’d like to be done soon, but don’t need to be done right now.  Note from the docstring that we’re using a start/stop/restart script for Celery which initially sends each Celery process a SIGINT signal asking it nicely to wrap up whatever its doing and not start anything new from the queue.  Only if that takes an unusually long time will we actually resort to a KILL signal which interrupts the task (if this happens, we get an error email about it and write up a ticket to either optimize the code or subdivide it into smaller tasks).</p>
+<h2>Install and Upgrade Dependencies</h2>
+<p>Next we update the virtualenv on each server to use the correct versions of the libraries used by the code we’re deploying.</p>
+
+		<div id="crayon-56d5aa17338c8908719013" class="crayon-syntax crayon-theme-classic crayon-font-monaco crayon-os-mac print-yes notranslate" data-settings=" minimize scroll-mouseover">
+		
+			
+			<p class="crayon-info"/>
+			<p class="crayon-plain-wrap"/>
+			<div class="crayon-main">
+				<table class="crayon-table">
+					<tr class="crayon-row">
+				<td class="crayon-nums " data-settings="show">
+					
+				</td>
+						<td class="crayon-code"><div class="crayon-pre"><p class="crayon-line" id="crayon-56d5aa17338c8908719013-1"><span class="crayon-sy">@</span><span class="crayon-i">task</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338c8908719013-2"><span class="crayon-sy">@</span><span class="crayon-e">parallel</span></p><p class="crayon-line" id="crayon-56d5aa17338c8908719013-3"><span class="crayon-r">def</span><span class="crayon-h"> </span><span class="crayon-e">update_packages</span><span class="crayon-sy">(</span><span class="crayon-sy">)</span><span class="crayon-o">:</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338c8908719013-4"><span class="crayon-h">    </span><span class="crayon-s">"""Update the set of Python packages installed on the server to match the</span></p><p class="crayon-line" id="crayon-56d5aa17338c8908719013-5"><span class="crayon-s">    application's current requirements"""</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338c8908719013-6"><span class="crayon-h">    </span><span class="crayon-sy">.</span><span class="crayon-sy">.</span><span class="crayon-sy">.</span></p></div></td>
+					</tr>
+				</table>
+			</div>
+		</div>
+
+<p>This is where we’re starting to take some risks, and this could be improved a little.  Because we’ve stopped all of our Celery processes, all of our web application processes have been running for a while and already loaded the code into memory, and the web servers are serving collected static assets from the previous deployment directory, the application isn’t really looking at this virtualenv on the filesystem much anymore.  But we do impose a limit on how many requests each Django process is allowed to handle before we restart it (to minimize risk of memory leaks and such), so bad timing could lead to one of them restarting in the middle of our deployment and a few requests hitting an odd in-between state of the code.  In practice this hasn’t happened very often, but the next improvement here is probably to <a href="https://pypi.python.org/pypi/virtualenv-clone">clone</a> the virtualenv in use, update the clone, and swap a symbolic link to point to the new one just before reloading the web application processes.</p>
+<h2>Update the Database</h2>
+<p>Not every deployment includes a database schema change, but it’s not uncommon either.</p>
+
+		<div id="crayon-56d5aa17338d3417441754" class="crayon-syntax crayon-theme-classic crayon-font-monaco crayon-os-mac print-yes notranslate" data-settings=" minimize scroll-mouseover">
+		
+			
+			<p class="crayon-info"/>
+			<p class="crayon-plain-wrap"/>
+			<div class="crayon-main">
+				<table class="crayon-table">
+					<tr class="crayon-row">
+				<td class="crayon-nums " data-settings="show">
+					
+				</td>
+						<td class="crayon-code"><div class="crayon-pre"><p class="crayon-line" id="crayon-56d5aa17338d3417441754-1"><span class="crayon-sy">@</span><span class="crayon-i">task</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338d3417441754-2"><span class="crayon-sy">@</span><span class="crayon-e">runs_once</span></p><p class="crayon-line" id="crayon-56d5aa17338d3417441754-3"><span class="crayon-r">def</span><span class="crayon-h"> </span><span class="crayon-e">migrate_db</span><span class="crayon-sy">(</span><span class="crayon-sy">)</span><span class="crayon-o">:</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338d3417441754-4"><span class="crayon-h">    </span><span class="crayon-s">"""Run syncdb and migrate to update the database"""</span></p><p class="crayon-line" id="crayon-56d5aa17338d3417441754-5"><span class="crayon-h">    </span><span class="crayon-sy">.</span><span class="crayon-sy">.</span><span class="crayon-sy">.</span></p></div></td>
+					</tr>
+				</table>
+			</div>
+		</div>
+
+<p>This is an area where we have to be particularly careful.  Because the main relational database is a single resource shared between all the application servers, it’s in constant use and changes really can’t be made to an offline copy and swapped in (the data is constantly changing).  So we need to take care that our migrations are backwards-compatible and finish pretty quickly.  This <a href="https://www.youtube.com/watch?v=-z6bKWmiAiQ">presentation</a> (slides <a href="https://speakerdeck.com/nduthoit/the-path-to-smoother-database-migrations">here</a>) gives a pretty good overview of the potential problems and how to avoid them.  The main points I’d emphasize:</p>
+<ul>
+<li>Do not create new fields on existing tables as not-null (especially on PostgreSQL; it triggers a full table rebuild).  If necessary, change the field type to not-null in a future migration after all records have been verified to have real values in it.</li>
+<li>Perform data migrations in batched transactions.  A single huge transaction can be much slower and gives you no feedback on how much longer it’ll take.</li>
+<li>Test migrations against a production-scale database before running them for real on production, to make sure they’ll finish in a reasonably length of time.</li>
+<li>Don’t assume atomic deployments.  This whole deployment process takes a nonzero amount of time, so you can’t assume that a data migration will catch every single record created by the old code or that the new code will already be in place immediately when the migration finishes.</li>
+</ul>
+<h2>Swap the Deployment Directory Link</h2>
+<p>Now that all the changes are in place, we update the symbolic link which points at the currently deployed code on each server.</p>
+
+		<div id="crayon-56d5aa17338df410678428" class="crayon-syntax crayon-theme-classic crayon-font-monaco crayon-os-mac print-yes notranslate" data-settings=" minimize scroll-mouseover">
+		
+			
+			<p class="crayon-info"/>
+			<p class="crayon-plain-wrap"/>
+			<div class="crayon-main">
+				<table class="crayon-table">
+					<tr class="crayon-row">
+				<td class="crayon-nums " data-settings="show">
+					
+				</td>
+						<td class="crayon-code"><div class="crayon-pre"><p class="crayon-line" id="crayon-56d5aa17338df410678428-1"><span class="crayon-sy">@</span><span class="crayon-i">task</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338df410678428-2"><span class="crayon-sy">@</span><span class="crayon-e">parallel</span></p><p class="crayon-line" id="crayon-56d5aa17338df410678428-3"><span class="crayon-r">def</span><span class="crayon-h"> </span><span class="crayon-e">update_deployment_link</span><span class="crayon-sy">(</span><span class="crayon-sy">)</span><span class="crayon-o">:</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338df410678428-4"><span class="crayon-h">    </span><span class="crayon-s">"""Switch the current deployment link to point at the new deployment</span></p><p class="crayon-line" id="crayon-56d5aa17338df410678428-5"><span class="crayon-s">    directory.  This must not be started until deliver_tar has finished on</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338df410678428-6"><span class="crayon-s">    all servers (to avoid 404s on new/updated static assets), but must also</span></p><p class="crayon-line" id="crayon-56d5aa17338df410678428-7"><span class="crayon-s">    be run before any app servers are restarted."""</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338df410678428-8"><span class="crayon-h">    </span><span class="crayon-sy">.</span><span class="crayon-sy">.</span><span class="crayon-sy">.</span></p></div></td>
+					</tr>
+				</table>
+			</div>
+		</div>
+
+<p>This one in particular we want to do as late as possible, and after all steps before are fully complete, because this is where all the processes look when loading the software that runs the site.  It needs to be all lined up and consistent when that happens.</p>
+<h2>Update the Server Configuration</h2>
+<p>Now we make any changes to init scripts, user permissions, system library versions, server-specific settings files, etc.</p>
+
+		<div id="crayon-56d5aa17338ea328481939" class="crayon-syntax crayon-theme-classic crayon-font-monaco crayon-os-mac print-yes notranslate" data-settings=" minimize scroll-mouseover">
+		
+			
+			<p class="crayon-info"/>
+			<p class="crayon-plain-wrap"/>
+			<div class="crayon-main">
+				<table class="crayon-table">
+					<tr class="crayon-row">
+				<td class="crayon-nums " data-settings="show">
+					
+				</td>
+						<td class="crayon-code"><div class="crayon-pre"><p class="crayon-line" id="crayon-56d5aa17338ea328481939-1"><span class="crayon-sy">@</span><span class="crayon-i">task</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338ea328481939-2"><span class="crayon-sy">@</span><span class="crayon-e">parallel</span></p><p class="crayon-line" id="crayon-56d5aa17338ea328481939-3"><span class="crayon-r">def</span><span class="crayon-h"> </span><span class="crayon-e">chef_client</span><span class="crayon-sy">(</span><span class="crayon-sy">)</span><span class="crayon-o">:</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338ea328481939-4"><span class="crayon-h">    </span><span class="crayon-s">"""Run chef-client on each app and celery node in a cluster that's managed</span></p><p class="crayon-line" id="crayon-56d5aa17338ea328481939-5"><span class="crayon-s">    via chef."""</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338ea328481939-6"><span class="crayon-h">    </span><span class="crayon-sy">.</span><span class="crayon-sy">.</span><span class="crayon-sy">.</span></p></div></td>
+					</tr>
+				</table>
+			</div>
+		</div>
+
+<p>Depending on exactly how your application code is linked to your server configuration, this could well be more appropriate to do elsewhere in the deployment process.  We do it here because we have Chef configured to generate some server-specific settings files based on templates in the application directory, so we need to have the new code fully in place before it runs in order for the settings to be correctly populated.</p>
+<h2>Restart the Servers</h2>
+<p>With all the code and database changes in place, it’s time to actually start switching over to the new code.</p>
+
+		<div id="crayon-56d5aa17338f3341130848" class="crayon-syntax crayon-theme-classic crayon-font-monaco crayon-os-mac print-yes notranslate" data-settings=" minimize scroll-mouseover">
+		
+			
+			<p class="crayon-info"/>
+			<p class="crayon-plain-wrap"/>
+			<div class="crayon-main">
+				<table class="crayon-table">
+					<tr class="crayon-row">
+				<td class="crayon-nums " data-settings="show">
+					
+				</td>
+						<td class="crayon-code"><div class="crayon-pre"><p class="crayon-line" id="crayon-56d5aa17338f3341130848-1"><span class="crayon-sy">@</span><span class="crayon-i">task</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338f3341130848-2"><span class="crayon-sy">@</span><span class="crayon-e">parallel</span></p><p class="crayon-line" id="crayon-56d5aa17338f3341130848-3"><span class="crayon-r">def</span><span class="crayon-h"> </span><span class="crayon-e">restart</span><span class="crayon-sy">(</span><span class="crayon-sy">)</span><span class="crayon-o">:</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5aa17338f3341130848-4"><span class="crayon-h">    </span><span class="crayon-s">"""Restart all app and celery servers to utilize newly deployed code"""</span></p><p class="crayon-line" id="crayon-56d5aa17338f3341130848-5"><span class="crayon-h">    </span><span class="crayon-sy">.</span><span class="crayon-sy">.</span><span class="crayon-sy">.</span></p></div></td>
+					</tr>
+				</table>
+			</div>
+		</div>
+
+<p>For Celery, this is pretty easy; we stopped all the Celery processes earlier in the deployment process, so we just need to start them again.  The processes handling web requests are where we need to be careful; basically, we want to allow requests that are currently in progress to finish while starting new processes with the updated code to handle all future incoming requests.  This is actually pretty difficult to get just right; rather than failing to do the topic justice here, I’ll just point you to the very detailed page in the uWSGI documentation on <a href="http://uwsgi-docs.readthedocs.org/en/latest/articles/TheArtOfGracefulReloading.html">the art of graceful reloading</a>.</p>
+<h2>Room for Improvement</h2>
+<p>By implementing a deployment process following the outline above, we’ve managed to significantly improve our deployment process.  A non-developer can click a button in to launch a <a href="https://www.safaribooksonline.com/library/view/jenkins-the-definitive/9781449311155/">Jenkins</a> job which runs the deployment script to deploy code which has already been tested in QA to production.  Within a few minutes, the new code is up and running on all the production servers with users none the wiser, unless maybe they suddenly notice “hey, did that page look this good before?”  When we were newer to all this, a deployment often prompted one or two dozen error emails as user requests and background tasks were rudely interrupted; now, a single error email arriving around the time of a deployment is cause for filing a new ticket to prevent it from happening again.</p>
+<p>Still, there’s still room for improving the process:</p>
+<ul>
+<li>I mentioned earlier that updating a clone of the virtualenv could reduce the risk of loading new library code too early; I’ve also seen <a href="https://hynek.me/articles/python-app-deployment-with-native-packages/">interesting</a> <a href="http://synack.me/blog/deploying-code-with-packages">arguments</a> for deploying the new code bundled with all dependencies as a native package, so that may be worth pursuing.</li>
+<li>It would be nice to be able to wait longer before pausing the Celery workers, while remaining confident that the web processes will keep humming along happily in the meantime.</li>
+<li>We could definitely get better at writing good database migrations and/or creating tools to automatically check a migration for potential problems before it goes live.</li>
+<li>The database settings can probably be tweaked for better overall performance, which would also speed up our migrations.</li>
+<li>The overall deployment is reasonably fast, but even faster would be good; some of the steps could probably stand to be optimized a bit (more efficient collection of static assets, etc.)</li>
+</ul>
+<p>If anybody has good suggestions for even more stealthy deployments, I’d love to hear about them in the comments!</p>
+                          
+                            
+                                                
+                        </section> 
+                        
+                        </div></body></html>

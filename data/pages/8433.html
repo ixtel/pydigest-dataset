@@ -1,0 +1,129 @@
+<html><body><div><div class="post-text" itemprop="text">
+<p>OK people, there is a good, nice and correct solution without any messing around.</p>
+
+<p>Firstly, I want to explain why Windows GUI process goes to background when wx.Frame.Show(MyFrame, False) is called.</p>
+
+<p>Very short explanation and skipping over details is that Windows consider the Window and an application the same thing.</p>
+
+<p>I.e. The main element of the MS Windows application is your main GUI window.</p>
+
+<p>So, when this window is hidden, an application has no more GUI and continues to run in background.</p>
+
+<p>Mac OS X considers the application to be your application and any windows you choose to put into it are its children so to speak.</p>
+
+<p>This allows you to have an application running while presenting no windows but a menu bar, from which you may choose an action which would then generate a needed window.</p>
+
+<p>Very handy for editors where you may have more than one file opened at once, each in its own window and when you close the last one, you can still open a new one or create a blank one, etc. etc.</p>
+
+<p>Therefore a main element of Mac OS X application is the application itself, and that is why it stays opened after last window is hidden, logically. Destroying its menu bar also will not help. The name of the app will stay present in Dock and in application switcher and in Force Quit. You will be able to switch to it and do nothing. :D
+But, luckily, Mac provides us with function to put it to background though. And this function is already mentioned setApplicationActivationPolicy() from NSApp object.</p>
+
+<p>The trouble was its naming in Python's AppKit, which is NSApp.setActivationPolicy_(). To complicate matters further, it is not available directly from Python's interactive shell but it has to be called at least from an imported module.</p>
+
+<p>Why? I have no idea. Anyway here is a complete example for throwing an application into background that will work on Mac and Windows.</p>
+
+<p>I didn't try it on Linux, which combines behaviour of Mac and Windows in matter of presenting an app, so, whether only hiding a window would be enough remains to be seen.</p>
+
+<p>Feel free to try and submit an edit to make the example more cross-platform.</p>
+
+<p>Example:</p>
+
+<pre><code>
+
+"""
+This app will show you small window with the randomly generated code that will confirm that reopened window is still the same app returned from background,
+and the button allowing you to send it to background.
+After you send it to background, wait 8 seconds and application will return to foreground again.
+Too prove that the application is continuing its work in the background, the app will call wx.Bell() every second.
+You should hear the sound while app is in the foreground and when it is in background too.
+
+Merry Christmas and a happy New Year!
+"""
+
+import wx
+import random, sys
+
+if sys.platform=="darwin":
+    from AppKit import NSBundle, NSApp, NSAutoreleasePool, NSApplicationActivationPolicyRegular, NSApplicationActivationPolicyProhibited
+
+    # Use Info.plist values to know whether our process started as daemon
+    # Also, change this dict in case anyone is later checking it (e.g. some module)
+    # Note: Changing this dict doesn't change Info.plist file
+    info = NSBundle.mainBundle().infoDictionary()
+
+    def SendToBackground ():
+        # Change info, just in case someone checks it later
+        info["LSUIElement"] = "1"
+        NSApp.setActivationPolicy_(NSApplicationActivationPolicyProhibited)
+
+    def ReturnToForeground ():
+        # Change info, just in case someone checks it later
+        info["LSUIElement"] = "0"
+        NSApp.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+
+else:
+    # Simulate Mac OS X App - Info.plist
+    info = {"LSUIElement": "0"} # Assume non background at startup
+                                # If programmer chose not to display GUI at startup then she/he should change this before calling ReturnToForeground()
+                                # To preserve consistency and allow correct IsDaemon() answer
+    def SendToBackground ():
+        info["LSUIElement"] = "1"
+
+    def ReturnToForeground ():
+        info["LSUIElement"] = "0"
+
+def IsDaemon ():
+    return info["LSUIElement"]=="1"
+
+class Interface (wx.Frame):
+    def __init__ (self):
+        wx.Frame.__init__(self, None, -1, "Test", pos=(100, 100), size=(100, 100))
+        wx.StaticText(self, -1, "Test code: "+str(random.randint(1000, 10000)), pos=(10, 10), size=(80, 20))
+        b = wx.Button(self, -1, "DAEMONIZE ME", size=(80, 20), pos=(10, 50))
+        wx.EVT_BUTTON(self, b.GetId(), self.OnDaemonize)
+        self.belltimer = wx.Timer(self)
+        wx.EVT_TIMER(self, self.belltimer.GetId(), self.OnBellTimer)
+        self.belltimer.Start(1000)
+        # On Mac OS X, you wouldn't be able to quit the app without the menu bar:
+        if sys.platform=="darwin":
+            self.SetMenuBar(wx.MenuBar())
+        self.Show()
+
+    def OnBellTimer (self, e):
+        wx.Bell()
+
+    def OnDaemonize (self, e):
+        self.Show(False)
+        SendToBackground()
+        self.timer = wx.Timer(self)
+        wx.EVT_TIMER(self, self.timer.GetId(), self.OnExorcize)
+        self.timer.Start(8000)
+
+    def OnExorcize (self, e):
+        self.timer.Stop()
+        ReturnToForeground()
+        self.Show()
+        self.Raise()
+
+app = wx.App()
+i = Interface()
+app.MainLoop()
+
+</code></pre>
+
+<p>Of course, this example may be started from terminal or with CLI window. In this case the terminal control over your program will stay opened while app only will appear and disappear.</p>
+
+<p>To complete your GUI daemon, you should start it with pythonw (on Windows) or launch it from daemontest.pyw file,</p>
+
+<p>and on Mac you should use:</p>
+
+<pre><code>% nohup python daemontest.py &amp;
+</code></pre>
+
+<p>or bundle it with py2app or use Python launcher that comes with python.org Python version to start daemontest.py without terminal.</p>
+
+<p>Note: This example suffers from the same flaw on Mac OS X that is mentioned on links I supplied in my question. I refer to the problem of wrong focusing and menu bar not instantly appearing when app comes from background. User has to switch around and come back to newly returned app for it to work properly. I hope somebody will solve this too. And soon. It is quite annoying.</p>
+
+<p>One more note: If you have threads running in your program, pause them while daemonizing and exorcizing. Especially if they are communicating with another app using Apple events. To be frank, something about wx.Timers should be done too. If you are not careful you may get leaking problems around non-existing NSAutoreleasePool and/or SegmentationFault upon program termination.</p>
+    </div>
+    </div></body></html>

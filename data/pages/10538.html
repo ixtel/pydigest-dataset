@@ -1,0 +1,64 @@
+<html><body><div><div class="post-text" itemprop="text">
+<p>First of all, in Python2, you need to use Unicode strings (<code>u'&lt;...&gt;'</code>) for Unicode characters to be seen as Unicode characters. And <a href="http://stackoverflow.com/questions/728891/correct-way-to-define-python-source-code-encoding">correct source encoding</a> if you want to use the chars themselves rather than the <code>\UXXXXXXXX</code> representation in source code.</p>
+
+<p>Now, as per <a href="http://stackoverflow.com/questions/12907022/python-getting-correct-string-length-when-it-contains-surrogate-pairs">Python: getting correct string length when it contains surrogate pairs</a> and <a href="http://stackoverflow.com/questions/29109944/python-returns-length-of-2-for-single-unicode-character-string">Python returns length of 2 for single Unicode character string</a>, in Python2 "narrow" builds (with <code>sys.maxunicode==65535</code>), 32-bit Unicode characters are represented as <a href="http://unicode.org/faq/utf_bom.html#utf16-2" rel="nofollow">surrogate pairs</a>, and this is not transparent to string functions. This has only been fixed in 3.3 (<a href="https://www.python.org/dev/peps/pep-0393/" rel="nofollow">PEP0393</a>).</p>
+
+<p><strong>The simplest resolution (save for migrating to 3.3+) is to compile a Python "wide" build from source as outlined on the 3rd link.</strong> In it, Unicode characters are all 4-byte (thus are a potential memory hog) but if you need to routinely handle wide Unicode chars, this is probably an acceptable price.</p>
+
+<p><strong>The solution for a "narrow" build</strong> is <strong>to make a custom set of string functions</strong> (<code>len</code>, <code>slice</code>; maybe as a subclass of <code>unicode</code>) that would detect surrogate pairs and handle them as a single character. I couldn't readily find an existing one (which is strange), but it's not too hard to write:</p>
+
+<ul>
+<li>as per <a href="https://en.wikipedia.org/wiki/UTF-16#U.2B10000_to_U.2B10FFFF" rel="nofollow">UTF-16#U+10000 to U+10FFFF - Wikipedia</a>,
+
+<ul>
+<li>the 1st character <em>(high surrogate)</em> is in range <code>0xD800..0xDBFF</code></li>
+<li>the 2nd character <em>(low surrogate)</em> - in range <code>0xDC00..0xDFFF</code></li>
+<li>these ranges are reserved and thus cannot occur as regular characters</li>
+</ul></li>
+</ul>
+
+<p>So here's the code to detect a surrogate pair:</p>
+
+<pre><code>def is_surrogate(s,i):
+    if 0xD800 &lt;= ord(s[i]) &lt;= 0xDBFF:
+        try:
+            l = s[i+1]
+        except IndexError:
+            return False
+        if 0xDC00 &lt;= ord(l) &lt;= 0xDFFF:
+            return True
+        else:
+            raise ValueError("Illegal UTF-16 sequence: %r" % s[i:i+2])
+    else:
+        return False
+</code></pre>
+
+<p>And a function that returns a simple slice:</p>
+
+<pre><code>def slice(s,start,end):
+    l=len(s)
+    i=0
+    while i&lt;start and i&lt;l:
+        if is_surrogate(s,i):
+            start+=1
+            end+=1
+            i+=1
+        i+=1
+    while i&lt;end and i&lt;l:
+        if is_surrogate(s,i):
+            end+=1
+            i+=1
+        i+=1
+    return s[start:end]
+</code></pre>
+
+<p>Here, the price you pay is performance, as these functions are much slower than built-ins:</p>
+
+<pre><code>&gt;&gt;&gt; ux=u"a"*5000+u"\U00100000"*30000+u"b"*50000
+&gt;&gt;&gt; timeit.timeit('slice(ux,10000,100000)','from __main__ import slice,ux',number=1000)
+46.44128203392029    #msec
+&gt;&gt;&gt; timeit.timeit('ux[10000:100000]','from __main__ import slice,ux',number=1000000)
+8.814016103744507    #usec
+</code></pre>
+    </div>
+    </div></body></html>

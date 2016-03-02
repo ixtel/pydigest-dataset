@@ -1,0 +1,236 @@
+<html><body><div><div class="content html_format"><p>
+      Появилась задача написать веб интерфейс управления устройством. Управлять устройством будет Raspberry Pi. Логика управления — python, соответственно и интерфейс хотелось бы python. Хочу поделится своим опытом.</p>
+
+<ul>
+<li>1. lighttpd mod_cgi и простой скрипт</li>
+<li>2. web.py на порту 8080</li>
+<li>3. WCGI интерфейс</li>
+<li>4. Простой сервер WSGI</li>
+<li>5. WSGI с использованием wsgiref</li>
+<li>6. WSGI c помощью flup</li>
+<li>7. web.py приложение с использованием flup</li>
+<li>8. Немного особенностей</li>
+</ul>
+<a name="habracut"/><p>
+1. Для решения задачи «в лоб» был поднят lighttpd c mod_cgi:
+
+</p><pre><code class="bash">sudo apt-get install lighttpd
+sudo nano /etc/lighttpd/lighttpd.conf
+</code></pre><p>
+Отрывок lighttpd.conf:
+
+</p><pre><code class="tex">#mod_cgi shoud be on
+server.modules = (
+    "mod_access",
+    "mod_alias",
+    "mod_compress",
+    "mod_redirect",
+    "mod_cgi",
+    "mod_rewrite",
+)
+#rule enables cgi script
+cgi.assign = (".py" =&gt; "/usr/bin/python")
+</code></pre><p>
+/var/www/index.py:
+
+</p><pre><code class="python">print "Content-Type: text/html\n\n"
+print "Hello World!"
+</code></pre><p>
+теперь </p><a href="http://localhost/index.py">localhost/index.py</a><p> отвечал бодрым «Hello World!»
+</p><p>
+Когда lighttpd встречает файл с расширением .py передает его на выполнение python-у и его результатом отвечает на запрос. Грубо говоря перенаправляет stdout. </p><p>
+После некоторых попыток написания интерфейса «с нуля», был рожден </p><a href="https://github.com/tarasii/PythonHtmlGenerator">HtmlGenerator</a><p>, который позволил не перегружать код html-тегами, весьма упростил, но все таки не решил проблемы в комплексе.
+</p><p>
+2. Решено было поэкспериментировать с веб фреймворками. </p><p>
+Под руку попался </p><a href="http://webpy.org/">wep.py</a><p>, простенький и маловесный. </p><p>
+code.py:
+
+</p><pre><code class="python">#! /usr/bin/python
+#
+import web
+urls = ( '/', 'index',)
+
+class index:
+    def GET(self):
+        return "Hello, world!"
+
+if __name__ == "__main__":
+    web.application(urls, globals()).run()
+</code></pre><p>
+Минимальный код и на порту 8080 висит наше веб приложение</p><p>
+Казалось бы пробросить алиас на порт 8080, организовать авто запуск скрипта и все готово. </p><p>
+Да но нет, эксперименты на слабеньком компьютере показали что присутствие нашего скрипта заставляет машинку изрядно «дуться». Кроме того есть lighttpd с mod_cgi.
+</p><p>
+Как же связать простой скрипт и веб приложение. 
+</p><p>
+3. Согласно описанию </p><a href="https://ru.wikipedia.org/wiki/WSGI">WSGI</a><p>, для его реализации необходим интерфейс такого вида 
+</p><pre><code class="python">#! /usr/bin/python
+#
+def myapp(environ, start_response):
+    status = '200 OK'
+    response_headers = [('Content-type','text/plain')]
+    start_response(status, response_headers)
+    return ['Hello World!\n']
+</code></pre><p>
+Ничего военного, но и что-то не работает, чего-то не хватает. </p><p>
+Момент который был неясным после прочтения вики и других статей, что же все таки запустит наш интерфейс. 
+</p><p>
+4. Для запуска WSGI приложения нужен сервер. Пример скрипта который может выступать в роли простого сервера WSGI:</p><p>
+wsgi.py:
+</p><pre><code class="python">#! /usr/bin/python
+import os
+import sys
+
+def run_with_cgi(application):
+
+    environ = dict(os.environ.items())
+    environ['wsgi.input'] = sys.stdin
+    environ['wsgi.errors'] = sys.stderr
+    environ['wsgi.version'] = (1, 0)
+    environ['wsgi.multithread'] = False
+    environ['wsgi.multiprocess'] = True
+    environ['wsgi.run_once'] = True
+
+    if environ.get('HTTPS', 'off') in ('on', '1'):
+        environ['wsgi.url_scheme'] = 'https'
+    else:
+        environ['wsgi.url_scheme'] = 'http'
+
+    headers_set = []
+    headers_sent = []
+
+    def write(data):
+        if not headers_set:
+            raise AssertionError("write() before start_response()")
+
+        elif not headers_sent:
+            status, response_headers = headers_sent[:] = headers_set
+            sys.stdout.write('Status: %s\r\n' % status)
+            for header in response_headers:
+                sys.stdout.write('%s: %s\r\n' % header)
+            sys.stdout.write('\r\n')
+
+        sys.stdout.write(data)
+        sys.stdout.flush()
+
+    def start_response(status, response_headers, exc_info=None):
+        if exc_info:
+            try:
+                if headers_sent:
+                    raise exc_info[0], exc_info[1], exc_info[2]
+            finally:
+                exc_info = None
+        elif headers_set:
+            raise AssertionError("Headers already set!")
+
+        headers_set[:] = [status, response_headers]
+        return write
+
+    result = application(environ, start_response)
+    try:
+        for data in result:
+            if data:
+                write(data)
+        if not headers_sent:
+            write('')
+    finally:
+        if hasattr(result, 'close'):
+            result.close()
+</code></pre><p>
+Теперь добавив к нашему интерфейсу его запуск получим скрипт который ответит уже на нашем lighttpd или apache, по адресу </p><a href="http://localhost/app.py">localhost/app.py</a><p>
+/var/www/app.py:
+</p><pre><code class="python">#! /usr/bin/python
+include wsgi
+
+def myapp(environ, start_response):
+    status = '200 OK'
+    response_headers = [('Content-type','text/plain')]
+    start_response(status, response_headers)
+    return ['Hello World!\n']
+
+if __name__ == '__main__':
+    wsgi.run_with_cgi(myapp)
+</code></pre>
+<p>
+5. Для python 2.7 доступен модуль wsgiref который может реализовать WSGI сервер
+</p><pre><code class="python">#! /usr/bin/python
+import wsgiref.handlers
+
+def myapp(environ, start_response):
+    status = '200 OK'
+    response_headers = [('Content-type','text/plain')]
+    start_response(status, response_headers)
+    return ['Hello World!\n']
+
+if __name__ == '__main__':
+    wsgiref.handlers.CGIHandler().run(myapp)
+</code></pre>
+<p>
+6. Реализация WSGI c помощью flup:</p><p>
+установим flup
+</p><pre><code class="bash">sudo apt-get install python-flup
+</code></pre>
+<pre><code class="python">#! /usr/bin/python
+import flup.server.fcgi
+
+def myapp(environ, start_response):
+    status = '200 OK'
+    response_headers = [('Content-type','text/plain')]
+    start_response(status, response_headers)
+    return ['Hello World!\n']
+
+if __name__ == '__main__':
+    flup.server.fcgi.WSGIServer(myapp).run()
+</code></pre>
+<p>
+7. Простое web.py приложение с использованием flup:</p><p>
+/var/www/app.py:
+</p><pre><code class="python">#! /usr/bin/python
+import web
+urls = (  '/', 'index', )
+
+class index:
+    def GET(self):
+        return "Hello World!"
+
+if __name__ == '__main__':
+    web.application(urls, globals()).run()
+</code></pre><p>
+приложение станет доступным по адресу </p><a href="http://localhost/app.py/">localhost/app.py</a>
+<p>
+8. По умолчанию web.py использует flup, но можно обойтись и без него.</p><p>
+Для запуска web.py на wsgiref необходимо:
+</p><pre><code class="python">web.application(urls, globals()).cgirun()
+</code></pre><p>
+B ссылках на скрипты web.py в конце не забывать ставить '/' (app.py/), иначе ответом будет «not found». По-хорошему необходимо создать rewrite правило:
+</p><pre><code class="tex"># mod_rewrite configuration.
+url.rewrite-once = (
+    "^/favicon.ico$" =&gt; "/favicon.ico", 
+    "^/(.*)$" =&gt; "app.py/$1" ,)
+</code></pre><p>
+Для отладки в скриптов полезно добавить:
+</p><pre><code class="python">import cgitb
+cgitb.enable()
+</code></pre><p>
+тогда будут видны ошибки.
+</p><p>
+Остается опробовать:</p><p>
+modwsgi</p><p>
+paste</p><p>
+pylons
+</p><p>
+Полезные ссылки:
+</p><a href="https://ru.wikipedia.org/wiki/WSGI">WSGI wiki</a>
+<a href="http://webpy.org/">wep.py</a>
+<a href="http://hlabs.org/development/python/wsgi.html">WSGI — протокол связи Web-сервера с Python приложением</a>
+<a href="http://citforum.ck.ua/programming/python/wsgi/">WSGI, введение</a>
+<a href="http://henry.precheur.org/python/how_to_serve_cgi.html">How to serve a WSGI application via CGI</a>
+<a href="http://wsgi.readthedocs.org/en/latest/#">WSGI.org</a>
+<a href="http://habrahabr.ru/post/67475/">Сравнение эффективности способов запуска веб-приложений на языке Python</a>
+
+      
+      <p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

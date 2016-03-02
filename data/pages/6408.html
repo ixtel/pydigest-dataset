@@ -1,0 +1,94 @@
+<html><body><div><div class="post-text" itemprop="text">
+<p><code>bar.py</code> would have to behave like the Python interpreter itself and run <code>foo.py</code> (or <code>foo.pyc</code>, as you asked for that) as if it was the main script. This is surprisingly hard. My 90% solution to do that looks like so:</p>
+
+<pre class="lang-py prettyprint-override"><code>def run_script_as_main(cmdline):
+    # It is crucial to import locally what we need as we
+    # later remove everything from __main__
+    import sys, imp, traceback, os
+    # Patch sys.argv
+    sys.argv = cmdline
+    # Clear the __main__ namespace and set it up to run
+    # the secondary program
+    maindict = sys.modules["__main__"].__dict__
+    builtins = maindict['__builtins__']
+    maindict.clear()
+    maindict['__file__'] = cmdline[0]
+    maindict['__builtins__'] = builtins
+    maindict['__name__'] = "__main__"
+    maindict['__doc__'] = None
+    # Python prepends a script's location to sys.path
+    sys.path[0] = os.path.dirname(os.path.abspath(cmdline[0]))
+    # Treat everything as a Python source file, except it
+    # ends in '.pyc'
+    loader = imp.load_source
+    if maindict["__file__"].endswith(".pyc"):
+        loader = imp.load_compiled
+    with open(cmdline[0], 'rb') as f:
+        try:
+            loader('__main__', maindict["__file__"], f)
+        except Exception:
+            # In case of an exception, remove this script from the
+            # stack trace; if you don't care seeing some bar.py in
+            # traceback, you can leave that out.
+            ex_type, ex_value, ex_traceback = sys.exc_info()
+            tb = traceback.extract_tb(ex_traceback, None)[1:]
+            sys.stderr.write("Traceback (most recent call last):\n")
+            for line in traceback.format_list(tb):
+                sys.stderr.write(line)
+            for line in traceback.format_exception_only(ex_type, ex_value):
+                sys.stderr.write(line)
+</code></pre>
+
+<p>This mimics the default behavior of the Python interpreter
+relatively closely. It sets system globals <code>__name__</code>, <code>__file__</code>,
+<code>sys.argv</code>, inserts the script location into <code>sys.path</code>, clears the global namespace etc.</p>
+
+<p>You would copy that code to <code>bar.py</code> or import it from somewhere and use it like so:</p>
+
+<pre><code>if __name__ == "__main__":
+    # You debugging setup goes here
+    ...
+    # Run the Python program given as argv[1]
+    run_script_as_main(sys.argv[1:])
+</code></pre>
+
+<p>Then, given this:</p>
+
+<pre><code>$ find so-foo-bar
+so-foo-bar
+so-foo-bar/debugaid
+so-foo-bar/debugaid/bar.py
+so-foo-bar/foo.py
+</code></pre>
+
+<p>and <code>foo.py</code> looking like this:</p>
+
+<pre><code>import sys
+
+if __name__ == "__main__":
+    print "My name is", __name__
+    print "My file is", __file__
+    print "My command line is", sys.argv
+    print "First 2 path items", sys.path[:2]
+    print "Globals", globals().keys()
+    raise Exception("foo")
+</code></pre>
+
+<p>... running <code>foo.py</code> via <code>bar.py</code> gives you that:</p>
+
+<pre>
+    $ python so-foo-bar/debugaid/bar.py so-foo-bar/foo.py
+    My name is __main__
+    My file is so-foo-bar/foo.py
+    My command line is ['so-foo-bar/foo.py']
+    First 2 path items ['~/so-foo-bar', '/usr/local/...']
+    Globals ['__builtins__', '__name__', '__file__', 'sys', '__package__', '__doc__']
+    Traceback (most recent call last):
+      File "so-foo-bar/foo.py", line 9, in 
+        raise Exception("foo")
+    Exception: foo
+</pre>
+
+<p>While I'd guess that <code>run_script_as_main</code> is lacking in some interesting details, it's pretty close to the way Python would run <code>foo.py</code>.</p>
+    </div>
+    </div></body></html>

@@ -1,0 +1,165 @@
+<html><body><div><div class="post-text" itemprop="text">
+
+<p>I have a django application that uses 2 database connections:</p>
+
+<ol>
+<li>To connect to the actual data the app is to produce</li>
+<li>To a reference master data system, that is maintained completely outside my  control</li>
+</ol>
+
+<p>The issue that I'm having, is that my webapp can absolutely NOT touch the data in the 2nd database. I solved most of the issues by using 2 (sub)apps, one for every database connection. I created a router file that router any migration, and writing to the first app</p>
+
+<p>I also made all the models in the 2nd app non managed, using the </p>
+
+<pre><code>model.meta.managed = False
+</code></pre>
+
+<p>option.</p>
+
+<p>To be sure, the user I connect to the 2nd database has read only access</p>
+
+<p>This works fine for migrations and running. However, when I try to run tests using django testcase, Django tries to delete and create a test_ database on the 2nd database connection.</p>
+
+<p>How can I make sure that Django will NEVER update/delete/insert/drop/truncate over the 2nd connection</p>
+
+<p>How can I run tests, that do not try to create <em>the second database</em>, but do create the first.</p>
+
+<p>Thanks!</p>
+
+<p><em>edited: code</em></p>
+
+<p><strong>model (for the 2nd app, that should not be managed):</strong> </p>
+
+<pre><code>from django.db import models
+
+
+class MdmMeta(object):
+    db_tablespace = 'MDM_ADM'
+    managed = False
+    ordering = ['name']
+
+
+class ActiveManager(models.Manager):
+    def get_queryset(self):
+        return super(ActiveManager, self).get_queryset().filter(lifecyclestatus='active')
+
+
+class MdmType(models.Model):
+    entity_guid = models.PositiveIntegerField(db_column='ENTITYGUID')
+    entity_name = models.CharField(max_length=255, db_column='ENTITYNAME')
+
+    entry_guid = models.PositiveIntegerField(primary_key=True, db_column='ENTRYGUID')
+
+    name = models.CharField(max_length=255, db_column='NAME')
+    description = models.CharField(max_length=512, db_column='DESCRIPTION')
+
+    lifecyclestatus = models.CharField(max_length=255, db_column='LIFECYCLESTATUS')
+
+    # active_manager = ActiveManager()
+
+    def save(self, *args, **kwargs):
+        raise Exception('Do not save MDM models!')
+
+    def delete(self, *args, **kwargs):
+        raise Exception('Do not delete MDM models!')
+
+    def __str__(self):
+        return self.name
+
+    class Meta(MdmMeta):
+        abstract = True
+
+
+# Create your models here.
+class MdmSpecies(MdmType):
+    class Meta(MdmMeta):
+        db_table = 'MDM_SPECIES'
+        verbose_name = 'Species'
+        verbose_name_plural = 'Species'
+
+
+class MdmVariety(MdmType):
+    class Meta(MdmMeta):
+        db_table = 'MDM_VARIETY'
+        verbose_name = 'Variety'
+        verbose_name_plural = 'Varieties'
+
+...
+</code></pre>
+
+<p><strong>router:</strong></p>
+
+<pre><code>__author__ = 'CoesseWa'
+
+class MdmRouter(object):
+
+    def db_for_read(self, model, **hints):
+        if model._meta.app_label == 'mdm':
+            # return 'default'
+            return 'mdm_db'   # trying to use one database connection
+        return 'default'
+
+    def db_for_write(self, model, **hints):
+        return 'default'
+
+    def allow_relation(self, obj1, obj2, **hints):
+        return None
+
+    def allow_migrate(self, db, model):
+        if model._meta.app_label == 'mdm':
+            return False
+</code></pre>
+
+<p><strong>settings:</strong></p>
+
+<pre><code>DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.oracle',
+        'NAME': '(DESCRIPTION=(ADDRESS_LIST=(ADDRESS=(PROTOCOL=TCP)(HOST=%s)(PORT=1521)))(CONNECT_DATA=(SID=%s)))'
+                % (get_env_variable('LIMS_MIGRATION_HOST'), get_env_variable('LIMS_MIGRATION_SID')),
+        'USER': 'LIMS_MIGRATION',
+        'PASSWORD': get_env_variable('LIMS_MIGRATION_PASSWORD'),
+    },
+    'mdm_db': {
+        'ENGINE': 'django.db.backends.oracle',
+        'NAME': '(DESCRIPTION=(ADDRESS_LIST=(ADDRESS=(PROTOCOL=TCP)(HOST=GB3P)(PORT=1521)))'
+                '(CONNECT_DATA=(SID=GB3P)))',
+        'USER': 'MDM',
+        'PASSWORD': get_env_variable('MDM_DB_PASSWORD'),
+    },
+}
+</code></pre>
+
+<p><strong>one testcase:</strong></p>
+
+<pre><code>from django.test.testcases import TestCase
+
+__author__ = 'CoesseWa'
+
+
+class ModelTest(TestCase):
+
+    def test_getting_guid_for_mdm_field(self):
+        self.assertIsNotNone(1)
+</code></pre>
+
+<p><strong>output from when running this tests:</strong></p>
+
+<pre><code>... 
+Destroying old test user...
+</code></pre>
+
+<p><em>(before this point, django creates the test database for my first connection = OK)</em></p>
+
+<pre><code>Creating test user...
+</code></pre>
+
+<p><em>=&gt; This next lines should never happen. Fails because I use a read only user (luckily)</em></p>
+
+<pre><code>Creating test database for alias 'mdm_db'...
+
+Failed (ORA-01031: insufficient privileges 
+Got an error creating the test database: ORA-01031: insufficient privileges
+</code></pre>
+    </div>
+    </div></body></html>

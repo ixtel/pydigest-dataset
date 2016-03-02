@@ -1,0 +1,396 @@
+<html><body><div><article class="col-md-10 col-md-offset-1">
+            
+
+
+<p>In this post I'm going to talk about something that's relatively simple but fundamental to just about any business: Customer Segmentation. At the core
+of customer segmentation is being able to identify different types of customers and then figure out ways to find more of those individuals so you can...
+you guessed it, get more customers! In this post, I'll detail how you can use K-Means clustering to help with some of the exploratory aspects of customer
+segmentation.</p>
+<h3>Our Data</h3>
+<p>The data we're using comes from John Foreman's book <a href="http://www.john-foreman.com/data-smart-book.html">Data Smart</a>. The <a href="../static/misc/data/WineKMC.xlsx">dataset</a>
+contains both information on marketing newsletters/e-mail campaigns (e-mail offers sent) and transaction level data from customers (which offer
+customers responded to and what they bought).</p>
+<pre><code>import pandas as pd
+
+df_offers = pd.read_excel("./WineKMC.xlsx", sheetname=0)
+df_offers.columns = ["offer_id", "campaign", "varietal", "min_qty", "discount", "origin", "past_peak"]
+df_offers.head()
+</code></pre>
+<table border="1" class="dataframe">
+  <thead>
+    <tr>
+      <th/>
+      <th>offer_id</th>
+      <th>campaign</th>
+      <th>varietal</th>
+      <th>min_qty</th>
+      <th>discount</th>
+      <th>origin</th>
+      <th>past_peak</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th>0</th>
+      <td>1</td>
+      <td>January</td>
+      <td>Malbec</td>
+      <td>72</td>
+      <td>56</td>
+      <td>France</td>
+      <td>False</td>
+    </tr>
+    <tr>
+      <th>1</th>
+      <td>2</td>
+      <td>January</td>
+      <td>Pinot Noir</td>
+      <td>72</td>
+      <td>17</td>
+      <td>France</td>
+      <td>False</td>
+    </tr>
+    <tr>
+      <th>2</th>
+      <td>3</td>
+      <td>February</td>
+      <td>Espumante</td>
+      <td>144</td>
+      <td>32</td>
+      <td>Oregon</td>
+      <td>True</td>
+    </tr>
+    <tr>
+      <th>3</th>
+      <td>4</td>
+      <td>February</td>
+      <td>Champagne</td>
+      <td>72</td>
+      <td>48</td>
+      <td>France</td>
+      <td>True</td>
+    </tr>
+    <tr>
+      <th>4</th>
+      <td>5</td>
+      <td>February</td>
+      <td>Cabernet Sauvignon</td>
+      <td>144</td>
+      <td>44</td>
+      <td>New Zealand</td>
+      <td>True</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>And the transaction level data...</p>
+<pre><code>df_transactions = pd.read_excel("./WineKMC.xlsx", sheetname=1)
+df_transactions.columns = ["customer_name", "offer_id"]
+df_transactions['n'] = 1
+df_transactions.head()
+</code></pre>
+<table border="1" class="dataframe">
+  <thead>
+    <tr>
+      <th/>
+      <th>customer_name</th>
+      <th>offer_id</th>
+      <th>n</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th>0</th>
+      <td>Smith</td>
+      <td>2</td>
+      <td>1</td>
+    </tr>
+    <tr>
+      <th>1</th>
+      <td>Smith</td>
+      <td>24</td>
+      <td>1</td>
+    </tr>
+    <tr>
+      <th>2</th>
+      <td>Johnson</td>
+      <td>17</td>
+      <td>1</td>
+    </tr>
+    <tr>
+      <th>3</th>
+      <td>Johnson</td>
+      <td>24</td>
+      <td>1</td>
+    </tr>
+    <tr>
+      <th>4</th>
+      <td>Johnson</td>
+      <td>26</td>
+      <td>1</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>A quick K-Means primer</h3>
+<p>In order to segment our customers, we need a way to compare them. To do this we're going to use <a href="https://en.wikipedia.org/wiki/K-means_clustering">K-Means clustering</a>.
+K-means is a way of taking a dataset and finding groups (or clusters) of points that have similar properties. K-means works
+by grouping the points together in such a way that the distance between all the points and the midpoint of the cluster they belong
+to is minimized.</p>
+<p>Think of the simplest possible example. If I told you to create 3 groups for the points below and draw a star where the middle of each
+group would be, what would you do?</p>
+<p><img alt="" src="../static/img/random-points.png"/></p>
+<p>Probably (or hopefully) something like this...</p>
+<p><img alt="" src="../static/img/random-points-clustered.png"/></p>
+<p>In K-Means speak, the "x"'s are called "centroids" and indicate (you guessed it), the center of a given cluster. I'm not going to
+go into the ins and outs of what K-Means is actually doing under the hood, but hopefully this illustration gives you a good idea.</p>
+<h3>Clustering our customers</h3>
+<p>Okay, so how does clustering apply to our customers? Well since we're trying to learn more about how our customers behave, we can use
+their behavior (whether or not they purchased something based on an offer) as a way to group similar minded customers together. We
+can then study those groups to look for patterns and trends which can help us formulate future offers.</p>
+<p>The first thing we need is a way to compare customers. To do this, we're going to create a matrix that contains each customer
+and a 0/1 indicator for whether or not they responded to a given offer. This is easy enough to do in Python:</p>
+<pre><code># join the offers and transactions table
+df = pd.merge(df_offers, df_transactions)
+# create a "pivot table" which will give us the number of times each customer responded to a given offer
+matrix = df.pivot_table(index=['customer_name'], columns=['offer_id'], values='n')
+# a little tidying up. fill NA values with 0 and make the index into a column
+matrix = matrix.fillna(0).reset_index()
+# save a list of the 0/1 columns. we'll use these a bit later
+x_cols = matrix.columns[1:]
+</code></pre>
+<p>Now to create the clusters, we're going to use the <code>KMeans</code> functionality from <code>scikit-learn</code>. I arbitrarily chose 5 clusters. My general
+rule of thumb is to have <strong>at least 7x</strong> as many records as I do clusters.</p>
+<pre><code>from sklearn.cluster import KMeans
+
+cluster = KMeans(n_clusters=5)
+# slice matrix so we only include the 0/1 indicator columns in the clustering
+matrix['cluster'] = cluster.fit_predict(matrix[matrix.columns[2:]])
+matrix.cluster.value_counts()
+2    32
+1    22
+4    20
+0    15
+3    11
+dtype: int64
+</code></pre>
+<p><img alt="" src="../static/img/cluster-histogram.png"/></p>
+<h3>Visualizing the clusters</h3>
+<p>A really cool trick that the probably didn't teach you in school is <a href="https://en.wikipedia.org/wiki/Principal_component_analysis">Principal Component Analysis</a>. There are lots of uses for it, but
+today we're going to use it to transform our multi-dimensional dataset into a 2 dimensional dataset. Why you ask? Well once it is in
+2 dimensions (or simply put, it has 2 columns), it becomes much easier to plot!</p>
+<p>Once again, <code>scikit-learn</code> comes to the rescue!</p>
+<pre><code>from sklearn.decomposition import PCA
+
+pca = PCA(n_components=2)
+matrix['x'] = pca.fit_transform(matrix[x_cols])[:,0]
+matrix['y'] = pca.fit_transform(matrix[x_cols])[:,1]
+matrix = matrix.reset_index()
+
+customer_clusters = matrix[['customer_name', 'cluster', 'x', 'y']]
+customer_clusters.head()
+</code></pre>
+<table border="1" class="dataframe">
+  <thead>
+    <tr>
+      <th>offer_id</th>
+      <th>customer_name</th>
+      <th>cluster</th>
+      <th>x</th>
+      <th>y</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th>0</th>
+      <td>Adams</td>
+      <td>2</td>
+      <td>-1.007580</td>
+      <td>0.108215</td>
+    </tr>
+    <tr>
+      <th>1</th>
+      <td>Allen</td>
+      <td>4</td>
+      <td>0.287539</td>
+      <td>0.044715</td>
+    </tr>
+    <tr>
+      <th>2</th>
+      <td>Anderson</td>
+      <td>1</td>
+      <td>0.392032</td>
+      <td>1.038391</td>
+    </tr>
+    <tr>
+      <th>3</th>
+      <td>Bailey</td>
+      <td>2</td>
+      <td>-0.699477</td>
+      <td>-0.022542</td>
+    </tr>
+    <tr>
+      <th>4</th>
+      <td>Baker</td>
+      <td>3</td>
+      <td>-0.088183</td>
+      <td>-0.471695</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>What we've done is we've taken those <code>x_cols</code> columns of 0/1 indicator variables, and we've transformed them into a 2-D dataset. We
+took one column and arbitrarily called it <code>x</code> and then called the other <code>y</code>. Now we can throw each point into a scatterplot. We'll
+color code each point based on it's cluster so it's easier to see them.</p>
+<pre><code>df = pd.merge(df_transactions, customer_clusters)
+df = pd.merge(df_offers, df)
+
+from ggplot import *
+
+ggplot(df, aes(x='x', y='y', color='cluster')) + \
+    geom_point(size=75) + \
+    ggtitle("Customers Grouped by Cluster")
+</code></pre>
+<p><img alt="" src="../static/img/cluster-plot-no-centers.png"/></p>
+<p>If you want to get fancy, you can also plot the centers of the clusters as well. These are stored in the <code>KMeans</code> instance
+using the <code>cluster_centers_</code> variable. Make sure that you also transform the cluster centers into the 2-D projection.</p>
+<pre><code>cluster_centers = pca.transform(cluster.cluster_centers_)
+cluster_centers = pd.DataFrame(cluster_centers, columns=['x', 'y'])
+cluster_centers['cluster'] = range(0, len(cluster_centers))
+
+ggplot(df, aes(x='x', y='y', color='cluster')) + \
+    geom_point(size=75) + \
+    geom_point(cluster_centers, size=500) +\
+    ggtitle("Customers Grouped by Cluster")
+</code></pre>
+<p><img alt="" src="../static/img/cluster-plot.png"/></p>
+<h3>Digging deeper into the clusters</h3>
+<p>Let's dig a little deeper into the clusters. Take cluster 4 for example. If we break out cluster 4 and compare it to the remaining
+customers, we can start to look for interesting facets that we might be able to exploit.</p>
+<p>As a baseline, take a look at the <code>varietal</code> counts for cluster 4 vs. everyone else. It turns out that almost all of the Cabernet Sauvignon
+offers were purchased by members of cluster 4. In addition, none of the Espumante offers were purchased by members of cluster 4.</p>
+<pre><code>df['is_4'] = df.cluster==4
+df.groupby("is_4").varietal.value_counts()
+</code></pre>
+<p/><table class="dataframe" border="1">
+  <thead>
+    <tr>
+      <th>is_4</th>
+      <th>varietal</th>
+      <th>count</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td rowspan="9">False</td>
+      <td>Champagne</td>
+      <td>45</td>
+    </tr>
+    <tr>
+      <td>Espumante</td>
+      <td>40</td>
+    </tr>
+    <tr>
+      <td>Prosecco</td>
+      <td>37</td>
+    </tr>
+    <tr>
+      <td>Pinot Noir</td>
+      <td>37</td>
+    </tr>
+    <tr>
+      <td>Malbec</td>
+      <td>17</td>
+    </tr>
+    <tr>
+      <td>Pinot Grigio</td>
+      <td>16</td>
+    </tr>
+    <tr>
+      <td>Merlot</td>
+      <td>8</td>
+    </tr>
+    <tr>
+      <td>Cabernet Sauvignon</td>
+      <td>6</td>
+    </tr>
+    <tr>
+      <td>Chardonnay</td>
+      <td>4</td>
+    </tr>
+    <tr>
+      <td rowspan="8">True</td>
+      <td>Champagne</td>
+      <td>36</td>
+    </tr>
+    <tr>
+      <td>Cabernet Sauvignon</td>
+      <td>26</td>
+    </tr>
+    <tr>
+      <td>Malbec</td>
+      <td>15</td>
+    </tr>
+    <tr>
+      <td>Merlot</td>
+      <td>12</td>
+    </tr>
+    <tr>
+      <td>Chardonnay</td>
+      <td>11</td>
+    </tr>
+    <tr>
+      <td>Pinot Noir</td>
+      <td>7</td>
+    </tr>
+    <tr>
+      <td>Prosecco</td>
+      <td>6</td>
+    </tr>
+    <tr>
+      <td>Pinot Grigio</td>
+      <td>1</td>
+    </tr>
+  </tbody>
+</table>
+<p>You can also segment out numerical features. For instance, look at how the mean of the <code>min_qty</code> field breaks out between 4 vs. non-4. It
+seems like members of cluster 4 like to by in bulk!</p>
+<pre><code>df.groupby("is_4")[['min_qty', 'discount']].mean()
+</code></pre>
+<table border="1" class="dataframe">
+  <thead>
+    <tr>
+      <th/>
+      <th>min_qty</th>
+      <th>discount</th>
+    </tr>
+    <tr>
+      <th>is_4</th>
+      <th/>
+      <th/>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th>False</th>
+      <td>47.685484</td>
+      <td>59.120968</td>
+    </tr>
+    <tr>
+      <th>True</th>
+      <td>93.394737</td>
+      <td>60.657895</td>
+    </tr>
+  </tbody>
+</table>
+
+<p><img alt="" src="../static/img/wine-in-bulk.jpg"/>
+</p><center>Send a bulk Cab Sav offer Cluster 4's way!</center>
+<h3>Final Thoughts</h3>
+<p>While it's not going to magically tell you all the answers, clustering is a great exploratory exercise that can help you learn more about
+your customers. For more info on K-Means and customer segmentation, check out these resources:</p>
+
+<p>Code for this post can be found <a href="https://gist.github.com/glamp/3a6e4d618afc344aab81">here</a>.</p>
+
+        </article>
+    </div></body></html>

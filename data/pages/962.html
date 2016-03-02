@@ -1,0 +1,116 @@
+<html><body><div><div>
+        <p>If you've worked with <a href="https://www.djangoproject.com/">Django</a> at some point you probably had the need for some background
+processing of long running tasks. Chances are you've used some sort of task queue, and <a href="http://www.celeryproject.org/">Celery</a> is currently
+the most popular project for this sort of thing in the Python (and Django) world (but there are others).</p>
+<p>While working on some projects that used Celery for a task queue I've gathered a number of best practices and decided to document them.
+Nevertheless, this is more a rant about what I think should be the proper way to do things, and about some underused features that the celery
+ecosystem offers.
+</p>
+<h4>No.1: Don't use the database as your AMQP Broker</h4>
+<p>Let me explain why I think this is wrong (aside from the <a href="http://docs.celeryproject.org/en/latest/getting-started/brokers/django.html#limitations">limitations</a> pointed out in the celery docs).</p>
+<p>A database is not built for doing the things a proper AMQP broker like RabbitMQ is designed for. It will break down at one point, probably in production
+with not that much traffic/user base.</p>
+<p>I guess the most popular reason people decide to use a database is because, well, they already have one for their web app, so why not re-use it. Setting up is a
+breeze and you don't need to worry about another component (like RabbitMQ).</p>
+<p>Not so hypothetical scenario: Let's say you have 4 background workers processing the tasks you've put in the database. This means that you get 4
+processes polling the database for new tasks fairly often, not to mention that each of those 4 workers can have multiple concurrent threads of it's own.
+At some point you notice that you are falling behind on your task processing and more tasks are coming in than are being completed, so naturally you increase the number
+of workers doing the task processing. Suddenly your database starts falling apart due to the huge number of workers polling the database for new tasks, your disk IO goes
+through the roof and your webapp starts being affected by this slow down because the workers are basically DDOS-ing the database.</p>
+<p>This does not happen when you have a proper AMQP like <a href="http://www.rabbitmq.com/">RabbitMQ</a> because, for one thing, the queue resides in memory so you don't hammer your disk.
+The consumers (the workers) do not need to resort to polling as the queue has a way of pushing new tasks to the consumers, and if the AMQP does get overwhelmed for some other reason,
+at least it will not bring down the user facing web app with it.</p>
+<p>I would go as far to say that you shouldn't use a database for a broker even in development, what with things like Docker and a ton of pre-built images that already give you
+RabbitMQ <a href="https://registry.hub.docker.com/search?q=rabbitmq">out of the box</a>.</p>
+<h4>No.2: Use more Queues (ie. not just the default one)</h4>
+<p>Celery is fairly simple to set up, and it comes with a default queue in which it puts all the tasks unless you tell it otherwise.
+The most common thing you'll see is something like this:</p>
+<pre class="code literal-block"><span class="nd">@app.task</span><span class="p">()</span>
+<span class="k">def</span> <span class="nf">my_taskA</span><span class="p">(</span><span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="p">,</span> <span class="n">c</span><span class="p">):</span>
+    <span class="k">print</span><span class="p">(</span><span class="s">"doing something here..."</span><span class="p">)</span>
+
+<span class="nd">@app.task</span><span class="p">()</span>
+<span class="k">def</span> <span class="nf">my_taskB</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">):</span>
+    <span class="k">print</span><span class="p">(</span><span class="s">"doing something here..."</span><span class="p">)</span>
+</pre>
+
+
+<p>What happens here is that <em>both</em> tasks will end up in the same Queue (if not specified otherwise in the <code>celeryconfig.py</code> file).
+I can definitely see the appeal of doing something like this because with just one decorator you've got yourself some sweet background tasks.
+My concern here is that taskA and taskB might be doing totally different things, and perhaps one of them might
+even be much  more important than the other, so why throw them both in the same basket? Even if you've got just one worker processing both tasks,
+suppose that at some point the unimportant taskB gets so massive in numbers that the more important taksA just can't get enough attention from the worker?
+At this point increasing the number of workers will probably not solve your problem as all workers still need to process both tasks, and with taskB so great in numbers taskA
+still can't get the attention it deserves. Which brings us to the next point.</p>
+<h4>No.3: Use priority workers</h4>
+<p>The way to solve the issue above is to have taskA in one queue, and taskB in another and then assign <code>x</code> workers to
+process Q1 and all the other workers to process the more intensive Q2 as it has more tasks coming in.
+This way you can still make sure that taskB gets enough workers all the while maintaining a few priority workers that just need to process
+taskA when one comes in without making it wait to long on processing.</p>
+<p>So, define your queues manually:</p>
+<pre class="code literal-block"><span class="n">CELERY_QUEUES</span> <span class="o">=</span> <span class="p">(</span>
+    <span class="n">Queue</span><span class="p">(</span><span class="s">'default'</span><span class="p">,</span> <span class="n">Exchange</span><span class="p">(</span><span class="s">'default'</span><span class="p">),</span> <span class="n">routing_key</span><span class="o">=</span><span class="s">'default'</span><span class="p">),</span>
+    <span class="n">Queue</span><span class="p">(</span><span class="s">'for_task_A'</span><span class="p">,</span> <span class="n">Exchange</span><span class="p">(</span><span class="s">'for_task_A'</span><span class="p">),</span> <span class="n">routing_key</span><span class="o">=</span><span class="s">'for_task_A'</span><span class="p">),</span>
+    <span class="n">Queue</span><span class="p">(</span><span class="s">'for_task_B'</span><span class="p">,</span> <span class="n">Exchange</span><span class="p">(</span><span class="s">'for_task_B'</span><span class="p">),</span> <span class="n">routing_key</span><span class="o">=</span><span class="s">'for_task_B'</span><span class="p">),</span>
+<span class="p">)</span>
+</pre>
+
+
+<p>And your <code>routes</code> that will decide which task goes where:</p>
+<pre class="code literal-block"><span class="n">CELERY_ROUTES</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s">'my_taskA'</span><span class="p">:</span> <span class="p">{</span><span class="s">'queue'</span><span class="p">:</span> <span class="s">'for_task_A'</span><span class="p">,</span> <span class="s">'routing_key'</span><span class="p">:</span> <span class="s">'for_task_A'</span><span class="p">},</span>
+    <span class="s">'my_taskB'</span><span class="p">:</span> <span class="p">{</span><span class="s">'queue'</span><span class="p">:</span> <span class="s">'for_task_B'</span><span class="p">,</span> <span class="s">'routing_key'</span><span class="p">:</span> <span class="s">'for_task_B'</span><span class="p">},</span>
+<span class="p">}</span>
+</pre>
+
+
+<p>Which will allow you to run workers for each task:</p>
+<pre class="code literal-block">celery worker -E -l INFO -n workerA -Q for_task_A
+celery worker -E -l INFO -n workerB -Q for_task_B
+</pre>
+
+
+<h4>No.4: Use Celery's error handling mechanisms</h4>
+<p>Most tasks I've seen in the wild don't have a notion of error handling at all. If a task fails that's it, it failed. This might be fine for some
+use cases, however, most tasks I've seen are talking to some kind of 3rd party API and fail because of some sort of network error,
+or other kind of "resource availability" error.
+The most simple way we can handle these kinds of errors is to just retry the task, because maybe the 3rd party API just had some server/network issues
+and it will be back up shortly, why not give it a go?</p>
+<pre class="code literal-block"><span class="nd">@app.task</span><span class="p">(</span><span class="n">bind</span><span class="o">=</span><span class="bp">True</span><span class="p">,</span> <span class="n">default_retry_delay</span><span class="o">=</span><span class="mi">300</span><span class="p">,</span> <span class="n">max_retries</span><span class="o">=</span><span class="mi">5</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">my_task_A</span><span class="p">():</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">print</span><span class="p">(</span><span class="s">"doing stuff here..."</span><span class="p">)</span>
+    <span class="k">except</span> <span class="n">SomeNetworkException</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+        <span class="k">print</span><span class="p">(</span><span class="s">"maybe do some clenup here...."</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">retry</span><span class="p">(</span><span class="n">e</span><span class="p">)</span>
+</pre>
+
+
+<p>What I like to do is define per task defaults for how long should a task wait before being retried, and how many retries is enough
+before finally giving up (the <code>default_retry_delay</code> and <code>max_retries</code> parameters respectively). This is the most basic form of error handling that I can think of
+and yet I see it used almost never. Of course Celery offers more in terms of error handling but I'll leave you with the celery docs for that.</p>
+<h4>No.5: Use Flower</h4>
+<p>The <a href="http://celery.readthedocs.org/en/latest/userguide/monitoring.html#flower-real-time-celery-web-monitor">Flower</a> project is a wonderful tool for monitoring your celery tasks
+and workers. It's web based and allows you to do stuff like see task progress, details, worker status, bringing up new workers and so forth. Check out the full list of features in
+the provided link.</p>
+<h4>No.6: Keep track of results only if you really need them</h4>
+<p>A task status is the information about the task exiting with a success or failure. It can be useful for some kind of statistics later on.
+The big thing to note here is that the exit status is not the result of the job that the task was performing, that information is most likely some sort
+of side effect that gets written to the database (ie. update a user's friend list).</p>
+<p>Most projects I've seen don't really care about keeping persistent track of a task's status after it exited yet most of them use either the default sqlite database for saving
+this information, or even better, they've taken the time and use their regular database (postgres or otherwise).</p>
+<p>Why hammer your webapp's database for no reason? Use <code>CELERY_IGNORE_RESULT = True</code> in your <code>celeryconfig.py</code> and discard the results.</p>
+<h4>No.7: Don't pass Database/ORM objects to tasks</h4>
+<p>After giving this talk at a local Python meetup a few people suggested I add this to the list. What's it all about? You shouldn't pass Database objects (for instance your User model) to
+a background task because the serialized object might contain stale data. What you want to do is feed the task the User id and have the task ask the database for a fresh
+User object.</p>
+                <p class="tags">
+        <span><i class="glyphicons-icon tags"/></span>
+                <a href="../../categories/celery/">celery</a>
+                <a href="../../categories/django/">django</a>
+                <a href="../../categories/python/">python</a>
+        </p>
+
+    </div>
+
+</div></body></html>

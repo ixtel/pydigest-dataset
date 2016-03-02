@@ -1,0 +1,115 @@
+<html><body><div><div class="post-body entry-content">
+
+<p>При создании некоторых web-приложений порой требуется выполнять задачи асинхронно запросу пользователя или периодически.</p>
+<p>К первым можно, например, отнести отправку уведомлений по электронной почте. В этом случае невозможно гарантировать быструю обработку запроса. Поэтому отправку уведомления можно поместить в параллельный поток и запрос не будет зависеть от скорости этой самой отправки.</p>
+<p>Ко вторым относятся задачи, обычно размещаемые в <code>cron</code>.</p>
+<p>И здесь на помощь как раз может придти система типа <a href="http://www.celeryproject.org/">Celery</a> — асинхронная очередь задач, основанная на передаче сообщений. Надо сказать, что Celery можно и нужно использовать не только в web-приложениях. Но здесь я расскажу о ней применительно к популярному web-фреймверку <a href="http://www.djangoproject.com/">Django</a>. Еще стоит оговориться, что я раскрою лишь малую часть системы Celery (достаточную для использования в Django), потому как её возможности достаточно велики.</p><a name="more"/>
+<p>Для работы Celery необходимо выбрать брокер — систему, которая будет заниматься очередью сообщений — хранением и выборкой. Celery поддерживает <a href="http://docs.celeryproject.org/en/latest/getting-started/brokers/index.html">множество брокеров</a>. Среди которых есть и Redis. Именно Redis и RabbitMQ заявлены как стабильные для Celery. Redis — очень популярная система управления структурами данных на основе key-value. Будем считать, что Redis установлен и настроен.</p>
+<p>Установка самого Celery совершенно не вызывает никаких проблем и <a href="http://www.celeryproject.org/install/">описана</a> в руководстве. После установки Celery уже можно использовать. В том числе и для Django. Но управление задачами будет не столь удобно, как с использованием пакета <a href="https://pypi.python.org/pypi/django-celery">django-celery</a> для фреймверка. Этот пакет позволит использовать админку Джанги для управления периодическими задачами, автоопределение задач из модулей фреймверка. Есть и другие пока не интересные для нас фичи.</p>
+<p>Итак, после установки этих двух пакетов — давайте настроим их. Вообще, Celery можно настроить тысячей разных способов. Я покажу лишь один из вариантов. Вы можете выбрать свой. В файле <code>settings.py</code> вашего django-проекта добавьте следующее:</p>
+<pre>
+<code class="language-python">import djcelery
+# указываем на то, что расписание будет задаваться посредством django-ORM
+CELERYBEAT_SCHEDULER = 'djcelery.schedulers.DatabaseScheduler'
+# указываем брокер сообщений
+BROKER_URL = 'redis://127.0.0.1:6379/0'
+# указываем хранилище результатов (можете не указывать)
+CELERY_RESULT_BACKEND = 'redis://127.0.0.1:6379/0'
+# формат хранения задач (можете не указывать)
+CELERY_TASK_SERIALIZER = 'json'
+# формат хранения результатов (можете не указывать)
+CELERY_RESULT_SERIALIZER = 'json'
+# если настроены джанговские параметры уведомлений по почте
+# и данный параметр True, то исключения в задачах будут
+# фиксироваться на почте администраторов приложения
+CELERY_SEND_TASK_ERROR_EMAILS = True
+# инициализация django-celery
+djcelery.setup_loader()
+
+# добавляем приложение django-celery и не забываем после этого сделать миграции
+INSTALLED_APPS = (
+    # ...
+    'djcelery',
+    # ...
+)</code></pre>
+<p>Основные установки для интеграции Django и Celery заданы. Теперь создадим приложение Celery (в файле celery.py рядом с settings.py) почти как описано в документации:</p>
+<pre>
+<code class="language-python">from __future__ import absolute_import
+import os
+
+from celery import Celery
+from django.conf import settings
+
+# устанавливаем settings модуль для приложения celery
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'proj.settings')
+
+# создаем celery-приложение
+app = Celery('name-of-app')
+
+# используем установки django-проекта в celery-приложении
+app.config_from_object('django.conf:settings')
+
+# автоопределение задач из django-проекта
+app.autodiscover_tasks(lambda: settings.INSTALLED_APPS)</code></pre>
+
+<p>Всё. Можно создать задачи и запускать <code>manage.py celeryd</code> <sup><a href="#note-1">*</a></sup> и <code>manage.py celerybeat</code> для тестирования интеграции. Но мы пойдем немного дальше и я покажу как запустить celery демоном в Ubuntu для <code>service</code>. Создайте <code>/etc/init.d/celeryd</code> и запишите в него код <a href="https://github.com/celery/celery/blob/3.1/extra/generic-init.d/celeryd">отсюда</a>. Затем в /etc/default/celeryd впишите следующее:</p>
+<pre>
+<code class="language-python"># Название узла демона
+CELERYD_NODES="projectname"
+
+# Исполняющий файл
+CELERY_BIN="/usr/local/bin/celery"
+
+# Указание celery-приложения
+CELERY_APP="proj.celery:app"
+
+CELERYD_CHDIR="/путь/до/джанго/проекта/"
+
+# параметры запуска демона
+# опция -B запускает демон с celerybeat-ом
+CELERYD_OPTS="--time-limit=300 --concurrency=3 -B"
+
+# лог-файл демона. %N - название узла
+CELERYD_LOG_FILE="/var/log/celery/%N.log"
+
+# Идентификатор процесса демона. %N - название узла
+CELERYD_PID_FILE="/var/run/celery/%N.pid"
+
+# Группа и пользователь, от имени которого будет работать демон
+# у меня тот же что и django
+CELERYD_USER="www-data"
+CELERYD_GROUP="www-data"
+
+# Если директории лога и pid-а отсутствуют - они создадутся автоматом
+CELERY_CREATE_DIRS=1
+</code></pre>
+<p>Это все премудрости простого способа развернуть Celery, интегрированную с Django. Теперь достаточно выполнить</p>
+<pre>
+<code class="language-bash">sudo service celeryd start</code></pre>
+<p>и читать логи celery — они подскажут, если что-то пошло не так.</p>
+<p>Теперь рассмотрим практическое применение celery в django-проекте.</p>
+<p>Для создания асинхронной задачи в любом django-приложении создайте файл tasks.py:</p>
+<pre>
+<code class="language-python"># -*- coding: utf8 -*-
+import datetime
+from celery import shared_task
+@shared_task
+def test_task():
+    print '{0}'.format(datetime.datetime.now())</code></pre>
+<p>Теперь в админке <code>/mtbackend/admin/djcelery/periodictask/add/</code> можно добавить эту задачу для выполнения с любой периодичностью, ограниченной лишь celerybeat.</p>
+<p>Если же нужно создать асинхронную задачу, то можно определить любую функцию или метод как:</p>
+<pre>
+<code class="language-python">from celery import task
+@task
+def func():
+    print 'call task func'</code></pre>
+<p>а затем вызвать её где-то в приложении, например так:</p>
+<pre>
+<code class="language-python">func.delay()</code></pre>
+<p>Замечу, что процессы описаны для Django 1.5-1.7, Celery 3.1.13, django-celery 3.1.10. Если у вас будут другие версии пакетов, то что-то может не заработать. Документация — в помощь.</p>
+<p>Полезные ссылки:</p>
+
+<p><a name="note-1"/><b>UPDATE:</b> Метод <code>manage.py celeryd</code> объявлен устаревшим, поэтому вместо него следует использовать <code>manage.py celery worker</code></p>
+<p/>
+</div>
+</div></body></html>

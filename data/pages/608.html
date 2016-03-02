@@ -1,0 +1,124 @@
+<html><body><div><div class="entry-content">
+		<p>Эта статья перевод. Оригинал: <a href="http://blog.etianen.com/blog/2013/06/08/django-querysets/">Using Django querysets effectively</a>.</p>
+<p>Системы объектно-реляционного отображения (ORM) делают взаимодействие с базой данных SQL намного легче, но имеют репутацию неэффективных и значительно более медленных решений, чем «сырые» SQL запросы.<br/>
+Эффективное использование ORM подразумевает некоторое понимание того, как система строит запросы к базе данных. В этой статье я опишу способы эффективного использования <a href="https://docs.djangoproject.com/en/dev/topics/db/models/">Django ORM</a> системы для средних и огромных наборов данных.<br/>
+<span id="more-386"/></p>
+<h2>Django QuerySet-ы ленивы</h2>
+<p>QuerySet в Django является представлением некоторого числа строк в базе данных, опционально отфильтрованных посредством запроса. Например, следующий код является представлением всех людей в базе данных по имени ‘Dave’:</p>
+<pre class="brush: python; ">
+
+person_set = Person.objects.filter(first_name="Dave")
+
+</pre>
+<p>Приведенный выше код не запускает какие-либо запросы к базе данных. Вы можете можете взять <code>person_set</code> и применить дополнительные фильтры, или передать его в функцию, и ничего не будет отправлено в базу данных. Это хорошо, потому что запросы к базе данных являются одной из вещей, которые существенно замедляют веб-приложения.</p>
+<p>Для выборки данных из базы данных необходимо осуществить перебор по QuerySet:</p>
+<pre class="brush: python; ">
+
+for person in person_set:
+    print(person.last_name)
+
+</pre>
+<h2>У Django QuerySets есть кэш</h2>
+<p>Как только вы начнете осуществлять перебор по QuerySet, все строки соответствующие QuerySet извлекутся из базы данных и будут преобразованы в объекты моделей Django. Это называется вычисление (evaluation). Затем эти модели сохранятся во встроенный кэш QuerySet, так что если вы осуществите перебор по QuerySet снова, вы не выполните тот же запрос повторно.</p>
+<p>Например, следующий код выполнит только один запрос к базе данных:</p>
+<pre class="brush: python; ">
+
+pet_set = Pet.objects.filter(species="Dog")
+# The query is executed and cached.
+for pet in pet_set:
+    print(pet.first_name)
+# The cache is used for subsequent iteration.
+for pet in pet_set:
+    print(pet.last_name)
+
+</pre>
+<h2>if-выражения вызывают вычисление QuerySet</h2>
+<p>Самым полезным в кэше QuerySet является то, что он позволяет эффективно проверить, содержит ли QuerySet строки, а затем только осуществить перебор по ним, если хотя бы одна строка была найдена:</p>
+<pre class="brush: python; ">
+
+restaurant_set = Restaurant.objects.filter(cuisine="Indian")
+# The `if` statement evaluates the queryset.
+if restaurant_set:
+    # The cache is used for subsequent iteration.
+    for restaurant in restaurant_set:
+        print(restaurant.name)
+
+</pre>
+<h2>Кэш QuerySet является проблемой, если вам не нужны все результаты выборки</h2>
+<p>Иногда, вместо того чтобы осуществлять перебор по результатам выборки, вы просто хотите убедиться, что существует по крайней мере один результат. В этом случае, простое использование if-выражения с QuerySet по-прежнему будет полностью вычислять QuerySet и заполнять его кэш. Даже если вы никогда не планируете использовать эти результаты!</p>
+<pre class="brush: python; ">
+
+city_set = City.objects.filter(name="Cambridge")
+# The `if` statement evaluates the queryset.
+if city_set:
+    # We don't need the results of the queryset here, but the
+    # ORM still fetched all the rows!
+    print("At least one city called Cambridge still stands!")
+
+</pre>
+<p>Чтобы избежать этого, используйте метод <code>exists()</code>, дабы проверить, была ли найдена хотя бы одна соответствующая строка:</p>
+<pre class="brush: python; ">
+
+tree_set = Tree.objects.filter(type="deciduous")
+# The `exists()` check avoids populating the queryset cache.
+if tree_set.exists():
+    # No rows were fetched from the database, so we save on
+    # bandwidth and memory.
+    print("There are still hardwood trees in the world!")
+
+</pre>
+<h2>Кэш QuerySet является проблемой, если ваш QuerySet огромен</h2>
+<p>Если вы имеете дело с тысячами строк данных, единовременное помещение их всех в память может быть очень расточительно. Хуже того, огромный QuerySet может заблокировать серверные процессы, вызвав останов всего веб-приложения.</p>
+<p>Для предотвращения переполнения кэша QuerySet, но сохранения возможности осуществления перебора по всем результатам выборки, используйте метод <code>iterator()</code> для извлечения данных частями, и отбрасывайте старые строки, когда они были обработаны.</p>
+<pre class="brush: python; ">
+
+star_set = Star.objects.all()
+# The `iterator()` method ensures only a few rows are fetched from
+# the database at a time, saving memory.
+for star in star_set.iterator():
+    print(star.name)
+
+</pre>
+<p>Конечно, использование метода <code>iterator()</code>, чтобы избежать переполнения кэша QuerySet, означает, что повторный перебор по тому же QuerySet снова будет выполнять запрос к базе данных. Так что используйте <code>iterator()</code> с осторожностью, и убедитесь, что ваш код организован так, чтобы избежать повторного вычисления того же огромного QuerySet.</p>
+<h2>if-выражение является проблемой, если ваш QuerySet огромен</h2>
+<p>Как было показано ранее, кэш QuerySet отлично подходит для объединения if-выражением с for-выражением. Это позволяет осуществлять условный перебор по QuerySet. Для огромных QuerySet-ов, однако, заполнение кэша QuerySet это не вариант.</p>
+<p>Самым простым решением является объединение <code>exists()</code> с <code>iterator()</code>, позволяющее избегать заполнения кэша QuerySet за счет запуска двух запросов к базе данных.</p>
+<pre class="brush: python; ">
+
+molecule_set = Molecule.objects.all()
+# One database query to test if any rows exist.
+if molecule_set.exists():
+    # Another database query to start fetching the rows in batches.
+    for molecule in molecule_set.iterator():
+        print(molecule.velocity)
+
+</pre>
+<p>Более сложным решением является использование <a href="http://docs.python.org/2/library/itertools.html">передовых методов перебора</a> в языке Python чтобы выбрать первую позицию в <code>iterator()</code>, прежде чем решить, следует ли продолжать итерации.</p>
+<pre class="brush: python; ">
+
+atom_set = Atom.objects.all()
+# One database query to start fetching the rows in batches.
+atom_iterator = atom_set.iterator()
+# Peek at the first item in the iterator.
+try:
+    first_atom = next(atom_iterator)
+except StopIteration:
+    # No rows were found, so do nothing.
+    pass
+else:
+    # At least one row was found, so iterate over
+    # all the rows, including the first one.
+    from itertools import chain
+    for atom in chain([first_atom], atom_iterator):
+        print(atom.mass)
+
+</pre>
+<h2>Остерегайтесь наивной оптимизации</h2>
+<p>Кэш QuerySet существует для того, чтобы уменьшить количество запросов к базе данных, сделанных вашим приложением, и при нормальном использовании гарантирует, что ваша база данных будет запрошена только в случае необходимости.</p>
+<p>Использование методов <code>exists()</code> и <code>iterator()</code> позволяет оптимизировать использование памяти вашего приложения. Однако, так как они не заполняют кэш QuerySet, они могут привести к дополнительным запросам к базе данных.</p>
+<p>Так что пишите код внимательно, и если приложение начинает замедляться, взгляните на узкие места в коде. Возможно, небольшая оптимизации QuerySet сможет вам помочь.</p>
+
+	</div>
+
+	
+	</div></body></html>

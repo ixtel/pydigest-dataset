@@ -1,0 +1,272 @@
+<html><body><div><div class="post">
+      
+
+      <span class="post-date">
+        2014-09-19       </span>
+
+      <p>One of the features at my current contract is displaying widgets showing trending news articles.<br/>
+We define trendiness on a company basis (topic as well but let's keep it to only companies for this article), ie we want to display articles from companies that are trending.<br/>
+The articles are stored in <a href="http://www.elasticsearch.org/">Elasticsearch</a> and we want to spot the trending ones for a given time period (last week, last month, last quarter, last year).<br/>
+For each article we keep track (in the article doc in ES, as a <a href="http://www.elasticsearch.org/guide/en/elasticsearch/reference/current/mapping-nested-type.html">nested type</a>) of the companies mentioned and we use that field to calculate the trends (this is a bit simplified, there is actually a second similar field as well but let's keep things simple for the sake of the article).  </p>
+<p>These trending articles are shown in a iframe and this iframe had been timing out even for short-ish time periods (3 months or so) worth of data.<br/>
+Since we can't really have things timing out, I decided to have a look and try to improve things.   </p>
+<h2>What was there before</h2>
+<p>Looking at the code, I realised that the current trending code was very naive.<br/>
+It was working in two steps:</p>
+<ul>
+<li>gets the number of times a company was mentioned over the time period we're interested in</li>
+<li>run a javascript script in a ES query that was calculating the score for each article by adding the score for of each company in the article </li>
+</ul>
+<p>There are two things wrong with that approach.<br/>
+The first obvious one is that it massively favours big companies, as they will have more articles talking about them, and even if they are actually trending down compared to the norm, they will still be at the top of the trending list.<br/>
+The second one is that it is running a script iterating over 2 dicts for each article (2 because as mentioned in the introduction, there is another field we rate with in addition to companies), making it pretty damn slow and timing out on the live server.  </p>
+<h2>A new approach</h2>
+<p>With these 2 things in mind, I set out to figure out a better and faster way to find the trending companies.  </p>
+<h3>Trendiness</h3>
+<p>The first thing to define is trendiness: something trendy is something that is mentioned more often than usual.<br/>
+From that definition we can realise that we first need to define what is <em>usual</em>, also called the <em>baseline</em> so let's start with that.</p>
+<h3>Defining a baseline using Elasticsearch</h3>
+<p>As mentioned above, the goal in defining a baseline is finding out what's normal for a company.<br/>
+I chose to find the number of mentions for each company everyday for the 3 months prior to the interval we're interested in.<br/>
+3 months is a completely arbitrary value that could as well be 1 month but it seemed about right.<br/>
+Elasticsearch provides a <a href="http://www.elasticsearch.org/guide/en/elasticsearch/reference/current/search-aggregations-bucket-datehistogram-aggregation.html">date histogram aggregation</a> that does exactly that !  </p>
+<p>Let's have a look at a query, there are a few options worth mentioning:</p>
+<div class="highlight"><pre><span class="p">{</span>
+    <span class="nt">"size"</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span>
+    <span class="nt">"query"</span><span class="p">:</span> <span class="p">{</span><span class="err">...</span><span class="p">},</span>
+    <span class="nt">"aggs"</span><span class="p">:</span> <span class="p">{</span>
+        <span class="nt">"companies"</span><span class="p">:</span> <span class="p">{</span>
+            <span class="nt">"date_histogram"</span><span class="p">:</span> <span class="p">{</span>
+                <span class="nt">"field"</span><span class="p">:</span> <span class="s2">"harvest_date"</span><span class="p">,</span>
+                <span class="nt">"interval"</span><span class="p">:</span> <span class="s2">"day"</span><span class="p">,</span>
+                <span class="nt">"format"</span><span class="p">:</span> <span class="s2">"yyyy-MM-dd"</span><span class="p">,</span>
+                <span class="nt">"min_doc_count"</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span> 
+                <span class="nt">"extended_bounds"</span><span class="p">:</span> <span class="p">{</span>
+                    <span class="nt">"min"</span><span class="p">:</span> <span class="err">history_start</span><span class="p">,</span>
+                    <span class="nt">"max"</span><span class="p">:</span> <span class="err">end</span>
+                <span class="p">},</span>
+            <span class="p">},</span>
+            <span class="nt">"aggs"</span><span class="p">:</span> <span class="p">{</span>
+                <span class="nt">"nested_items"</span><span class="p">:</span> <span class="p">{</span>
+                    <span class="nt">"aggs"</span><span class="p">:</span> <span class="p">{</span>
+                        <span class="nt">"items"</span><span class="p">:</span> <span class="p">{</span>
+                            <span class="nt">"terms"</span><span class="p">:</span> <span class="p">{</span>
+                                <span class="nt">"field"</span><span class="p">:</span> <span class="s2">"companies.id"</span><span class="p">,</span>
+                                <span class="nt">"size"</span><span class="p">:</span> <span class="mi">0</span>
+                            <span class="p">}</span>
+                        <span class="p">}</span>
+                    <span class="p">},</span>
+                    <span class="nt">"nested"</span><span class="p">:</span> <span class="p">{</span>
+                        <span class="nt">"path"</span><span class="p">:</span> <span class="s2">"companies"</span>
+                    <span class="p">}</span>
+                <span class="p">}</span>
+            <span class="p">}</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+
+
+<p>As mentioned in the introduction, companies is a nested type so require some addition levels in the queries.<br/>
+There are a few things to note:</p>
+<ul>
+<li>we want a day by day interval, ES provides that out of the box and a few more if necessary, see the link above for all the possibilities</li>
+<li>we want the date formatted as ISO for simplicity sake</li>
+<li>we want to get as many buckets as possible so we even get the days where we don't have any matching documents by setting <strong>min_doc_count</strong> to 0</li>
+<li>we want every possible day between history_start and end to have a bucket by setting the <strong>extended_bounds</strong> min/max to these dates</li>
+</ul>
+<p>With this query we get a bucket for each day that can contain companies with they doc_count if there are, or an empty bucket otherwise.<br/>
+With all the companies ids and that data, we can recreate the complete histogram of the number of article for each company in our postgres  database.  I also separate the history data from the window we are observing, the python code looks something like:</p>
+<div class="highlight"><pre><span class="n">AggregationData</span> <span class="o">=</span> <span class="n">namedtuple</span><span class="p">(</span><span class="s">'AggregationData'</span><span class="p">,</span> <span class="p">[</span><span class="s">'history'</span><span class="p">,</span> <span class="s">'window'</span><span class="p">])</span>
+
+<span class="k">def</span> <span class="nf">_get_numbers_by_day</span><span class="p">(</span><span class="n">all_ids</span><span class="p">,</span> <span class="n">aggregation</span><span class="p">,</span> <span class="n">window_start</span><span class="p">):</span>
+  <span class="sd">"""window_start is ISO formatted string"""</span>
+  <span class="n">values</span> <span class="o">=</span> <span class="n">defaultdict</span><span class="p">(</span><span class="k">lambda</span><span class="p">:</span> <span class="n">AggregationData</span><span class="p">([],</span> <span class="p">[]))</span>
+
+  <span class="n">in_window</span> <span class="o">=</span> <span class="bp">False</span>
+  <span class="k">for</span> <span class="n">day</span> <span class="ow">in</span> <span class="n">aggregation</span><span class="p">:</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">in_window</span><span class="p">:</span>
+      <span class="c"># remember we asked for the dates from the agg to be ISO formatted as well</span>
+      <span class="n">in_window</span> <span class="o">=</span> <span class="n">window_start</span> <span class="o">==</span> <span class="n">day</span><span class="p">[</span><span class="s">'key_as_string'</span><span class="p">]</span>
+
+    <span class="c"># then look if we got doc_counts for that day, add it to the right tuple in the values dict, see below</span>
+    <span class="c"># fill with 0 for the rest, for example</span>
+    <span class="c"># (_id would have been set while looping over the ids not seen in the buckets here)</span>
+    <span class="k">if</span> <span class="n">in_window</span><span class="p">:</span>
+      <span class="n">values</span><span class="p">[</span><span class="n">_id</span><span class="p">]</span><span class="o">.</span><span class="n">window</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+      <span class="n">values</span><span class="p">[</span><span class="n">_id</span><span class="p">]</span><span class="o">.</span><span class="n">history</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+</pre></div>
+
+
+<p>We now have the data for all companies for each day. Cool.  </p>
+<h3>Finding the trends</h3>
+<h4>First approach</h4>
+<p>The first thing I tried was to get the mean value of the history values and divide the window period values with that mean to get normalized values compared to their usual values.<br/>
+You are then able to spot unusual activities when a value is above 1 (by that mean I something like 5, not 1.1) and identify trends by looking at the difference between 2 consecutive points: if the numbers are going up and are reasonably higher than 1, it's trending !  </p>
+<p>While this gives <em>ok</em> results, this approach fails to account for the standard deviation which can change the results quite a bit.  </p>
+<h4>Z-Score</h4>
+<p>Time to look at <a href="http://en.wikipedia.org/wiki/Standard_score">z-score</a> !<br/>
+This is the standard algorithm to find trending things and is simple to implement :
+<img alt="z-score formula" src="http://upload.wikimedia.org/math/8/4/6/8463971a22cc96a1e0612588e5656bce.png"/> with Îź being the history mean and Ď the standard deviation of the history data.  </p>
+<p>Let's implement it quickly in python:</p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">math</span> <span class="kn">import</span> <span class="n">sqrt</span>
+
+<span class="k">def</span> <span class="nf">zscore</span><span class="p">(</span><span class="n">data</span><span class="p">,</span> <span class="n">point</span><span class="p">):</span>
+  <span class="sd">"""Going to observe a single point here"""</span>
+  <span class="n">length_data</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">data</span><span class="p">))</span> <span class="c"># need floats, and we are using it several times</span>
+  <span class="n">mean</span> <span class="o">=</span> <span class="nb">sum</span><span class="p">(</span><span class="n">data</span><span class="p">)</span> <span class="o">/</span> <span class="n">length_data</span>  <span class="c"># and be careful of len(data) == 0</span>
+  <span class="n">std</span> <span class="o">=</span> <span class="n">sqrt</span><span class="p">(</span><span class="nb">sum</span><span class="p">((</span><span class="n">point</span> <span class="o">-</span> <span class="n">mean</span><span class="p">)</span> <span class="o">**</span> <span class="mi">2</span> <span class="k">for</span> <span class="n">point</span> <span class="ow">in</span> <span class="n">data</span><span class="p">)</span> <span class="o">/</span> <span class="n">length_data</span><span class="p">)</span>
+
+  <span class="c"># And we now apply the formula above</span>
+  <span class="k">return</span> <span class="p">(</span><span class="n">point</span> <span class="o">-</span> <span class="n">mean</span><span class="p">)</span> <span class="o">/</span> <span class="n">std</span>  <span class="c"># again, check for std == 0</span>
+</pre></div>
+
+
+<p>Nothing fancy going there, just getting the mean and standard deviation for the data and use the formula.<br/>
+This gives pretty good results (good thing we humans can detect if something is trendy pretty easily):</p>
+<div class="highlight"><pre>print zscore<span class="o">([</span>20, 10, 10, 5, 5, 6, 6, 6<span class="o">]</span>, 20<span class="o">)</span>
+&gt;&gt; 2.4244128728
+print zscore<span class="o">([</span>0, 2, 3, 4, 6, 8<span class="o">]</span>, 2<span class="o">)</span>
+&gt;&gt; -0.7027642215
+</pre></div>
+
+
+<p>There is one issue with that though:</p>
+<div class="highlight"><pre><span class="k">print</span> <span class="n">zscore</span><span class="p">([</span><span class="mi">20</span><span class="p">,</span> <span class="mi">20</span><span class="p">,</span> <span class="mi">20</span><span class="p">,</span> <span class="mi">20</span><span class="p">,</span> <span class="mi">20</span><span class="p">,</span> <span class="mi">20</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">],</span> <span class="mi">20</span><span class="p">)</span>
+<span class="o">&gt;&gt;</span> <span class="mf">1.15470053838</span>
+<span class="k">print</span> <span class="n">zscore</span><span class="p">([</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">20</span><span class="p">,</span> <span class="mi">20</span><span class="p">,</span> <span class="mi">20</span><span class="p">,</span> <span class="mi">20</span><span class="p">,</span> <span class="mi">20</span><span class="p">,</span> <span class="mi">20</span><span class="p">],</span> <span class="mi">20</span><span class="p">)</span>
+<span class="o">&gt;&gt;</span> <span class="mf">1.15470053838</span>
+</pre></div>
+
+
+<p>Our guts tell us that the first one is more unusual than the second one and thus should have a higher rating than the second (imagine similar series containing hundred of points rather than this small example) if we are only looking at the last few days.<br/>
+When we are looking at trending things, recent values are more important than old ones right?<br/>
+We need to somehow depreciate the previous values as we move forward in the history.<br/>
+This is called a rolling zscore and unfortunately Pandas doesn't <a href="http://pandas.pydata.org/pandas-docs/stable/api.html#standard-moving-window-functions">have one for zscore</a>.  I could have probably used rolling_apply but where would be the fun in that and it is pretty easy to implement anyway !</p>
+<h4>Rolling z-score</h4>
+<p>We got the formula and the code for the normal z-score above.<br/>
+By rolling we mean that we re-apply the formula for every point, and in our case adding a factor so that the oldest points carry the less value.<br/>
+How do we do that?<br/>
+Simply by multiplying the average by a factor for every point.<br/>
+An implementation in python looks like the following (maths taken from <a href="http://stackoverflow.com/a/826509">that stackoverflow answer</a>:  </p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">rolling_zscore</span><span class="p">(</span><span class="n">data</span><span class="p">,</span> <span class="n">observed_window</span><span class="p">,</span> <span class="n">decay</span><span class="o">=</span><span class="mf">0.9</span><span class="p">):</span>
+    <span class="sd">"""</span>
+<span class="sd">    The lowest the decay, the more important the new points</span>
+<span class="sd">    Decay is there to ensure that new data is worth more than old data</span>
+<span class="sd">    in terms of trendiness</span>
+<span class="sd">    """</span>
+    <span class="c"># Set the average to a the first value of the history to start with</span>
+    <span class="n">avg</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">data</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
+    <span class="n">squared_average</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">data</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">**</span> <span class="mi">2</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">add_to_history</span><span class="p">(</span><span class="n">point</span><span class="p">,</span> <span class="n">average</span><span class="p">,</span> <span class="n">sq_average</span><span class="p">):</span>
+        <span class="n">average</span> <span class="o">=</span> <span class="n">average</span> <span class="o">*</span> <span class="n">decay</span> <span class="o">+</span> <span class="n">point</span> <span class="o">*</span> <span class="p">(</span><span class="mi">1</span> <span class="o">-</span> <span class="n">decay</span><span class="p">)</span>
+        <span class="n">sq_average</span> <span class="o">=</span> <span class="n">sq_average</span> <span class="o">*</span> <span class="n">decay</span> <span class="o">+</span> <span class="p">(</span><span class="n">point</span> <span class="o">**</span> <span class="mi">2</span><span class="p">)</span> <span class="o">*</span> <span class="p">(</span><span class="mi">1</span> <span class="o">-</span> <span class="n">decay</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">average</span><span class="p">,</span> <span class="n">sq_average</span>
+
+    <span class="k">def</span> <span class="nf">calculate_zscore</span><span class="p">(</span><span class="n">average</span><span class="p">,</span> <span class="n">sq_average</span><span class="p">,</span> <span class="n">value</span><span class="p">):</span>
+        <span class="n">std</span> <span class="o">=</span> <span class="nb">round</span><span class="p">(</span><span class="n">sqrt</span><span class="p">(</span><span class="n">sq_average</span> <span class="o">-</span> <span class="n">avg</span> <span class="o">**</span> <span class="mi">2</span><span class="p">))</span>
+        <span class="k">if</span> <span class="n">std</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">value</span> <span class="o">-</span> <span class="n">average</span>
+
+        <span class="k">return</span> <span class="p">(</span><span class="n">value</span> <span class="o">-</span> <span class="n">average</span><span class="p">)</span> <span class="o">/</span> <span class="n">std</span>
+
+    <span class="k">for</span> <span class="n">point</span> <span class="ow">in</span> <span class="n">data</span><span class="p">[</span><span class="mi">1</span><span class="p">:]:</span>
+        <span class="n">avg</span><span class="p">,</span> <span class="n">squared_average</span> <span class="o">=</span> <span class="n">add_to_history</span><span class="p">(</span><span class="n">point</span><span class="p">,</span> <span class="n">avg</span><span class="p">,</span> <span class="n">squared_average</span><span class="p">)</span>
+
+    <span class="n">trends</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="c"># We recalculate the averages for each new point added to be more</span>
+    <span class="c"># accurate</span>
+    <span class="k">for</span> <span class="n">point</span> <span class="ow">in</span> <span class="n">observed_window</span><span class="p">:</span>
+        <span class="n">trends</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">calculate_zscore</span><span class="p">(</span><span class="n">avg</span><span class="p">,</span> <span class="n">squared_average</span><span class="p">,</span> <span class="n">point</span><span class="p">))</span>
+        <span class="n">avg</span><span class="p">,</span> <span class="n">squared_average</span> <span class="o">=</span> <span class="n">add_to_history</span><span class="p">(</span><span class="n">point</span><span class="p">,</span> <span class="n">avg</span><span class="p">,</span> <span class="n">squared_average</span><span class="p">)</span>
+
+    <span class="c"># Close enough way to find a trend in the window</span>
+    <span class="k">return</span> <span class="nb">sum</span><span class="p">(</span><span class="n">trends</span><span class="p">)</span> <span class="o">/</span> <span class="nb">len</span><span class="p">(</span><span class="n">trends</span><span class="p">)</span> <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">trends</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">0</span> <span class="k">else</span> <span class="mi">0</span>
+</pre></div>
+
+
+<p>Let's see the results and how decay affects the trendiness by checking the values for the trends list:  </p>
+<div class="highlight"><pre><span class="c"># Values used, you can see data averaging 3-4</span>
+<span class="n">data</span> <span class="o">=</span> <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="mi">5</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="mi">6</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">6</span><span class="p">,</span> <span class="mi">8</span><span class="p">,</span> <span class="mi">9</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="mi">7</span><span class="p">,</span> <span class="mi">5</span><span class="p">,</span> <span class="mi">6</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="mi">5</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="mi">5</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">6</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="mi">1</span><span class="p">]</span>
+<span class="n">window_not_trending</span> <span class="o">=</span> <span class="p">[</span><span class="mi">3</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="mi">5</span><span class="p">]</span>
+<span class="n">window_trending</span> <span class="o">=</span> <span class="p">[</span><span class="mi">5</span><span class="p">,</span> <span class="mi">8</span><span class="p">,</span> <span class="mi">10</span><span class="p">,</span> <span class="mi">12</span><span class="p">,</span> <span class="mi">15</span><span class="p">,</span> <span class="mi">17</span><span class="p">,</span> <span class="mi">20</span><span class="p">]</span>
+
+<span class="k">print</span> <span class="n">rolling_zscore</span><span class="p">(</span><span class="n">data</span><span class="p">,</span> <span class="n">window_not_trending</span><span class="p">)</span>
+<span class="p">[</span><span class="mf">3.8618524915490227e-05</span><span class="p">,</span> <span class="mf">0.5000347566724239</span><span class="p">,</span> <span class="o">-</span><span class="mf">0.04996871899481836</span><span class="p">,</span> <span class="o">-</span><span class="mf">1.5449718470953364</span><span class="p">,</span> <span class="o">-</span><span class="mf">0.8904746623858029</span><span class="p">,</span> <span class="mf">0.6985728038527774</span><span class="p">,</span> <span class="mf">1.1287155234674997</span><span class="p">]</span>
+<span class="o">&gt;&gt;</span> <span class="o">-</span><span class="mf">0.0225790751369</span>
+
+<span class="k">print</span> <span class="n">rolling_zscore</span><span class="p">(</span><span class="n">data</span><span class="p">,</span> <span class="n">window_trending</span><span class="p">)</span>
+<span class="p">[</span><span class="mf">1.0000386185249155</span><span class="p">,</span> <span class="mf">2.400034756672424</span><span class="p">,</span> <span class="mf">2.106687520670121</span><span class="p">,</span> <span class="mf">2.5626854352697754</span><span class="p">,</span> <span class="mf">2.4798126688070985</span><span class="p">,</span> <span class="mf">2.185465121541111</span><span class="p">,</span> <span class="mf">2.566918609387</span><span class="p">]</span>
+<span class="o">&gt;&gt;</span> <span class="mf">2.18594896155</span>
+
+<span class="c"># And now with diferent decay, not linear relation</span>
+<span class="k">print</span> <span class="n">rolling_zscore</span><span class="p">(</span><span class="n">data</span><span class="p">,</span> <span class="n">window_trending</span><span class="p">,</span> <span class="n">decay</span><span class="o">=</span><span class="mf">0.5</span><span class="p">)</span>
+<span class="o">&gt;&gt;</span> <span class="mf">1.85740988579</span>
+<span class="k">print</span> <span class="n">rolling_zscore</span><span class="p">(</span><span class="n">data</span><span class="p">,</span> <span class="n">window_trending</span><span class="p">,</span> <span class="n">decay</span><span class="o">=</span><span class="mf">0.1</span><span class="p">)</span>
+<span class="o">&gt;&gt;</span> <span class="mf">2.93406854599</span>
+</pre></div>
+
+
+<p>And now let's see the results for the type of series we had before that would cause problems:</p>
+<div class="highlight"><pre><span class="k">print</span> <span class="n">rolling_zscore</span><span class="p">([</span><span class="mi">20</span><span class="p">,</span> <span class="mi">20</span><span class="p">,</span> <span class="mi">20</span><span class="p">,</span> <span class="mi">20</span><span class="p">,</span> <span class="mi">20</span><span class="p">,</span> <span class="mi">20</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">],</span> <span class="p">[</span><span class="mi">20</span><span class="p">])</span>
+<span class="o">&gt;&gt;</span> <span class="mf">2.03674495279</span>
+<span class="k">print</span> <span class="n">rolling_zscore</span><span class="p">([</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">20</span><span class="p">,</span> <span class="mi">20</span><span class="p">,</span> <span class="mi">20</span><span class="p">,</span> <span class="mi">20</span><span class="p">,</span> <span class="mi">20</span><span class="p">,</span> <span class="mi">20</span><span class="p">],</span> <span class="p">[</span><span class="mi">20</span><span class="p">])</span>
+<span class="o">&gt;&gt;</span> <span class="mf">1.062882</span>
+</pre></div>
+
+
+<p>Ok we got something that looks like credible results, time to get back to the ES part but first, a (very) quick trip to redis.</p>
+<h3>Finding the most trendings in that</h3>
+<p>So we got a dict with companies ids as keys and trendiness as values.<br/>
+We could easily sort that in python but where's the fun in that !<br/>
+Redis provides a sorted set for us that we can query easily as we want and since we want to cache things to avoid repeating all these calculations and the initial ES query, let's use that: <a href="http://redis.io/commands/zadd">ZADD</a>.<br/>
+The syntax is a bit odd (to me) as you five the value before the key, but is easy to use:</p>
+<div class="highlight"><pre><span class="c"># This will insert a member to the set `company_key`,</span>
+<span class="c"># with the rolling average as the value and the company_id as they key</span>
+<span class="k">for</span> <span class="n">company_id</span><span class="p">,</span> <span class="n">agg</span> <span class="ow">in</span> <span class="n">companies</span><span class="o">.</span><span class="n">iteritems</span><span class="p">():</span>
+    <span class="n">redis</span><span class="o">.</span><span class="n">zadd</span><span class="p">(</span><span class="n">company_key</span><span class="p">,</span> <span class="n">rolling_zscore</span><span class="p">(</span><span class="n">agg</span><span class="o">.</span><span class="n">history</span><span class="p">,</span> <span class="n">agg</span><span class="o">.</span><span class="n">window</span><span class="p">),</span> <span class="n">company_id</span><span class="p">)</span>
+</pre></div>
+
+
+<p>Now, if we query redis for that set, it will return the key-value tuple sorted the way we want:</p>
+<div class="highlight"><pre><span class="c"># This asks for the 5 companies with the highest trending score</span>
+<span class="c"># and to send the score back as well</span>
+<span class="c"># if you want to find the 5 lowest trending companies, you would use redis.zrange</span>
+<span class="n">trending_companies</span> <span class="o">=</span> <span class="n">redis</span><span class="o">.</span><span class="n">zrevrange</span><span class="p">(</span><span class="n">company_key</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">5</span><span class="p">,</span> <span class="n">withscores</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+</pre></div>
+
+
+<h3>Wrapping this up in Elasticsearch</h3>
+<p>Note: I am a newbie with ES, so do let me know if there are better ways to do that
+We got our trending companies, time to actually take them into articles when fetching data from ES.<br/>
+ES provides a way to <a href="http://www.elasticsearch.org/guide/en/elasticsearch/reference/1.x/query-dsl-boosting-query.html">boost</a> a query, which will change a document score (ie 0.2 boost means its the document score is multiplied by 0.2 and so has a lower score while a boost of 1.5 means it will be higher than normal).<br/>
+Good thing we have the trendiness of every companies ! We can just give each company its trendiness as a boost:</p>
+<div class="highlight"><pre><span class="n">companies_filters</span> <span class="o">=</span> <span class="p">[]</span>
+<span class="c"># trending_companies if the list of tuples returned by redis.zrevrange</span>
+<span class="k">for</span> <span class="n">company</span> <span class="ow">in</span> <span class="n">trending_companies</span><span class="p">:</span>
+    <span class="n">companies_filters</span><span class="o">.</span><span class="n">append</span><span class="p">({</span>
+        <span class="s">"filter"</span><span class="p">:</span> <span class="p">{</span>
+            <span class="s">"nested"</span><span class="p">:</span> <span class="p">{</span>
+                <span class="s">"path"</span><span class="p">:</span> <span class="s">"companies"</span><span class="p">,</span>
+                <span class="s">"filter"</span><span class="p">:</span> <span class="p">{</span>
+                    <span class="s">"term"</span><span class="p">:</span> <span class="p">{</span>
+                        <span class="s">"companies.id"</span><span class="p">:</span> <span class="n">company</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>  <span class="c"># id</span>
+                    <span class="p">}</span>
+                <span class="p">}</span>
+
+            <span class="p">}</span>
+        <span class="p">},</span>
+        <span class="s">"boost_factor"</span><span class="p">:</span> <span class="mi">1</span> <span class="o">+</span> <span class="n">company</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>  <span class="c"># score (can be negative)</span>
+    <span class="p">})</span>
+</pre></div>
+
+
+<p>From that we get a list of filters to apply to our query that will favour articles from the trendy companies.  </p>
+<h2>Conclusion</h2>
+<p>I finally got to play a bit with Elasticsearch and it looks quite good !<br/>
+Being able to do queries in JSON (still more complex than SQL imo) and easy to compose it from different functions as from the python side we are just manipulating a dict.<br/>
+I'll definitely use it when I need search on another project.</p>
+    </div>
+  </div></body></html>

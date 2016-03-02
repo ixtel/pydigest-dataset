@@ -1,0 +1,354 @@
+<html><body><div><article id="a835ZbsGSFBLUIa6IjD6" class="post  historical">
+	<time datetime="2015-04-29" class="article_time">April 29, 2015</time>
+  
+	
+<p>Everything in python is an object including classes; if a class is an object then such class must have another class from which it is created. <br/>
+Consider, an instance, <code class="prettyprint">f</code>, of a user defined class <code class="prettyprint">Foo</code>; we can find out the type/class of the instance, <code class="prettyprint">f</code> by using the inbuilt method, <code class="prettyprint">type</code> and in this case it seen that the type of <code class="prettyprint">f</code> is <code class="prettyprint">Foo</code>.</p>
+
+<pre><code class="prettyprint lang-python">
+&gt;&gt;&gt; class Foo(object):
+...     pass
+... 
+&gt;&gt;&gt; f = Foo()
+&gt;&gt;&gt; type(f)
+&lt;class '__main__.Foo'&gt;
+&gt;&gt;&gt; 
+</code></pre>
+
+<p>Given that everything in python is an object including classes, we can also introspect on a <em>class object</em> to find out the type/class for such class.<br/>
+To illustrate this, we introspect on our previous class, <code class="prettyprint">Foo</code>, using the <code class="prettyprint">type</code> inbuilt method.</p>
+
+<pre><code class="prettyprint lang-python">
+class Foo(object):
+    pass
+
+&gt;&gt;&gt; type(Foo)
+&lt;class 'type'&gt;
+</code></pre>
+
+<p>In new style classes such as that defined above, the class used for creating all other class objects is the <code class="prettyprint">type</code> class. This applies to user defined classes as shown above as well as in-built classes as shown below: </p>
+
+<pre><code class="prettyprint lang-python">&gt;&gt;&gt;type(dict)
+&lt;class 'type'&gt;
+</code></pre>
+
+<p>Classes such as the <code class="prettyprint">type</code> class that are used to create other classes are called <strong><em>metaclasses</em></strong> in python. That is all there is to metaclasses; they are classes that are used in creating other classes. Custom metaclasses are not often used in python but sometimes we want to control the way our classes are created; for example we may want to check that every method has some kind of documentation; this is where custom metaclasses come in handy. </p>
+
+<p>Before explaining how metaclasses are  used to customize class creation, we look in detail at how the creation of python class objects happens when a class statement is encountered during the execution of a python script.</p>
+
+<pre><code class="prettyprint lang-python"># class definition
+class Foo(object):
+    def __init__(self, name):
+        self.name = name
+
+    def print_name():
+        print(self.name)
+</code></pre>
+
+<p>The above snippet is the class definition for a simple class that every python user is familiar with but this is not the only way such class can be defined. The snippet below shows a more involved method for defining the same above class with all the syntactic sugar provided by the <code class="prettyprint">class</code> keyword stripped away; the snippet provides a better understanding of what actually goes on under the covers during the execution of a python class:</p>
+
+<pre><code class="prettyprint lang-python">class_name = "Foo"
+class_parents = (object,)
+class_body = """
+def __init__(self, name):
+    self.name = name
+
+def print_name(self):
+    print(self.name)
+"""
+# a new dict is used as local namespace
+class_dict = {}
+
+#the body of the class is executed using dict from above as local 
+# namespace 
+exec(class_body, globals(), class_dict)
+
+# viewing the class dict reveals the name bindings from class body
+&gt;&gt;&gt;class_dict
+{'__init__': &lt;function __init__ at 0x10066f8c8&gt;, 'print_name': &lt;function blah at 0x10066fa60&gt;}
+# final step of class creation
+Foo = type(class_name, class_parents, class_dict)
+</code></pre>
+
+<p>When a new class is defined, the body of the class is executed as a set of statements within its own namespace (<em>its own dict</em>). As a final step in the class creation process, the class object is then created by instantiating the <code class="prettyprint">type</code> metaclass passing in the class name, base classes and dictionary as arguments. The above snippet shows how metaclasses comes into play during the class creation process but the above is not the way that classes are every defined rather they are defined with the <code class="prettyprint">class</code> statements and it is here we want to control such metaclass.</p>
+
+<p>The metaclass used in the class creation can be explicitly specified by setting a <code class="prettyprint">__metaclass__</code> variable or supplying the <code class="prettyprint">metaclass</code> keyword argument in a <code class="prettyprint">class</code> definition. In the case that none of this is supplied, the class statement examines the first entry in the <em>tuple</em> of the the base classes if any. If no base classes are used, the global variable <code class="prettyprint">__metaclass__</code> is searched for and if no value is found for this, python uses the default metaclass. </p>
+
+<p>Armed with a basic understanding of metaclasses, we illustrate how metaclasses can be of use to python programmers.</p>
+
+<p>We can define custom metaclasses that can be used when creating classes. These custom metaclasses will normally inherit from <code class="prettyprint">type</code> and re-implement certain methods such as <code class="prettyprint">__init__</code> and <code class="prettyprint">__new__</code>.</p>
+
+<p>We start with a trivial example. </p>
+
+<p>Imagine that you are the chief architect for a shiny new project and you have diligently read dozens of software engineering books and style guides that have hammered on the importance of <em>docstrings</em> so you want to enforce the requirement that all non-private methods in the project must have <em>docstrings</em>; how would you enforce this requirement?</p>
+
+<p>A simple and straightforward answer to this is to create a custom metaclass that will be used across the project that enforces this requirement. The snippet below though not production ready is an example of such a metaclass.</p>
+
+<pre><code class="prettyprint lang-python">
+class DocMeta(type):
+
+    def __init__(self, name, bases, attrs):
+        for key, value in attrs.items():
+            # skip special and private methods
+            if key.startswith("__"): continue
+            # skip any non-callable
+            if not hasattr(value, "__call__"): continue
+            # check for a doc string. a better way may be to store 
+            # all methods without a docstring then throw an error showing
+            # all of them rather than stopping on first encounter
+            if not getattr(value, '__doc__'):
+                raise TypeError("%s must have a docstring" % key)
+        type.__init__(self, name, bases, attrs)
+</code></pre>
+
+<p>We create a type subclass, <code class="prettyprint">DocMeta</code>, that overrides the <code class="prettyprint">type</code> class  <code class="prettyprint">__init__</code> method. The implemented <code class="prettyprint">__init__</code> method iterates through all the class attributes searching for non-private methods missing a <em>docstring</em>; if such is encountered an exception is thrown as shown below.</p>
+
+<pre><code class="prettyprint lang-python">class Car(object):
+
+    __metaclass__ = DocMeta
+
+    def __init__(self, make, model, color):
+        self.make = make
+        self.model = model
+        self.color = color
+
+    def change_gear(self):
+        print("Changing gear")
+
+    def start_engine(self):
+        print("Changing engine")
+
+car = Car()
+Traceback (most recent call last):
+  File "abc.py", line 47, in &lt;module&gt;
+    class Car(object):
+  File "abc.py", line 42, in __init__
+    raise TypeError("%s must have a docstring" % key)
+TypeError: change_gear must have a docstring
+</code></pre>
+
+<p>Another trivial example that illustrates the use of python metaclasses is when we want to create a final class that is a class that cannot be sub-classed. Some people may feel that this is <em>unpythonic</em> but for illustration purposes we implement a metaclass enforcing this requirement below:</p>
+
+<pre><code class="prettyprint lang-python">class final(type):
+    def __init__(cls, name, bases, namespace):
+        super(final, cls).__init__(name, bases, namespace)
+        for klass in bases:
+            if isinstance(klass, final):
+                raise TypeError(str(klass.__name__) + " is final")
+
+&gt;&gt;&gt; class B(object):
+...     __metaclass__ = final
+... 
+&gt;&gt;&gt; class C(B):
+...     pass
+... 
+Traceback (most recent call last):
+  File "&lt;stdin&gt;", line 1, in &lt;module&gt;
+  File "&lt;stdin&gt;", line 6, in __init__
+TypeError: B is final
+</code></pre>
+
+<p>In the above example, the metaclass simply performs a check ensuring that the final class is never part of the base classes for any class being created.</p>
+
+<p>There is confusion sometimes over whether to override either <code class="prettyprint">__init__</code> or <code class="prettyprint">__new__</code> when defining metaclasses. The decision whether to use either of them depends on what we are trying to achieve with such custom metaclasses. If we are trying to modify the class by modifying some class attribute then we override the <code class="prettyprint">__new__</code> method but when we are looking just to carry out checks such as we have done above then we override the <code class="prettyprint">__init__</code> method of the metaclass.</p>
+<h2 id="abstract-base-classes_2">
+<a class="head_anchor" href="#abstract-base-classes_2" rel="nofollow"> </a>Abstract Base Classes</h2>
+<p>Sometimes, we want to enforce a contract between classes in our program. For example, we may want all classes of a given type to implement a set of methods and properties; this is accomplished by interfaces and abstract classes in statically typed languages like Java.  In python we may create a base class with default methods and have all other classes inherit from them but what if we want each subclass to have its own implementation and we want to enforce this rule. We could define all the needed methods in a base class and have them raise <code class="prettyprint">NotImplementedError</code> exception then the subclasses have to implement these methods if they are going to be used. However this does not still solve the problem fully. We could have subclasses that don’t implement this method and one would not know till the method call was attempted at runtime. Another issue we may experience is that of a proxy object that passes on method calls to another object. Even if such an object implements all required methods of a type via its proxied object, an <code class="prettyprint">isinstance</code> test on such a proxy object for the proxied object will fail to produce the correct result.</p>
+
+<p>Python’s <em>Abstract base classes</em> provide a simple and elegant solution to these issues mentioned above. The abstract base class functionality is provided by the <em>abc</em> module. This module defines a metaclass and a set of decorators that are used in the creation of abstract base classes.<br/>
+When defining an abstract base class we use the <code class="prettyprint">ABCMeta</code> metaclass from the <code class="prettyprint">abc</code> module as the metaclass for the abstract base class and then make use  of the @abstractmethod and @abstractproperty decorators to create methods and properties that must be implemented by non-abstract subclasses. If a subclass doesn’t implement any of the abstract methods or properties then it is also an abstract class and cannot be instantiated as illustrated below:</p>
+
+<pre><code class="prettyprint lang-python">from abc import ABCMeta, abstractmethod
+
+class Vehicle(object):
+    __metaclass__ = ABCMeta
+
+    @abstractmethod
+    def change_gear(self):
+        pass
+
+    @abstractmethod
+    def start_engine(self):
+        pass
+
+
+class Car(Vehicle):
+
+    def __init__(self, make, model, color):
+        self.make = make
+        self.model = model
+        self.color = color
+
+# abstract methods not implemented
+&gt;&gt;&gt; car = Car("Toyota", "Avensis", "silver")
+Traceback (most recent call last):
+  File "&lt;stdin&gt;", line 1, in &lt;module&gt;
+TypeError: Can't instantiate abstract class Car with abstract methods change_gear, start_engine
+&gt;&gt;&gt; 
+</code></pre>
+
+<p>Once, a class implements all abstract methods then that class becomes a concrete class and can be instantiated by a user.</p>
+
+<pre><code class="prettyprint lang-python">from abc import ABCMeta, abstractmethod
+
+class Vehicle(object):
+    __metaclass__ = ABCMeta
+
+    @abstractmethod
+    def change_gear(self):
+        pass
+
+    @abstractmethod
+    def start_engine(self):
+        pass
+
+
+class Car(Vehicle):
+
+    def __init__(self, make, model, color):
+        self.make = make
+        self.model = model
+        self.color = color
+
+    def change_gear(self):
+        print("Changing gear")
+
+    def start_engine(self):
+        print("Changing engine")
+
+&gt;&gt;&gt; car = Car("Toyota", "Avensis", "silver")
+&gt;&gt;&gt; print(isinstance(car, Vehicle))
+True
+
+</code></pre>
+
+<p>Abstract base classes also allow existing classes to registered as part of its hierarchy but it performs no check on whether those classes implement the methods and properties that have been marked as abstract. This provides a simple solution to the second issue raised in the opening paragraph. Now we can just register a proxy class with an abstract base class and <code class="prettyprint">isinstance</code> check will return the correct answer when used.</p>
+
+<pre><code class="prettyprint lang-python">from abc import ABCMeta, abstractmethod
+
+class Vehicle(object):
+    __metaclass__ = ABCMeta
+
+    @abstractmethod
+    def change_gear(self):
+        pass
+
+    @abstractmethod
+    def start_engine(self):
+        pass
+
+
+class Car(object):
+
+    def __init__(self, make, model, color):
+        self.make = make
+        self.model = model
+        self.color = color
+
+&gt;&gt;&gt; Vehicle.register(Car)
+&gt;&gt;&gt; car = Car("Toyota", "Avensis", "silver")
+&gt;&gt;&gt; print(isinstance(car, Vehicle))
+True
+
+</code></pre>
+
+<p>Abstract base classes are used a lot in python library. They provide a mean to group python objects such as number types that have a relatively flat hierarchy. The <code class="prettyprint">collections</code> module also contains abstract base classes for various kinds of operations involving sets, sequences and dictionaries. <br/>
+Whenever we want to enforce contracts between classes in python just as interfaces do in java, abstract base classes is the way to go.</p>
+<h2 id="class-decorators_2">
+<a class="head_anchor" href="#class-decorators_2" rel="nofollow"> </a>Class Decorators</h2>
+<p>Just like functions can be decorated with other functions, classes can also be decorated in python. We decorate classes to add required functionality that maybe external to the class implementation; for example we may want to enforce the singleton pattern for a given class. Some functions implemented by class decorators can also implemented by metaclasses but class decorators sometimes make for a cleaner implementation to such functionality.</p>
+
+<p>The most popular example used to illustrate the class decorators is that of a registry for class <em>ids</em> as they are created.</p>
+
+<pre><code class="prettyprint lang-python">
+registry  =  {}
+
+def register(cls):
+    registry[cls.__clsid__] = cls
+    return cls
+
+@register
+class Foo(object):
+    __clsid__ = "123-456"
+
+def bar(self):
+    pass
+</code></pre>
+
+<p>Another example of using class decorators is for implementing the singleton pattern as shown below:</p>
+
+<pre><code class="prettyprint lang-python">def singleton(cls):
+    instances = {}
+
+    def get_instance():
+        if cls not in instances:
+            instances[cls] = cls()
+        return instances[cls]
+
+    return get_instance
+</code></pre>
+
+<p>The decorator defined above can be used to decorate any python class forcing that class to initialize a single instance of itself throughout the life time of the execution of the program.</p>
+
+<pre><code class="prettyprint lang-python">
+@singleton
+class Foo(object):
+    pass
+
+&gt;&gt;&gt; x = Foo()
+&gt;&gt;&gt; id(x)
+4310648144
+&gt;&gt;&gt; y = Foo()
+&gt;&gt;&gt; id(y)
+4310648144
+&gt;&gt;&gt; id(y) == id(x)
+True
+&gt;&gt;&gt; 
+</code></pre>
+
+<p>In the above example, we initialize the <code class="prettyprint">Foo</code> class twice; when we compare the ids of both objects, we see that they refer to a single object of the class. The same functionality can be achieved using a metaclass by overriding the <code class="prettyprint">__call__</code>  method of the metaclass as shown below:</p>
+
+<pre><code class="prettyprint lang-python">class Singleton(type):
+    _instances = {}
+    def __call__(cls, *args, **kwargs):
+        if cls not in cls._instances:
+            cls._instances[cls] = super(Singleton, cls).__call__(*args, **kwargs)
+        return cls._instances[cls]
+
+class Foo(object):
+    __metaclass__ = Singleton
+
+&gt;&gt;&gt; x = Foo()
+&gt;&gt;&gt; y = Foo()
+&gt;&gt;&gt; id(x)
+4310648400
+&gt;&gt;&gt; id(y)
+4310648400
+&gt;&gt;&gt; id(y) == id(x)
+True
+</code></pre>
+<h2 id="further-reading_2">
+<a class="head_anchor" href="#further-reading_2" rel="nofollow"> </a>Further Reading</h2>
+<ol>
+<li>Python Essential Reference 4th Edition; David Beazley.</li>
+<li><a href="http://stackoverflow.com/questions/6760685/creating-a-singleton-in-python" rel="nofollow">Stack Overflow: Creating a singleton in python.</a></li>
+<li><a href="https://docs.python.org/2/library/abc.html" rel="nofollow">Python Documentation: abc - Abstract Base Classes.</a></li>
+</ol>
+
+  <figure class="postend kudo able clearfix" id="kudo_a835ZbsGSFBLUIa6IjD6">
+    <a href="#kudo">
+      <p class="filling"> </p>
+    </a>
+    <p class="num">218</p>
+    <p class="txt">Kudos</p>
+  </figure>
+  <figure class="side kudo able clearfix" id="kudo_side_a835ZbsGSFBLUIa6IjD6">
+    <a href="#kudo">
+      <p class="filling"> </p>
+    </a>
+    <p class="num">218</p>
+    <p class="txt">Kudos</p>
+  </figure>
+</article>
+
+</div></body></html>

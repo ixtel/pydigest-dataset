@@ -1,0 +1,280 @@
+<html><body><div><div class="post-text" itemprop="text">
+<p>Here is my attempt. It's in C++, but can be easily ported to python since most are OpenCV functions.</p>
+
+<p>A brief outline of the method, comments in the code should help, too.</p>
+
+<ol>
+<li>Load the image</li>
+<li>Convert to grayscale</li>
+<li>Binaryze the image (threshold)</li>
+<li>Thinning, to have thin contours and help <code>findContours</code></li>
+<li>Get contours</li>
+<li><p>For each contour, get convex hull (to handle open contours), and classify according to <em>circularity</em>. Handle each shape differently.</p>
+
+<ul>
+<li><strong>Circle</strong> : find the minimum encolsing circle, or the best fitting ellipse</li>
+<li><strong>Recrangle</strong> : find the boundinx box, or the minimum oriented bounding box.</li>
+<li><strong>Triangle</strong> : search for the intersection of the minimum enclosing circle with the original shape, as they would intersect in the three vertices of the triangle. </li>
+</ul></li>
+</ol>
+
+<p>NOTES:</p>
+
+<ul>
+<li>I needed to modify the original image to 3 channel RGB from a png with transparency.</li>
+<li>The <em>thinning</em> code is from <a href="https://github.com/bsdnoobz/zhang-suen-thinning">here</a>. There is also the Python version.</li>
+<li><em>Circularity</em> is defined as: A measures how close to a circle the shape is. E.g. a regular hexagon has higher circularity than say a square. Is defined as (\frac{4*\pi*Area}{perimeter * perimeter}). This means that a circle has a circularity of 1, circularity of a square is 0.785, and so on.</li>
+<li>Because of the contours, there may be multiple detection for each shape. These can be filtered out according to, for example, intersection over union condition. I did't inserted this part in the code for now, since it requires additional logic that isn't strictly related to the main task of finding the shapes.</li>
+</ul>
+
+<p><strong>UPDATE</strong>
+- Just noticed that in OpenCV 3.0.0 there is the function <a href="http://docs.opencv.org/3.0-beta/modules/imgproc/doc/structural_analysis_and_shape_descriptors.html#minenclosingtriangle">minEnclosingTriangle</a>. This might be helpful to use instead of my procedure to find the triangle vertices. However, since inserting this function in the code would be trivial, I'll leave my procedure in the code in case one doesn't have OpenCV 3.0.0.</p>
+
+<p>The code:</p>
+
+<pre><code>#include &lt;opencv2\opencv.hpp&gt;
+#include &lt;vector&gt;
+#include &lt;iostream&gt;
+
+using namespace std;
+using namespace cv;
+
+/////////////////////////////////////////////////////////////////////////////////////////////
+// Thinning algorithm from here:
+// https://github.com/bsdnoobz/zhang-suen-thinning
+/////////////////////////////////////////////////////////////////////////////////////////////
+
+void thinningIteration(cv::Mat&amp; img, int iter)
+{
+    CV_Assert(img.channels() == 1);
+    CV_Assert(img.depth() != sizeof(uchar));
+    CV_Assert(img.rows &gt; 3 &amp;&amp; img.cols &gt; 3);
+
+    cv::Mat marker = cv::Mat::zeros(img.size(), CV_8UC1);
+
+    int nRows = img.rows;
+    int nCols = img.cols;
+
+    if (img.isContinuous()) {
+        nCols *= nRows;
+        nRows = 1;
+    }
+
+    int x, y;
+    uchar *pAbove;
+    uchar *pCurr;
+    uchar *pBelow;
+    uchar *nw, *no, *ne;    // north (pAbove)
+    uchar *we, *me, *ea;
+    uchar *sw, *so, *se;    // south (pBelow)
+
+    uchar *pDst;
+
+    // initialize row pointers
+    pAbove = NULL;
+    pCurr = img.ptr&lt;uchar&gt;(0);
+    pBelow = img.ptr&lt;uchar&gt;(1);
+
+    for (y = 1; y &lt; img.rows - 1; ++y) {
+        // shift the rows up by one
+        pAbove = pCurr;
+        pCurr = pBelow;
+        pBelow = img.ptr&lt;uchar&gt;(y + 1);
+
+        pDst = marker.ptr&lt;uchar&gt;(y);
+
+        // initialize col pointers
+        no = &amp;(pAbove[0]);
+        ne = &amp;(pAbove[1]);
+        me = &amp;(pCurr[0]);
+        ea = &amp;(pCurr[1]);
+        so = &amp;(pBelow[0]);
+        se = &amp;(pBelow[1]);
+
+        for (x = 1; x &lt; img.cols - 1; ++x) {
+            // shift col pointers left by one (scan left to right)
+            nw = no;
+            no = ne;
+            ne = &amp;(pAbove[x + 1]);
+            we = me;
+            me = ea;
+            ea = &amp;(pCurr[x + 1]);
+            sw = so;
+            so = se;
+            se = &amp;(pBelow[x + 1]);
+
+            int A = (*no == 0 &amp;&amp; *ne == 1) + (*ne == 0 &amp;&amp; *ea == 1) +
+                (*ea == 0 &amp;&amp; *se == 1) + (*se == 0 &amp;&amp; *so == 1) +
+                (*so == 0 &amp;&amp; *sw == 1) + (*sw == 0 &amp;&amp; *we == 1) +
+                (*we == 0 &amp;&amp; *nw == 1) + (*nw == 0 &amp;&amp; *no == 1);
+            int B = *no + *ne + *ea + *se + *so + *sw + *we + *nw;
+            int m1 = iter == 0 ? (*no * *ea * *so) : (*no * *ea * *we);
+            int m2 = iter == 0 ? (*ea * *so * *we) : (*no * *so * *we);
+
+            if (A == 1 &amp;&amp; (B &gt;= 2 &amp;&amp; B &lt;= 6) &amp;&amp; m1 == 0 &amp;&amp; m2 == 0)
+                pDst[x] = 1;
+        }
+    }
+
+    img &amp;= ~marker;
+}
+
+void thinning(const cv::Mat&amp; src, cv::Mat&amp; dst)
+{
+    dst = src.clone();
+    dst /= 255;         // convert to binary image
+
+    cv::Mat prev = cv::Mat::zeros(dst.size(), CV_8UC1);
+    cv::Mat diff;
+
+    do {
+        thinningIteration(dst, 0);
+        thinningIteration(dst, 1);
+        cv::absdiff(dst, prev, diff);
+        dst.copyTo(prev);
+    } while (cv::countNonZero(diff) &gt; 0);
+
+    dst *= 255;
+}
+
+
+int main()
+{
+    RNG rng(123);
+
+    // Read image
+    Mat3b src = imread("path_to_image");
+
+    // Convert to grayscale
+    Mat1b gray;
+    cvtColor(src, gray, COLOR_BGR2GRAY);
+
+    // Binarize
+    Mat1b bin;
+    threshold(gray, bin, 127, 255, THRESH_BINARY_INV);
+
+    // Perform thinning
+    thinning(bin, bin);
+
+    // Create result image
+    Mat3b res = src.clone();
+
+    // Find contours
+    vector&lt;vector&lt;Point&gt;&gt; contours;
+    findContours(bin.clone(), contours, CV_RETR_LIST, CV_CHAIN_APPROX_NONE);
+
+    // For each contour
+    for (vector&lt;Point&gt;&amp; contour : contours)
+    {
+        // Compute convex hull
+        vector&lt;Point&gt; hull;
+        convexHull(contour, hull);
+
+        // Compute circularity, used for shape classification
+        double area = contourArea(hull);
+        double perimeter = arcLength(hull, true);
+        double circularity = (4 * CV_PI * area) / (perimeter * perimeter);
+
+        // Shape classification
+
+        if (circularity &gt; 0.9)
+        {
+            // CIRCLE
+
+            //{
+            //  // Fit an ellipse ...
+            //  RotatedRect rect = fitEllipse(contour);
+            //  Scalar color = Scalar(rng.uniform(0, 255), rng.uniform(0, 255), rng.uniform(0, 255));
+            //  ellipse(res, rect, color, 5);
+            //}
+            {
+                // ... or find min enclosing circle
+                Point2f center;
+                float radius;
+                minEnclosingCircle(contour, center, radius);
+                Scalar color = Scalar(rng.uniform(0, 255), rng.uniform(0, 255), rng.uniform(0, 255));
+                circle(res, center, radius, color, 5);
+            }
+        }
+        else if (circularity &gt; 0.75)
+        {
+            // RECTANGLE
+
+            //{
+            //  // Minimum oriented bounding box ...
+            //  RotatedRect rect = minAreaRect(contour);
+            //  Point2f pts[4];
+            //  rect.points(pts);
+
+            //  Scalar color = Scalar(rng.uniform(0, 255), rng.uniform(0, 255), rng.uniform(0, 255));
+            //  for (int i = 0; i &lt; 4; ++i)
+            //  {
+            //      line(res, pts[i], pts[(i + 1) % 4], color, 5);
+            //  }
+            //}
+            {
+                // ... or bounding box
+                Rect box = boundingRect(contour);
+                Scalar color = Scalar(rng.uniform(0, 255), rng.uniform(0, 255), rng.uniform(0, 255));
+                rectangle(res, box, color, 5);
+            }
+        }
+        else if (circularity &gt; 0.7)
+        {
+            // TRIANGLE
+
+            // Select the portion of the image containing only the wanted contour
+            Rect roi = boundingRect(contour);
+            Mat1b maskRoi(bin.rows, bin.cols, uchar(0));
+            rectangle(maskRoi, roi, Scalar(255), CV_FILLED);
+            Mat1b triangle(roi.height, roi.height, uchar(0));
+            bin.copyTo(triangle, maskRoi);
+
+            // Find min encolsing circle on the contour
+            Point2f center;
+            float radius;
+            minEnclosingCircle(contour, center, radius);
+
+            // decrease the size of the enclosing circle until it intersects the contour
+            // in at least 3 different points (i.e. the 3 vertices)
+            vector&lt;vector&lt;Point&gt;&gt; vertices;
+            do
+            {
+                vertices.clear();
+                radius--;
+
+                Mat1b maskCirc(bin.rows, bin.cols, uchar(0));
+                circle(maskCirc, center, radius, Scalar(255), 5);
+
+                maskCirc &amp;= triangle;
+                findContours(maskCirc.clone(), vertices, CV_RETR_LIST, CV_CHAIN_APPROX_NONE);
+
+            } while (vertices.size() &lt; 3);
+
+            // Just get the first point in each vertex blob.
+            // You could get the centroid for a little better accuracy
+
+            Scalar color = Scalar(rng.uniform(0, 255), rng.uniform(0, 255), rng.uniform(0, 255));
+            line(res, vertices[0][0], vertices[1][0], color, 5);
+            line(res, vertices[1][0], vertices[2][0], color, 5);
+            line(res, vertices[2][0], vertices[0][0], color, 5);
+
+        }
+        else
+        {
+            cout &lt;&lt; "Some other shape..." &lt;&lt; endl;
+        }
+
+    }
+
+    return 0;
+}
+</code></pre>
+
+<p>The results (<code>minEnclosingCircle</code> and <code>boundingRect</code>):
+<a href="http://i.stack.imgur.com/RxFJx.png"><img src="http://i.stack.imgur.com/RxFJx.png" alt="enter image description here"/></a></p>
+
+<p>The results (<code>fitEllipse</code> and <code>minAreaRect</code>):
+<a href="http://i.stack.imgur.com/ZvSfE.png"><img src="http://i.stack.imgur.com/ZvSfE.png" alt="enter image description here"/></a></p>
+    </div>
+    </div></body></html>

@@ -1,0 +1,138 @@
+<html><body><div><div class="entry-content">
+		<p>Namaste everyone. If you build a RESTFul API for some purpose, what technology stack you use in python and why?. I may receive the following answers from you.</p>
+<p>1)  I use Flask with Flask-RESTFul</p>
+<p>2)  I use (Django + Tastypie) or (Django + REST Framework)</p>
+<p>Both options are not suitable for me. Because there is a very good light-weight API framework available in python called Falcon. I always keep my project and REST API loosely coupled. It means my REST API knows little about the Django or Flask project that is being implemented. Creating cloud API’s with low-level web framework than a bulky wrapped one always speeds up my API.</p>
+<h2>What is Falcon?</h2>
+<p>As per Falcon website <a href="http://falconframework.org/">Falcon official website</a></p>
+<p>“Falcon is a minimalist WSGI library for building speedy web APIs and app backends. We like to think of Falcon as the <cite>Dieter Rams</cite> of web frameworks.”</p>
+<p>“When it comes to building HTTP APIs, other frameworks weigh you down with tons of dependencies and unnecessary abstractions. Falcon cuts to the chase with a clean design that embraces HTTP and the REST architectural style.”</p>
+<p>If you want to hit bare metal for creating API use Falcon. You can build easy to develop, easy to serve and easy to scale API with Falcon. Just use it for speed.</p>
+<h2>What is PyPy?</h2>
+<p>“If you want your code to run faster, you should probably just use PyPy.” — Guido van Rossum</p>
+<p>PyPy is a <a class="reference external" href="http://speed.pypy.org/">fast</a>, <a class="reference external" href="http://pypy.org/compat.html">compliant</a> alternative implementation of the <a class="reference external" href="http://python.org/">Python</a> language</p>
+<p>So PyPy is a JIT implementation for your Python code. It is a separate interpreter that can be used as a normal interpreter in a virtual environment to power our projects. In most of the cases, there are no issues with PyPy.</p>
+<h2>Let’s start building a simple todo REST API</h2>
+<p>Note: Project source is available at <a href="https://github.com/narenaryan/Falcon-REST-API-Pattern" target="_blank">https://github.com/narenaryan/Falcon-REST-API-Pattern</a></p>
+<p>Falcon and PyPy are our ingredients to build scalable, faster REST API. We start with a virtual environment that runs PyPy with falcon installed using pip. Then we use rethinkDB as the resource provider for our API. Our todo app does three main things.</p>
+<ol>
+<li>Create a note (PUT)</li>
+<li>Fetch a note by ID (GET)</li>
+<li>Fetch all notes (GET)</li>
+<li>PUT &amp; DELETE are obvious</li>
+</ol>
+<p>Install RethinkDB on Ubuntu14.04 in this way.</p>
+<pre class="code-pre ">$ source /etc/lsb-release &amp;&amp; echo "deb http://download.rethinkdb.com/apt $DISTRIB_CODENAME main" | sudo tee /etc/apt/sources.list.d/rethinkdb.list
+$ wget -qO- http://download.rethinkdb.com/apt/pubkey.gpg | sudo apt-key add -
+$ sudo apt-get update &amp;&amp; sudo apt-get install rethinkdb
+$ sudo cp /etc/rethinkdb/default.conf.sample /etc/rethinkdb/instances.d/instance1.conf
+$ sudo /etc/init.d/rethinkdb restart</pre>
+<p class="de1"/>
+<p>Create virtualenv for the project and install required libraries. Download PyPy from this URL .<a href="http://pypy.org/download.html">PyPy Download</a>. After downloading, extract files and install pip if required.</p>
+<pre class="code-pre ">$ sudo apt-get install python-pip
+$ virtualenv -p pypy-2.6.1-linux64/bin/pypy falconenv
+$ source falconenv/bin/activate
+$ pip install rethinkdb falcon gunicorn</pre>
+<p>Now we are ready with our stack. PyPy as python interpreter, Falcon as web framework to build the RESTful API. Gunicorn is a WSGI server that serves our API. Now, let us prepare our rethinkDB database client for fetching and inserting resources. Let me give the filename “db_client.py”</p>
+<pre class="code-pre ">#db_client.py
+import os
+import rethinkdb as r
+from rethinkdb.errors import RqlRuntimeError, RqlDriverError
+
+RDB_HOST = 'localhost'
+RDB_PORT = 28015
+
+# Datbase is todo and table is notes
+PROJECT_DB = 'todo'
+PROJECT_TABLE = 'notes'
+
+# Set up db connection client
+db_connection = r.connect(RDB_HOST,RDB_PORT)
+
+
+# Function is for cross-checking database and table exists 
+def dbSetup():
+    try:
+        r.db_create(PROJECT_DB).run(db_connection)
+        print 'Database setup completed.'
+    except RqlRuntimeError:
+        try:
+            r.db(PROJECT_DB).table_create(PROJECT_TABLE).run(db_connection)
+            print 'Table creation completed'
+        except:
+            print 'Table already exists.Nothing to do'
+
+dbSetup()</pre>
+<p>Don’t worry, if you do not know about rethinkDB. Just go to this link and see quickstart. <a href="https://www.rethinkdb.com/docs/guide/python/">RethinkDB Python</a>. We just prepared a db connection client and created database, table. Now the actual thing comes. Falcon allows us to define a resource class which we can route to a URL. In that resource class we can have four REST methods</p>
+<ol>
+<li>on_get</li>
+<li>on_post</li>
+<li>on_put</li>
+<li>on_delete</li>
+</ol>
+<p>So we are going to implement first two functions in this article. Create a file called app.py.</p>
+<pre class="code-pre ">#app.py
+import falcon
+import json
+
+from db_client import *
+
+class NoteResource:
+ 
+    def on_get(self, req, resp):
+        """Handles GET requests"""
+        # Return note for particular ID
+        if req.get_param("id"):
+            result = {'note': r.db(PROJECT_DB).table(PROJECT_TABLE). get(req.get_param("id")).run(db_connection)}
+        else:
+            note_cursor = r.db(PROJECT_DB).table(PROJECT_TABLE).run(db_connection)
+            result = {'notes': [i for i in note_cursor]}
+        resp.body = json.dumps(result)
+
+    def on_post(self, req, resp):
+         """Handles POST requests"""
+         try:
+             raw_json = req.stream.read()
+         except Exception as ex:
+             raise falcon.HTTPError(falcon.HTTP_400,'Error',ex.message)
+
+         try:
+             result = json.loads(raw_json, encoding='utf-8')
+             sid =  r.db(PROJECT_DB).table(PROJECT_TABLE).insert({'title':result['title'],'body':result['body']}).run(db_connection)
+             resp.body = 'Successfully inserted %s'%sid
+         except ValueError:
+             raise falcon.HTTPError(falcon.HTTP_400,'Invalid JSON','Could not decode the request body. The ''JSON was incorrect.')
+
+api = falcon.API()
+api.add_route('/notes', NoteResource())</pre>
+<p>We can break down the code into following pieces.</p>
+<ol>
+<li>We imported falcon and database client</li>
+<li>Created a resource class called NoteResource</li>
+<li>Created two methods called on_get and on_post on NoteResource.</li>
+<li>In on_get method, we are checking for “id” parameter in the request and sending one resource (note) or all resources (notes). req, resp are the request and response objects of falcon respectively.</li>
+<li>In on_post method, we are checking for data as a raw JSON. We are decoding that raw JSON to store title and body in the rethinkDB notes table.</li>
+<li>We are creating API class of falcon and adding a route for it. ex: ‘/notes’ in our case.</li>
+</ol>
+<p>Now in order to serve API, we should start WSGI server because falcon needs an independent server to deliver the API. So launch Gunicorn</p>
+<pre class="code-pre ">$ gunicorn app:api</pre>
+<p> </p>
+<p>This will run Gunicorn WSGI server on port 8000. Visit</p>
+<p><a href="http://localhost:8000/notes" rel="nofollow">http://localhost:8000/notes</a></p>
+<p>to view all notes stored.</p>
+<p>If notes are empty then add one using POST request to our API.</p>
+<p><a href="https://impythonist.files.wordpress.com/2015/09/screenshot-from-2015-09-13-031354.png"><img class="aligncenter size-full wp-image-1188" src="https://impythonist.files.wordpress.com/2015/09/screenshot-from-2015-09-13-031354.png?w=1000" alt="Screenshot from 2015-09-13 03:13:54"/></a></p>
+<p>Now add one more note as shown above with different data. Let us say it is { “title” : “At 10:00 AM” , “body” : ” Scrum meeting scheduled”}. Now visit <a href="http://localhost:8000/notes?id=d24866be-36f0-4713-81fd-750b1b2b3bd4" target="_blank">http://localhost:8000/notes</a> once again and you will find this</p>
+<p> </p>
+<p>.<a href="https://impythonist.files.wordpress.com/2015/09/screenshot-from-2015-09-13-031937.png"><img class="aligncenter size-full wp-image-1191" src="https://impythonist.files.wordpress.com/2015/09/screenshot-from-2015-09-13-031937.png?w=1000" alt="Screenshot from 2015-09-13 03:19:37"/></a></p>
+<p>If we want to fetch an element by id then do it with this. <a href="http://localhost:8000/notes?id=d24866be-36f0-4713-81fd-750b1b2b3bd4" target="_blank">http://localhost:8000/notes?id=d24866be-36f0-4713-81fd-750b1b2b3bd4</a>. Now only one note with given ID will be displayed.</p>
+<p><a href="https://impythonist.files.wordpress.com/2015/09/screenshot-from-2015-09-13-032251.png"><img class="aligncenter size-full wp-image-1192" src="https://impythonist.files.wordpress.com/2015/09/screenshot-from-2015-09-13-032251.png?w=1000" alt="Screenshot from 2015-09-13 03:22:51"/></a></p>
+<p>This is how falcon enables us to create REST API easily at very low level. There are many additional features available for Falcon. For more details visit Falcon home page. If you want to see the full source code of above demonstration, visit this link.</p>
+<p><a href="https://github.com/narenaryan/Falcon-REST-API-Pattern" target="_blank">https://github.com/narenaryan/Falcon-REST-API-Pattern</a></p>
+<p>please do comment if you have any query. Have a good day <span class="wp-smiley wp-emoji wp-emoji-smile" title=":)">:)</span> .</p>
+		<div id="jp-post-flair" class="sharedaddy sd-like-enabled sd-sharing-enabled"><div class="sharedaddy sd-block sd-like jetpack-likes-widget-wrapper jetpack-likes-widget-unloaded" id="like-post-wrapper-62549587-1174-56d59b43af8d0" data-src="//widgets.wp.com/likes/#blog_id=62549587&amp;post_id=1174&amp;origin=impythonist.wordpress.com&amp;obj_id=62549587-1174-56d59b43af8d0" data-name="like-post-frame-62549587-1174-56d59b43af8d0"><h3 class="sd-title">Like this:</h3><p class="likes-widget-placeholder post-likes-widget-placeholder"><span class="button"><span>Like</span></span> <span class="loading">Loading...</span></p><span class="sd-text-color"/><a class="sd-link-color"/></div>
+<p id="jp-relatedposts" class="jp-relatedposts">
+	<h3 class="jp-relatedposts-headline"><em>Related</em></h3>
+</p></div>					</div>
+
+	</div></body></html>

@@ -1,0 +1,122 @@
+<html><body><div><section class="the_post">
+    <p>Say you have a big pile of data and a set of intuitions that can help to classify your data. Say you are a python developer. <a class="reference external" href="https://pypi.python.org/pypi/featureforge">FeatureForge</a> is the open source tool that will bridge you from there to pure machine learning stuff on scikit-learn without the need of boilerplate, incorporating in the way a set of utilities that will increase the robustness of your solution.</p>
+<p>All you have to do is</p>
+<dl class="docutils"><dt>Step 1:</dt><dd>Translate your intuitions into features</dd><dt>Step 2:</dt><dd>Evaluate them in the scikit-learn way</dd></dl>
+<p>and precisely how those 2 things can be done with this tool is what I want to tell here.</p>
+<div class="section" id="feature-definition">
+<h2>Feature Definition:</h2>
+<p>Your solution will strongly depend on your features, so you better be sure of have solid features instead of just <em>features</em>. So, how to be sure that each of the features is behaving like expected? In our experience, sometimes some reasonable and promising features can be discarded not because they don’t provide value, but instead they were buggy, and because of those bugs they were looking valueless. Probably you won’t be consuming your function output, and maybe in the best case you’ll only be watching some plots and aggregations of your feature results, but just that. <a class="reference external" href="https://pypi.python.org/pypi/featureforge">FeatureForge</a> gives you a set of utilities to help you minimize the usual mistakes when writing features. With little effort you can improve your features from this:</p>
+<div class="highlight-python">
+<div class="highlight">
+<pre><span class="k">def</span> <span class="nf">image_height</span><span class="p">(</span><span class="n">img</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">img</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">"heigth"</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span> <span class="c"># yes, it's misspelled</span>
+
+<span class="k">def</span> <span class="nf">picture_posts_ratio</span><span class="p">(</span><span class="n">user</span><span class="p">):</span>
+    <span class="k">return</span> <span class="nb">float</span><span class="p">(</span><span class="n">user</span><span class="p">[</span><span class="s">'pictures_nr'</span><span class="p">])</span> <span class="o">/</span> <span class="n">user</span><span class="p">[</span><span class="s">'posts_nr'</span><span class="p">]</span>
+</pre>
+</div>
+</div>
+<p>to this:</p>
+<div class="highlight-python">
+<div class="highlight">
+<pre><span class="kn">from</span> <span class="nn">featureforge.feature</span> <span class="kn">import</span> <span class="n">input_schema</span><span class="p">,</span> <span class="n">output_schema</span>
+
+<span class="nd">@input_schema</span><span class="p">({</span><span class="s">"heigth"</span><span class="p">:</span> <span class="nb">int</span><span class="p">})</span>
+<span class="k">def</span> <span class="nf">image_heigth</span><span class="p">(</span><span class="n">img</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">img</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">"heigth"</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
+
+<span class="nd">@input_schema</span><span class="p">({</span><span class="s">'posts_nr'</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="s">'pictures_nr'</span><span class="p">:</span> <span class="nb">int</span><span class="p">})</span>
+<span class="nd">@output_schema</span><span class="p">(</span><span class="nb">float</span><span class="p">,</span> <span class="k">lambda</span> <span class="n">i</span><span class="p">:</span> <span class="n">i</span> <span class="o">&gt;=</span> <span class="mi">0</span> <span class="ow">and</span> <span class="n">i</span> <span class="o">&lt;=</span> <span class="mi">1</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">picture_posts_ratio</span><span class="p">(</span><span class="n">user</span><span class="p">):</span>
+    <span class="k">return</span> <span class="nb">float</span><span class="p">(</span><span class="n">user</span><span class="p">[</span><span class="s">'pictures_nr'</span><span class="p">])</span> <span class="o">/</span> <span class="n">user</span><span class="p">[</span><span class="s">'posts_nr'</span><span class="p">]</span>
+</pre>
+</div>
+</div>
+<p>Both cases are (almost) real features with real bugs we wrote, and in both cases the input/output schemas help to easily identify what was going on.</p>
+<ul class="simple">
+<li>With <em>image_heigth</em>, because of a typo in the word <em>height</em>, we were going to end up with a constantly zero value feature, but the input schema helped us to realize that no single data point was having the expected input, and because of that we discovered the bug.</li>
+<li>With <em>picture_posts_ratio</em> we were giving for granted that each picture was counting as a post, which is something that we later realize wasn’t the case, and because of that we were having users with picture ratio higher than one, which was not what we wanted.</li>
+</ul>
+<p>Another nice thing with features written like this is that the provided <em>BaseFeatureFixture</em> mixin helps to write unitests easily, like this:</p>
+<div class="highlight-python">
+<div class="highlight">
+<pre><span class="kn">import</span> <span class="nn">unittest</span>
+<span class="kn">from</span> <span class="nn">featureforge.validate</span> <span class="kn">import</span> <span class="n">BaseFeatureFixture</span><span class="p">,</span> <span class="n">APPROX</span><span class="p">,</span> <span class="n">EQ</span>
+<span class="kn">from</span> <span class="nn">featureforge.feature</span> <span class="kn">import</span> <span class="n">make_feature</span>
+
+<span class="k">class</span> <span class="nc">TestPicturesRatio</span><span class="p">(</span><span class="n">unittest</span><span class="o">.</span><span class="n">TestCase</span><span class="p">,</span> <span class="n">BaseFeatureFixture</span><span class="p">):</span>
+    <span class="n">feature</span> <span class="o">=</span> <span class="n">make_feature</span><span class="p">(</span><span class="n">picture_posts_ratio</span><span class="p">)</span>
+    <span class="n">fixtures</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span>
+        <span class="n">test_simple</span><span class="o">=</span><span class="p">({</span><span class="s">"posts_nr"</span><span class="p">:</span> <span class="mi">4</span><span class="p">,</span> <span class="s">"pictures_nr"</span><span class="p">:</span> <span class="mi">1</span><span class="p">},</span>
+                     <span class="n">APPROX</span><span class="p">,</span> <span class="mf">0.2</span><span class="p">),</span>
+        <span class="n">test_no_pics</span><span class="o">=</span><span class="p">({</span><span class="s">"posts_nr"</span><span class="p">:</span> <span class="mi">3</span><span class="p">,</span> <span class="s">"pictures_nr"</span><span class="p">:</span> <span class="mi">0</span><span class="p">},</span>
+                      <span class="n">EQ</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">),</span>
+        <span class="n">test_nothing</span><span class="o">=</span><span class="p">({</span><span class="s">"posts_nr"</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span> <span class="s">"pictures_nr"</span><span class="p">:</span> <span class="mi">0</span><span class="p">},</span>
+                      <span class="n">EQ</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">),</span>
+    <span class="p">)</span>
+</pre>
+</div>
+</div>
+<p>Which will:</p>
+<blockquote>
+<div>
+<ul class="simple">
+<li>ensure that the feature produces the expected output with the given input, and for free</li>
+<li>ensure that the given fixtures satisfy the input schema,</li>
+<li>ensure that the generated outputs satisfy the output schema, and</li>
+<li>ensure that when the feature is stressed with some random valid inputs, it’s always returning things that satisfy the output schema.</li>
+</ul>
+</div>
+</blockquote>
+<p>Both features after bug fixing and testing ended up like this:</p>
+<div class="highlight-python">
+<div class="highlight">
+<pre><span class="nd">@input_schema</span><span class="p">({</span><span class="s">"height"</span><span class="p">:</span> <span class="nb">int</span><span class="p">}))</span>
+<span class="k">def</span> <span class="nf">image_height</span><span class="p">(</span><span class="n">img</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">img</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">"height"</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
+
+<span class="nd">@input_schema</span><span class="p">({</span><span class="s">'posts_nr'</span><span class="p">:</span> <span class="n">And</span><span class="p">(</span><span class="nb">int</span><span class="p">,</span> <span class="k">lambda</span> <span class="n">i</span><span class="p">:</span> <span class="n">i</span> <span class="o">&gt;=</span> <span class="mi">0</span><span class="p">),</span>
+               <span class="s">'pictures_nr'</span><span class="p">:</span> <span class="n">And</span><span class="p">(</span><span class="nb">int</span><span class="p">,</span> <span class="k">lambda</span> <span class="n">i</span><span class="p">:</span> <span class="n">i</span> <span class="o">&gt;=</span> <span class="mi">0</span><span class="p">)})</span>
+<span class="nd">@output_schema</span><span class="p">(</span><span class="nb">float</span><span class="p">,</span> <span class="k">lambda</span> <span class="n">i</span><span class="p">:</span> <span class="n">i</span> <span class="o">&gt;=</span> <span class="mi">0</span> <span class="ow">and</span> <span class="n">i</span> <span class="o">&lt;=</span> <span class="mi">1</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">picture_posts_ratio</span><span class="p">(</span><span class="n">user</span><span class="p">):</span>
+    <span class="n">total</span> <span class="o">=</span> <span class="n">user</span><span class="p">[</span><span class="s">'posts_nr'</span><span class="p">]</span> <span class="o">+</span> <span class="n">user</span><span class="p">[</span><span class="s">'pictures_nr'</span><span class="p">]</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">total</span><span class="p">:</span>
+        <span class="k">return</span> <span class="mf">0.0</span>
+    <span class="k">return</span> <span class="nb">float</span><span class="p">(</span><span class="n">user</span><span class="p">[</span><span class="s">'pictures_nr'</span><span class="p">])</span> <span class="o">/</span> <span class="n">total</span>
+</pre>
+</div>
+</div>
+<p>You can read more detailed descriptions, use cases and examples at here: <a class="reference external" href="https://github.com/machinalis/featureforge/blob/develop/docs/feature_definition.rst">Feature Definition</a>.</p>
+</div>
+<div class="section" id="feature-evaluation">
+<h2>Feature Evaluation:</h2>
+<p>Given your features, <a class="reference external" href="https://pypi.python.org/pypi/featureforge">FeatureForge</a> Vectorizer allows you to easily evaluate them against your data and deliver it to scikit-learn like this:</p>
+<div class="highlight-python">
+<div class="highlight">
+<pre><span class="kn">from</span> <span class="nn">featureforge.vectorizer</span> <span class="kn">import</span> <span class="n">Vectorizer</span>
+<span class="kn">from</span> <span class="nn">sklearn</span> <span class="kn">import</span> <span class="n">Pipeline</span>
+<span class="n">v</span> <span class="o">=</span> <span class="n">Vectorizer</span><span class="p">([</span><span class="n">some_feature</span><span class="p">,</span> <span class="n">some_other_feature</span><span class="p">])</span>
+<span class="o">...</span> <span class="n">build</span> <span class="n">other</span> <span class="n">steps</span> <span class="n">like</span> <span class="n">classificators</span><span class="o">/</span><span class="n">regressors</span> <span class="o">...</span>
+<span class="n">p</span> <span class="o">=</span> <span class="n">Pipeline</span><span class="p">([</span><span class="n">v</span><span class="p">,</span> <span class="n">step2</span><span class="p">,</span> <span class="n">step3</span><span class="p">])</span>
+<span class="n">p</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+<span class="c"># Here you can use p methods depending on what you built. See the scikit</span>
+<span class="c"># documentation for examples</span>
+</pre>
+</div>
+</div>
+<p>The output for the Vectorizer is a numpy matrix, ready to be used as input for a machine learning algorithm, with one row per each data point, and columns for the features.</p>
+<p>Some other nice things about the <a class="reference external" href="https://pypi.python.org/pypi/featureforge">FeatureForge</a> Vectorizer:</p>
+<ul class="simple">
+<li>It’s smart enough to work with both scalar and enumerated features</li>
+<li>It works smoothly with consumable datasets</li>
+<li>It can be set to run on Tolerant Mode, sacrifying performance in order to let you to have experiment results even in the case that some of your data is invalid or some features are faulty.</li>
+</ul>
+<p>You can read more detailed descriptions, use cases and examples at here: <a class="reference external" href="http://feature-forge.readthedocs.org/en/latest/feature_evaluation.html">Vectorization</a></p>
+<p>Because of all these, is that we are proud to announce the first release Feature Forge. We are already using this in our projects, but we are sure that there’s plenty room to grow, and that’s why we invite you to collaborate and submit your ideas. It’s free software, and hosted on github.</p>
+<dl class="docutils"><dt>Links:</dt><dd>
+
+</dd></dl></div>
+</section>
+
+
+</div></body></html>

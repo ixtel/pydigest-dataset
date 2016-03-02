@@ -1,0 +1,180 @@
+<html><body><div><div class="content html_format">
+      
+<p>
+Доброго времени суток, Хабр!
+</p><p>
+Недавно разрабатывала сайт на python/django и нужна была возможность использования API Вконтакте. А именно:
+</p><p>
+• Постинг статей с сайта на страницу во Вконтакте, а также в выбранные группы (в которых состоял администратор);</p><p>
+• Возможность прикрепления документов и картинок к записям;</p><p>
+• Получение списка групп и записей с помощью обновляющегося скрипта и загрузка всего этого в админку django.
+</p><p>
+Собственно, для администратора управление этим функционалом осуществляется через админку. 
+</p><p>
+Расскажу по шагам реализацию этого функционала.
+</p><a name="habracut"/><p>
+На первом этапе администратору нужно создать своё приложение во «Вконтакте», а также получить токен для работы с API. Для получения токена я использую модуль VKAppAuth (</p><a href="https://github.com/speechkey/VKAppAuth">ссылка</a><p> на GitHub, там же пример использования модуля).
+ </p><p>
+Настройки для получения сохраняю в отдельном файле и подключаю его в models.py. В models.py добавляю поля для «Вконтакте» в модель статьи: 
+
+</p><pre><code class="django">    photo_vk = models.ImageField(upload_to=photo_vk_path, verbose_name=u'Прикрепить фото для Вконтакте', max_length = 1000, blank=True)
+    file_vk = models.FileField(upload_to=files_vk_path, verbose_name=u'Прикрепить документ для Вконтакте', max_length = 1000, blank=True)
+    wall_user_vk = models.BooleanField(verbose_name=u'Отправить на стену пользователя Вконтакте', default=False)
+    group_vk = models.ManyToManyField(Vk_groups, verbose_name=u'Отправить в следующие группы Вконтакте', blank=True)
+    group_stat = models.BooleanField(verbose_name=u'Публиковать запись от имени группы', default=False)
+</code></pre>
+<p>
+Поле group_vk отображает все группы «Вконтакте» из таблицы Vk_groups. Код класса Vk_groups в models.py:
+
+</p><pre><code class="django">class Vk_groups(models.Model):
+    title = models.CharField(max_length=1000, verbose_name=u'Название группы')
+    gid = models.CharField(max_length=1000, verbose_name=u'ID группы')
+    is_closed = models.BooleanField(verbose_name=u'Закрытая группа', default=False)
+    is_admin = models.BooleanField(verbose_name=u'Пользователь является администратором', default=False)
+
+    def __str__(self):
+        return self.title.encode('utf8')
+
+    class Meta:
+        verbose_name = "Группа Вконтакте"
+        verbose_name_plural = "Группы Вконтакте"
+</code></pre>
+<p>
+Также создана модель для записей «Вконтакте». Они будут загружаться с помощью автоматически обновляемого на сервере скрипта, таким образом, в админке будут актуальные записи со страницы администратора и из групп, в которых он состоит.
+</p><p>
+Поля модели:
+
+</p><pre><code class="django">class Vk_posts(models.Model):
+    group = models.CharField(max_length=1000, verbose_name=u'Страница/группа', blank=True)
+    text = HTMLField(verbose_name=u'Текст записи', blank=True)
+    date = models.DateTimeField(verbose_name=u'Дата публикации', blank=True)
+</code></pre>
+<p>
+Для модели статьи я переопределила метод save(), чтобы при сохранении какой-либо статьи происходило обращение к API Вконтакте и производилась отправка записи во «Вконтакте», если поставлены соответствующие галочки.
+
+</p><pre><code class="django">    def save(self, *args, **kwargs):
+        use_vk(self)   
+        model = super(Page, self).save(*args, **kwargs)
+</code></pre>
+<p>
+Перед сохранением вызывается функция use_vk, в которой происходит обращение к API.
+
+</p><pre><code class="python">#пути для фото и документов
+photo_vk_path = 'photo_vk'
+files_vk_path = 'files_vk'
+
+def use_vk(self):
+    #составление записи
+    msg = self.title + '\n' + self.text
+    msg = re.sub('&lt;.*?&gt;','',msg)
+    #флаг для определения, нужно ли отправлять запись
+    post_vk = 0
+    #получение списка групп        
+    groups = [g for g in self.group_vk.all()]
+    
+    if len(groups) or self.wall_user_vk:
+        post_vk = 1
+
+    if post_vk:
+        attachments = []
+        #для прикрепления фото
+        if self.photo_vk:
+            server = vk.photos.getWallUploadServer(uid = my_id)
+            path = MEDIA_ROOT + photo_vk_path + '/' + re.split('/', self.photo_vk.url)[-1]
+            r = requests.post(server['upload_url'], files={'photo': open(path,"rb")})
+            params = {'server': r.json()['server'], 'photo': r.json()['photo'], 'hash': r.json()['hash']}
+            wallphoto = vk.photos.saveWallPhoto(**params)
+            attachments.append(wallphoto[0]['id'])
+        #для прикрепления документа         
+        if self.file_vk:
+            server = vk.docs.getWallUploadServer()
+            path = MEDIA_ROOT + files_vk_path + '/' + re.split('/', self.file_vk.url)[-1]
+            r = requests.post(server['upload_url'], files={'file': open(path,"rb")})
+            params = {'file': r.json()['file']}
+            doc = vk.docs.save(**params)
+            attachments.append('doc' + str(my_id) + '_' + str(doc[0]['did']))
+                    
+        params = {'attachments': ','.join(attachments), 'message': msg}
+        #для отправки записи на стену администратора
+        if self.wall_user_vk:
+            params['owner_id'] = my_id
+            vk.wall.post(**params)
+        #для отправки записи в выбранные группы           
+        if len(groups):
+            if self.group_stat:
+                params['from_group'] = 1
+            for g in groups:
+                params['owner_id'] = g.gid
+                vk.wall.post(**params)
+</code></pre>
+<p>
+Нужно отметить, что загрузчик для фото и документов выдавал некорректный путь к файлам в папках по вызову его метода url (не исключаю, что это именно у меня), поэтому я сама составляла путь до картинок и документов (переменная path).
+</p><p>
+Подробнее об этапах загрузки фото или документа к записи:
+</p><p>
+a) Отправка запроса на получение адреса сервера Вконтакте, куда можно загрузить фото или документ;</p><p>
+b) Получение адреса сервера Вконтакте;</p><p>
+c) Формирование post-запроса по адресу сервера с загрузкой на него документа или фото;</p><p>
+d) При успешной загрузке получение ответа с идентификатором загруженного документа или фото;</p><p>
+e) Формирование списка атрибутов для размещения записи во Вконтакте, в числе которых идентификатор фото или документа.
+</p><p>
+После прикрепления фото/документа используется завершающий метод API vk.wall.post(**params), отправляющий запись на стену администратора/группы запись.
+</p><p>
+Для получения списка групп и сохранения новых записей из групп и со стены администратора используется скрипт, который автоматически обновляется на сервере в заданное время. Данный скрипт получает настройки django, импортирует к себе необходимые модели и файл получения токена, а затем через API получает группы администратора, записи со стены/из групп и обновляет таблицы базы данных:
+
+</p><pre><code class="python">import sys
+import time
+sys.path = ['C:/site/umc/'] + sys.path
+from django.core.management import setup_environ
+import settings
+setup_environ(settings)
+
+from www.models import Vk_groups, Vk_posts
+from umc.vk_response import *
+
+count_posts = 15
+
+def get_posts(owner_id, g_name):
+    """Функция получения записей со стены администратора и групп и добавление новых записей в таблицу Vk_posts"""
+    params = {'owner_id': owner_id, 'count': count_posts}
+    answer = vk.wall.get(**params)
+    for i in range(count_posts):
+        params = {
+            'group': g_name,
+            'text': answer[i+1]['text'],
+            'date': time.strftime("%Y-%m-%d %H:%M:%S+06:00", time.localtime(answer[i+1]['date']))
+        }
+        try:
+            Vk_posts.objects.get_or_create(**params)
+        except:
+            params['text'] = u'Невозможно отобразить текст статьи'
+            Vk_posts.objects.get_or_create(**params)
+            
+
+#добавление новых групп в таблицу Vk_groups
+params = {'owner_id': my_id, 'extended': 1, 'filter': 'events, groups, admin'}
+answer = vk.groups.get(**params)
+for i in range(answer[0]):
+    Vk_groups.objects.get_or_create(title = answer[i+1]['name'], gid = '-' + str(answer[i+1]['gid']), is_admin = answer[i+1]['is_admin'], is_closed = answer[i+1]['is_closed'])
+
+#добавление новых записей из групп в таблицу Vk_posts
+groups = Vk_groups.objects.all()
+for g in groups:
+    get_posts(g.gid, g.title)
+
+#добавление новых записей со стены пользователя в таблицу Vk_posts    
+user = vk.users.get(uid = my_id)
+get_posts(my_id, user[0]['first_name']+ ' ' + user[0]['last_name'])
+</code></pre>
+<p>
+Собственно, теперь можно попробовать отправить записи из админки на стену или любую группу (если права доступа позволяют размещать записи на стене группы), и проверить работу. 
+</p><p>
+Надеюсь, статья была полезной. </p><p>
+Ссылка на проект: </p><a href="https://github.com/julia-bikova/DjangoVkPosting">github.com/julia-bikova/DjangoVkPosting</a>
+<p>
+Всем приятной работы с Django!
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

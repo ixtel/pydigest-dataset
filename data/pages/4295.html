@@ -1,0 +1,145 @@
+<html><body><div><div>
+<span>Этой статьей мне хотелось бы открыть цикл, посвященный внутреннему устройству интерпретатора языка Python. Большую часть времени мы будем говорить о коде CPython версии не ниже чем 3.3, который собран и запущен на Linux based OS. Цель этого цикла – показать, что питоновские внутренности - это совсем не страшно (я про интерпретатор), в них может разобраться любой желающий, при этом профит, который вы получаете, выражается если даже не в повышении зарплаты и интереса к вам со стороны женщин, то по меньшей мере в собственном удовлетворении и возможности повыделываться перед коллегами в курилке.</span>
+<span><br/></span>
+
+<h2>
+<span>Подготовительный этап</span></h2>
+<span>Ок, предположим, что вы <a href="https://www.python.org/downloads/source/" target="_blank">тем</a> или <a href="https://github.com/python/cpython" target="_blank">иным</a> образом завладели кодом CPython. Если вы собираетесь экспериментировать с этими исходниками, то вот вам небольшой совет – если вы скачали tarball, рекомендую инициализировать внутри git репозиторий, добавить в .gitignore те бинари, которые произведет компилятор в процессе сборки и закоммитить это ванильное состояние, на которое, если что, можно сделать reset. Стандартный скрипт configure нужно будет запустить с ключем --with-pydebug, это поможет нам в дальнейшем, и, напоследок, полезно прогнать <a href="https://docs.python.org/devguide/runtests.html" target="_blank">тесты</a>. В результате должен получиться полностью работоспособный интерпретатор:</span>
+<pre>magniff@<span>/home/magniff/Downloads/Python-3.4.2</span><span>$</span> <span>.</span><span>/python</span> 
+Python <span>3</span><span>.</span><span>4</span><span>.</span><span>2</span> <span>(</span>default, Apr <span>10</span> <span>2015</span>, <span>20</span><span>:</span><span>16</span><span>:</span><span>23</span><span>)</span> 
+<span>[</span><span>GCC 4.9.2 20150212 (Red Hat 4.9.2</span><span>-</span><span>6)</span><span>]</span> on linux
+Type <span>"help"</span>, <span>"copyright"</span>, <span>"credits"</span> or <span>"license"</span> <span>for</span> more information<span>.</span>
+<span>&gt;</span><span>&gt;</span><span>&gt;</span></pre>
+<h2>
+<span>Готово ко вскрытию</span></h2>
+<span>Итак, с чего бы нам начать свой путь от полной несознанки до почти коре-девелопера? Взгляните на сорцы, которые вы только что скачали - дюжина директорий с неведомым содержимым. Совершенно не очевидно, что из этого является ядром системы и то, как отдельные компоненты связаны друг с другом. Думаю, что в таких условиях наиболее естественной была бы попытка пройти вместе с интерпретатором весь путь от начальной инициализации до интерпретации питоновской программы, что дало бы минимальное представление о сути проблемы.</span>
+<span>Давайте использовать <a href="https://ru.wikipedia.org/wiki/GNU_Debugger" target="_blank">GDB - GNU Debugger</a>. Не пугайтесь, нам понадобится лишь самый минимум его возможностей, так что ни один изящный питонист не пострадает, помимо этого мы частенько будем подглядывать в исходники - вы можете делать это прямо из отладчика.</span>
+<span>Запускать мы будем вот такой питоновский код:</span>
+<pre><span>import</span> os<span>,</span> signal
+os<span>.</span>kill<span>(</span>os<span>.</span>getpid<span>(</span><span>)</span><span>,</span> signal<span>.</span>SIGTRAP<span>)</span></pre>
+<span>его мы заботливо положим в файл probe0.py где нибудь в файловой системе.</span>
+<span>Что это и почему оно такое? Перед тем как начать выполнять какой либо скрипт интерпретатор долго готовится, в частности, грузит всякое-разное из стандартной библиотеки (помните непустой sys.modules в только что запущеной REPL сессии, например?), поэтому чтобы поймать в отладчике выполнение именно нашего скрипта мы пошлем себе <a href="https://ru.wikipedia.org/wiki/SIGTRAP" target="_blank">SIGTRAP</a>, который и будет перехвачен GDBой - вот такой нехитрый трюк.</span>
+<span><br/></span>
+<b>gdb --args path/to/our/python path/to/probe0.py</b>
+<span>GNU gdb (GDB) Fedora 7.8.2-38.fc21</span>
+<span>Copyright (C) 2014 Free Software Foundation, Inc.</span>
+<span># blah blah</span>
+<b>(gdb) run</b>
+<span>Program received signal </span><b>SIGTRAP</b><span>, Trace/breakpoint trap.</span>
+<span>0x00007ffff7127c07 in kill () from /lib64/libc.so.6</span>
+<span>(gdb)</span>
+<span><br/></span>
+<span>Мы имеем интерпретатор, остановленный на строке с лямбдой. Чтобы посмотреть нативный callstack, достаточно вызвать команду backtrace (или ее короткую версию bt).</span>
+<span><br/></span>
+<span><span>#0-6 are skipped...</span></span>
+<span><b><span>#7  PyEval_EvalFrameEx (f=0xa0c578, ...) -------- at Python/ceval.c:2835</span></b></span>
+<span><b><span>#8  PyEval_EvalCodeEx (_co=0x7ffff70c7340, ...) - at Python/ceval.c:3586</span></b></span>
+<span><b><span>#9  PyEval_EvalCode (co=0x7ffff70c7340, ...) ---- at Python/ceval.c:773</span></b></span>
+<span><span>#10 run_mod (mod=0xa46768, ...) ----------------- at Python/pythonrun.c:2180</span></span>
+<span><span>#11 PyRun_FileExFlags (fp=0x9ed880, ...) -------- at Python/pythonrun.c:2133</span></span>
+<span><span>#12 PyRun_SimpleFileExFlags (fp=0x9ed880, ...) -- at Python/pythonrun.c:1606</span></span>
+<span><span>#13 PyRun_AnyFileExFlags (fp=0x9ed880, ...) ----- at Python/pythonrun.c:1292</span></span>
+<span><span>#14 run_file (fp=0x9ed880, ...) ----------------- at Modules/main.c:319</span></span>
+<span><b><span>#15 Py_Main (argc=2, ...) ----------------------- at Modules/main.c:751</span></b></span>
+<b><span>#16 main (argc=2, ...) -------------------------- at Modules/python.c:69</span></b>
+<b><span><br/></span></b>
+<span>Первый столбик - это номера activation frame`ов сишных функций интерпретатора, лежат они в стековой памяти процесса в виде непрерывной простыни. Очевидно, что в самом начале вызывается функция main - шестнадцатый фрейм. Она выполняет самые первичные проверки - хватает ли памяти на запуск, удается ли декодировать аргументы командной строки и пр. Дальше, убедившись, что всё в порядке, управление передается функции Py_Main. Пока мы не сможем оценить её роли, но именно там происходит вызов Py_Initialize, который создает новый инстанс интерпретатора и выполняет его первоначальную настройку. Об этом мы обязательно поговорим как нибудь в другой раз, сейчас же нас интересуют куда более общие вопросы. Далее, вплоть до десятого фрейма включительно, система пытается собрать инстанс PyCodeObject. Тут мы тоже не будем пока вдаваться в подробности, но думаю ясно, что в этом процессе участвует компилятор, на вход которому подается длинная строка из .py файла, командной строки с ключем -с или, например, пользовательского ввода из REPLа. Так или иначе должен получиться "код", способный управлять интерпретатором точно так же, как машинные инструкции управляют аппаратным процессором. Функция PyEval_EvalCode есть тончайшая обертка вокруг PyEval_EvalCodeEx (восьмой фрейм), которая как раз и решает, что делать с тем кодом, который собрался из нашего питоновского исходника.</span>
+<span><br/></span>
+
+<h2>
+<span>Что мы поняли на текущий момент</span></h2>
+<span>Мы с вами достигли первой важной точки на пути понимания CPython. Во-первых, мы поняли, что в CPython существует явным образом выделенная виртуальная машина, представленная функцией PyEval_EvalCodeEx (как мы увидим далее, это скорее PyEval_EvalFrameEx, но пока сойдет) и, во-вторых, эта машина на вход принимает специально собранный "код", представленный на низком уровне типом PyCodeObject.</span>
+
+<h2>
+<span>Виртуальная машина</span></h2>
+<span>В сердце CPython лежит довольно простая стековая машина, управляемая байткодом, являющимся частью code objecta. Пойдем по порядку - сначала вызывается функция:</span>
+<pre>PyObject <span>*</span>
+PyEval_EvalCodeEx<span>(</span>PyObject <span>*</span>_co<span>,</span> PyObject <span>*</span>globals<span>,</span> PyObject <span>*</span>locals<span>,</span> <span>.</span><span>.</span><span>.</span><span>)</span>
+<span>{</span>
+    PyCodeObject<span>*</span> co <span>=</span> <span>(</span>PyCodeObject<span>*</span><span>)</span>_co<span>;</span>
+    PyFrameObject <span>*</span>f<span>;</span>
+    f <span>=</span> PyFrame_New<span>(</span>tstate<span>,</span> co<span>,</span> globals<span>,</span> locals<span>)</span><span>;</span>
+    <span>/* usualy it evals frame */</span>
+    <span>return</span> PyEval_EvalFrameEx<span>(</span>f<span>,</span><span>0</span><span>)</span><span>;</span>
+       
+<span>}</span></pre>
+<span>Фактически, все что она делает - это создает новый питоновский фрейм f (о том, что это такое мы поговорим чуть ниже) и связывает с ним объект кода _co, который нужно будет исполнить. Непосредственно в этот момент ваша программа еще не исполняется - дальше "обычно" управление передается функции </span><span>PyEval_EvalFrameEx</span><span>, умеющей запускать фреймы (да, в питоне фреймы запускаются - "евалятся"). Я говорю "обычно", потому что в таком примере:</span>
+<pre><span>def</span> some_foo<span>(</span><span>)</span><span>:</span>
+    <span>yield</span>
+some_foo<span>(</span><span>)</span></pre>
+<span>компилятор увидев в теле функции some_foo слово yield, пометит код, связанный с этой функцией, специальным флагом. Он будет опознан внутри PyEval_EvalCodeEx, в результате чего some_foo() не исполнит тело функции (не запустит фрейм), вместо этого создастся новый generator object. </span><span>Так вот, дальше "обычно" происходит следующее:</span>
+<pre>PyObject <span>*</span>
+PyEval_EvalFrameEx<span>(</span>PyFrameObject <span>*</span>f<span>,</span> <span>int</span> throwflag<span>)</span>
+<span>{</span>
+    co <span>=</span> f<span>-&gt;</span>f_code<span>;</span>
+    <span>for</span> <span>(</span><span>;</span><span>;</span><span>)</span> <span>{</span>
+        <span>switch</span> <span>(</span>opcode<span>)</span> <span>{</span>
+            TARGET<span>(</span>LOAD_FAST<span>)</span>  <span>{</span>\<span>*</span> implementation of LOAD_FAST  <span>*</span>\<span>}</span>
+            TARGET<span>(</span>LOAD_CONST<span>)</span> <span>{</span>\<span>*</span> implementation of LOAD_CONST <span>*</span>\<span>}</span>
+            TARGET<span>(</span>STORE_FAST<span>)</span> <span>{</span>\<span>*</span> implementation of STORE_FAST <span>*</span>\<span>}</span>
+            TARGET<span>(</span>POP_TOP<span>)</span>    <span>{</span>\<span>*</span> implementation of POP_TOP    <span>*</span>\<span>}</span>
+            <span>.</span><span>.</span><span>.</span>
+    <span>}</span>
+<span>}</span></pre>
+<span>На вход подается указатель на питоновский фрейм. Фрейм - это внутреннее представление исполняющегося кода, такой контейнер с кодом и метаданными внутри. Именно фрейм хранит информацию о том, какой опкод сейчас исполняется и куда передать управление, когда код отработает. Последнее достигается хранением в атрибуте f_back ссылки на родительский фрейм, так что множество фреймов образует односвязный список. На один и тот же объект кода могу ссылаться множество фреймов, так что объект кода - это что-то вроде шаблона. В свете вышесказанного можно заключить, что питоновский фрейм очень похож на нативный фрейм, который создала бы программа на Си, внутри которой происходит вызов подпрограммы. Это почти правда, важно понимать, что питоновские фреймы - это обычные объекты, у них есть свой конструктор, память под них выделяется на куче, а не из стековой памяти, как для нативных фреймов, а также они подвержены сборке мусора. Подобно другим объектам, фреймы исполнения имеют представление внутри питоновского кода, что вкупе с другими возможностями делает питон языком с очень богатой интроспекцией.</span>
+<span>Вернемся к PyEval_EvalFrameEx, на самом деле эта функция очень длинная, так что я немного укоротил ее код. Посмотрите насколько он простой (макросы вроде TARGET не должны вас смущать, они тоже простые) - из фрейма забирается ссылка на объект кода, а из него байтовая строка, изображающая опкоды. Виртуальная машина перебирая эти опкоды один за другим выполняет примитивные атомарные операции - питонячая программа выполняется. Да, вот так просто, никакой магии.</span>
+<h2>
+<span><br/></span></h2>
+<h2>
+<span>Объект кода</span></h2>
+<p>
+<span>Инстанс питоновского кода возникает всякий раз, когда компилятор видит независимую единицу исполнения - модуль, функцию (метод) или класс. Помимо этого код можно собрать самостоятельно из произвольного набора выражений с помощью встроенной функции compile, например так</span></p>
+<div>
+<div>
+<pre><span>&gt;&gt;</span><span>&gt;</span> code <span>=</span> <span>compile</span><span>(</span><span>'print(a + foo.bar())'</span><span>,</span> <span>'</span><span>&lt;string&gt;</span><span><string>'</string></span><span>,</span> <span>'exec'</span><span>)</span></pre>
+</div>
+<p>
+<span>Обратите внимание, что переменные нигде не определены, при этом компилятор считает этот код совершенно валидным.</span></p>
+</div>
+<div>
+<span>Мы можем запустить его, предоставив контекст:</span>
+<span/>
+<pre><span>&gt;&gt;</span><span>&gt;</span> <span>class</span> Mock<span>:</span>
+<span>.</span><span>.</span><span>.</span>     <span>pass</span>
+<span>.</span><span>.</span><span>.</span> 
+<span>.</span><span>.</span><span>.</span> Mock<span>.</span>bar <span>=</span> <span>lambda</span><span>:</span> <span>'world!'</span>
+<span>.</span><span>.</span><span>.</span> <span>eval</span><span>(</span>code<span>,</span> <span>{</span><span>'a'</span><span>:</span><span>'Hello'</span><span>,</span> <span>'foo'</span><span>:</span> Mock<span>}</span><span>)</span>
+Helloworld!</pre>
+</div>
+<div>
+<div>
+<span>Вы, должно быть, знаете, что в стандартной библиотеке есть модуль dis, позволяющий дизассемблировать объекты питоновского кода:</span>
+<pre><span>&gt;&gt;</span><span>&gt;</span> dis<span>.</span>disassemble<span>(</span>code<span>)</span>
+  <span>1</span>           <span>0</span> LOAD_NAME                <span>0</span> <span>(</span><span>print</span><span>)</span>
+              <span>3</span> LOAD_NAME                <span>1</span> <span>(</span>a<span>)</span>
+              <span>6</span> LOAD_NAME                <span>2</span> <span>(</span>foo<span>)</span>
+              <span>9</span> LOAD_ATTR                <span>3</span> <span>(</span>bar<span>)</span>
+             <span>12</span> CALL_FUNCTION            <span>0</span> <span>(</span><span>0</span> positional<span>,</span> <span>0</span> keyword pair<span>)</span>
+             <span>15</span> BINARY_ADD
+             <span>16</span> CALL_FUNCTION            <span>1</span> <span>(</span><span>1</span> positional<span>,</span> <span>0</span> keyword pair<span>)</span>
+             <span>19</span> POP_TOP
+             <span>20</span> LOAD_CONST               <span>0</span> <span>(</span><span>None</span><span>)</span>
+             <span>23</span> RETURN_VALUE</pre>
+</div>
+</div>
+<div>
+<p>
+<span>Что мы видим? На стек нашей стековой машины последовательно грузятся сущности под именами print, a, foo и так далее. Откуда происходит эта загрузка? Точно не из байткода, потому что на момент компиляции корректность таких ссылок никто не гарантировал. Значит существует контекст, объект кода знает о его интерфейсе (он грузит из него сущности, зная их имена), но не знает о реализации, т.е. что там лежит. Это полезно в случае рекурсии, когда один и тот же код переиспользуется многократно внутри разных контекстов.</span></p>
+<p>
+<span>Детали реализации </span><span>PyCodeObject вы можете посмотреть в исходниках (Include/code.h)</span><span>. О коде нам важно уяснить вот что:</span><br/>
+<span>1. Он включает в себя байтовую строку - байткод, который непосредственно рулит виртуальной машиной.</span><br/>
+<span>2. Этот байткод запускается внутри определенного контекста, для обращения к которому ему так же нужен интерфейс.</span><br/>
+<span>3. Байткод и интерфейс собраны в один объект - объект кода.</span><br/>
+<span>4. Контекст является внешней по отношению к коду сущностью.</span><br/>
+<span>5. Фрейм исполнения содержит в себе ссылку на объект кода и на контекст, когда исполняется ваш питоновский скрипт, на низком уровне запущена </span><span>PyEval_EvalFrameEx.</span></p>
+</div>
+<h2>
+<span><br/></span></h2>
+<h2>
+<span>Думаю на сегодня хватит</span></h2>
+<span>Разумеется, непосредственную работу выполняют внутренности объектов (даже, точнее, их классов), так что когда мы пишем:</span>
+<pre><span>1</span> <span>+</span> <span>'hello'</span></pre>
+<span>то именно класс int должен решить, может ли он обработать такое суммирование или нет, в то время как функция PyEval_EvalFrameEx лишь инициирует это суммирование. Поэтому, познакомившись сегодня с фронтендом, мы узнали одновременно и многое и совсем ничего, но не отчаивайтесь, это всего лишь введение, со временем мы обозреем все важные вопросы.</span>
+<span>Спасибо за ваше время, надеюсь, что эта тема была интересной.</span>
+<span><br/></span></div>
+</div></body></html>

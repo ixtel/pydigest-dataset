@@ -1,0 +1,401 @@
+<html><body><div><div id="blog-content">
+
+  <p id="blog-menu">
+    <a href="/blog/2014/10-19-high-performance-python-extensions-part-1.html">Previous</a>
+    <a href="/blog/2014/10-24-high-performance-python-extensions-part-3.html">Next</a>
+    <a href="/blog/all.html">All</a>
+  </p>
+  
+  <h1 id="blog-title">High Performance Python Extensions: Part 2</h1>
+
+  <p id="blog-editing-info">By J. David Lee on 2014-10-21.</p>
+
+  <hr/>
+
+  
+
+
+
+<h2>Introduction</h2>
+
+<p>This post is the second in a series looking at the process of writing
+C extension modules for Python using the NumPy API. In part 1 we built
+a simple N-body simulation and found that the bottleneck was computing
+the mutual forces between bodies, an O(N<sup>2</sup>) operation. By
+implementing the time-evolution function in C, we were able to speed
+up the computation by a factor of about 70.</p>
+
+<p>If you haven't read the first post, you should probably skim it before
+moving on. </p>
+
+<p>In this post we'll trade some generality in our code for improved
+performance.</p>
+
+
+
+<h2>Review</h2>
+
+<p><code>World</code> is a class that stores the state of N bodies. Our simulation
+will evolve that state over a series of time-steps.</p>
+
+<div class="codehilite"><pre><code><span class="k">class</span> <span class="nc">World</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
+    <span class="sd">"""World is a structure that holds the state of N bodies and</span>
+<span class="sd">    additional variables.</span>
+
+<span class="sd">    threads : (int) The number of threads to use for multithreaded</span>
+<span class="sd">              implementations.</span>
+<span class="sd">    dt      : (float) The time-step.</span>
+
+<span class="sd">    STATE OF THE WORLD: </span>
+
+<span class="sd">    N : (int) The number of bodies in the simulation.</span>
+<span class="sd">    m : (1D ndarray) The mass of each body.</span>
+<span class="sd">    r : (2D ndarray) The position of each body.</span>
+<span class="sd">    v : (2D ndarray) The velocity of each body.</span>
+<span class="sd">    F : (2D ndarray) The force on each body.</span>
+
+<span class="sd">    TEMPORARY VARIABLES:</span>
+
+<span class="sd">    Ft : (3D ndarray) A 2D force array for each thread's local storage.</span>
+<span class="sd">    s  : (2D ndarray) The vectors from one body to all others. </span>
+<span class="sd">    s3 : (1D ndarray) The norm of each s vector. </span>
+
+<span class="sd">    NOTE: Ft is used by parallel algorithms for thread-local</span>
+<span class="sd">          storage. s and s3 are only used by the Python</span>
+<span class="sd">          implementation.</span>
+<span class="sd">    """</span>
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">N</span><span class="p">,</span> <span class="n">threads</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> 
+                 <span class="n">m_min</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">m_max</span><span class="o">=</span><span class="mf">30.0</span><span class="p">,</span> <span class="n">r_max</span><span class="o">=</span><span class="mf">50.0</span><span class="p">,</span> <span class="n">v_max</span><span class="o">=</span><span class="mf">4.0</span><span class="p">,</span> <span class="n">dt</span><span class="o">=</span><span class="mf">1e-3</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">threads</span> <span class="o">=</span> <span class="n">threads</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">N</span>  <span class="o">=</span> <span class="n">N</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">m</span>  <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">uniform</span><span class="p">(</span><span class="n">m_min</span><span class="p">,</span> <span class="n">m_max</span><span class="p">,</span> <span class="n">N</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">r</span>  <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">uniform</span><span class="p">(</span><span class="o">-</span><span class="n">r_max</span><span class="p">,</span> <span class="n">r_max</span><span class="p">,</span> <span class="p">(</span><span class="n">N</span><span class="p">,</span> <span class="mi">2</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">v</span>  <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">uniform</span><span class="p">(</span><span class="o">-</span><span class="n">v_max</span><span class="p">,</span> <span class="n">v_max</span><span class="p">,</span> <span class="p">(</span><span class="n">N</span><span class="p">,</span> <span class="mi">2</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">F</span>  <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros_like</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">r</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">Ft</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">((</span><span class="n">threads</span><span class="p">,</span> <span class="n">N</span><span class="p">,</span> <span class="mi">2</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">s</span>  <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros_like</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">r</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">s3</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros_like</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">m</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">dt</span> <span class="o">=</span> <span class="n">dt</span>
+</code></pre></div>
+
+<p>When the simulation begins, <code>N</code> bodies are randomly assigned a mass,
+<code>m</code>, position, <code>r</code>, and velocity, <code>v</code>. For each time-step, the
+following computations are made: </p>
+
+<ol>
+<li>The net force, <code>F</code>, on each body due to all other bodies is
+computed.  </li>
+<li>The velocity, <code>v</code>, of each body is modified due to the force.</li>
+<li>The position, <code>r</code>, of each body is modified due to its velocity.</li>
+</ol>
+
+
+
+<h2>Accessor Macros</h2>
+
+<p>The extension module that we created in part 1 used macros to access
+the elements of NumPy arrays in C. Here's what one of those macros
+looks like:</p>
+
+<div class="codehilite"><pre><code><span class="cp">#define r(x0, x1) (*(npy_float64*)((PyArray_DATA(py_r) +                \</span>
+<span class="cp">                                    (x0) * PyArray_STRIDES(py_r)[0] +   \</span>
+<span class="cp">                                    (x1) * PyArray_STRIDES(py_r)[1])))</span>
+</code></pre></div>
+
+<p>Using a macro like this, we can access the elements of the <code>py_r</code>
+array using a simple notation like <code>r(i, j)</code>. The value indexed will
+match what you'd see in Python, even if the array has been reshaped or
+sliced in some way. </p>
+
+<p>For general purpose code, that's what we'd want. In the case of our
+simulation, we know the pedigree of our arrays: they're contiguous and
+never sliced or reshaped. We can use this fact to both simplify and
+improve the performance of our code.</p>
+
+
+
+<h2>Simple C Extension 2</h2>
+
+<p>In this section we'll look at a modified version of our C extension
+that does away with the accessor macros and works directly with the
+NumPy array's underlying data. The code for this section,
+<code>src/simple2.c</code>, is available on
+<a href="https://github.com/johnnylee/python-numpy-c-extension-examples/blob/master/src/simple2.c">github</a>.</p>
+
+<p>For comparison, the implementation from the previous post is available
+<a href="https://github.com/johnnylee/python-numpy-c-extension-examples/blob/master/src/simple1.c">here</a>.</p>
+
+<h3>The Evolution Function</h3>
+
+<p>Starting at the bottom of the file, we can see that the <code>evolve</code>
+function parses the Python arguments in the same manner as the
+previous version, but now we're utilizing the <code>PyArray_DATA</code> macro to
+obtain a pointer to the underlying memory. We cast this pointer to an
+<code>npy_float64</code> which is an alias for <code>double</code>. </p>
+
+<div class="codehilite"><pre><code><span class="k">static</span> <span class="n">PyObject</span> <span class="o">*</span><span class="nf">evolve</span><span class="p">(</span><span class="n">PyObject</span> <span class="o">*</span><span class="n">self</span><span class="p">,</span> <span class="n">PyObject</span> <span class="o">*</span><span class="n">args</span><span class="p">)</span> <span class="p">{</span>
+  <span class="c1">// Declare variables. </span>
+  <span class="n">npy_int64</span> <span class="n">N</span><span class="p">,</span> <span class="n">threads</span><span class="p">,</span> <span class="n">steps</span><span class="p">,</span> <span class="n">step</span><span class="p">,</span> <span class="n">i</span><span class="p">,</span> <span class="n">xi</span><span class="p">,</span> <span class="n">yi</span><span class="p">;</span>
+  <span class="n">npy_float64</span> <span class="n">dt</span><span class="p">;</span>
+  <span class="n">PyArrayObject</span> <span class="o">*</span><span class="n">py_m</span><span class="p">,</span> <span class="o">*</span><span class="n">py_r</span><span class="p">,</span> <span class="o">*</span><span class="n">py_v</span><span class="p">,</span> <span class="o">*</span><span class="n">py_F</span><span class="p">;</span>
+  <span class="n">npy_float64</span> <span class="o">*</span><span class="n">m</span><span class="p">,</span> <span class="o">*</span><span class="n">r</span><span class="p">,</span> <span class="o">*</span><span class="n">v</span><span class="p">,</span> <span class="o">*</span><span class="n">F</span><span class="p">;</span>
+
+  <span class="c1">// Parse arguments. </span>
+  <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">PyArg_ParseTuple</span><span class="p">(</span><span class="n">args</span><span class="p">,</span> <span class="s">"ldllO!O!O!O!"</span><span class="p">,</span>
+                        <span class="o">&amp;</span><span class="n">threads</span><span class="p">,</span>
+                        <span class="o">&amp;</span><span class="n">dt</span><span class="p">,</span>
+                        <span class="o">&amp;</span><span class="n">steps</span><span class="p">,</span>
+                        <span class="o">&amp;</span><span class="n">N</span><span class="p">,</span>
+                        <span class="o">&amp;</span><span class="n">PyArray_Type</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">py_m</span><span class="p">,</span>
+                        <span class="o">&amp;</span><span class="n">PyArray_Type</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">py_r</span><span class="p">,</span>
+                        <span class="o">&amp;</span><span class="n">PyArray_Type</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">py_v</span><span class="p">,</span>
+                        <span class="o">&amp;</span><span class="n">PyArray_Type</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">py_F</span><span class="p">))</span> <span class="p">{</span>
+    <span class="k">return</span> <span class="nb">NULL</span><span class="p">;</span>
+  <span class="p">}</span>
+
+  <span class="c1">// Get underlying arrays from numpy arrays. </span>
+  <span class="n">m</span> <span class="o">=</span> <span class="p">(</span><span class="n">npy_float64</span><span class="o">*</span><span class="p">)</span><span class="n">PyArray_DATA</span><span class="p">(</span><span class="n">py_m</span><span class="p">);</span>
+  <span class="n">r</span> <span class="o">=</span> <span class="p">(</span><span class="n">npy_float64</span><span class="o">*</span><span class="p">)</span><span class="n">PyArray_DATA</span><span class="p">(</span><span class="n">py_r</span><span class="p">);</span>
+  <span class="n">v</span> <span class="o">=</span> <span class="p">(</span><span class="n">npy_float64</span><span class="o">*</span><span class="p">)</span><span class="n">PyArray_DATA</span><span class="p">(</span><span class="n">py_v</span><span class="p">);</span>
+  <span class="n">F</span> <span class="o">=</span> <span class="p">(</span><span class="n">npy_float64</span><span class="o">*</span><span class="p">)</span><span class="n">PyArray_DATA</span><span class="p">(</span><span class="n">py_F</span><span class="p">);</span>
+
+  <span class="c1">// Evolve the world. </span>
+  <span class="k">for</span><span class="p">(</span><span class="n">step</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">step</span> <span class="o">&lt;</span> <span class="n">steps</span><span class="p">;</span> <span class="o">++</span><span class="n">step</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">compute_F</span><span class="p">(</span><span class="n">N</span><span class="p">,</span> <span class="n">m</span><span class="p">,</span> <span class="n">r</span><span class="p">,</span> <span class="n">F</span><span class="p">);</span>
+
+    <span class="k">for</span><span class="p">(</span><span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">N</span><span class="p">;</span> <span class="o">++</span><span class="n">i</span><span class="p">)</span> <span class="p">{</span>
+      <span class="c1">// Compute offsets into arrays. </span>
+      <span class="n">xi</span> <span class="o">=</span> <span class="mi">2</span> <span class="o">*</span> <span class="n">i</span><span class="p">;</span> 
+      <span class="n">yi</span> <span class="o">=</span> <span class="n">xi</span> <span class="o">+</span> <span class="mi">1</span><span class="p">;</span>
+
+      <span class="n">v</span><span class="p">[</span><span class="n">xi</span><span class="p">]</span> <span class="o">+=</span> <span class="n">F</span><span class="p">[</span><span class="n">xi</span><span class="p">]</span> <span class="o">*</span> <span class="n">dt</span> <span class="o">/</span> <span class="n">m</span><span class="p">[</span><span class="n">i</span><span class="p">];</span>
+      <span class="n">v</span><span class="p">[</span><span class="n">yi</span><span class="p">]</span> <span class="o">+=</span> <span class="n">F</span><span class="p">[</span><span class="n">yi</span><span class="p">]</span> <span class="o">*</span> <span class="n">dt</span> <span class="o">/</span> <span class="n">m</span><span class="p">[</span><span class="n">i</span><span class="p">];</span>
+
+      <span class="n">r</span><span class="p">[</span><span class="n">xi</span><span class="p">]</span> <span class="o">+=</span> <span class="n">v</span><span class="p">[</span><span class="n">xi</span><span class="p">]</span> <span class="o">*</span> <span class="n">dt</span><span class="p">;</span>
+      <span class="n">r</span><span class="p">[</span><span class="n">yi</span><span class="p">]</span> <span class="o">+=</span> <span class="n">v</span><span class="p">[</span><span class="n">yi</span><span class="p">]</span> <span class="o">*</span> <span class="n">dt</span><span class="p">;</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+
+  <span class="n">Py_RETURN_NONE</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>The only change from our previous implementation using macros is that
+we have to compute our array indices explicitly. We could have cast the
+underlying arrays as two-dimensional <code>npy_float64</code> arrays, but that
+would require some upfront cost and memory management.</p>
+
+<h3>Computing the Forces</h3>
+
+<p>The forces are computed in the same manner as in the previous
+implementation, the only differences being the notation, and explicit
+index calculations in the nested <code>for</code>-loops. </p>
+
+<div class="codehilite"><pre><code><span class="k">static</span> <span class="kr">inline</span> <span class="kt">void</span> <span class="nf">compute_F</span><span class="p">(</span><span class="n">npy_int64</span> <span class="n">N</span><span class="p">,</span>
+                             <span class="n">npy_float64</span> <span class="o">*</span><span class="n">m</span><span class="p">,</span>
+                             <span class="n">npy_float64</span> <span class="o">*</span><span class="n">r</span><span class="p">,</span>
+                             <span class="n">npy_float64</span> <span class="o">*</span><span class="n">F</span><span class="p">)</span> <span class="p">{</span>
+  <span class="n">npy_int64</span> <span class="n">i</span><span class="p">,</span> <span class="n">j</span><span class="p">,</span> <span class="n">xi</span><span class="p">,</span> <span class="n">yi</span><span class="p">,</span> <span class="n">xj</span><span class="p">,</span> <span class="n">yj</span><span class="p">;</span>
+  <span class="n">npy_float64</span> <span class="n">sx</span><span class="p">,</span> <span class="n">sy</span><span class="p">,</span> <span class="n">Fx</span><span class="p">,</span> <span class="n">Fy</span><span class="p">,</span> <span class="n">s3</span><span class="p">,</span> <span class="n">tmp</span><span class="p">;</span>
+
+  <span class="c1">// Set all forces to zero. </span>
+  <span class="k">for</span><span class="p">(</span><span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">N</span><span class="p">;</span> <span class="o">++</span><span class="n">i</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">F</span><span class="p">[</span><span class="mi">2</span><span class="o">*</span><span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="n">F</span><span class="p">[</span><span class="mi">2</span><span class="o">*</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">]</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+  <span class="p">}</span>
+
+  <span class="c1">// Compute forces between pairs of bodies.</span>
+  <span class="k">for</span><span class="p">(</span><span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">N</span><span class="p">;</span> <span class="o">++</span><span class="n">i</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">xi</span> <span class="o">=</span> <span class="mi">2</span><span class="o">*</span><span class="n">i</span><span class="p">;</span>
+    <span class="n">yi</span> <span class="o">=</span> <span class="n">xi</span> <span class="o">+</span> <span class="mi">1</span><span class="p">;</span>
+    <span class="k">for</span><span class="p">(</span><span class="n">j</span> <span class="o">=</span> <span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">;</span> <span class="n">j</span> <span class="o">&lt;</span> <span class="n">N</span><span class="p">;</span> <span class="o">++</span><span class="n">j</span><span class="p">)</span> <span class="p">{</span>
+      <span class="n">xj</span> <span class="o">=</span> <span class="mi">2</span><span class="o">*</span><span class="n">j</span><span class="p">;</span> 
+      <span class="n">yj</span> <span class="o">=</span> <span class="n">xj</span> <span class="o">+</span> <span class="mi">1</span><span class="p">;</span>
+
+      <span class="n">sx</span> <span class="o">=</span> <span class="n">r</span><span class="p">[</span><span class="n">xj</span><span class="p">]</span> <span class="o">-</span> <span class="n">r</span><span class="p">[</span><span class="n">xi</span><span class="p">];</span>
+      <span class="n">sy</span> <span class="o">=</span> <span class="n">r</span><span class="p">[</span><span class="n">yj</span><span class="p">]</span> <span class="o">-</span> <span class="n">r</span><span class="p">[</span><span class="n">yi</span><span class="p">];</span>
+
+      <span class="n">s3</span> <span class="o">=</span> <span class="n">sqrt</span><span class="p">(</span><span class="n">sx</span><span class="o">*</span><span class="n">sx</span> <span class="o">+</span> <span class="n">sy</span><span class="o">*</span><span class="n">sy</span><span class="p">);</span>
+      <span class="n">s3</span> <span class="o">*=</span> <span class="n">s3</span><span class="o">*</span><span class="n">s3</span><span class="p">;</span>
+
+      <span class="n">tmp</span> <span class="o">=</span> <span class="n">m</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">*</span> <span class="n">m</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="o">/</span> <span class="n">s3</span><span class="p">;</span>
+      <span class="n">Fx</span> <span class="o">=</span> <span class="n">tmp</span> <span class="o">*</span> <span class="n">sx</span><span class="p">;</span>
+      <span class="n">Fy</span> <span class="o">=</span> <span class="n">tmp</span> <span class="o">*</span> <span class="n">sy</span><span class="p">;</span>
+
+      <span class="n">F</span><span class="p">[</span><span class="n">xi</span><span class="p">]</span> <span class="o">+=</span> <span class="n">Fx</span><span class="p">;</span>
+      <span class="n">F</span><span class="p">[</span><span class="n">yi</span><span class="p">]</span> <span class="o">+=</span> <span class="n">Fy</span><span class="p">;</span>
+      <span class="n">F</span><span class="p">[</span><span class="n">xj</span><span class="p">]</span> <span class="o">-=</span> <span class="n">Fx</span><span class="p">;</span>
+      <span class="n">F</span><span class="p">[</span><span class="n">yj</span><span class="p">]</span> <span class="o">-=</span> <span class="n">Fy</span><span class="p">;</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Performance</h3>
+
+<p>I was surprised to find that, compared to our original C extension,
+this implementation is 45% faster, performing 26108 time-steps per
+second versus the previous version's 17972 on the same Intel i5
+desktop. This represents a factor of 101 improvement over the original
+Python and NumPy implementation.</p>
+
+
+
+<h2>Using SIMD Instructions</h2>
+
+<p>In the implementation above, we calculated vector components in the
+<code>x</code> and <code>y</code> directions explicitly. If we're willing to give up some
+portability, we can use x86 SIMD (Single Instruction Multiple
+Data) instructions to simplify our code, and hopefully speed it up as
+well.</p>
+
+<p>The code for this section, <code>src/simd1.c</code>, is available on
+<a href="https://github.com/johnnylee/python-numpy-c-extension-examples/blob/master/src/simd1.c">github</a>. </p>
+
+<h3>x86 Intrinsics</h3>
+
+<p>In code below, we'll be utilizing the vector data type <code>__m128d</code>. The
+number 128 refers to the number of bits in the vector, while the
+letter "d" indicates the data type of the vector's components. In this
+case the components are type <code>double</code> (64 bit floating point). Other
+vector widths and types are available depending on the architecture. </p>
+
+<p>A variety of intrinsic functions are available for working with vector
+data types. Intel has a <a href="https://software.intel.com/sites/landingpage/IntrinsicsGuide/">handy reference</a> available on their site.</p>
+
+<h4>Portability</h4>
+
+<p>I'm working on Debian Wheezy using the GNU gcc compiler. In this
+environment the header file defining the available intrinsic data
+types and functions is <code>x86intrin.h</code>. This may not be portable across
+platforms.</p>
+
+<h3>The Evolution Function</h3>
+
+<p>The <code>evolve</code> function shown here is more compact that the version
+above. The two-dimensional arrays are cast to <code>__mm128d</code> pointers, and
+the use of vectors obviates the need for computing vector components
+explicitly.</p>
+
+<div class="codehilite"><pre><code><span class="k">static</span> <span class="n">PyObject</span> <span class="o">*</span><span class="nf">evolve</span><span class="p">(</span><span class="n">PyObject</span> <span class="o">*</span><span class="n">self</span><span class="p">,</span> <span class="n">PyObject</span> <span class="o">*</span><span class="n">args</span><span class="p">)</span> <span class="p">{</span>
+  <span class="c1">// Variable declarations.</span>
+  <span class="n">npy_int64</span> <span class="n">N</span><span class="p">,</span> <span class="n">threads</span><span class="p">,</span> <span class="n">steps</span><span class="p">,</span> <span class="n">step</span><span class="p">,</span> <span class="n">i</span><span class="p">;</span>
+  <span class="n">npy_float64</span> <span class="n">dt</span><span class="p">;</span>
+
+  <span class="n">PyArrayObject</span> <span class="o">*</span><span class="n">py_m</span><span class="p">,</span> <span class="o">*</span><span class="n">py_r</span><span class="p">,</span> <span class="o">*</span><span class="n">py_v</span><span class="p">,</span> <span class="o">*</span><span class="n">py_F</span><span class="p">;</span>
+  <span class="n">npy_float64</span> <span class="o">*</span><span class="n">m</span><span class="p">;</span>
+  <span class="kr">__m128d</span> <span class="o">*</span><span class="n">r</span><span class="p">,</span> <span class="o">*</span><span class="n">v</span><span class="p">,</span> <span class="o">*</span><span class="n">F</span><span class="p">;</span>
+
+  <span class="c1">// Parse arguments. </span>
+  <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">PyArg_ParseTuple</span><span class="p">(</span><span class="n">args</span><span class="p">,</span> <span class="s">"ldllO!O!O!O!"</span><span class="p">,</span>
+                        <span class="o">&amp;</span><span class="n">threads</span><span class="p">,</span>
+                        <span class="o">&amp;</span><span class="n">dt</span><span class="p">,</span>
+                        <span class="o">&amp;</span><span class="n">steps</span><span class="p">,</span>
+                        <span class="o">&amp;</span><span class="n">N</span><span class="p">,</span>
+                        <span class="o">&amp;</span><span class="n">PyArray_Type</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">py_m</span><span class="p">,</span>
+                        <span class="o">&amp;</span><span class="n">PyArray_Type</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">py_r</span><span class="p">,</span>
+                        <span class="o">&amp;</span><span class="n">PyArray_Type</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">py_v</span><span class="p">,</span>
+                        <span class="o">&amp;</span><span class="n">PyArray_Type</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">py_F</span><span class="p">))</span> <span class="p">{</span>
+    <span class="k">return</span> <span class="nb">NULL</span><span class="p">;</span>
+  <span class="p">}</span>
+
+  <span class="c1">// Get underlying arrays from numpy arrays. </span>
+  <span class="n">m</span> <span class="o">=</span> <span class="p">(</span><span class="n">npy_float64</span><span class="o">*</span><span class="p">)</span><span class="n">PyArray_DATA</span><span class="p">(</span><span class="n">py_m</span><span class="p">);</span>
+  <span class="n">r</span> <span class="o">=</span> <span class="p">(</span><span class="kr">__m128d</span><span class="o">*</span><span class="p">)</span><span class="n">PyArray_DATA</span><span class="p">(</span><span class="n">py_r</span><span class="p">);</span>
+  <span class="n">v</span> <span class="o">=</span> <span class="p">(</span><span class="kr">__m128d</span><span class="o">*</span><span class="p">)</span><span class="n">PyArray_DATA</span><span class="p">(</span><span class="n">py_v</span><span class="p">);</span>
+  <span class="n">F</span> <span class="o">=</span> <span class="p">(</span><span class="kr">__m128d</span><span class="o">*</span><span class="p">)</span><span class="n">PyArray_DATA</span><span class="p">(</span><span class="n">py_F</span><span class="p">);</span>
+
+  <span class="c1">// Evolve the world.</span>
+  <span class="k">for</span><span class="p">(</span><span class="n">step</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">step</span> <span class="o">&lt;</span> <span class="n">steps</span><span class="p">;</span> <span class="o">++</span><span class="n">step</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">compute_F</span><span class="p">(</span><span class="n">N</span><span class="p">,</span> <span class="n">m</span><span class="p">,</span> <span class="n">r</span><span class="p">,</span> <span class="n">F</span><span class="p">);</span>
+
+    <span class="k">for</span><span class="p">(</span><span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">N</span><span class="p">;</span> <span class="o">++</span><span class="n">i</span><span class="p">)</span> <span class="p">{</span>
+      <span class="n">v</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">+=</span> <span class="n">F</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">*</span> <span class="n">dt</span> <span class="o">/</span> <span class="n">m</span><span class="p">[</span><span class="n">i</span><span class="p">];</span>
+      <span class="n">r</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">+=</span> <span class="n">v</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">*</span> <span class="n">dt</span><span class="p">;</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+
+  <span class="n">Py_RETURN_NONE</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Computing the Forces</h3>
+
+<p>The force computation is also more compact than in the previously implementation.</p>
+
+<div class="codehilite"><pre><code><span class="k">static</span> <span class="kr">inline</span> <span class="kt">void</span> <span class="nf">compute_F</span><span class="p">(</span><span class="n">npy_int64</span> <span class="n">N</span><span class="p">,</span>
+                             <span class="n">npy_float64</span> <span class="o">*</span><span class="n">m</span><span class="p">,</span>
+                             <span class="kr">__m128d</span> <span class="o">*</span><span class="n">r</span><span class="p">,</span>
+                             <span class="kr">__m128d</span> <span class="o">*</span><span class="n">F</span><span class="p">)</span> <span class="p">{</span>
+  <span class="n">npy_int64</span> <span class="n">i</span><span class="p">,</span> <span class="n">j</span><span class="p">;</span>
+  <span class="kr">__m128d</span> <span class="n">s</span><span class="p">,</span> <span class="n">s2</span><span class="p">,</span> <span class="n">tmp</span><span class="p">;</span>
+  <span class="n">npy_float64</span> <span class="n">s3</span><span class="p">;</span>
+
+  <span class="c1">// Set all forces to zero.</span>
+  <span class="k">for</span><span class="p">(</span><span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">N</span><span class="p">;</span> <span class="o">++</span><span class="n">i</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">F</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="n">_mm_set1_pd</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+  <span class="p">}</span>
+
+  <span class="c1">// Compute forces between pairs of bodies. </span>
+  <span class="k">for</span><span class="p">(</span><span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">N</span><span class="p">;</span> <span class="o">++</span><span class="n">i</span><span class="p">)</span> <span class="p">{</span>
+    <span class="k">for</span><span class="p">(</span><span class="n">j</span> <span class="o">=</span> <span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">;</span> <span class="n">j</span> <span class="o">&lt;</span> <span class="n">N</span><span class="p">;</span> <span class="o">++</span><span class="n">j</span><span class="p">)</span> <span class="p">{</span>
+      <span class="n">s</span> <span class="o">=</span> <span class="n">r</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="o">-</span> <span class="n">r</span><span class="p">[</span><span class="n">i</span><span class="p">];</span>
+
+      <span class="n">s2</span> <span class="o">=</span> <span class="n">s</span> <span class="o">*</span> <span class="n">s</span><span class="p">;</span>
+      <span class="n">s3</span> <span class="o">=</span> <span class="n">sqrt</span><span class="p">(</span><span class="n">s2</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">+</span> <span class="n">s2</span><span class="p">[</span><span class="mi">1</span><span class="p">]);</span>
+      <span class="n">s3</span> <span class="o">*=</span> <span class="n">s3</span> <span class="o">*</span> <span class="n">s3</span><span class="p">;</span>
+
+      <span class="n">tmp</span> <span class="o">=</span> <span class="n">s</span> <span class="o">*</span> <span class="n">m</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">*</span> <span class="n">m</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="o">/</span> <span class="n">s3</span><span class="p">;</span>
+      <span class="n">F</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">+=</span> <span class="n">tmp</span><span class="p">;</span>
+      <span class="n">F</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="o">-=</span> <span class="n">tmp</span><span class="p">;</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3>Performance</h3>
+
+<p>While this explicitly vectorized code is clearer and more compact than
+the previous version, it only runs about 1% faster, performing 26427
+time-steps per second. It's likely that the compiler was able to
+optimize the previous implementation using the same vector
+instructions. </p>
+
+
+
+<h2>Conclusion</h2>
+
+<p>If full generality isn't necessary, often performance gains can be
+acheived by accessing NumPy arrays' underlying memory directly in C. </p>
+
+<p>While the explicit use of vector intrinsics didn't provide much
+benefit in this example, the relative performance difference will
+increase in a multi-core setting using OpenMP. </p>
+
+
+
+<h2>Next Time</h2>
+
+<p>In the next part of this series, we'll parallelize both of the
+implementations shown here using OpenMP, and see how performance
+scales using multiple cores. </p>
+
+<p>If you have any questions, comments, suggestions, or corrections,
+please let me know via the contact link.</p>
+
+  
+  <hr/>
+  <div id="blog-about-author">
+    <img id="blog-author-image" src="/images/blog-author-jdlee.jpg"/>
+    <h4>The Author</h4>
+    <p>
+      <a href="mailto:jdl-blog@crumpington.com">J. David Lee</a> is a
+      programmer turned physicist turned programmer and the
+      proprietor of Crumpington Consulting. If you feel that his
+      expertise could benefit you or your organization, don't hesitate
+      to <a href="/contact.html">get in touch</a>.
+    </p>
+  </div>
+</div>
+
+
+    </div></body></html>

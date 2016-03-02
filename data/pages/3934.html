@@ -1,0 +1,151 @@
+<html><body><div><div class="entry-content">
+            <p>Опишу, как сделать собственный плагин для Django-CMS на примере слайдера фотогалереи.</p>
+<p>Допустим, плагин должен уметь отображать саму галерею, а также выводить заголовок и опционально некоторый текст описания, который задаётся в настройках самого плагина. Также должна быть возможность удобного администрирования галерей, например, доступ к оным из админ-панели. И, наконец, должна быть возможность размещения на одной странице нескольких плагинов без конфликтов между ними.</p>
+<p>Вот так это выглядит:<img alt="скриншот демо-примера" src="https://leto8g.storage.yandex.net/rdisk/649332c5c058bbb798cafe4683220590ca5f18f578f76f663ffeab1b2ce75f70/inf/7mOPKHuTSV9WC-ttJGBJR0xoLZKGed1q2q2FKNPMNCAzl_6qGJ22oY-3pWfr5Gdvj9G5xwE5zF0AqCKQ0faDxA==?uid=0&amp;filename=2015-04-01%2018-07-21%20Home.png&amp;disposition=inline&amp;hash=&amp;limit=0&amp;content_type=image%2Fpng&amp;tknv=v2&amp;rtoken=2d1e3e7eaba64e6cc8c410e0e1a51635&amp;force_default=no"/> [Исходный код примера здесь]<a href="https://github.com/and-nothing-else/slider_example">2</a>.</p>
+<p>Допустим, уже установлена Django-CMS, создано приложение, и в нём есть такие модели:</p>
+<pre><code>class Gallery(models.Model):
+    name = models.CharField(_('name'), max_length=128)
+
+class Photo(models.Model):
+    title = models.CharField(_('title'), max_length=128, null=True, blank=True)
+    file = ImageField(_('file'), upload_to='images')
+    gallery = models.ForeignKey(Gallery)
+</code></pre>
+<p>А также эти модели выведены в админку:</p>
+<pre><code>class PhotoInline(AdminInlineImageMixin, admin.TabularInline):
+    model = Photo
+
+class GalleryAdmin(admin.ModelAdmin):
+    inlines = [PhotoInline]
+
+admin.site.register(Gallery, GalleryAdmin)
+</code></pre>
+<p>Плагин описывается классом, унаследованным от класса <code>CMSPluginBase</code>, в файле с именем <code>cms_plugins.py</code>, расположенном в каталоге приложения. Полный пример такого класса:</p>
+<pre><code>from cms.plugin_base import CMSPluginBase
+from cms.plugin_pool import plugin_pool
+from django.utils.translation import ugettext as _
+from .models import Slider
+
+class SliderPlugin(CMSPluginBase):
+    module = _("Our Mega Plugins")
+    name = _("Slider Plugin")
+    render_template = "slider/slider_plugin.html"
+    model = Slider
+
+    def render(self, context, instance, placeholder):
+        context.update({'instance': instance})
+        return context
+
+plugin_pool.register_plugin(SliderPlugin)
+</code></pre>
+<p>Свойства <code>module</code> и <code>name</code> описывают, как будет выглядеть плагин в интерфейсе добавления:
+<img alt="Добавление плагина в placeholder" src="https://leto35h.storage.yandex.net/rdisk/0b105476648c1a2e02d15dea6432c6b050b9947fb2e4162e5e6733684f902831/inf/5T7PlaF6Z-u_OYZRK5RBFp_GmevQqeQeotsNjoZLd9eQZkA8hXTSxgjSFgxAhZgP2hx6oGsdZzT5Zvf3BWk_uQ==?uid=0&amp;filename=2015-04-01%2018-40-53%20Home.png&amp;disposition=inline&amp;hash=&amp;limit=0&amp;content_type=image/png&amp;tknv=v2&amp;rtoken=2d1e3e7eaba64e6cc8c410e0e1a51635&amp;force_default=no"/></p>
+<ul>
+<li><code>module</code> — раздел;</li>
+<li><code>name</code> — непосредственно название плагина.</li>
+</ul>
+<p><code>render_template</code>, как можно догадаться из названия — имя шаблона плагина. Шаблон точно такой же, как и при разработке собственных тэгов.</p>
+<p><code>model</code> — необязательное свойство. Оно нужно в том случае, если у плагина есть настройки. Значением является модель, в которой сохраняются настройки плагина. Эта модель описывается классом, унаследованным от <code>CMSPlugin</code>. Опишем эту модель:</p>
+<pre><code>from cms.models import CMSPlugin
+from djangocms_text_ckeditor.fields import HTMLField
+
+class Slider(CMSPlugin):
+    title = models.CharField(_('title'), max_length=128, null=True, blank=True)
+    description = HTMLField(_('description'), null=True, blank=True)
+    gallery = models.ForeignKey(Gallery, verbose_name=_('gallery'), null=True, blank=True)
+
+    def get_title(self):
+        return self.title or self.gallery.name
+
+    def __str__(self):
+        return self.get_title()
+</code></pre>
+<p>Полями этого класса могут быть любые допустимые в django поля модели. В данном примере кроме стандартных используется поле типа <code>HTMLField</code>, предоставляемое приложением <code>djangocms_text_ckeditor</code>. Это <code>TextField</code> с интегрированным визуальным редактором. Так выглядит получившееся окно редактирования свойств плагина: <img alt="https://yadi.sk/i/hi95ct5tfgRqk" src="https://leto48g.storage.yandex.net/rdisk/5d39b4b8ed98685dfa9a9aa8955d819abf9f071b6e5cfd5c342fee4749b33f2e/inf/ERFSfFBuPeP94JiegPMX-DbgviEtwNp6B8beVnk_hXfl6GxZilip4MbCbI1o8fims_soUl5Tyn1z5_hLRr86SA==?uid=0&amp;filename=2015-04-01%2019-02-24%20Home.png&amp;disposition=inline&amp;hash=&amp;limit=0&amp;content_type=image/png&amp;tknv=v2&amp;rtoken=2d1e3e7eaba64e6cc8c410e0e1a51635&amp;force_default=no"/>
+Метод <code>render</code> отвечает за подготовку контекста и отрисовку шаблона. Получаемый им аргумент <code>instance</code> содержит объект плагина. Воспользуемся им для получения доступа к настройкам. Модель галереи в нашем случае выбирается в настройках, таким образом весь необходимый контент доступен через модель настройки, и её достаточно для вывода.</p>
+<p>Осталось только сделать шаблон. Приведу его полностью:</p>
+<pre><code>{% load sekizai_tags thumbnail %}
+
+&lt;h1&gt;{{ instance.get_title }}&lt;/h1&gt;
+{% if instance.description %}
+&lt;article&gt;{{ instance.description|safe }}&lt;/article&gt;
+{% endif %}
+&lt;div id="carousel-example-{{ instance.id }}" class="carousel slide" data-ride="carousel"&gt;
+   &lt;ol class="carousel-indicators"&gt;
+{% for photo in instance.gallery.photo_set.all %}
+       &lt;li data-target="#carousel-example-{{ instance.id }}" data-slide-to="{{ forloop.counter0 }}"{% if forloop.first %} class="active"{% endif %}&gt;&lt;/li&gt;
+{% endfor %}
+   &lt;/ol&gt;
+   &lt;div class="carousel-inner" role="listbox"&gt;
+{% for photo in instance.gallery.photo_set.all %}
+   &lt;div class="item{% if forloop.first %} active{% endif %}"&gt;
+{% thumbnail photo.file "x400" as im %}
+       &lt;img src="{{ im.url }}" class="img-responsive center-block"&gt;
+{% endthumbnail %}
+{% if photo.title %}
+       &lt;div class="carousel-caption"&gt;{{ photo.title }}&lt;/div&gt;
+{% endif %}
+   &lt;/div&gt;
+{% endfor %}
+   &lt;/div&gt;
+   &lt;a class="left carousel-control" href="#carousel-example-{{ instance.id }}" role="button" data-slide="prev"&gt;
+       &lt;span class="glyphicon glyphicon-chevron-left" aria-hidden="true"&gt;&lt;/span&gt;
+       &lt;span class="sr-only"&gt;Previous&lt;/span&gt;
+   &lt;/a&gt;
+   &lt;a class="right carousel-control" href="#carousel-example-{{ instance.id }}" role="button" data-slide="next"&gt;
+       &lt;span class="glyphicon glyphicon-chevron-right" aria-hidden="true"&gt;&lt;/span&gt;
+       &lt;span class="sr-only"&gt;Next&lt;/span&gt;
+   &lt;/a&gt;
+&lt;/div&gt;
+
+{% addtoblock "js" %}
+   &lt;script src="https://ajax.googleapis.com/ajax/libs/jquery/1.11.2/jquery.min.js"&gt;&lt;/script&gt;
+   &lt;script src="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.4/js/bootstrap.min.js"&gt;&lt;/script&gt;
+{% endaddtoblock %}
+</code></pre>
+<p>На что здесь стоит обратить внимание. Заголовок и описание берём из настроек плагина. ID карусели строим из id модели плагина во избежание конфликтов при размещении нескольких плагинов этого типа на одной странице. Сами фото из галереи доступны через связи: <code>instance.gallery.photo_set.all</code>.</p>
+<p>В этом примере используется bootstrap для оформления. Чтобы карусель работала, нужно подключить скрипты. Не стоит подключать в общем шаблоне те скрипты, которые нужны только в отдельных случаях, лучше подключать их по мере необходимости. В Django-CMS для этого предлагается использовать приложение <a href="https://django-sekizai.readthedocs.org/en/latest/">sekizai</a>. В коде шаблона подключаемые скрипты заключены в тэг <code>{% addtoblock "js" %}</code>. В базовом шаблоне должен быть тэг <code>{% render_block "js" %}</code>. Sekizai позаботится о том, чтобы код подключения скриптов был помещён на место тэга <code>render_block</code> только один раз, независимо о того, сколько раз встречается <code>addtoblock</code>.</p>
+<p>Плагин готов, его можно использовать. Осталось только добавить управление данными в админ-панель.</p>
+<p>Для этого в каталоге приложения следует создать файл <code>cms_toolbar.py</code>, и описать класс, унаследованный от <code>CMSToolbar</code>.</p>
+<pre><code>from django.core.urlresolvers import reverse
+from django.utils.translation import ugettext_lazy as _
+from cms.toolbar_pool import toolbar_pool
+from cms.toolbar_base import CMSToolbar
+from cms.toolbar.items import Break
+from cms.cms_toolbar import ADMIN_MENU_IDENTIFIER, ADMINISTRATION_BREAK
+from .models import Gallery
+
+
+@toolbar_pool.register
+class SliderToolbar(CMSToolbar):
+    def populate(self):
+        admin_menu = self.toolbar.get_or_create_menu(
+            ADMIN_MENU_IDENTIFIER
+        )
+        position = admin_menu.find_first(
+            Break,
+            identifier=ADMINISTRATION_BREAK
+        ) + 1
+        admin_menu.add_break('custom-break', position=position)
+        slider_menu = admin_menu.get_or_create_menu(
+            'slider-menu',
+            _('Slider'),
+            position=position
+        )
+        for gallery in Gallery.objects.all():
+            slider_menu.add_modal_item(
+                _('edit gallery %s') % gallery.name,
+                reverse(u'admin:slider_gallery_change', args=[gallery.id])
+            )
+        slider_menu.add_break('custom-break')
+        slider_menu.add_modal_item(
+            _('add gallery'),
+            reverse(u'admin:slider_gallery_add')
+        )
+</code></pre>
+<p>Все манипуляции с меню описываются в методе <code>populate()</code>. Метод <code>get_or_create_menu()</code> обеспечивает доступ к меню. Метод <code>add_modal_item()</code> позволяет добавить пункт меню, по нажатию на который откроется модельное окно. Первый аргумент — текст пункта меню, второй — адрес страницы. В нашем случае это стандартные адреса джанговской админки. В данном случае приведён полностью работающий пример. но сама тема административного меню достаточно обширна и достойна отдельной статьи.</p>
+        </div>
+        
+
+        
+
+        </div></body></html>

@@ -1,0 +1,36 @@
+<html><body><div><div itemprop="articleBody"><p>One neat trick you can do is publish to GitHub Pages is publish to GitHub Pages from Travis.</p><p>I needed to do this for a <a class="reference external" href="http://ropython.org/">static blog</a>. However, the repository is under an organization and multiple people have commit access there. Using my <cite>Personal access token</cite> <a class="footnote-reference" href="#existing-guides" id="id1">[1]</a> is not the right way to do the authentication because:</p><ul class="simple"><li><cite>Personal access tokens</cite> can only restrict kinds of operations, restricting to specific repository is not possible.</li><li>If something bad happens all my public repositories are at risk, as the <cite>Personal access token</cite> is the <a class="reference external" href="https://developer.github.com/guides/managing-deploy-keys/#https-cloning-with-oauth-tokens">equivalent of a password</a>.</li></ul><p>There's a better way to solve the authentication: repositories can have <a class="reference external" href="https://developer.github.com/guides/managing-deploy-keys/#deploy-keys">deploy keys</a>. The idea is that we'll use a brand new ssh key to perform the authentication. We do not use that key for anything else.</p><p>First we need to make a new ssh key:</p><div class="highlight"><pre><span/><span class="gp">ionel@localhost$</span> ssh-keygen -f publish-key
+<span class="go">Generating public/private rsa key pair.</span>
+<span class="go">Enter passphrase (empty for no passphrase):</span>
+<span class="go">Enter same passphrase again:</span>
+<span class="go">Your identification has been saved in publish-key.</span>
+<span class="go">Your public key has been saved in publish-key.pub.</span>
+</pre></div><p>Then use use the <a class="reference external" href="https://github.com/travis-ci/travis.rb">Travis CLI</a> (use <tt class="docutils literal">gem install travis</tt> to install it) to encrypt it:</p><div class="note"><p class="first admonition-title">Note</p><p class="last">I didn't use <tt class="docutils literal"><span class="pre">--add</span></tt> cause it reformats my <tt class="docutils literal">.travis.yml</tt>, and it needs editing anyway.</p></div><div class="highlight"><pre><span/><span class="gp">ionel@localhost$</span> travis encrypt-file publish-key
+<span class="go">Detected repository as ionelmc/sphinx-py3doc-enhanced-theme, is this correct? |yes|</span>
+<span class="go">encrypting publish-key for ionelmc/sphinx-py3doc-enhanced-theme</span>
+<span class="go">storing result as publish-key.enc</span>
+<span class="go">storing secure env variables for decryption</span>
+
+<span class="go">Please add the following to your build script (before_install stage in your .travis.yml, for instance):</span>
+
+<span class="go">    openssl aes-256-cbc -K ionel@localhost$encrypted_87d9ccdaebfd_key -iv ionel@localhost$encrypted_87d9ccdaebfd_iv -in publish-key.enc -out publish-key -d</span>
+
+<span class="go">Pro Tip: You can add it automatically by running with --add.</span>
+
+<span class="go">Make sure to add publish-key.enc to the git repository.</span>
+<span class="go">Make sure not to add publish-key to the git repository.</span>
+<span class="go">Commit all changes to your .travis.yml.</span>
+</pre></div><p>The unencrypted secret key should be removed (we don't want to add it by accident in a commit 😅):</p><pre class="literal-block">
+rm publish-key
+</pre><p>Then we add the encrypted key:</p><pre class="literal-block">
+git add publish-key.enc
+</pre><p>We need to change the decode command as the decoded file will go into a different path and some other fixups for the ssh authentication. In <tt class="docutils literal">.travis.yml</tt> we need to have:</p><div class="highlight"><pre><span/><span class="l l-Scalar l-Scalar-Plain">before_install</span><span class="p p-Indicator">:</span>
+<span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">openssl aes-256-cbc -K ionel@localhost$encrypted_87d9ccdaebfd_key -iv ionel@localhost$encrypted_87d9ccdaebfd_iv -in publish-key.enc -out ~/.ssh/publish-key -d</span>
+<span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">chmod u=rw,og= ~/.ssh/publish-key</span>
+<span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">echo "Host github.com" &gt;&gt; ~/.ssh/config</span>
+<span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">echo "  IdentityFile ~/.ssh/publish-key" &gt;&gt; ~/.ssh/config</span>
+<span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">git --version</span>
+<span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">git remote set-url origin git@github.com:ionelmc/sphinx-py3doc-enhanced-theme.git</span>
+<span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">git fetch origin -f gh-pages:gh-pages</span>
+</pre></div><p>Now we can use a tool like <a class="reference external" href="https://pypi.python.org/pypi/ghp-import">ghp-import</a> to simply publish (somewhere in <tt class="docutils literal">.travis.yml</tt> after you generate the HTML in <tt class="docutils literal">output</tt>):</p><pre class="literal-block">
+ghp-import -n -p -m "Update gh-pages." output
+</pre><p>All is left is to add the public key in your repo's <cite>deploy keys</cite> (make sure to tick the <cite>write access</cite> checkbox):</p><img alt="A screenshot of the &quot;Add a deploy key&quot; form." src="https://blog.ionelmc.ro/2015/07/11/publishing-to-github-pages-from-travis-ci/deploy-keys.png"/><p>In some cases you only want to publish for the changes made on the <cite>master</cite> branch. Make sure you have this in your <tt class="docutils literal">.travis.yml</tt>:</p><hr class="docutils"/><p>You can see the working examples of this in <a class="reference external" href="https://github.com/RoPython/ropython-site">ropython-site</a> or <a class="reference external" href="https://github.com/ionelmc/sphinx-py3doc-enhanced-theme">sphinx-py3doc-enhanced-theme</a>.</p></div></div></body></html>

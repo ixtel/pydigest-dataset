@@ -1,0 +1,458 @@
+<html><body><div><div class="entry-content clearfix"><p><em>The following is a collaboration piece between <a href="http://twitter.com/_devbob">Bobby Grayson</a>, a software developer at <a href="http://www.ahalogy.com/">Ahalogy</a>, and Real Python.</em></p>
+
+
+
+
+<a name="Why."/>
+<h2>Why?</h2>
+
+<p><a href="http://en.wikipedia.org/wiki/Optical_character_recognition">OCR</a> (Optical Character Recognition) has become a common Python tool. With the advent of libraries such as <a href="http://en.wikipedia.org/wiki/Tesseract_%28software%29">Tesseract</a> and <a href="http://www.gnu.org/software/ocrad/">Ocrad</a>, more and more developers are building libraries and bots that use OCR in novel, interesting ways. A trivial example is a basic OCR tool used to extract text from screenshots so you don’t have to re-type the text later on.</p>
+
+<a name="Beginning.steps"/>
+<h2>Beginning steps</h2>
+
+<p>We’ll start by developing the Flask back-end layer to serve the results of the OCR engine. From there you can just hit the endpoint and serve the results to the end user in the manner that suits you. All of this is covered in detail by the tutorial. We’ll also add a bit of back-end code to generate an HTML form as well as the front-end code to consume the API. This will not be covered by the tutorial, but you will have access to the code.</p>
+
+<p>Let’s get to it.</p>
+
+<p>First, we have to install some dependencies. As always, configuring your environment is 90% of the fun.</p>
+
+<blockquote><p>This post has been tested on Ubuntu version 14.04 but it should work for 12.x and 13.x versions as well. If you’re running OSX, you can use <a href="http://osxdaily.com/2012/03/27/install-run-ubuntu-linux-virtualbox/">VirtualBox</a>, <a href="https://www.docker.com/">Docker</a> (check out the <a href="https://github.com/rhgraysonii/ocr_tutorial/blob/master/Dockerfile">Dockerfile</a> along with an <a href="https://github.com/rhgraysonii/ocr_tutorial/blob/master/DOCKER_INSTALL.md">install guide</a> are included) or a droplet on <a href="https://www.digitalocean.com/">DigitalOcean</a> (recommended!) to create the appropriate environment.</p></blockquote>
+
+<a name="Downloading.dependencies"/>
+<h2>Downloading dependencies</h2>
+
+<p>We need <a href="http://en.wikipedia.org/wiki/Tesseract_%28software%29">Tesseract</a> and all of its dependencies, which includes <a href="http://www.leptonica.com/">Leptonica</a>, as well as some other packages that power these two for sanity checks to start.</p>
+
+<blockquote><p><strong>NOTE</strong>: You can also use the <a href="https://github.com/rhgraysonii/ocr_tutorial/blob/master/_run.sh">_run.sh</a> shell script to quickly install the dependencies along with Leptonica and Tesseract. If you go this route, skip down to the <a href="https://realpython.com/blog/python/setting-up-a-simple-ocr-server/#web-server-time">Web-server time!</a> section. But please consider manually building these libraries if you have not done so before (for learning purposes).</p></blockquote>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+<span class="line-number">14</span>
+<span class="line-number">15</span>
+<span class="line-number">16</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>sudo apt-get update
+</span><span class="line"><span class="nv">$ </span>sudo apt-get install autoconf automake libtool
+</span><span class="line"><span class="nv">$ </span>sudo apt-get install libpng12-dev
+</span><span class="line"><span class="nv">$ </span>sudo apt-get install libjpeg62-dev
+</span><span class="line"><span class="nv">$ </span>sudo apt-get install g++
+</span><span class="line"><span class="nv">$ </span>sudo apt-get install libtiff4-dev
+</span><span class="line"><span class="nv">$ </span>sudo apt-get install libopencv-dev libtesseract-dev
+</span><span class="line"><span class="nv">$ </span>sudo apt-get install git
+</span><span class="line"><span class="nv">$ </span>sudo apt-get install cmake
+</span><span class="line"><span class="nv">$ </span>sudo apt-get install build-essential
+</span><span class="line"><span class="nv">$ </span>sudo apt-get install libleptonica-dev
+</span><span class="line"><span class="nv">$ </span>sudo apt-get install liblog4cplus-dev
+</span><span class="line"><span class="nv">$ </span>sudo apt-get install libcurl3-dev
+</span><span class="line"><span class="nv">$ </span>sudo apt-get install python2.7-dev
+</span><span class="line"><span class="nv">$ </span>sudo apt-get install tk8.5 tcl8.5 tk8.5-dev tcl8.5-dev
+</span><span class="line"><span class="nv">$ </span>sudo apt-get build-dep python-imaging --fix-missing
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p><strong>What’s happening?</strong></p>
+
+<p>Put simply, <code>sudo apt-get update</code> is short for “make sure we have the latest package listings”. We then grab a number of libraries that allow us to toy with images – i.e., <code>libtiff</code>, <code>libpng</code>, etc. Beyond that, we grab <code>Python 2.7</code>, our programming language of choice, along with the <code>python-imaging</code> library for interaction with all these pieces.</p>
+
+<p>Speaking of images, we need <a href="http://www.imagemagick.org/">ImageMagick</a> as well if we want to toy with (edit) the images before we throw them in programmatically.</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>sudo apt-get install imagemagick
+</span></code></pre></td></tr></table></div></figure>
+
+
+<a name="Building.Leptonica.and.Tesseract"/>
+<h2>Building Leptonica and Tesseract</h2>
+
+<p>Again, if you ran the shell script, these are already installed, so proceed to the <a href="https://realpython.com/blog/python/setting-up-a-simple-ocr-server/#web-server-time">Web-server time!</a> section</p>
+
+<a name="Leptonica"/>
+<h3>Leptonica</h3>
+
+<p>Now, time for Leptonica, finally!</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>wget http://www.leptonica.org/source/leptonica-1.70.tar.gz
+</span><span class="line"><span class="nv">$ </span>tar -zxvf leptonica-1.70.tar.gz
+</span><span class="line"><span class="nv">$ </span><span class="nb">cd </span>leptonica-1.70/
+</span><span class="line"><span class="nv">$ </span>./autobuild
+</span><span class="line"><span class="nv">$ </span>./configure
+</span><span class="line"><span class="nv">$ </span>make
+</span><span class="line"><span class="nv">$ </span>sudo make install
+</span><span class="line"><span class="nv">$ </span>sudo ldconfig
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>If this is your first time playing with <a href="http://en.wikipedia.org/wiki/Tar_%28computing%29">tar</a>, here’s what’s happening:</p>
+
+<ul>
+<li>Grab the binary for Leptonica (via <code>wget</code>)</li>
+<li>Unzip the tarball</li>
+<li><code>cd</code> into the new unpacked directory</li>
+<li>Run <code>autobuild</code> and <code>configure</code> bash scripts to set up the application</li>
+<li>Use <code>make</code> to build it</li>
+<li>Install it with <code>make</code> after the build</li>
+<li>Create the necessary links with <code>ldconfig</code></li>
+</ul>
+
+
+<p>Boom! Now we have Leptonica. On to Tesseract!</p>
+
+<a name="Tesseract"/>
+<h3>Tesseract</h3>
+
+<p>And now to download and build Tesseract…</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span><span class="nb">cd</span> ..
+</span><span class="line"><span class="nv">$ </span>wget https://tesseract-ocr.googlecode.com/files/tesseract-ocr-3.02.02.tar.gz
+</span><span class="line"><span class="nv">$ </span>tar -zxvf tesseract-ocr-3.02.02.tar.gz
+</span><span class="line"><span class="nv">$ </span><span class="nb">cd </span>tesseract-ocr/
+</span><span class="line"><span class="nv">$ </span>./autogen.sh
+</span><span class="line"><span class="nv">$ </span>./configure
+</span><span class="line"><span class="nv">$ </span>make
+</span><span class="line"><span class="nv">$ </span>sudo make install
+</span><span class="line"><span class="nv">$ </span>sudo ldconfig
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>The process here mirrors the Leptonica one almost perfectly. So to keep this DRY, see the Leptonica explanation for more information.</p>
+
+<a name="Environment.variable"/>
+<h3>Environment variable</h3>
+
+<p>We need to set up an environment variable to source our Tesseract data:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span><span class="nb">export </span><span class="nv">TESSDATA_PREFIX</span><span class="o">=</span>/usr/local/share/
+</span></code></pre></td></tr></table></div></figure>
+
+
+<a name="Tesseract.Packages"/>
+<h3>Tesseract Packages</h3>
+
+<p>Finally, let’s get the Tesseract english language packages that are relevant:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span><span class="nb">cd</span> ..
+</span><span class="line"><span class="nv">$ </span>wget https://tesseract-ocr.googlecode.com/files/tesseract-ocr-3.02.eng.tar.gz
+</span><span class="line"><span class="nv">$ </span>tar -xf tesseract-ocr-3.02.eng.tar.gz
+</span><span class="line"><span class="nv">$ </span>sudo cp -r tesseract-ocr/tessdata <span class="nv">$TESSDATA_PREFIX</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>BOOM! We now have Tesseract. We can use the CLI to test. Feel free to read the <a href="https://code.google.com/p/tesseract-ocr/">docs</a> if you want to play. However, we need a Python wrapper to truly achieve our end goal. So the next step is to set
+up a Flask server along with a basic API that accepts POST requests:</p>
+
+<ol>
+<li>Accept an image URL</li>
+<li>Run the character recognition on the image</li>
+</ol>
+
+
+<a name="Web-server.time."/>
+<h2>Web-server time!</h2>
+
+<p>Now, on to the fun stuff. First, we need to build a way to interface with Tesseract via Python. We COULD use <code>popen</code> but that just feels wrong/unPythonic. Instead, we can use a very minimal, but functional Python package wrapping Tesseract – <a href="https://github.com/madmaze/pytesseract">pytesseract</a>.</p>
+
+<p>Want to get started quickly? Run the <a href="https://github.com/rhgraysonii/ocr_tutorial/blob/master/_app.sh">_app.sh</a> shell script. Or you can set up the application manually by grabbing the boilerplate code/structure <a href="https://github.com/rhgraysonii/ocr_tutorial/releases/tag/v0">here</a> and then running the following commands:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>wget https://github.com/rhgraysonii/ocr_tutorial/archive/v0.tar.gz
+</span><span class="line"><span class="nv">$ </span>tar -xf v0.tar.gz
+</span><span class="line"><span class="nv">$ </span>mv ocr_tutorial-0/* ../home/
+</span><span class="line"><span class="nv">$ </span><span class="nb">cd</span> ../home
+</span><span class="line"><span class="nv">$ </span>sudo apt-get install python-virtualenv
+</span><span class="line"><span class="nv">$ </span>virtualenv env
+</span><span class="line"><span class="nv">$ </span><span class="nb">source </span>env/bin/activate
+</span><span class="line"><span class="nv">$ </span>pip install -r requirements.txt
+</span></code></pre></td></tr></table></div></figure>
+
+
+<blockquote><p><strong>NOTE</strong>: The Flask Boilerplate (maintained by <a href="https://realpython.com">Real Python</a>) is a wonderful library for getting a simple, Pythonic server running. We customized this for our base application. Check out the <a href="https://github.com/mjhea0/flask-boilerplate">Flask Boilerplate repository</a> for more info.</p></blockquote>
+
+<a name="Let.s.make.an.OCR.Engine"/>
+<h3>Let’s make an OCR Engine</h3>
+
+<p>Now, we need to make a class using pytesseract to intake and read images. Create a new file called <em>ocr.py</em> in the “flask_server” directory and add the following code:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+<span class="line-number">14</span>
+<span class="line-number">15</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="kn">import</span> <span class="nn">pytesseract</span>
+</span><span class="line"><span class="kn">import</span> <span class="nn">requests</span>
+</span><span class="line"><span class="kn">from</span> <span class="nn">PIL</span> <span class="kn">import</span> <span class="n">Image</span>
+</span><span class="line"><span class="kn">from</span> <span class="nn">PIL</span> <span class="kn">import</span> <span class="n">ImageFilter</span>
+</span><span class="line"><span class="kn">from</span> <span class="nn">StringIO</span> <span class="kn">import</span> <span class="n">StringIO</span>
+</span><span class="line">
+</span><span class="line">
+</span><span class="line"><span class="k">def</span> <span class="nf">process_image</span><span class="p">(</span><span class="n">url</span><span class="p">):</span>
+</span><span class="line">    <span class="n">image</span> <span class="o">=</span> <span class="n">_get_image</span><span class="p">(</span><span class="n">url</span><span class="p">)</span>
+</span><span class="line">    <span class="n">image</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="n">ImageFilter</span><span class="o">.</span><span class="n">SHARPEN</span><span class="p">)</span>
+</span><span class="line">    <span class="k">return</span> <span class="n">pytesseract</span><span class="o">.</span><span class="n">image_to_string</span><span class="p">(</span><span class="n">image</span><span class="p">)</span>
+</span><span class="line">
+</span><span class="line">
+</span><span class="line"><span class="k">def</span> <span class="nf">_get_image</span><span class="p">(</span><span class="n">url</span><span class="p">):</span>
+</span><span class="line">    <span class="k">return</span> <span class="n">Image</span><span class="o">.</span><span class="n">open</span><span class="p">(</span><span class="n">StringIO</span><span class="p">(</span><span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">url</span><span class="p">)</span><span class="o">.</span><span class="n">content</span><span class="p">))</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Wonderful!</p>
+
+<p>So, in our main method, <code>process_image()</code>, we sharpen the image to crisp up the text.</p>
+
+<p>Sweet! A working module to toy with.</p>
+
+<a name="Optional:.Building.a.CLI.tool.for.your.new.OCR.Engine"/>
+<h2>Optional: Building a CLI tool for your new OCR Engine</h2>
+
+<p>Making a CLI is a great proof of concept, and a fun breather after doing so much configuration. So lets take a stab at making one. Create a new file within “flask_server” called <em>cli.py</em> and then add the following code:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+<span class="line-number">14</span>
+<span class="line-number">15</span>
+<span class="line-number">16</span>
+<span class="line-number">17</span>
+<span class="line-number">18</span>
+<span class="line-number">19</span>
+<span class="line-number">20</span>
+<span class="line-number">21</span>
+<span class="line-number">22</span>
+<span class="line-number">23</span>
+<span class="line-number">24</span>
+<span class="line-number">25</span>
+<span class="line-number">26</span>
+<span class="line-number">27</span>
+<span class="line-number">28</span>
+<span class="line-number">29</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="kn">import</span> <span class="nn">sys</span>
+</span><span class="line"><span class="kn">import</span> <span class="nn">requests</span>
+</span><span class="line"><span class="kn">import</span> <span class="nn">pytesseract</span>
+</span><span class="line"><span class="kn">from</span> <span class="nn">PIL</span> <span class="kn">import</span> <span class="n">Image</span>
+</span><span class="line"><span class="kn">from</span> <span class="nn">StringIO</span> <span class="kn">import</span> <span class="n">StringIO</span>
+</span><span class="line">
+</span><span class="line">
+</span><span class="line"><span class="k">def</span> <span class="nf">get_image</span><span class="p">(</span><span class="n">url</span><span class="p">):</span>
+</span><span class="line">    <span class="k">return</span> <span class="n">Image</span><span class="o">.</span><span class="n">open</span><span class="p">(</span><span class="n">StringIO</span><span class="p">(</span><span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">url</span><span class="p">)</span><span class="o">.</span><span class="n">content</span><span class="p">))</span>
+</span><span class="line">
+</span><span class="line">
+</span><span class="line"><span class="k">if</span> <span class="n">__name__</span> <span class="o">==</span> <span class="s">'__main__'</span><span class="p">:</span>
+</span><span class="line">    <span class="sd">"""Tool to test the raw output of pytesseract with a given input URL"""</span>
+</span><span class="line">    <span class="n">sys</span><span class="o">.</span><span class="n">stdout</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s">"""</span>
+</span><span class="line"><span class="s">===OOOO=====CCCCC===RRRRRR=====</span><span class="se">\n</span><span class="s"/>
+</span><span class="line"><span class="s">==OO==OO===CC=======RR===RR====</span><span class="se">\n</span><span class="s"/>
+</span><span class="line"><span class="s">==OO==OO===CC=======RR===RR====</span><span class="se">\n</span><span class="s"/>
+</span><span class="line"><span class="s">==OO==OO===CC=======RRRRRR=====</span><span class="se">\n</span><span class="s"/>
+</span><span class="line"><span class="s">==OO==OO===CC=======RR==RR=====</span><span class="se">\n</span><span class="s"/>
+</span><span class="line"><span class="s">==OO==OO===CC=======RR== RR====</span><span class="se">\n</span><span class="s"/>
+</span><span class="line"><span class="s">===OOOO=====CCCCC===RR====RR===</span><span class="se">\n\n</span><span class="s"/>
+</span><span class="line"><span class="s">"""</span><span class="p">)</span>
+</span><span class="line">    <span class="n">sys</span><span class="o">.</span><span class="n">stdout</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s">"A simple OCR utility</span><span class="se">\n</span><span class="s">"</span><span class="p">)</span>
+</span><span class="line">    <span class="n">url</span> <span class="o">=</span> <span class="nb">raw_input</span><span class="p">(</span><span class="s">"What is the url of the image you would like to analyze?</span><span class="se">\n</span><span class="s">"</span><span class="p">)</span>
+</span><span class="line">    <span class="n">image</span> <span class="o">=</span> <span class="n">get_image</span><span class="p">(</span><span class="n">url</span><span class="p">)</span>
+</span><span class="line">    <span class="n">sys</span><span class="o">.</span><span class="n">stdout</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s">"The raw output from tesseract with no processing is:</span><span class="se">\n\n</span><span class="s">"</span><span class="p">)</span>
+</span><span class="line">    <span class="n">sys</span><span class="o">.</span><span class="n">stdout</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s">"-----------------BEGIN-----------------</span><span class="se">\n</span><span class="s">"</span><span class="p">)</span>
+</span><span class="line">    <span class="n">sys</span><span class="o">.</span><span class="n">stdout</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">pytesseract</span><span class="o">.</span><span class="n">image_to_string</span><span class="p">(</span><span class="n">image</span><span class="p">)</span> <span class="o">+</span> <span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">)</span>
+</span><span class="line">    <span class="n">sys</span><span class="o">.</span><span class="n">stdout</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s">"------------------END------------------</span><span class="se">\n</span><span class="s">"</span><span class="p">)</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>This is really quite simple. Line by line we look at the text output from our engine, and output it to STDOUT. Test it out (<code>python flask_server/cli.py</code>) with a few image urls, or play with your own ascii art for a good time.</p>
+
+<a name="Back.to.the.server"/>
+<h2>Back to the server</h2>
+
+<p>Now that we have an engine, we need to get ourselves some output! Add the following route handler and view function to <em>app.py</em>:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="nd">@app.route</span><span class="p">(</span><span class="s">'/v{}/ocr'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">_VERSION</span><span class="p">),</span> <span class="n">methods</span><span class="o">=</span><span class="p">[</span><span class="s">"POST"</span><span class="p">])</span>
+</span><span class="line"><span class="k">def</span> <span class="nf">ocr</span><span class="p">():</span>
+</span><span class="line">    <span class="k">try</span><span class="p">:</span>
+</span><span class="line">        <span class="n">url</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">json</span><span class="p">[</span><span class="s">'image_url'</span><span class="p">]</span>
+</span><span class="line">        <span class="k">if</span> <span class="s">'jpg'</span> <span class="ow">in</span> <span class="n">url</span><span class="p">:</span>
+</span><span class="line">            <span class="n">output</span> <span class="o">=</span> <span class="n">process_image</span><span class="p">(</span><span class="n">url</span><span class="p">)</span>
+</span><span class="line">            <span class="k">return</span> <span class="n">jsonify</span><span class="p">({</span><span class="s">"output"</span><span class="p">:</span> <span class="n">output</span><span class="p">})</span>
+</span><span class="line">        <span class="k">else</span><span class="p">:</span>
+</span><span class="line">            <span class="k">return</span> <span class="n">jsonify</span><span class="p">({</span><span class="s">"error"</span><span class="p">:</span> <span class="s">"only .jpg files, please"</span><span class="p">})</span>
+</span><span class="line">    <span class="k">except</span><span class="p">:</span>
+</span><span class="line">        <span class="k">return</span> <span class="n">jsonify</span><span class="p">(</span>
+</span><span class="line">            <span class="p">{</span><span class="s">"error"</span><span class="p">:</span> <span class="s">"Did you mean to send: {'image_url': 'some_jpeg_url'}"</span><span class="p">}</span>
+</span><span class="line">        <span class="p">)</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Make sure to update the imports:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="kn">import</span> <span class="nn">os</span>
+</span><span class="line"><span class="kn">import</span> <span class="nn">logging</span>
+</span><span class="line"><span class="kn">from</span> <span class="nn">logging</span> <span class="kn">import</span> <span class="n">Formatter</span><span class="p">,</span> <span class="n">FileHandler</span>
+</span><span class="line"><span class="kn">from</span> <span class="nn">flask</span> <span class="kn">import</span> <span class="n">Flask</span><span class="p">,</span> <span class="n">request</span><span class="p">,</span> <span class="n">jsonify</span>
+</span><span class="line">
+</span><span class="line"><span class="kn">from</span> <span class="nn">ocr</span> <span class="kn">import</span> <span class="n">process_image</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Also, add the API version number:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="n">_VERSION</span> <span class="o">=</span> <span class="mi">1</span>  <span class="c"># API version</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Now, as you can see, we just add in the JSON response of the Engine’s <code>process_image()</code> method, passing it in a file object using <code>Image</code> from PIL to install. <em>And, yes – For the time being, this currently only works with .jpg images.</em></p>
+
+<blockquote><p><strong>NOTE</strong>: You will not have <code>PIL</code> itself installed; this runs off of <code>Pillow</code> and allows us to do the same thing. This is because the PIL library was at one time forked, and turned into <code>Pillow</code>. The community has strong opinions on this matter. Consult Google for insight – and drama.</p></blockquote>
+
+<a name="Let.s.test."/>
+<h2>Let’s test!</h2>
+
+<p>Run your app:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span><span class="nb">cd</span> ../home/flask_server/
+</span><span class="line"><span class="nv">$ </span>python app.py
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Then in another terminal tab run:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>curl -X POST http://localhost:5000/v1/ocr -d <span class="s1">'{"image_url": "some_url"}'</span> -H <span class="s2">"Content-Type: application/json"</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<a name="Example"/>
+<h3>Example</h3>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>curl -X POST http://localhost:5000/v1/ocr -d <span class="s1">'{"image_url": "https://www.realpython.com/images/blog_images/ocr/ocr.jpg"}'</span> -H <span class="s2">"Content-Type: application/json"</span>
+</span><span class="line"><span class="o">{</span>
+</span><span class="line">  <span class="s2">"output"</span>: <span class="s2">"ABCDE\nFGH I J\nKLMNO\nPQRST"</span>
+</span><span class="line"><span class="o">}</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<a name="Front-end"/>
+<h2>Front-end</h2>
+
+<p>With the back-end API done along with the OCR Engine, we can now add a basic front-end to consume the API and add the results to the DOM via AJAX and jQuery. Again, this is not covered by this tutorial, but you can grab the code from the <a href="https://github.com/rhgraysonii/ocr_tutorial">repository</a>.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<p>Test this out with some sample images:</p>
+
+<ol>
+<li><a href="https://www.realpython.com/images/blog_images/ocr/ocr.jpg">https://www.realpython.com/images/blog_images/ocr/ocr.jpg</a></li>
+<li><a href="https://www.realpython.com/images/blog_images/ocr/sample1.jpg">https://www.realpython.com/images/blog_images/ocr/sample1.jpg</a></li>
+<li><a href="https://www.realpython.com/images/blog_images/ocr/sample2.jpg">https://www.realpython.com/images/blog_images/ocr/sample2.jpg</a></li>
+<li><a href="https://www.realpython.com/images/blog_images/ocr/sample3.jpg">https://www.realpython.com/images/blog_images/ocr/sample3.jpg</a></li>
+<li><a href="https://www.realpython.com/images/blog_images/ocr/sample4.jpg">https://www.realpython.com/images/blog_images/ocr/sample4.jpg</a></li>
+<li><a href="https://www.realpython.com/images/blog_images/ocr/sample5.jpg">https://www.realpython.com/images/blog_images/ocr/sample5.jpg</a></li>
+</ol>
+
+
+<a name="Conclusion.and.next.steps"/>
+<h2>Conclusion and next steps</h2>
+
+<p>Hope you enjoyed this tutorial. Grab the final code <a href="https://github.com/rhgraysonii/ocr_tutorial/releases/tag/v1">here</a> from the <a href="https://github.com/rhgraysonii/ocr_tutorial">repository</a>. Oh – And please star the repo if you find this code/tutorial useful. Cheers!</p>
+
+<p>Happy hacking.</p>
+
+<p>:)</p>
+</div>
+
+
+      </div></body></html>

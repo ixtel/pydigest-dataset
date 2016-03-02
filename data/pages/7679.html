@@ -1,0 +1,391 @@
+<html><body><div><div class="package-version__description">
+      <p>PyMongo 3.0 is a partial rewrite of PyMongo bringing a large number of
+improvements:</p>
+<ul>
+<li>A unified client class. MongoClient is the one and only client class for
+connecting to a standalone mongod, replica set, or sharded cluster. Migrating
+from a standalone, to a replica set, to a sharded cluster can be accomplished
+with only a simple URI change.</li>
+<li>MongoClient is much more responsive to configuration changes in your MongoDB
+deployment. All connected servers are monitored in a non-blocking manner.
+Slow to respond or down servers no longer block server discovery, reducing
+application startup time and time to respond to new or reconfigured
+servers and replica set failovers.</li>
+<li>A unified CRUD API. All official MongoDB drivers now implement a standard
+CRUD API allowing polyglot developers to move from language to language
+with ease.</li>
+<li>Single source support for Python 2.x and 3.x. PyMongo no longer relies on
+2to3 to support Python 3.</li>
+<li>A rewritten pure Python BSON implementation, improving performance
+with pypy and cpython deployments without support for C extensions.</li>
+<li>Better support for greenlet based async frameworks including eventlet.</li>
+<li>Immutable client, database, and collection classes, avoiding a host of thread
+safety issues in client applications.</li>
+</ul>
+<p>PyMongo 3.0 brings a large number of API changes. Be sure to read the changes
+listed below before upgrading from PyMongo 2.x.</p>
+<div>
+<p>Warning</p>
+<p>PyMongo no longer supports Python 2.4, 2.5, or 3.1. If you
+must use PyMongo with these versions of Python the 2.x branch of PyMongo
+will be minimally supported for some time.</p>
+</div>
+<div>
+<h3>SONManipulator changes<a href="#sonmanipulator-changes" title="Permalink to this headline">¶</a></h3>
+<p>The <code><span>SONManipulator</span></code> API has limitations as a
+technique for transforming your data. Instead, it is more flexible and
+straightforward to transform outgoing documents in your own code before passing
+them to PyMongo, and transform incoming documents after receiving them from
+PyMongo.</p>
+<p>Thus the <code><span>add_son_manipulator()</span></code> method is
+<span class="changelog-highlight-dep">deprecated</span>. PyMongo 3’s new CRUD API does <strong>not</strong> apply SON manipulators to
+documents passed to <code><span>bulk_write()</span></code>,
+<code><span>insert_one()</span></code>,
+<code><span>insert_many()</span></code>,
+<code><span>update_one()</span></code>, or
+<code><span>update_many()</span></code>. SON manipulators are <strong>not</strong>
+applied to documents returned by the new methods
+<code><span>find_one_and_delete()</span></code>,
+<code><span>find_one_and_replace()</span></code>, and
+<code><span>find_one_and_update()</span></code>.</p>
+</div>
+<div>
+<h3>SSL/TLS changes<a href="#ssl-tls-changes" title="Permalink to this headline">¶</a></h3>
+<p>When <cite>ssl</cite> is <code><span>True</span></code> the <cite>ssl_cert_reqs</cite> option now defaults to
+<code><span>ssl.CERT_REQUIRED</span></code> if not provided. PyMongo will attempt to load OS
+provided CA certificates to verify the server, raising
+<code><span>ConfigurationError</span></code> if it cannot.</p>
+</div>
+<div>
+<h3>Gevent Support<a href="#gevent-support" title="Permalink to this headline">¶</a></h3>
+<p>In previous versions, PyMongo supported Gevent in two modes: you could call
+<code><span>gevent.monkey.patch_socket()</span></code> and pass <code><span>use_greenlets=True</span></code> to
+<code><span>MongoClient</span></code>, or you could simply call
+<code><span>gevent.monkey.patch_all()</span></code> and omit the <code><span>use_greenlets</span></code> argument.</p>
+<p>In PyMongo 3.0, the <code><span>use_greenlets</span></code> option is gone. To use PyMongo with
+Gevent simply call <code><span>gevent.monkey.patch_all()</span></code>.</p>
+<p>For more information,
+see <code><span>PyMongo's</span> <span>Gevent</span> <span>documentation</span></code>.</p>
+</div>
+<div>
+<h3><code><span>MongoClient</span></code> changes<a href="#mongoclient-changes" title="Permalink to this headline">¶</a></h3>
+<p><code><span>MongoClient</span></code> is now the one and only
+client class for a standalone server, mongos, or replica set.
+It includes the functionality that had been split into
+<code><span>MongoReplicaSetClient</span></code>: it can connect to a replica set, discover all its
+members, and monitor the set for stepdowns, elections, and reconfigs.
+<code><span>MongoClient</span></code> now also supports the full
+<code><span>ReadPreference</span></code> API.</p>
+<p>The obsolete classes <code><span>MasterSlaveConnection</span></code>, <code><span>Connection</span></code>, and
+<code><span>ReplicaSetConnection</span></code> are <span class="changelog-highlight-inc">removed</span>.</p>
+<p>The <code><span>MongoClient</span></code> constructor no
+longer blocks while connecting to the server or servers, and it no
+longer raises <code><span>ConnectionFailure</span></code> if they
+are unavailable, nor <code><span>ConfigurationError</span></code>
+if the user’s credentials are wrong. Instead, the constructor
+returns immediately and launches the connection process on
+background threads. The <code><span>connect</span></code> option is added to control whether
+these threads are started immediately, or when the client is first used.</p>
+<p>Therefore the <code><span>alive</span></code> method is <span class="changelog-highlight-inc">removed</span> since it no longer provides meaningful
+information; even if the client is disconnected, it may discover a server in
+time to fulfill the next operation.</p>
+<p>In PyMongo 2.x, <code><span>MongoClient</span></code> accepted a list of
+standalone MongoDB servers and used the first it could connect to:</p>
+<div><div><pre><span/><span>MongoClient</span><span>([</span><span>'host1.com:27017'</span><span>,</span> <span>'host2.com:27017'</span><span>])</span>
+</pre></div>
+</div>
+<p>A list of multiple standalones is no longer supported; if multiple servers
+are listed they must be members of the same replica set, or mongoses in the
+same sharded cluster.</p>
+<p>The behavior for a list of mongoses is changed from “high availability” to
+“load balancing”. Before, the client connected to the lowest-latency mongos in
+the list, and used it until a network error prompted it to re-evaluate all
+mongoses’ latencies and reconnect to one of them. In PyMongo 3, the client
+monitors its network latency to all the mongoses continuously, and distributes
+operations evenly among those with the lowest latency.
+See <span>mongos-load-balancing</span> for more information.</p>
+<p>The client methods <code><span>start_request</span></code>, <code><span>in_request</span></code>, and <code><span>end_request</span></code>
+are <span class="changelog-highlight-inc">removed</span>, and so is the <code><span>auto_start_request</span></code> option. Requests were
+designed to make read-your-writes consistency more likely with the <code><span>w=0</span></code>
+write concern. Additionally, a thread in a request used the same member for
+all secondary reads in a replica set. To ensure read-your-writes consistency
+in PyMongo 3.0, do not override the default write concern with <code><span>w=0</span></code>, and
+do not override the default <span>read preference</span> of
+PRIMARY.</p>
+<p>Support for the <code><span>slaveOk</span></code> (or <code><span>slave_okay</span></code>), <code><span>safe</span></code>, and
+<code><span>network_timeout</span></code> options has been <span class="changelog-highlight-inc">removed</span>. Use
+<code><span>SECONDARY_PREFERRED</span></code> instead of
+slave_okay. Accept the default write concern, acknowledged writes, instead of
+setting safe=True. Use socketTimeoutMS in place of network_timeout (note that
+network_timeout was in seconds, where as socketTimeoutMS is milliseconds).</p>
+<p>The <code><span>max_pool_size</span></code> option has been <span class="changelog-highlight-inc">removed</span>. It is replaced by the
+<code><span>maxPoolSize</span></code> MongoDB URI option. <code><span>maxPoolSize</span></code> is now a supported URI
+option in PyMongo and can be passed as a keyword argument.</p>
+<p>The <code><span>copy_database</span></code> method is <span class="changelog-highlight-inc">removed</span>, see the
+<code><span>copy_database</span> <span>examples</span></code> for alternatives.</p>
+<p>The <code><span>disconnect</span></code> method is <span class="changelog-highlight-inc">removed</span>. Use
+<code><span>close()</span></code> instead.</p>
+<p>The <code><span>get_document_class</span></code> method is <span class="changelog-highlight-inc">removed</span>. Use
+<code><span>codec_options</span></code> instead.</p>
+<p>The <code><span>get_lasterror_options</span></code>, <code><span>set_lasterror_options</span></code>, and
+<code><span>unset_lasterror_options</span></code> methods are <span class="changelog-highlight-inc">removed</span>. Write concern options
+can be passed to <code><span>MongoClient</span></code> as keyword
+arguments or MongoDB URI options.</p>
+<p>The <code><span>get_database()</span></code> method is added for
+getting a Database instance with its options configured differently than the
+MongoClient’s.</p>
+<p>The following read-only attributes have been added:</p>
+
+<p>The following attributes are now read-only:</p>
+<ul>
+<li><code><span>read_preference</span></code></li>
+<li><code><span>write_concern</span></code></li>
+</ul>
+<p>The following attributes have been <span class="changelog-highlight-inc">removed</span>:</p>
+<ul>
+<li><code><span>document_class</span></code>
+(use <code><span>codec_options</span></code> instead)</li>
+<li><code><span>host</span></code>
+(use <code><span>address</span></code> instead)</li>
+<li><code><span>min_wire_version</span></code></li>
+<li><code><span>max_wire_version</span></code></li>
+<li><code><span>port</span></code>
+(use <code><span>address</span></code> instead)</li>
+<li><code><span>safe</span></code>
+(use <code><span>write_concern</span></code> instead)</li>
+<li><code><span>slave_okay</span></code>
+(use <code><span>read_preference</span></code> instead)</li>
+<li><code><span>tag_sets</span></code>
+(use <code><span>read_preference</span></code> instead)</li>
+<li><code><span>tz_aware</span></code>
+(use <code><span>codec_options</span></code> instead)</li>
+</ul>
+<p>The following attributes have been renamed:</p>
+<ul>
+<li><code><span>secondary_acceptable_latency_ms</span></code> is
+now <code><span>local_threshold_ms</span></code> and is now
+read-only.</li>
+</ul>
+</div>
+<div>
+<h3><code><span>Cursor</span></code> changes<a href="#cursor-changes" title="Permalink to this headline">¶</a></h3>
+<p>The <code><span>conn_id</span></code> property is renamed to <code><span>address</span></code>.</p>
+</div>
+<div>
+<h3>Cursor management changes<a href="#cursor-management-changes" title="Permalink to this headline">¶</a></h3>
+<p><code><span>CursorManager</span></code> and
+<code><span>set_cursor_manager()</span></code> are no longer
+<span class="changelog-highlight-dep">deprecated</span>. If you subclass <code><span>CursorManager</span></code>
+your implementation of <code><span>close()</span></code>
+must now take a second parameter, <cite>address</cite>. The <code><span>BatchCursorManager</span></code> class
+is <span class="changelog-highlight-inc">removed</span>.</p>
+<p>The second parameter to <code><span>close_cursor()</span></code>
+is renamed from <code><span>_conn_id</span></code> to <code><span>address</span></code>.
+<code><span>kill_cursors()</span></code> now accepts an <cite>address</cite>
+parameter.</p>
+</div>
+<div>
+<h3><code><span>Database</span></code> changes<a href="#database-changes" title="Permalink to this headline">¶</a></h3>
+<p>The <code><span>connection</span></code> property is renamed to
+<code><span>client</span></code>.</p>
+<p>The following read-only attributes have been added:</p>
+
+<p>The following attributes are now read-only:</p>
+<ul>
+<li><code><span>read_preference</span></code></li>
+<li><code><span>write_concern</span></code></li>
+</ul>
+<p>Use <code><span>get_database()</span></code> for getting a
+Database instance with its options configured differently than the
+MongoClient’s.</p>
+<p>The following attributes have been <span class="changelog-highlight-inc">removed</span>:</p>
+<ul>
+<li><code><span>safe</span></code></li>
+<li><code><span>secondary_acceptable_latency_ms</span></code></li>
+<li><code><span>slave_okay</span></code></li>
+<li><code><span>tag_sets</span></code></li>
+</ul>
+<p>The following methods have been added:</p>
+
+<p>The following methods have been changed:</p>
+<ul>
+<li><code><span>command()</span></code>. Support for <cite>as_class</cite>,
+<cite>uuid_subtype</cite>, <cite>tag_sets</cite>, and <cite>secondary_acceptable_latency_ms</cite> have been
+<span class="changelog-highlight-inc">removed</span>. You can instead pass an instance of
+<code><span>CodecOptions</span></code> as <cite>codec_options</cite> and an instance
+of a read preference class from <code><span>read_preferences</span></code> as
+<cite>read_preference</cite>. The <cite>fields</cite> and <cite>compile_re</cite> options are also <span class="changelog-highlight-inc">removed</span>.
+The <cite>fields</cite> options was undocumented and never really worked. Regular
+expressions are always decoded to <code><span>Regex</span></code>.</li>
+</ul>
+<p>The following methods have been <span class="changelog-highlight-dep">deprecated</span>:</p>
+
+<p>The following methods have been <span class="changelog-highlight-inc">removed</span>:</p>
+<p>The <code><span>get_lasterror_options</span></code>, <code><span>set_lasterror_options</span></code>, and
+<code><span>unset_lasterror_options</span></code> methods have been <span class="changelog-highlight-inc">removed</span>. Use
+<code><span>WriteConcern</span></code> with
+<code><span>get_database()</span></code> instead.</p>
+</div>
+<div>
+<h3><code><span>Collection</span></code> changes<a href="#collection-changes" title="Permalink to this headline">¶</a></h3>
+<p>The following read-only attributes have been added:</p>
+
+<p>The following attributes are now read-only:</p>
+<ul>
+<li><code><span>read_preference</span></code></li>
+<li><code><span>write_concern</span></code></li>
+</ul>
+<p>Use <code><span>get_collection()</span></code> or
+<code><span>with_options()</span></code> for getting a Collection
+instance with its options configured differently than the Database’s.</p>
+<p>The following attributes have been <span class="changelog-highlight-inc">removed</span>:</p>
+<ul>
+<li><code><span>safe</span></code></li>
+<li><code><span>secondary_acceptable_latency_ms</span></code></li>
+<li><code><span>slave_okay</span></code></li>
+<li><code><span>tag_sets</span></code></li>
+</ul>
+<p>The following methods have been added:</p>
+<ul>
+<li><code><span>bulk_write()</span></code></li>
+<li><code><span>insert_one()</span></code></li>
+<li><code><span>insert_many()</span></code></li>
+<li><code><span>update_one()</span></code></li>
+<li><code><span>update_many()</span></code></li>
+<li><code><span>replace_one()</span></code></li>
+<li><code><span>delete_one()</span></code></li>
+<li><code><span>delete_many()</span></code></li>
+<li><code><span>find_one_and_delete()</span></code></li>
+<li><code><span>find_one_and_replace()</span></code></li>
+<li><code><span>find_one_and_update()</span></code></li>
+<li><code><span>with_options()</span></code></li>
+<li><code><span>create_indexes()</span></code></li>
+<li><code><span>list_indexes()</span></code></li>
+</ul>
+<p>The following methods have changed:</p>
+<ul>
+<li><code><span>aggregate()</span></code> now <strong>always</strong> returns an
+instance of <code><span>CommandCursor</span></code>. See the
+documentation for all options.</li>
+<li><code><span>count()</span></code> now optionally takes a filter
+argument, as well as other options supported by the count command.</li>
+<li><code><span>distinct()</span></code> now optionally takes a filter
+argument.</li>
+<li><code><span>create_index()</span></code> no longer caches
+indexes, therefore the <cite>cache_for</cite> parameter has been <span class="changelog-highlight-inc">removed</span>. It also
+no longer supports the <cite>bucket_size</cite> and <cite>drop_dups</cite> aliases for <cite>bucketSize</cite>
+and <cite>dropDups</cite>.</li>
+</ul>
+<p>The following methods are <span class="changelog-highlight-dep">deprecated</span>:</p>
+<ul>
+<li><code><span>save()</span></code></li>
+<li><code><span>insert()</span></code></li>
+<li><code><span>update()</span></code></li>
+<li><code><span>remove()</span></code></li>
+<li><code><span>find_and_modify()</span></code></li>
+<li><code><span>ensure_index()</span></code></li>
+</ul>
+<p>The following methods have been <span class="changelog-highlight-inc">removed</span>:</p>
+<p>The <code><span>get_lasterror_options</span></code>, <code><span>set_lasterror_options</span></code>, and
+<code><span>unset_lasterror_options</span></code> methods have been <span class="changelog-highlight-inc">removed</span>. Use
+<code><span>WriteConcern</span></code> with
+<code><span>with_options()</span></code> instead.</p>
+<div>
+<h4>Changes to <code><span>find()</span></code> and <code><span>find_one()</span></code><a href="#changes-to-find-and-find-one" title="Permalink to this headline">¶</a></h4>
+<p>The following find/find_one options have been renamed:</p>
+<p>These renames only affect your code if you passed these as keyword arguments,
+like find(fields=[‘fieldname’]). If you passed only positional parameters these
+changes are not significant for your application.</p>
+<ul>
+<li>spec -&gt; filter</li>
+<li>fields -&gt; projection</li>
+<li>partial -&gt; allow_partial_results</li>
+</ul>
+<p>The following find/find_one options have been added:</p>
+<ul>
+<li>cursor_type (see <code><span>CursorType</span></code> for values)</li>
+<li>oplog_replay</li>
+<li>modifiers</li>
+</ul>
+<p>The following find/find_one options have been <span class="changelog-highlight-inc">removed</span>:</p>
+<ul>
+<li>network_timeout (use <code><span>max_time_ms()</span></code> instead)</li>
+<li>slave_okay (use one of the read preference classes from
+<code><span>read_preferences</span></code> and
+<code><span>with_options()</span></code> instead)</li>
+<li>read_preference (use <code><span>with_options()</span></code>
+instead)</li>
+<li>tag_sets (use one of the read preference classes from
+<code><span>read_preferences</span></code> and
+<code><span>with_options()</span></code> instead)</li>
+<li>secondary_acceptable_latency_ms (use the <cite>localThresholdMS</cite> URI option
+instead)</li>
+<li>max_scan (use the new <cite>modifiers</cite> option instead)</li>
+<li>snapshot (use the new <cite>modifiers</cite> option instead)</li>
+<li>tailable (use the new <cite>cursor_type</cite> option instead)</li>
+<li>await_data (use the new <cite>cursor_type</cite> option instead)</li>
+<li>exhaust (use the new <cite>cursor_type</cite> option instead)</li>
+<li>as_class (use <code><span>with_options()</span></code> with
+<code><span>CodecOptions</span></code> instead)</li>
+<li>compile_re (BSON regular expressions are always decoded to
+<code><span>Regex</span></code>)</li>
+</ul>
+<p>The following find/find_one options are <span class="changelog-highlight-dep">deprecated</span>:</p>
+
+<p>The following renames need special handling.</p>
+<ul>
+<li>timeout -&gt; no_cursor_timeout -
+The default for <cite>timeout</cite> was True. The default for <cite>no_cursor_timeout</cite> is
+False. If you were previously passing False for <cite>timeout</cite> you must pass
+<strong>True</strong> for <cite>no_cursor_timeout</cite> to keep the previous behavior.</li>
+</ul>
+</div>
+</div>
+<div>
+<h3><code><span>errors</span></code> changes<a href="#errors-changes" title="Permalink to this headline">¶</a></h3>
+<p>The exception classes <code><span>UnsupportedOption</span></code> and <code><span>TimeoutError</span></code> are deleted.</p>
+</div>
+<div>
+<h3><code><span>gridfs</span></code> changes<a href="#gridfs-changes" title="Permalink to this headline">¶</a></h3>
+<p>Since PyMongo 1.6, methods <code><span>open</span></code> and <code><span>close</span></code> of <code><span>GridFS</span></code>
+raised an <code><span>UnsupportedAPI</span></code> exception, as did the entire <code><span>GridFile</span></code> class.
+The unsupported methods, the class, and the exception are all deleted.</p>
+</div>
+<div>
+<h3><code><span>bson</span></code> changes<a href="#bson-changes" title="Permalink to this headline">¶</a></h3>
+<p>The <cite>compile_re</cite> option is <span class="changelog-highlight-inc">removed</span> from all methods
+that accepted it in <code><span>bson</span></code> and <code><span>json_util</span></code>. Additionally, it
+is <span class="changelog-highlight-inc">removed</span> from <code><span>find()</span></code>,
+<code><span>find_one()</span></code>,
+<code><span>aggregate()</span></code>,
+<code><span>command()</span></code>, and so on.
+PyMongo now always represents BSON regular expressions as
+<code><span>Regex</span></code> objects. This prevents errors for incompatible
+patterns, see <a href="https://jira.mongodb.org/browse/PYTHON-500">PYTHON-500</a>. Use <code><span>try_compile()</span></code> to
+attempt to convert from a BSON regular expression to a Python regular
+expression object.</p>
+<p>PyMongo now decodes the int64 BSON type to <code><span>Int64</span></code>, a
+trivial wrapper around long (in python 2.x) or int (in python 3.x). This
+allows BSON int64 to be round tripped without losing type information in
+python 3. Note that if you store a python long (or a python int larger than
+4 bytes) it will be returned from PyMongo as <code><span>Int64</span></code>.</p>
+<p>The <cite>as_class</cite>, <cite>tz_aware</cite>, and <cite>uuid_subtype</cite> options are <span class="changelog-highlight-inc">removed</span> from all
+BSON encoding and decoding methods. Use
+<code><span>CodecOptions</span></code> to configure these options. The
+APIs affected are:</p>
+<ul>
+<li><code><span>decode_all()</span></code></li>
+<li><code><span>decode_iter()</span></code></li>
+<li><code><span>decode_file_iter()</span></code></li>
+<li><code><span>encode()</span></code></li>
+<li><code><span>decode()</span></code></li>
+</ul>
+<p>This is a <span class="changelog-highlight-fix">breaking change</span> for any application that uses the BSON API directly
+and changes any of the named parameter defaults. No changes are required for
+applications that use the default values for these options. The behavior
+remains the same.</p>
+</div>
+
+    </div>
+  
+</div></body></html>

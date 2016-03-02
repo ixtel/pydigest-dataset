@@ -1,0 +1,310 @@
+<html><body><div><div class="post-text" itemprop="text">
+
+<p>I'm working with a Gtk TextView/TextBuffer in my project where the user is able to type in rich text (bold/italic/underline) by selecting the correct toggle buttons.</p>
+
+<p>The problem is that if I apply the underline or italic Pango flag to text within the TextView, then turn off italic/underline and type some more, and then get the text with those flags via <code>TextBuffer.serialize()</code>, the unformatted text (visibly unformatted in the TextView) is returned with the Underline/Italic tags around it.</p>
+
+<p>You can see this here: (Note, I simplified the tags to their HTML counterparts with BeautifulSoup for readability, but the actual positions/type haven't been edited at all.)</p>
+
+<p><img src="http://i.stack.imgur.com/5QhM5.png" alt=""/></p>
+
+<p>Here's the code (requires Gtk3 and BS4 for Python3 to be installed):</p>
+
+<pre><code>import gi
+gi.require_version('Gtk', '3.0')
+from gi.repository import Gtk, Gdk, Pango
+
+import smtplib, mimetypes
+from bs4 import BeautifulSoup
+
+class Handler():
+
+    def __init__(self):
+        global html
+        self.state = 0
+
+    def onDeleteWindow(self, *args):
+        Gtk.main_quit(*args)
+
+    def onSendClicked(self, button):
+        start, end = textBodyBuffer.get_bounds()
+        self.content = textBodyBuffer.get_text(start, end, True)
+
+        # Below is the serialization code for exporting with format tags
+        format = textBodyBuffer.register_serialize_tagset() 
+        exported = textBodyBuffer.serialize(textBodyBuffer, format, start, end)
+
+        exported = exported.decode("latin-1")
+
+        exported = exported.split('&lt;text_view_markup&gt;', 1)
+        del exported[0]
+        exported[0] = '&lt;text_view_markup&gt;' + str(exported[0])
+
+        exported = exported[0].split('&lt;/tags&gt;', 1)
+        del exported[0]
+
+        exported = exported[0].split('&lt;/text_view_markup&gt;', 1)
+        exported = str(exported[0]).replace('\n', ' ')
+
+        soup = BeautifulSoup(exported)
+
+        soupTags = soup.find_all('apply_tag')
+
+        for tag in soupTags:
+
+            if tag['name'] == 'bold':
+                tag.name = 'b'
+                del tag['name']
+            elif tag['name'] == 'italic':
+                tag.name = 'em'
+                del tag['name']
+            elif tag['name'] == 'underline':
+                tag.name = 'u'
+                del tag['name']
+
+        print (soup)
+
+    def bold(self, button):
+        global tags_on
+        name = button.get_name()
+        if button.get_active():             # Button is "down"/enabled
+            tags_on.append('bold')
+        elif button.get_active() != True:   # Button is "up"/disabled
+            del tags_on[tags_on.index('bold')]
+
+    def italic(self, button):
+        global tags_on
+        name = button.get_name()
+        if button.get_active():             # Button is "down"/enabled
+            tags_on.append('italic')
+        elif button.get_active() != True:   # Button is "up"/disabled
+            del tags_on[tags_on.index('italic')]
+
+    def underline(self, button):
+        global tags_on
+        name = button.get_name()
+        if button.get_active():             # Button is "down"/enabled
+            tags_on.append('underline')
+        elif button.get_active() != True:   # Button is "up"/disabled
+            del tags_on[tags_on.index('underline')]
+
+    def alignToggled(self, radiobutton):
+        pass
+
+    def undo(self, button):
+        pass
+
+    def redo(self, button):
+        pass
+
+    def keyHandler(self, widget, event):
+        global html
+        if Gdk.ModifierType.CONTROL_MASK &amp; event.state:
+            if Gdk.keyval_name(event.keyval) == 'q':    # Quit the program
+                w.destroy()
+                Gtk.main_quit()
+
+def get_iter_position(buffer):
+    return buffer.get_iter_at_mark(buffer.get_insert())
+
+def text_inserted(buffer, iter, char, length):
+
+    global tags_on
+
+    if len(tags_on) &gt;= 0:
+        iter.backward_chars(length)
+
+        for tag in tags_on:
+            w.queue_draw()
+            if tag == 'bold':
+                buffer.apply_tag(tag_bold, get_iter_position(buffer), iter)
+            elif tag == 'italic':
+                buffer.apply_tag(tag_italic, get_iter_position(buffer), iter)
+            elif tag == 'underline':
+                buffer.apply_tag(tag_underline, get_iter_position(buffer), iter)
+
+
+if __name__ == '__main__':
+
+    global text, html
+    # Gtk tag globals
+    global tag_bold, tag_italic, tag_underline, tags_on
+
+    tags_on = []
+
+    text = ''
+    html = '&lt;html&gt;&lt;body&gt;&lt;p&gt;'
+
+    builder = Gtk.Builder()
+    builder.add_from_file('editor.glade')
+    builder.connect_signals(Handler())
+
+    buttonSend = builder.get_object('buttonSend')
+
+    textBody = builder.get_object('textviewBody')
+    textBodyBuffer = textBody.get_buffer()
+
+    textBodyBuffer.connect_after('insert-text', text_inserted)
+    tag_bold = textBodyBuffer.create_tag("bold", weight=Pango.Weight.BOLD)
+    tag_italic = textBodyBuffer.create_tag("italic", style=Pango.Style.ITALIC)
+    tag_underline = textBodyBuffer.create_tag("underline", underline=Pango.Underline.SINGLE)
+
+    w = builder.get_object('window1')
+    w.show_all()
+
+    Gtk.main()
+</code></pre>
+
+<p>Here's the <code>editor.glade</code> file:</p>
+
+<pre><code>&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+&lt;!-- Generated with glade 3.16.1 --&gt;
+&lt;interface&gt;
+  &lt;requires lib="gtk+" version="3.10"/&gt;
+  &lt;object class="GtkImage" id="image1"&gt;
+    &lt;property name="visible"&gt;True&lt;/property&gt;
+    &lt;property name="can_focus"&gt;False&lt;/property&gt;
+    &lt;property name="icon_name"&gt;mail-send&lt;/property&gt;
+  &lt;/object&gt;
+  &lt;object class="GtkWindow" id="window1"&gt;
+    &lt;property name="can_focus"&gt;False&lt;/property&gt;
+    &lt;property name="title" translatable="yes"&gt;Keyboard Mail - Edit Message&lt;/property&gt;
+    &lt;property name="modal"&gt;True&lt;/property&gt;
+    &lt;property name="type_hint"&gt;dialog&lt;/property&gt;
+    &lt;signal name="delete-event" handler="onDeleteWindow" swapped="no"/&gt;
+    &lt;signal name="key-press-event" handler="keyHandler" swapped="no"/&gt;
+    &lt;child&gt;
+      &lt;object class="GtkBox" id="box2"&gt;
+        &lt;property name="visible"&gt;True&lt;/property&gt;
+        &lt;property name="can_focus"&gt;False&lt;/property&gt;
+        &lt;property name="orientation"&gt;vertical&lt;/property&gt;
+        &lt;child&gt;
+          &lt;object class="GtkBox" id="box1"&gt;
+            &lt;property name="visible"&gt;True&lt;/property&gt;
+            &lt;property name="can_focus"&gt;False&lt;/property&gt;
+            &lt;property name="orientation"&gt;vertical&lt;/property&gt;
+            &lt;child&gt;
+              &lt;object class="GtkButton" id="buttonSend"&gt;
+                &lt;property name="label" translatable="yes"&gt;Send&lt;/property&gt;
+                &lt;property name="visible"&gt;True&lt;/property&gt;
+                &lt;property name="can_focus"&gt;True&lt;/property&gt;
+                &lt;property name="receives_default"&gt;True&lt;/property&gt;
+                &lt;property name="image"&gt;image1&lt;/property&gt;
+                &lt;property name="relief"&gt;none&lt;/property&gt;
+                &lt;property name="image_position"&gt;top&lt;/property&gt;
+                &lt;property name="always_show_image"&gt;True&lt;/property&gt;
+                &lt;signal name="clicked" handler="onSendClicked" swapped="no"/&gt;
+              &lt;/object&gt;
+              &lt;packing&gt;
+                &lt;property name="expand"&gt;False&lt;/property&gt;
+                &lt;property name="fill"&gt;False&lt;/property&gt;
+                &lt;property name="position"&gt;1&lt;/property&gt;
+              &lt;/packing&gt;
+            &lt;/child&gt;
+          &lt;/object&gt;
+          &lt;packing&gt;
+            &lt;property name="expand"&gt;False&lt;/property&gt;
+            &lt;property name="fill"&gt;False&lt;/property&gt;
+            &lt;property name="position"&gt;1&lt;/property&gt;
+          &lt;/packing&gt;
+        &lt;/child&gt;
+        &lt;child&gt;
+          &lt;object class="GtkToolbar" id="toolbar1"&gt;
+            &lt;property name="visible"&gt;True&lt;/property&gt;
+            &lt;property name="can_focus"&gt;False&lt;/property&gt;
+            &lt;property name="toolbar_style"&gt;icons&lt;/property&gt;
+            &lt;property name="show_arrow"&gt;False&lt;/property&gt;
+            &lt;child&gt;
+              &lt;object class="GtkToggleToolButton" id="buttonBold"&gt;
+                &lt;property name="name"&gt;bold&lt;/property&gt;
+                &lt;property name="visible"&gt;True&lt;/property&gt;
+                &lt;property name="can_focus"&gt;False&lt;/property&gt;
+                &lt;property name="tooltip_text" translatable="yes"&gt;Make the selected text bold&lt;/property&gt;
+                &lt;property name="icon_name"&gt;format-text-bold&lt;/property&gt;
+                &lt;signal name="toggled" handler="bold" swapped="no"/&gt;
+              &lt;/object&gt;
+              &lt;packing&gt;
+                &lt;property name="expand"&gt;False&lt;/property&gt;
+                &lt;property name="homogeneous"&gt;True&lt;/property&gt;
+              &lt;/packing&gt;
+            &lt;/child&gt;
+            &lt;child&gt;
+              &lt;object class="GtkToggleToolButton" id="buttonItalic"&gt;
+                &lt;property name="name"&gt;italic&lt;/property&gt;
+                &lt;property name="visible"&gt;True&lt;/property&gt;
+                &lt;property name="can_focus"&gt;False&lt;/property&gt;
+                &lt;property name="icon_name"&gt;format-text-italic&lt;/property&gt;
+                &lt;signal name="toggled" handler="italic" swapped="no"/&gt;
+              &lt;/object&gt;
+              &lt;packing&gt;
+                &lt;property name="expand"&gt;False&lt;/property&gt;
+                &lt;property name="homogeneous"&gt;True&lt;/property&gt;
+              &lt;/packing&gt;
+            &lt;/child&gt;
+            &lt;child&gt;
+              &lt;object class="GtkToggleToolButton" id="buttonUnderline"&gt;
+                &lt;property name="name"&gt;underline&lt;/property&gt;
+                &lt;property name="visible"&gt;True&lt;/property&gt;
+                &lt;property name="can_focus"&gt;False&lt;/property&gt;
+                &lt;property name="icon_name"&gt;format-text-underline&lt;/property&gt;
+                &lt;signal name="toggled" handler="underline" swapped="no"/&gt;
+              &lt;/object&gt;
+              &lt;packing&gt;
+                &lt;property name="expand"&gt;False&lt;/property&gt;
+                &lt;property name="homogeneous"&gt;True&lt;/property&gt;
+              &lt;/packing&gt;
+            &lt;/child&gt;
+          &lt;/object&gt;
+          &lt;packing&gt;
+            &lt;property name="expand"&gt;False&lt;/property&gt;
+            &lt;property name="fill"&gt;True&lt;/property&gt;
+            &lt;property name="position"&gt;3&lt;/property&gt;
+          &lt;/packing&gt;
+        &lt;/child&gt;
+        &lt;child&gt;
+          &lt;object class="GtkBox" id="box5"&gt;
+            &lt;property name="visible"&gt;True&lt;/property&gt;
+            &lt;property name="can_focus"&gt;False&lt;/property&gt;
+            &lt;property name="orientation"&gt;vertical&lt;/property&gt;
+            &lt;child&gt;
+              &lt;object class="GtkTextView" id="textviewBody"&gt;
+                &lt;property name="width_request"&gt;500&lt;/property&gt;
+                &lt;property name="height_request"&gt;100&lt;/property&gt;
+                &lt;property name="visible"&gt;True&lt;/property&gt;
+                &lt;property name="can_focus"&gt;True&lt;/property&gt;
+                &lt;property name="hexpand"&gt;True&lt;/property&gt;
+                &lt;property name="vexpand"&gt;True&lt;/property&gt;
+                &lt;property name="wrap_mode"&gt;word&lt;/property&gt;
+                &lt;property name="left_margin"&gt;5&lt;/property&gt;
+                &lt;property name="right_margin"&gt;5&lt;/property&gt;
+              &lt;/object&gt;
+              &lt;packing&gt;
+                &lt;property name="expand"&gt;True&lt;/property&gt;
+                &lt;property name="fill"&gt;True&lt;/property&gt;
+                &lt;property name="position"&gt;0&lt;/property&gt;
+              &lt;/packing&gt;
+            &lt;/child&gt;
+          &lt;/object&gt;
+          &lt;packing&gt;
+            &lt;property name="expand"&gt;False&lt;/property&gt;
+            &lt;property name="fill"&gt;True&lt;/property&gt;
+            &lt;property name="position"&gt;3&lt;/property&gt;
+          &lt;/packing&gt;
+        &lt;/child&gt;
+      &lt;/object&gt;
+    &lt;/child&gt;
+  &lt;/object&gt;
+&lt;/interface&gt;
+</code></pre>
+
+<p>Does anyone know why the <code>TextBuffer.serialize()</code> statement (line 23) is returning the visibly non-formatted characters within the underline/italic tags?</p>
+
+<p>I can't seem to find any pattern in when this is occurring, it seems to randomly decide to return the text with the tags or not.</p>
+
+<p><strong>Edit</strong>: I've gone over the code step by step with <code>pdb</code> (Python debugger) and still haven't seen anything that would cause this.</p>
+
+<p><strong>Edit</strong>: Interesting pattern I have figured out - if you turn on both italic and underline at once, then type some, then turn them both off at once, and type, the <code>serialize()</code> call returns the proper string.</p>
+
+<p>However, if you apply them one at a time, typing a bit for each new tag, it's returned incorrectly.</p>
+    </div>
+    </div></body></html>

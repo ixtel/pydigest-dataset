@@ -1,0 +1,50 @@
+<html><body><div><div class="content">
+		<p>A few years ago I started writing <a href="https://github.com/mikeboers/PyHAML">PyHAML</a>, a Pythonic version of <a href="http://haml.info/">HAML</a> for Ruby.</p>
+<p>Since most of the HAML syntax is pretty straight forward, PyHAML's parser uses a series of regular expressions to get the job done. This proved generally inadequate anytime that there was Python source to be isolated, since <a href="https://docs.python.org/2/reference/grammar.html">Python isn't quite so straight forward to parse</a>.</p>
+<p>The earliest thing to bite me was nested parenthesis in tag definitions. In PyHAML you can specify a link via <code>%a(href="http://example.com")</code>, essentially treating the <code>%a</code> tag as a function which accepts keyword arguments. The very next thing you will want to do is include a function call, e.g. <code>%a(href=url_for('my_endpoint'))</code>.</p>
+<p>At this point, you are going to have A Bad Time™ with regular expressions as <a href="https://stackoverflow.com/questions/133601/can-regular-expressions-be-used-to-match-nested-patterns">you can't deal with arbitrarily deep nesting</a>. I "solved" this particular problem by scanning character by character until we have balanced the parenthesis, with something similar to:</p>
+<table class="codehilitetable"><tr><td class="linenos"/><td class="code"><div class="codehilite"><pre><span class="k">def</span> <span class="nf">split_balanced_parens</span><span class="p">(</span><span class="n">line</span><span class="p">):</span>
+    <span class="n">depth</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="k">for</span> <span class="n">pos</span><span class="p">,</span> <span class="n">char</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">line</span><span class="p">):</span>
+        <span class="n">depth</span> <span class="o">+=</span> <span class="p">{</span><span class="s">'('</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span> <span class="s">')'</span><span class="p">:</span> <span class="o">-</span><span class="mi">1</span><span class="p">}</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">char</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">depth</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">line</span><span class="p">[:</span><span class="n">pos</span><span class="o">+</span><span class="mi">1</span><span class="p">],</span> <span class="n">line</span><span class="p">[</span><span class="n">pos</span><span class="o">+</span><span class="mi">1</span><span class="p">:]</span>
+    <span class="k">return</span> <span class="s">''</span><span class="p">,</span> <span class="n">line</span>
+</pre></div>
+</td></tr></table>
+
+<p>And things were great with PyHAML for a long time, until a number of odd restrictions starting getting in the way. For example, you can't have a closing parenthesis in a string in a tag (like <code>%img(title="A sad face looks like ):")</code>), you can't have a colon in a control statement, and statements can't span lines via unbalanced brackets.</p>
+<p>If only you could use Python to tokenize Python without fully parsing it...</p>
+		<hr id="the-fold" class="the-fold"/>
+		<p><a href="https://docs.python.org/2/library/tokenize.html">Behold the tokenize module</a>, which exposes Python's own internal tokenizer. This will allow us to take one tiny step further with our function above, and have it fully understand strings without us even having to try. It doesn't fully parse the given code, so there are many less cases for it to trip up on HAML being very much not Python.</p>
+<p>Once you have a token iterator via [<code>tokenize.generate_tokens()</code>][generate_tokens], you can write a version of the above function which isolates which token is the end of a bracketed statement:</p>
+<table class="codehilitetable"><tr><td class="linenos"><div class="linenodiv"><pre> 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12</pre></div></td><td class="code"><div class="codehilite"><pre><span class="k">def</span> <span class="nf">match_python_brackets</span><span class="p">(</span><span class="n">token_iter</span><span class="p">):</span>
+    <span class="n">brackets</span> <span class="o">=</span> <span class="p">{</span><span class="s">'('</span><span class="p">:</span> <span class="s">')'</span><span class="p">,</span> <span class="s">'['</span><span class="p">:</span> <span class="s">']'</span><span class="p">,</span> <span class="s">'{'</span><span class="p">:</span> <span class="s">'}'</span><span class="p">}</span>
+    <span class="n">stack</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">token</span> <span class="ow">in</span> <span class="n">token_iter</span><span class="p">:</span>
+        <span class="n">type_</span><span class="p">,</span> <span class="n">value</span><span class="p">,</span> <span class="n">_</span><span class="p">,</span> <span class="n">_</span><span class="p">,</span> <span class="n">_</span>  <span class="o">=</span> <span class="n">token</span>
+        <span class="k">if</span> <span class="n">type_</span> <span class="o">==</span> <span class="n">tokenize</span><span class="o">.</span><span class="n">OP</span><span class="p">:</span>
+            <span class="k">if</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">brackets</span><span class="p">:</span>
+                <span class="n">stack</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">brackets</span><span class="p">[</span><span class="n">value</span><span class="p">])</span>
+            <span class="k">elif</span> <span class="n">stack</span> <span class="ow">and</span> <span class="n">value</span> <span class="o">==</span> <span class="n">stack</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]:</span>
+                <span class="n">stack</span><span class="o">.</span><span class="n">pop</span><span class="p">()</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="n">stack</span><span class="p">:</span>
+                <span class="k">return</span> <span class="n">token</span>
+</pre></div>
+</td></tr></table>
+
+<p>Since tokens contain their line and column number, you can quickly isolate how much of the original source was consumed. I'll leave it as an exercise to the reader (or someone who wants to read <a href="https://github.com/mikeboers/PyHAML/blob/master/haml/parse.py">PyHAML's source</a>) how to figure out how this can be done.</p>
+<p>Immediately we can put whatever we want into strings, and expressions (and control statements) can span multiple lines.</p>
+	</div>
+	</div></body></html>

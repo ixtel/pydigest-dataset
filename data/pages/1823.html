@@ -1,0 +1,501 @@
+<html><body><div><div class="entry-content clearfix"><p><strong>This tutorial details how to setup a Flask application on a server running Ubuntu.</strong></p>
+
+<p>Since this process can be difficult, as there are a number of moving pieces, we’ll look at this in multiple parts, starting with the most basic configuration and working our way up:</p>
+
+<ol>
+<li>Part 1: Setting up the basic configuration</li>
+<li>Part 2: Adding Supervisor</li>
+<li>Part 3: Simplifying deployment with Git Hooks</li>
+<li>Part 4: Automating with Fabric (<em>with an example video!</em>)</li>
+</ol>
+
+
+<p><em>Updates:</em></p>
+
+<ul>
+<li>10/28/2014: Added info on how to add a new user on Ubuntu</li>
+<li>04/16/2015: Updated nginx configuration</li>
+</ul>
+
+
+<hr/>
+
+
+<p>We’ll specifically be using:</p>
+
+<ol>
+<li>Ubuntu 14.04</li>
+<li>nginx 1.4.6</li>
+<li>gunicorn 19.1.1</li>
+<li>Python 2.7.8</li>
+<li>Pip 1.5.4</li>
+<li>virtualenv 1.11.4</li>
+<li>Flask 0.10.1</li>
+<li>Supervisor 3.0b2</li>
+</ol>
+
+
+<p>Assuming you already have a VPS running an Ubuntu operating system, we need to set up a web server on top of the operating system to serve static files – like stylesheets, JavaScript files, and images – to end users. We’ll use <a href="http://nginx.org/">nginx</a> as our web server. Since a web server cannot communicate directly with Flask (err Python), we’ll use <a href="http://gunicorn.org/">gunicorn</a> to act as a medium between the server and Python/Flask.</p>
+
+<p>Wait, why do we need <em>two</em> servers? Think if Gunicorn as the <em>application</em> web server that will be running behind nginx – the front facing web server. Gunicorn is WSGI compatible. It can talk to other applications that support WSGI, like Flask or Django.</p>
+
+<p><img src="https://raw.githubusercontent.com/realpython/flask-deploy/master/images/localhost2.jpg" alt="nginx+gunicorn"/></p>
+
+<blockquote><p>Need access to a web server? Check out <a href="https://www.digitalocean.com/">Digital Ocean</a>, <a href="https://www.linode.com/">Linode</a>, or <a href="http://aws.amazon.com/ec2/">Amazon EC2</a>. Alternatively, you can use <a href="https://www.vagrantup.com/">Vagrant</a> to emulate a Linux environment. This setup was tested on both Digital Ocean and Linode.</p></blockquote>
+
+<p>The end goal: HTTP requests are routed from the web server to Flask, which Flask handles appropriately, and the responses are then sent right back to the web server and, finally, back to the end user. Properly implementing a Web Server Gateway Interface (WSGI) will be paramount to our success.</p>
+
+<p><img src="https://raw.githubusercontent.com/realpython/flask-deploy/master/images/wsgi.jpg" alt="wsgi"/></p>
+
+<p>Let’s get to it.</p>
+
+<a name="Part.1.-.Setup"/>
+<h2>Part 1 – Setup</h2>
+
+<p>Let’s get the basic configuration setup.</p>
+
+<a name="Add.a.new.User"/>
+<h3>Add a new User</h3>
+
+<p>After SSH’ing into the server as the ‘root’ user, run-</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>adduser newuser
+</span><span class="line"><span class="nv">$ </span>adduser newuser sudo
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>-to create a new user with ‘sudo’ privileges.</p>
+
+<a name="Install.the.Requirements"/>
+<h3>Install the Requirements</h3>
+
+<p>SSH into the server with the new user, and then install the following packages:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>sudo apt-get update
+</span><span class="line"><span class="nv">$ </span>sudo apt-get install -y python python-pip python-virtualenv nginx gunicorn
+</span></code></pre></td></tr></table></div></figure>
+
+
+<a name="Set.up.Flask"/>
+<h3>Set up Flask</h3>
+
+<p>Start by creating a new directory, “/home/www”, to store the project:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>sudo mkdir /home/www <span class="o">&amp;&amp;</span> <span class="nb">cd</span> /home/www
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Then create and activate a virtualenv:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>sudo virtualenv env
+</span><span class="line"><span class="nv">$ </span><span class="nb">source </span>env/bin/activate
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Install the requirements:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>sudo pip install <span class="nv">Flask</span><span class="o">==</span>0.10.1
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Now set up your project:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>sudo mkdir flask_project <span class="o">&amp;&amp;</span> <span class="nb">cd </span>flask_project
+</span><span class="line"><span class="nv">$ </span>sudo vim app.py
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Add the following code to <em>app.py</em>:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+<span class="line-number">14</span>
+<span class="line-number">15</span>
+<span class="line-number">16</span>
+<span class="line-number">17</span>
+<span class="line-number">18</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="kn">from</span> <span class="nn">flask</span> <span class="kn">import</span> <span class="n">Flask</span><span class="p">,</span> <span class="n">jsonify</span>
+</span><span class="line">
+</span><span class="line"><span class="n">app</span> <span class="o">=</span> <span class="n">Flask</span><span class="p">(</span><span class="n">__name__</span><span class="p">)</span>
+</span><span class="line">
+</span><span class="line">
+</span><span class="line"><span class="nd">@app.route</span><span class="p">(</span><span class="s">'/'</span><span class="p">)</span>
+</span><span class="line"><span class="k">def</span> <span class="nf">index</span><span class="p">():</span>
+</span><span class="line">    <span class="k">return</span> <span class="s">'Flask is running!'</span>
+</span><span class="line">
+</span><span class="line">
+</span><span class="line"><span class="nd">@app.route</span><span class="p">(</span><span class="s">'/data'</span><span class="p">)</span>
+</span><span class="line"><span class="k">def</span> <span class="nf">names</span><span class="p">():</span>
+</span><span class="line">    <span class="n">data</span> <span class="o">=</span> <span class="p">{</span><span class="s">"names"</span><span class="p">:</span> <span class="p">[</span><span class="s">"John"</span><span class="p">,</span> <span class="s">"Jacob"</span><span class="p">,</span> <span class="s">"Julie"</span><span class="p">,</span> <span class="s">"Jennifer"</span><span class="p">]}</span>
+</span><span class="line">    <span class="k">return</span> <span class="n">jsonify</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+</span><span class="line">
+</span><span class="line">
+</span><span class="line"><span class="k">if</span> <span class="n">__name__</span> <span class="o">==</span> <span class="s">'__main__'</span><span class="p">:</span>
+</span><span class="line">    <span class="n">app</span><span class="o">.</span><span class="n">run</span><span class="p">()</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<blockquote><p>Within VIM, press “i” to enter the INSERT mode. Add the code, then press “escape” to leave INSERT mode to go into COMMAND mode. Finally type “:wq” to save and exit VIM.</p></blockquote>
+
+<p>Set up a static directory-</p>
+
+<figure class="code"><figcaption><span/></figcaption></figure>
+
+
+<p>-and then add an <em>index.html</em> (<code>sudo vim static/index.html</code>) file with the following html:</p>
+
+<figure class="code"><figcaption><span/></figcaption></figure>
+
+
+<a name="Configure.nginx"/>
+<h3>Configure nginx</h3>
+
+<p>Start nginx:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>sudo /etc/init.d/nginx start
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Then:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>sudo rm /etc/nginx/sites-enabled/default
+</span><span class="line"><span class="nv">$ </span>sudo touch /etc/nginx/sites-available/flask_project
+</span><span class="line"><span class="nv">$ </span>sudo ln -s /etc/nginx/sites-available/flask_project /etc/nginx/sites-enabled/flask_project
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Here, we remove the default nginx configuration, create a new config file (called <em>flask_project</em>), and, finally, set up a symlink to the config file we just created so that nginx loads it on startup.</p>
+
+<p>Now, let’s add the config settings to <em>flask_project</em>:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>sudo vim /etc/nginx/sites-enabled/flask_project
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Add:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line">server <span class="o">{</span>
+</span><span class="line">    location / <span class="o">{</span>
+</span><span class="line">        proxy_pass http://localhost:8000<span class="p">;</span>
+</span><span class="line">        proxy_set_header Host <span class="nv">$host</span><span class="p">;</span>
+</span><span class="line">        proxy_set_header X-Real-IP <span class="nv">$remote_addr</span><span class="p">;</span>
+</span><span class="line">    <span class="o">}</span>
+</span><span class="line">    location /static <span class="o">{</span>
+</span><span class="line">        <span class="nb">alias</span>  /home/www/flask_project/static/<span class="p">;</span>
+</span><span class="line">    <span class="o">}</span>
+</span><span class="line"><span class="o">}</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>So, HTTP requests that hit the <code>/</code> endpoint will be ‘<a href="http://en.wikipedia.org/wiki/Reverse_proxy">reverse proxied</a>’ to port 8000 on <code>127.0.0.1</code> (or the “loopback ip” or “localhost”). This is same IP and port that gunicorn will use.</p>
+
+<p>We also indicate that we want nginx to directly serve the static files from the “/home/www/flask_project/static/” directory rather than routing the requests through gunicorn/WSGI. This will speed up our site’s load time since nginx knows to serve that directory directly.</p>
+
+<p>Restart nginx:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>sudo /etc/init.d/nginx restart
+</span></code></pre></td></tr></table></div></figure>
+
+
+<a name="Profit."/>
+<h3>Profit!</h3>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span><span class="nb">cd</span> /home/www/flask_project/
+</span><span class="line"><span class="nv">$ </span>gunicorn app:app -b localhost:8000
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>The latter command manually runs gunicorn on localhost port 8000.</p>
+
+<p>Open your browser and navigate to <a href="http://your_domain_name_or_ip_address">http://your_domain_name_or_ip_address</a>.</p>
+
+<p>Again, you should see the “Flask is running!” message. Test out the other URL, <code>/data</code>, as well. If you navigate to <a href="http://your_domain_name_or_ip_address/static">http://your_domain_name_or_ip_address/static</a>, you should see “Test!”, indicating that we’re serving static files correctly.</p>
+
+<a name="Part.2.-.Supervisor"/>
+<h2>Part 2 – Supervisor</h2>
+
+<p>So, we have a working Flask app; however, there’s one problem: We have to manually (re)start gunicorn each time we make changes to our app. We can automate this with <a href="http://supervisord.org/">Supervisor</a>.</p>
+
+<a name="Configure.Supervisor"/>
+<h3>Configure Supervisor</h3>
+
+<p>SSH into your server, and then install Supervisor:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>sudo apt-get install -y supervisor
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Now create a configuration file:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>sudo vim /etc/supervisor/conf.d/flask_project.conf
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Add:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="o">[</span>program:flask_project<span class="o">]</span>
+</span><span class="line"><span class="nb">command</span> <span class="o">=</span> gunicorn app:app -b localhost:8000
+</span><span class="line"><span class="nv">directory</span> <span class="o">=</span> /home/www/flask_project
+</span><span class="line"><span class="nv">user</span> <span class="o">=</span> newuser
+</span></code></pre></td></tr></table></div></figure>
+
+
+<a name="Profit."/>
+<h3>Profit!</h3>
+
+<p>Stop gunicorn:</p>
+
+<figure class="code"><figcaption><span/></figcaption></figure>
+
+
+<p>Start gunicorn with supervisor:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>sudo supervisorctl reread
+</span><span class="line"><span class="nv">$ </span>sudo supervisorctl update
+</span><span class="line"><span class="nv">$ </span>sudo supervisorctl start flask_project
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Make sure your app is still running at <a href="http://your_domain_name_or_ip_address">http://your_domain_name_or_ip_address</a>. Check out the Supervisor <a href="http://supervisord.org/index.html">documentation</a> for custom configuration info.</p>
+
+<a name="Part.3.-.Deployment"/>
+<h2>Part 3 – Deployment</h2>
+
+<p>In this final part, we’ll look at using a post-receive <a href="http://git-scm.com/book/en/Customizing-Git-Git-Hooks">Git Hook</a> along with Git, of course, to simplify the deployment process.</p>
+
+<p><img src="https://raw.githubusercontent.com/realpython/flask-deploy/master/images/githooks2.jpg" alt="githooks"/></p>
+
+<a name="Configure.Git"/>
+<h3>Configure Git</h3>
+
+<p>Again, SSH into the remote server. And then install Git:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>sudo apt-get install -y git
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Now run the following commands to set up a bare Git repo that we can push to:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>sudo mkdir /home/git <span class="o">&amp;&amp;</span> <span class="nb">cd</span> /home/git
+</span><span class="line"><span class="nv">$ </span>sudo mkdir flask_project.git <span class="o">&amp;&amp;</span> <span class="nb">cd </span>flask_project.git
+</span><span class="line"><span class="nv">$ </span>sudo git init --bare
+</span></code></pre></td></tr></table></div></figure>
+
+
+<blockquote><p>Quick tip: displaying the git branch on your prompt will help remind you of where you are at while trekking through the terminal.</p>
+
+<p>Consider adding this to your bash profile on production:</p>
+
+<pre><code>parse_git_branch() {
+    git branch 2&gt; /dev/null | sed -e '/^[^*]/d' -e 's/* \(.*\)/ (\1)/'
+}
+
+export PS1="\u@\h \W\[\033[32m\]\$(parse_git_branch)\[\033[00m\] $ "
+</code></pre></blockquote>
+
+<a name="Configure.the.Post-Receive.Hook"/>
+<h3>Configure the Post-Receive Hook</h3>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>sudo vim hooks/post-receive
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Add:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="c">#!/bin/sh</span>
+</span><span class="line"><span class="nv">GIT_WORK_TREE</span><span class="o">=</span>/home/www/flask_project git checkout -f
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Now on every push, the new files will copy over to the app directory, “/home/www/flask_project”.</p>
+
+<p>Then make the file executable:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>sudo chmod +x hooks/post-receive
+</span></code></pre></td></tr></table></div></figure>
+
+
+<a name="Profit."/>
+<h3>Profit!</h3>
+
+<p>Back in your local Flask directory (“flask_project”) add a new Git repo along with the following remote:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>git init
+</span><span class="line"><span class="nv">$ </span>git remote add production root@&lt;your_ip_or_domain&gt;:/home/git/flask_project.git
+</span></code></pre></td></tr></table></div></figure>
+
+
+<blockquote><p>Make sure to update the IP or domain name.</p></blockquote>
+
+<p>Make some changes to your code in the <em>app.py</em> file:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="nd">@app.route</span><span class="p">(</span><span class="s">'/data'</span><span class="p">)</span>
+</span><span class="line"><span class="k">def</span> <span class="nf">names</span><span class="p">():</span>
+</span><span class="line">    <span class="n">data</span> <span class="o">=</span> <span class="p">{</span>
+</span><span class="line">        <span class="s">"first_names"</span><span class="p">:</span> <span class="p">[</span><span class="s">"John"</span><span class="p">,</span> <span class="s">"Jacob"</span><span class="p">,</span> <span class="s">"Julie"</span><span class="p">,</span> <span class="s">"Jennifer"</span><span class="p">],</span>
+</span><span class="line">        <span class="s">"last_names"</span><span class="p">:</span> <span class="p">[</span><span class="s">"Connor"</span><span class="p">,</span> <span class="s">"Johnson"</span><span class="p">,</span> <span class="s">"Cloud"</span><span class="p">,</span> <span class="s">"Ray"</span><span class="p">]</span>
+</span><span class="line">    <span class="p">}</span>
+</span><span class="line">    <span class="k">return</span> <span class="n">jsonify</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Commit your local changes, then push:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>git add -A
+</span><span class="line"><span class="nv">$ </span>git commit -am <span class="s2">"initial"</span>
+</span><span class="line"><span class="nv">$ </span>git push production master
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>SSH into your server and restart gunicorn via Supervisor:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>sudo supervisorctl restart flask_project
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Check out your changes at <a href="http://your_domain_name_or_ip_address/data">http://your_domain_name_or_ip_address/data</a>.</p>
+
+<a name="Part.4.-.Automating"/>
+<h2>Part 4 – Automating</h2>
+
+<p>Do you really want to manually configure a server? Sure, it’s great for learning, but it’s super tedious, as you can tell. Fortunately, we’ve automated the process with <a href="http://www.fabfile.org/">Fabric</a>. Along with setting up nginx, gunicorn, Supervisor, and Git, the script creates a basic Flask app, which is specific to the project that we’ve been working with. You can easily customize this to meet your own specific needs.</p>
+
+<blockquote><p>You should remove the username and password from the file and either place them in a separate config file that stays out of version control or set up SSH keys on the remote server so that you do not need a password to login. Also, be sure to update the <code>env.hosts</code> variable to your IP or domain name.</p></blockquote>
+
+<a name="Setup"/>
+<h3>Setup</h3>
+
+<p>To test this script (<em>fabfile.py</em>) clone the <a href="https://github.com/realpython/flask-deploy">repo</a> and start with a clean, freshly provisioned server with Ubuntu 14.04. Then navigate to the “flask-deploy” directory. To set up the basic configuration on the remote server as well as your app, run the following command:</p>
+
+<figure class="code"><figcaption><span/></figcaption></figure>
+
+
+<p>Your app should now be live. Test this out in your browser.</p>
+
+<a name="Deployment"/>
+<h3>Deployment</h3>
+
+<p>Want to set up deployment with Git Hooks? Initialize a local repo within your Flask project directory (if necessary). Then make some local changes to your Flask app, and run the following command to deploy:</p>
+
+<figure class="code"><figcaption><span/></figcaption></figure>
+
+
+<p>Check your app again in the browser. Make sure your changes show up.</p>
+
+<a name="Status.Check"/>
+<h3>Status Check</h3>
+
+<p>Finally, you can check that the Supervisor process is running correctly, to ensure that your app is live, with the following command:</p>
+
+<figure class="code"><figcaption><span/></figcaption></figure>
+
+
+<p>Again, this script is specific to your project at hand. You can customize this to your own needs by updating the config section and altering the tasks as necessary.</p>
+
+<a name="Rollback"/>
+<h3>Rollback</h3>
+
+<p>To err is human…</p>
+
+<p>Things are bound to go wrong from time to time once you have code on production. Everything may work well on your local development environment only to crash in production. So it’s important to have a strategy in place to quickly revert a Git commit. Take a quick look at the <code>rollback</code> task from the <em>fabfile.py</em>, which allows you to revert changes quickly to get a working app back up.</p>
+
+<p>Test it out by purposely breaking your code and then deploying to production, and then run:</p>
+
+<figure class="code"><figcaption><span/></figcaption></figure>
+
+
+<p>You can then update your code locally to fix the bugs, and then re-deploy.</p>
+
+<a name="Example.Video"/>
+<h2>Example Video</h2>
+
+<p>Just press play…</p>
+
+<p class="embed-video-container"><iframe src="https://www.youtube.com/embed/VmcGuKPpWH8" allowfullscreen="">VIDEO</iframe></p>
+
+
+<a name="Conclusion.and.Next.Steps"/>
+<h2>Conclusion and Next Steps</h2>
+
+<p>Want to take this workflow to the next level?</p>
+
+<ol>
+<li>Add a pre-production (staging) server into the mix for testing purposes. Deploy to this server first, which should be an exact copy of your production environment, to test before deploying to production.</li>
+<li>Utilize Continuous Integration and Delivery to further eliminate bugs and regressions with automated testing and decrease the time it takes to deploy your app.</li>
+</ol>
+
+
+<p>Please leave questions and comments below. Be sure to grab the code from the <a href="https://github.com/realpython/flask-deploy">repo</a>.</p>
+</div>
+
+
+      </div></body></html>

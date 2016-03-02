@@ -1,0 +1,211 @@
+<html><body><div><div class="post-text" itemprop="text">
+<h3>What has changed:</h3>
+
+<p><strong>Note:</strong> I can't really get into the details of what the function <code>guo_hall_thinning</code> does per se. What I know is that it uses a small subset of the <code>numpy C-API</code> for getting and returning the data as an <code>ndarray</code>; I couldn't find any documentation on them being altered so it should be good to go. </p>
+
+<p><em>Now, what has <strong>definitely changed</strong> is the way modules are initialized</em>; with this I can help you and get it imported in a Python 3 distribution. I'm using <code>3.5</code> for this too, even though, I believe differences between older versions of the <code>3.x</code> family <em>shouldn't exist</em> or <em>are backwards compatible</em>.</p>
+
+<p>As you noted, general information is provided in the <em><a href="https://docs.python.org/3/howto/cporting.html" rel="nofollow">Porting to Python 3</a></em> document with specifics about the initialization phase in <em><a href="https://docs.python.org/3/howto/cporting.html#module-initialization-and-state" rel="nofollow">Module Initialization and state</a></em>. The new change is described in <strong><a href="https://www.python.org/dev/peps/pep-3121/" rel="nofollow">PEP 3121</a></strong> which, by itself, is a nice but challenging read. </p>
+
+<p>Now, <em>the gist of it can be listed in two points</em>:</p>
+
+<p><strong><em>A) Modules are now defined in a dedicated <a href="https://docs.python.org/3/c-api/module.html#c.PyModuleDef" rel="nofollow"><code>PyModuleDef</code></a> struct:</em></strong></p>
+
+<pre><code>struct PyModuleDef{
+  PyModuleDef_Base m_base;  /* To be filled out by the interpreter */
+  Py_ssize_t m_size; /* Size of per-module data */
+  PyMethodDef *m_methods;
+  inquiry m_reload;
+  traverseproc m_traverse;
+  inquiry m_clear;
+  freefunc m_free;
+};
+</code></pre>
+
+<p>This new struct contains some additional members holding the name and documentation for the module. The members <a href="https://docs.python.org/3/c-api/module.html#c.PyModuleDef" rel="nofollow"><code>m_reload</code>, <code>m_traverse</code>, <code>m_clear</code> and <code>m_free</code> provide additional control during initialization/finalization but, we can opt to leave them as <code>NULL</code>.</a> These along with a module <code>m_size</code> set to <code>-1</code> are for simplicity, setting these values is generally done to support multiple interpreters/ mutliple initializations and should be more tricky.</p>
+
+<p>So, in short, the fancy new module struct for the <code>thinning</code> module could look like this:</p>
+
+<pre><code>static struct PyModuleDef moduledef = {
+       PyModuleDef_HEAD_INIT,
+       "thinning",
+       "Thinning of segmented images. See https://bitbucket.org/adrian_n/thinning",
+       -1,
+       thinningMethods,
+       NULL,
+       NULL,
+       NULL,
+       NULL
+};
+</code></pre>
+
+<p>aaand that's it for the first issue!</p>
+
+<p><strong><em>B) New initialization function i.e you'll need to give <code>initthinning</code> a major face-lift.</em></strong></p>
+
+<p>The new module initialization function returns a <code>PyObject *</code> and is now named <code>PyInit_&lt;module_name&gt;</code>. In it (heh, get it?) <a href="https://docs.python.org/3/c-api/module.html#c.PyModule_Create" rel="nofollow">new modules are created with <code>PyModule_Create(&amp;moduledef)</code></a> which takes the struct we defined and returns the initialized module. It's prettier now and looks like this:</p>
+
+<pre><code>/* ==== Initialize the C_test functions ====================== */
+PyObject *
+PyInit_thinning(void){
+    // create module
+    PyObject *module = PyModule_Create(&amp;moduledef);
+
+    // handle probable error
+    if (module == NULL)
+        return NULL;
+
+    PyModule_AddStringConstant(module, "__author__", "Adrian Neumann &lt;adrian_neumann@gmx.de&gt;");
+    PyModule_AddStringConstant(module, "__version__", "1.2.3");
+    import_array();  // Must be present for NumPy.  Called first after above line.
+
+    // return newly created module
+    return module;
+}
+</code></pre>
+
+<hr/>
+
+<h3>Installing the module:</h3>
+
+<p>All this is for the initialization of the module. You can download the module (as you have done, I believe) find the <code>thinning_folder/src/c_thinning.c</code> file and replace <em>everything</em> <strong><em>prior</em></strong> to:</p>
+
+<pre><code>/* ==== Guo Hall Thinning =========
+</code></pre>
+
+<p>with the following:</p>
+
+<pre><code>#define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
+
+#include "Python.h"
+#include "arrayobject.h"
+#include &lt;stdlib.h&gt;
+#include &lt;assert.h&gt;
+#include &lt;stdbool.h&gt;
+#include &lt;limits.h&gt;
+
+static PyObject *guo_hall_thinning(PyObject *self, PyObject *args);
+int _guo_hall_thinning(unsigned char* binary_image, int width, int height);
+
+
+/* ==== Set up the methods table ====================== */
+static PyMethodDef thinningMethods[] = {
+    {"guo_hall_thinning",guo_hall_thinning, METH_VARARGS,
+    "Takes a 2D numpy UBYTE array in C-order and thins it in place using the algorithm by Guo and Hall."
+    "Images that come out of cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) have the right format."
+    "\n\n"
+    "We assume that the dimensions of the image fit into an int on your platform. If your computer for some"
+    "reason has a 2 byte int and lots of memory so that the image can become too large, bad things can happen."
+    "\n\n"
+    "interface:\n"
+    "\tguo_hall_thinning(segmented_image)"
+    "\tsegmented_image is a NumPy matrix,"
+    "\treturns the same NumPy matrix (thinned)"},
+    {NULL, NULL, 0, NULL}     /* Sentinel - marks the end of this structure */
+};
+
+static struct PyModuleDef moduledef = {
+        PyModuleDef_HEAD_INIT,
+        "thinning",
+        "Thinning of segmented images. See https://bitbucket.org/adrian_n/thinning.",
+        -1,
+        thinningMethods,
+        NULL,
+        NULL,
+        NULL,
+        NULL
+};
+
+/* ==== Initialize the C_test functions ====================== */
+PyObject *
+PyInit_thinning(void){
+    PyObject *module = PyModule_Create(&amp;moduledef);
+
+    if (module == NULL)
+        return NULL;
+
+    PyModule_AddStringConstant(module, "__author__", "Adrian Neumann &lt;adrian_neumann@gmx.de&gt;");
+    PyModule_AddStringConstant(module, "__version__", "1.2.3");
+    import_array();  // Must be present for NumPy.  Called first after above line.
+    return module;
+}
+
+/* ==== Guo Hall Thinning =========
+// Leave the rest as it was
+</code></pre>
+
+<p>After that, navigate to the top level directory containing <code>setup.py</code> and run:</p>
+
+<pre><code>python setup.py install
+</code></pre>
+
+<p>as usual. Some compilation warnings will probably pop-up but <em>those are safe to ignore</em>. If all goes well you'll get a successful install and the following will not result in a nasty <em>seg-fault</em>:</p>
+
+<pre><code>&gt;&gt;&gt; from thinning import guo_hall_thinning
+&gt;&gt;&gt; print(guo_hall_thinning.__doc__)
+Takes a 2D numpy UBYTE array in C-order and thins it in place using the algorithm by Guo and Hall.Images that come out of cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) have the right format.
+
+We assume that the dimensions of the image fit into an int on your platform. If your computer for somereason has a 2 byte int and lots of memory so that the image can become too large, bad things can happen.
+
+interface:
+    guo_hall_thinning(segmented_image)  segmented_image is a NumPy matrix,  returns the same NumPy matrix (thinned)
+</code></pre>
+
+<hr/>
+
+<h3>It seems to run :) :</h3>
+
+<p>I further edited the source in <code>c_thinning.c</code> to print out the number of elements changed during every iteration. It seems to be changing things but I don't understand what underlying criteria it uses because I haven't read the corresponding paper.</p>
+
+<p>In short, <code>guo_hall_thinning(ndarr)</code> apparently does the 'thinning' <em>in place</em>. This means that after it is executed, the original array that was supplied as a parameter is going to be altered. So, a check of the form:</p>
+
+<pre><code>gray_img == guo_hall_thinning(gray_img)
+</code></pre>
+
+<p>is always going to be <code>True</code> (<a href="http://stackoverflow.com/questions/10580676/comparing-two-numpy-arrays-for-equality-element-wise">Hint: check for equality between numpy arrays with <code>(arr1 == arr2).all()</code></a>).</p>
+
+<p>Here's a test I ran in which you can visually see the altering taking place, I believe this test can be reproduced on your machine too:</p>
+
+<pre><code># dtype = 'B' is UBYTE
+&gt;&gt;&gt; n = numpy.ndarray(shape=(100, 200), dtype='B')
+&gt;&gt;&gt; n
+array([[ 40, 159,  95, ..., 114, 114,  97],
+       [121,  95, 108, ..., 114, 101,  32],
+       [ 48, 161,  90, ..., 127,   0,   0],
+       ..., 
+       [110,  32,  97, ..., 124,   1,   0],
+       [124,   5,   0, ...,   0,   0, 131],
+       [  1,   0,  25, ...,   0, 125,  17]], dtype=uint8)
+&gt;&gt;&gt; thinning.guo_hall_thinning(n)
+-- Array height 100 Array width: 200
+
+Value of `changed` during 0 iteration is: 1695 
+Value of `changed` during 1 iteration is: 1216 
+Value of `changed` during 2 iteration is: 808 
+Value of `changed` during 3 iteration is: 493 
+Value of `changed` during 4 iteration is: 323 
+Value of `changed` during 5 iteration is: 229 
+Value of `changed` during 6 iteration is: 151 
+Value of `changed` during 7 iteration is: 90 
+Value of `changed` during 8 iteration is: 46 
+Value of `changed` during 9 iteration is: 27 
+Value of `changed` during 10 iteration is: 11 
+Value of `changed` during 11 iteration is: 8 
+Value of `changed` during 12 iteration is: 7 
+Value of `changed` during 13 iteration is: 4 
+Value of `changed` during 14 iteration is: 0 
+Value of `ok` is: 0
+
+# array returned
+array([[ 40, 159,  95, ..., 114, 114,  97],
+       [121,   0,   0, ..., 114,   0,  32],
+       [ 48,   0,   0, ..., 127,   0,   0],
+       ..., 
+       [110,   0,  97, ..., 124,   1,   0],
+       [124,   5,   0, ...,   0,   0, 131],
+       [  1,   0,  25, ...,   0, 125,  17]], dtype=uint8)
+</code></pre>
+
+<p>So I'm guessing it does work :-).</p>
+    </div>
+    </div></body></html>

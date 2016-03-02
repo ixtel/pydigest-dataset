@@ -1,0 +1,63 @@
+<html><body><div><section class="content">
+                            <p><img alt="image" src="http://i.imgur.com/Lpf9jhu.jpg"/></p>
+<p><strong>TL;DR</strong> - I came up with a very simple solution to handle WebSockets in Django apps. You just install <a href="http://t.umblr.com/redirect?z=https%3A%2F%2Fgithub.com%2FGetBlimp%2Fdjango-websocket-request&amp;t=NmE1YzIyMDNkMDEzNDZiYmE0NzcxN2E2MTI1MzIyNjQ3MGQwNWRmYSxuUG00WlY5Zw%3D%3D" target="_blank">django-websocket-request</a>, run a script and you have WebSockets for your Django app. The cool thing is that this solution makes Django believe its getting a (somewhat) normal HTTP request so you can reuse almost all of you application’s code. Plays nicely with Django REST Framework and with plain function-based views and class-based views. Check out the <a href="http://t.umblr.com/redirect?z=https%3A%2F%2Fgithub.com%2FGetBlimp%2Fdjango-websocket-request-example&amp;t=NDgyYWZiZDM0ZTRjZjBkMWU5ZDVmYWM1NDUxM2FiNzJhNGI1OTQ4NyxuUG00WlY5Zw%3D%3D" target="_blank">demo</a> and it’s source code on <a href="http://t.umblr.com/redirect?z=https%3A%2F%2Fgithub.com%2FGetBlimp%2Fdjango-websocket-request-example&amp;t=NDgyYWZiZDM0ZTRjZjBkMWU5ZDVmYWM1NDUxM2FiNzJhNGI1OTQ4NyxuUG00WlY5Zw%3D%3D" target="_blank">GitHub</a>.</p>
+<p/>
+<p><strong>The Details</strong></p>
+<p>We’re building <a href="http://t.umblr.com/redirect?z=http%3A%2F%2Fblog.getblimp.com%2Fcategory%2Fodp%2F&amp;t=MjBjMGQ1MTJiMjI0YWJlMzNhYmZiZDJkZWMyZGNmYTY2NjU3MzExZixuUG00WlY5Zw%3D%3D" target="_blank">Blimp 2</a> which means a lot of changes in our current application, infrastructure, and how we’d tackle old and new problems. One of the decisions we made regarding our application was how our frontend and backend would be organized and how they would interact.</p>
+<p>Blimp’s backend is currently built on Django. It serves our frontend’s HTML, handles our private and public API, and all our business logic. That’s how most web apps are usually built, but Blimp is already a client-side JavaScript heavy application. Right now a normal request goes something like: You request a URL, there’s some backend work, queries to the database, caching, some more logic, render an HTML response, load third party CSS and JavaScript libraries, load our JavaScript application, some more logic, and finally render it.</p>
+<p>After months of usage and growth, we’ve noticed a few key improvements we can build on. The new version will have a backend app that will only serve JSON, no HTML. Our frontend app, served from another location, will then consume data from that API. We want the frontend app to use WebSockets when possible, falling back to XHR.</p>
+<p/>
+<p>Web frameworks like Django are built for the HTTP request/response life cycle, so everything from middleware, authentication, and views takes in an HTTP request, and at the end is an HTTP response. On the other hand, a WebSockets server implementation knows nothing about that kind of lifecycle and what it means.</p>
+<p>Our main objectives were:</p>
+<ol><li><span>Reuse the same serialization and deserialization logic between the HTTP and WebSockets API.</span></li>
+<li><span>Reuse all business logic for all </span>available<span> resources.</span></li>
+</ol><p>First ideas that came to mind were to abstract all of what we wanted to reuse by writing them as methods for our models. That way we would write what we needed once, sharing it between the two implementations. This seemed like the right answer at the moment, but after a couple of hours, it proved not to be. Since we are building on top of the awesome Django REST framework, we were going to have to subclass tons of their Generic Views and Mixins, which didn’t sound as bad at the moment, but still being very skeptical we decided to look for other possible solutions.</p>
+<p>By then we knew that we wanted a single REST API available via two different transports, HTTP and WebSockets. The best case scenario for me was to avoid rewriting anything of what we have already working for the new HTTP API, just to have it work via WebSockets. Then it clicked. I remembered that <a href="http://t.umblr.com/redirect?z=http%3A%2F%2Fsailsjs.org%2F&amp;t=M2Q0MWRiZjQ3YTE3ZTZkOTllZTM5NTFiMjM4MDA5Nzk1MDBhYWVjNCxuUG00WlY5Zw%3D%3D" target="_blank">Sails.js</a> does something similar to what we wanted to achieve.</p>
+<blockquote>
+<p>Sails supports transport agnostic routing, which allows your controllers/policies to automatically handle Socket.io / WebSocket messages. In the past, you’d have to maintain a separate code base to make that happen.</p>
+</blockquote>
+<p>So in more formal terms, we wanted to support transport agnostic routing, allowing us to use everything in Django’s request/response lifecycle to automatically handle WebSocket messages.</p>
+<p><strong>Solution</strong></p>
+<p><img alt="image" src="http://i.imgur.com/b6YkCmG.jpg"/></p>
+
+<p>WebSocketRequest is the surprisingly simple solution I came up with to solve this.</p>
+<p>WebSocketRequest is a simple class that requires a JSON string containing the following keys: method, url, data, and token. The method key can be any HTTP method: GET, POST, PUT, DELETE, PATCH, HEAD, or OPTIONS. The url key is an absolute URL without the domain name. The data key is an optional dictionary in which the key-value pairs in used to create the method’s data payload. The token key is also optional, and used to recreate an HTTP Authorization header, Authorization: JWT YOUR_TOKEN_HERE. You might want to check out my<a href="http://jpadilla.com/post/73791304724/auth-with-json-web-tokens" target="_blank"> last blog post</a> to learn more about authentication with JSON Web Tokens and if you’re using Django REST framework, you might like to check out <a href="http://t.umblr.com/redirect?z=https%3A%2F%2Fgithub.com%2FGetBlimp%2Fdjango-rest-framework-jwt&amp;t=ZGIxMTMxYTZmZWM5MjQ2MmIxNzhiMDQ0YWRlMTFkMzg1N2EyMmQwMCxuUG00WlY5Zw%3D%3D" target="_blank">django-rest-framework-jwt</a>.<span><br/></span></p>
+<p><span>WebSocketRequest works as following:</span></p>
+<ol><li>Validates JSON string payload.</li>
+<li>Creates an instance of <a href="http://t.umblr.com/redirect?z=https%3A%2F%2Fdocs.djangoproject.com%2Fen%2Fdev%2Ftopics%2Ftesting%2Fadvanced%2F%23the-request-factory&amp;t=YWYxNDMxNTVhZmVjNmY0ZTE0NjhmNWVlOTkxZWZhZTNiZjljNjViYixuUG00WlY5Zw%3D%3D" target="_blank">Django’s RequestFactory</a>.</li>
+<li>Dynamically calls one of RequestFactory’s methods, which returns a <span>WSGIRequest object</span></li>
+<li>Resolves the given URL</li>
+<li>Instantiates the resolved view passing along the request, any positional and keyword arguments from the resolved URL.</li>
+</ol><p>Yeah, RequestFactory, you read that right. You might be familiar with it if you’ve written tests in Django, but if you haven’t, the RequestFactory provides a way to generate a request instance that can be used as the first argument for any view. The only down side to this is that it does not support middleware, which might be a problem for some.</p>
+<p>You can install WebSocketRequest via pip.</p>
+<p><strong>pip install django-websocket-request</strong></p>
+<p>As always source is available on <a href="http://t.umblr.com/redirect?z=https%3A%2F%2Fgithub.com%2FGetBlimp%2Fdjango-websocket-request&amp;t=NmE1YzIyMDNkMDEzNDZiYmE0NzcxN2E2MTI1MzIyNjQ3MGQwNWRmYSxuUG00WlY5Zw%3D%3D" target="_blank">GitHub</a>.</p>
+<p><strong>Demo time!</strong></p>
+<p>I’ve setup a demo application running on Heroku. Source code is also available on <a href="http://t.umblr.com/redirect?z=https%3A%2F%2Fgithub.com%2FGetBlimp%2Fdjango-websocket-request-example&amp;t=NDgyYWZiZDM0ZTRjZjBkMWU5ZDVmYWM1NDUxM2FiNzJhNGI1OTQ4NyxuUG00WlY5Zw%3D%3D" target="_blank">GitHub</a>.</p>
+<p><a href="http://t.umblr.com/redirect?z=http%3A%2F%2Fdwr-example.herokuapp.com%2F&amp;t=M2QyMjI4ZTU5ZjU4MmZjOWJhMmVkN2VlY2NjZGU5YzBkODA1ZDYxZixuUG00WlY5Zw%3D%3D" target="_blank">http://dwr-example.herokuapp.com/</a></p>
+<p>Note that Django is not running at all. Tornado is serving a static HTML file and is routing the websocket requests. django-websocket-request then does the magic.</p>
+<p>Throttling is enabled and snippets are erased periodically. If you run into any errors feel free to bother me on <a href="https://twitter.com/jpadilla_" target="_blank">Twitter</a> about it.</p>
+<p>I definitely would like to hear about possible problems of this solution. Where do you think that this fails? How about for a production environment? Where can it be improved?</p>
+<p>Photo Credit: <a href="http://t.umblr.com/redirect?z=http%3A%2F%2Fwww.flickr.com%2Fphotos%2Falicebartlett%2F3746583699%2F&amp;t=ZGY4MzUyMzU1ZmYzOGY2YjUwNTk2NzM3NTFkODk4ZWM2NGMyY2Q3NixuUG00WlY5Zw%3D%3D" target="_blank">Alice Bartlett</a> / <a href="http://t.umblr.com/redirect?z=http%3A%2F%2Fwww.flickr.com%2Fphotos%2Fmartin_borjesson%2F3704268639%2Fin%2Fpool-plugface&amp;t=OGRlMTA5Y2VlNDViZDIwYmMzZWQ5MmM2MWIyNjNjMjU5NDM5MTVlNyxuUG00WlY5Zw%3D%3D" target="_blank">Martin Börjesson</a></p>
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            
+                            <span class="divider"/>
+                            
+                            
+                        </section>
+                        
+                        
+                        
+                        
+                        
+                        
+                        
+                        
+                        
+                    </div></body></html>

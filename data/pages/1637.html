@@ -1,0 +1,380 @@
+<html><body><div><article>
+    <header>
+        
+    </header>
+
+
+
+
+    <p>This how-to article describes how you can use Bottle, Apache, and MongoDB to create a simple, understandable, and fast website. In real life applications that support <span class="caps">CRUD</span> operations, it will most likely also use JavaScript, but <span class="caps">BAMJ</span> doesn’t sound as cool. If you want to play with the code in this example, it is available on <a href="https://github.com/tiarno/bam_example">GitHub</a>. The example is kept very simple to show the general workflow. </p>
+<p><strong>Table of Contents</strong></p>
+
+<p>Here are the tools:</p>
+<ul>
+<li><a href="http://bottlepy.org/docs/dev/index.html">Bottle</a> Fast <span class="caps">WSGI</span> micro web-framework for Python</li>
+<li><a href="http://httpd.apache.org/">Apache Web Server</a> Popular, secure, open-source <span class="caps">HTTP</span> server</li>
+<li><a href="http://www.mongodb.com/mongodb-overview">MongoDB</a> Leading open-source <span class="caps">NOSQL</span> database (<span class="caps">BSON</span> document based)</li>
+</ul>
+<p class="callout"><span class="note">Note: </span>
+Be warned if you want to use a <span class="caps">NFS</span> file system to house your web files, logs, or database. <span class="caps">NFS</span> is nice if you need to share directories with clients over a network. However, file locking is slow and that can cause problems if a program finds it cannot get a lock. It is not recommended to use <span class="caps">NFS</span> for logging or for MongoDB.</p>
+<h3 class="article-title" id="overview">Overview</h3>
+<p>This is what we’re going to do:</p>
+<ol>
+<li>Create a simple MongoDB database.</li>
+<li>Set up the Bottle web framework.</li>
+<li>Set up Apache and <span class="caps">WSGI</span> to enable Bottle applications.</li>
+<li>Create a Bottle application that can connect (using <span class="caps">GET</span>/<span class="caps">POST</span>) to the MongoDB database.</li>
+<li>Create <span class="caps">HTML</span> to view the data. With some final notes on how to handle <span class="caps">CRUD</span> operations on the data.</li>
+</ol>
+<p>I’m assuming you have installed Bottle, the Apache <span class="caps">HTTP</span> server with <code>mod_wsgi</code>, and MongoDB.</p>
+<ul>
+<li>
+<p><a href="http://bottlepy.org/docs/dev/index.html">Bottle</a> 
+     This is the smallest and  simplest Python web framework I have found. 
+     When I first started out, I used Django, which supports just about everything you could ever want in a framework. I found that it was great to get a lot accomplished in a short time; it is called <em>the web framework for perfectionists with deadlines</em> for a reason. But I always felt uneasy about using it because I never fully understood what was going on under the covers.</p>
+<p>Bottle is on the other end of the spectrum.  While I have to program the stuff I need, that gives me confidence because there’s no magic. If it doesn’t work, it’s my code that broke it and I know where to look.  On the other hand, my needs are simple. You might find this <a href="http://stackoverflow.com/questions/4941145/python-flask-vs-bottle">question</a> on <code>stackoverflow</code> helpful if you’re trying to decide on a web framework.</p>
+</li>
+<li>
+<p><a href="http://httpd.apache.org/">Apache</a> Over time Apache has lost some of its cool factor I guess, and Node/Express, Lighttpd, and Nginx, etc. are hot now. But Apache is a hardy, stable, and very popular tool. It is easy to install and not too hard to configure. You also need to follow the <code>modwsgi</code> installation <a href="https://code.google.com/p/modwsgi/wiki/QuickInstallationGuide">guide</a> since that is the bridge between Apache and Bottle.</p>
+</li>
+<li>
+<p><a href="http://www.mongodb.org/">MongoDB</a> I really like the <span class="caps">JSON</span>-like structure of MongoDB documents (records). For my own needs (configuration database, build reports, and system monitoring) that structure fits much better than an <span class="caps">SQL</span> database. </p>
+</li>
+</ul>
+<h3 class="article-title" id="create-the-database">Create the Database</h3>
+<p>First, create a toy <code>people</code> database in the mongo shell. We’ll use a collection called <code>test</code>. Here is what it looks like from a terminal window:</p>
+<div class="highlight"><pre><span class="o">&gt;</span> <span class="nx">mongo</span> <span class="nx">servername</span>
+<span class="nx">MongoDB</span> <span class="nx">shell</span> <span class="nx">version</span><span class="o">:</span> <span class="mf">2.4</span><span class="p">.</span><span class="mi">9</span>
+<span class="nx">connecting</span> <span class="nx">to</span><span class="o">:</span> <span class="nx">servername</span><span class="o">/</span><span class="nx">test</span>
+<span class="nx">rs1</span><span class="o">:</span><span class="nx">PRIMARY</span><span class="o">&gt;</span> <span class="kd">var</span> <span class="nx">people</span> <span class="o">=</span> <span class="p">[</span>
+    <span class="p">{</span><span class="nx">name</span><span class="o">:</span><span class="s1">'Alphonse'</span><span class="p">,</span> <span class="nx">age</span><span class="o">:</span> <span class="s1">'15'</span><span class="p">,</span> <span class="nx">height</span><span class="o">:</span> <span class="s1">'67'</span><span class="p">,</span> <span class="nx">weight</span><span class="o">:</span><span class="s1">'116.5'</span><span class="p">},</span>
+    <span class="p">{</span><span class="nx">name</span><span class="o">:</span><span class="s1">'Janice'</span><span class="p">,</span> <span class="nx">age</span><span class="o">:</span> <span class="s1">'12'</span><span class="p">,</span> <span class="nx">height</span><span class="o">:</span> <span class="s1">'54.3'</span><span class="p">,</span> <span class="nx">weight</span><span class="o">:</span><span class="s1">'60.5'</span><span class="p">},</span>
+    <span class="p">{</span><span class="nx">name</span><span class="o">:</span><span class="s1">'Sam'</span><span class="p">,</span> <span class="nx">age</span><span class="o">:</span> <span class="s1">'12'</span><span class="p">,</span> <span class="nx">height</span><span class="o">:</span> <span class="s1">'64.3'</span><span class="p">,</span> <span class="nx">weight</span><span class="o">:</span><span class="s1">'123.25'</span><span class="p">},</span>
+    <span class="p">{</span><span class="nx">name</span><span class="o">:</span><span class="s1">'Ursula'</span><span class="p">,</span> <span class="nx">age</span><span class="o">:</span> <span class="s1">'14'</span><span class="p">,</span> <span class="nx">height</span><span class="o">:</span> <span class="s1">'62.8'</span><span class="p">,</span> <span class="nx">weight</span><span class="o">:</span><span class="s1">'104.0'</span><span class="p">}</span>
+<span class="p">]</span>
+
+<span class="nx">rs1</span><span class="o">:</span><span class="nx">PRIMARY</span><span class="o">&gt;</span> <span class="nx">db</span><span class="p">.</span><span class="nx">people</span><span class="p">.</span><span class="nx">insert</span><span class="p">(</span><span class="nx">people</span><span class="p">)</span>
+<span class="nx">rs1</span><span class="o">:</span><span class="nx">PRIMARY</span><span class="o">&gt;</span> <span class="nx">db</span><span class="p">.</span><span class="nx">people</span><span class="p">.</span><span class="nx">find</span><span class="p">()</span>
+<span class="p">{</span> <span class="s2">"_id"</span> <span class="o">:</span> <span class="nx">ObjectId</span><span class="p">(</span><span class="s2">"..."</span><span class="p">),</span> <span class="s2">"name"</span> <span class="o">:</span> <span class="s2">"Alphonse"</span><span class="p">,</span> <span class="s2">"age"</span> <span class="o">:</span> <span class="s2">"15"</span><span class="p">,</span> <span class="s2">"height"</span> <span class="o">:</span> <span class="s2">"67"</span><span class="p">,</span> <span class="s2">"weight"</span> <span class="o">:</span> <span class="s2">"116.5"</span> <span class="p">}</span>
+<span class="p">{</span> <span class="s2">"_id"</span> <span class="o">:</span> <span class="nx">ObjectId</span><span class="p">(</span><span class="s2">"..."</span><span class="p">),</span> <span class="s2">"name"</span> <span class="o">:</span> <span class="s2">"Janice"</span><span class="p">,</span> <span class="s2">"age"</span> <span class="o">:</span> <span class="s2">"12"</span><span class="p">,</span> <span class="s2">"height"</span> <span class="o">:</span> <span class="s2">"54.3"</span><span class="p">,</span> <span class="s2">"weight"</span> <span class="o">:</span> <span class="s2">"60.5"</span> <span class="p">}</span>
+<span class="p">{</span> <span class="s2">"_id"</span> <span class="o">:</span> <span class="nx">ObjectId</span><span class="p">(</span><span class="s2">"..."</span><span class="p">),</span> <span class="s2">"name"</span> <span class="o">:</span> <span class="s2">"Sam"</span><span class="p">,</span> <span class="s2">"age"</span> <span class="o">:</span> <span class="s2">"12"</span><span class="p">,</span> <span class="s2">"height"</span> <span class="o">:</span> <span class="s2">"64.3"</span><span class="p">,</span> <span class="s2">"weight"</span> <span class="o">:</span> <span class="s2">"123.25"</span> <span class="p">}</span>
+<span class="p">{</span> <span class="s2">"_id"</span> <span class="o">:</span> <span class="nx">ObjectId</span><span class="p">(</span><span class="s2">"..."</span><span class="p">),</span> <span class="s2">"name"</span> <span class="o">:</span> <span class="s2">"Ursula"</span><span class="p">,</span> <span class="s2">"age"</span> <span class="o">:</span> <span class="s2">"14"</span><span class="p">,</span> <span class="s2">"height"</span> <span class="o">:</span> <span class="s2">"62.8"</span><span class="p">,</span> <span class="s2">"weight"</span> <span class="o">:</span> <span class="s2">"104.0"</span> <span class="p">}</span>
+</pre></div>
+
+
+<p>The data is a set of height and weight measurements on children of various ages. That’s the data we’ll connect to via Bottle/Apache.</p>
+<h3 class="article-title" id="bottle-directory-structure">Bottle Directory Structure</h3>
+<p>In <code>/var/www/bottle</code>, the directory structure looks like this. This layout makes it easy to add new applications as you need them. We have the main <code>wsgi</code> script (<code>bottle_adapter.wsgi</code>), and a single application, <code>people</code>. For every application you write, you may also have a <code>css</code> file, a <code>javascript</code> file and templates in the <code>views</code> subdirectory.</p>
+<div class="highlight"><pre><span class="n">bottle_adapter</span><span class="p">.</span><span class="n">wsgi</span>
+<span class="n">people</span><span class="p">.</span><span class="n">py</span>
+
+<span class="n">css</span><span class="o">/</span>
+    <span class="n">person_form</span><span class="p">.</span><span class="n">css</span>
+
+<span class="n">js</span><span class="o">/</span>
+    <span class="n">person</span><span class="p">.</span><span class="n">js</span>
+
+<span class="n">views</span><span class="o">/</span>
+    <span class="n">people</span><span class="o">/</span>
+        <span class="n">people</span><span class="p">.</span><span class="n">tpl</span>
+        <span class="n">person</span><span class="p">.</span><span class="n">tpl</span>
+</pre></div>
+
+
+<p>To add a new application:</p>
+<ol>
+<li>create the application code file in the root directory, like <code>people.py</code></li>
+<li>mount the application in the <code>bottle_adapter.wsgi</code> file</li>
+<li>add the template path in the <code>bottle_adapter.wsgi</code> file</li>
+<li>add <code>css</code>, <code>js</code> files if needed</li>
+<li>add a <code>view</code> subdirectory to contain the application templates. </li>
+</ol>
+<p>In this example we won’t use any javascript or even css, but in real life you will probably want to add that in. This directory layout keeps things simple and separated, and it’s easy to extend.</p>
+<h3 class="article-title" id="apache-configuration">Apache Configuration</h3>
+<p>In the Apache <code>httpd.conf</code> file, set the <code>WSGIScriptAlias</code> and <code>WSGIDaemonProcess</code>. 
+For details on <code>wsgi</code> configuration, see the <a href="https://code.google.com/p/modwsgi/wiki/QuickConfigurationGuide">guide</a>.
+When a request comes in to our server with a url that begins with <code>service</code>, the request is passed on to our bottle application.</p>
+<div class="highlight"><pre>LoadModule wsgi_module /usr/lib/apache2/modules/mod_wsgi.so
+WSGIScriptAlias /service /var/www/bottle/bottle_adapter.wsgi
+WSGIDaemonProcess example02 <span class="nv">processes</span><span class="o">=</span>5 <span class="nv">threads</span><span class="o">=</span>25
+</pre></div>
+
+
+<p>You may need to set other parameters depending on your platform. I am on a FreeBSD machine and needed to set <code>WSGIAcceptMutex posixsem</code> in addition to the settings above. The <code>wsgi</code> guide is well written and indispensable.</p>
+<h3 class="article-title" id="the-wsgi-adapter">The <code>wsgi</code> Adapter</h3>
+<p>When the Apache server gets a request that begins with <code>service</code>, the <code>httpd</code> daemon calls the bottle application adapter script, <code>bottle_adapter.wsgi</code>. As you can see below, the script imports the application code, adds to the template path and “mounts” the application on a specific <span class="caps">URL</span> path. </p>
+<p>Now that the <code>people</code> application is mounted on the <span class="caps">URL</span> path <code>/people</code>, the application will get called for any <span class="caps">URL</span> that starts with <code>/service/people</code>. </p>
+<p>The debug attribute is set to <code>True</code> until we’re ready to go production. Bottle provides its own development server when you’re getting started; I’ve commented out that line but it is helpful to use it when debugging your application code.</p>
+<div class="highlight"><pre><span class="kn">import</span> <span class="nn">sys</span><span class="o">,</span> <span class="nn">bottle</span>
+<span class="n">sys</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">insert</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="s">'/var/www/bottle'</span><span class="p">)</span>
+<span class="kn">import</span> <span class="nn">people</span>
+
+<span class="n">bottle</span><span class="o">.</span><span class="n">TEMPLATE_PATH</span><span class="o">.</span><span class="n">insert</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="s">'/var/www/bottle/views/people'</span><span class="p">)</span>
+
+<span class="n">application</span> <span class="o">=</span> <span class="n">bottle</span><span class="o">.</span><span class="n">default_app</span><span class="p">()</span>
+<span class="n">application</span><span class="o">.</span><span class="n">mount</span><span class="p">(</span><span class="s">'/people'</span><span class="p">,</span> <span class="n">people</span><span class="o">.</span><span class="n">app</span><span class="p">)</span>
+
+<span class="n">bottle</span><span class="o">.</span><span class="n">debug</span><span class="p">(</span><span class="bp">True</span><span class="p">)</span>
+<span class="c">#bottle.run(host='example02', port=8090, debug=True)</span>
+</pre></div>
+
+
+<h3 class="article-title" id="the-skeleton-of-an-app">The Skeleton of an App</h3>
+<p>Every application will have a similar skeleton; all my apps have the same things at the beginning. The following code block displays the beginning of  the <code>people</code> application. First, we make the necessary imports, get a connection to the MongoDB database <code>test</code> collection and instantiate our application, <code>app</code>, which is known as <code>people.app</code> to the <code>wsgi</code> adapter.</p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">bottle</span> <span class="kn">import</span> <span class="n">Bottle</span><span class="p">,</span> <span class="n">view</span><span class="p">,</span> <span class="n">request</span>
+<span class="kn">from</span> <span class="nn">bson.objectid</span> <span class="kn">import</span> <span class="n">ObjectId</span>
+<span class="kn">import</span> <span class="nn">pymongo</span>
+
+<span class="n">conn</span> <span class="o">=</span> <span class="n">pymongo</span><span class="o">.</span><span class="n">MongoReplicaSetClient</span><span class="p">(</span>
+    <span class="s">'example02.unx.sas.com, example01.unx.sas.com'</span><span class="p">,</span>
+    <span class="n">replicaSet</span><span class="o">=</span><span class="s">'rs1'</span><span class="p">)</span>
+<span class="n">db</span> <span class="o">=</span> <span class="n">conn</span><span class="o">.</span><span class="n">test</span>
+
+<span class="n">app</span> <span class="o">=</span> <span class="n">Bottle</span><span class="p">()</span>
+</pre></div>
+
+
+<p>And there we have it—our <code>people.app</code> Bottle application, all wired up but not able to do anything yet. Let’s add some abilities so we can respond to <span class="caps">URL</span> requests. For example, when a <code>GET</code> request comes in on <code>service/people</code>, we’ll send back a response with a list of the people in the database. </p>
+<p>Most capabilities you code will have three parts:</p>
+<ul>
+<li>a <span class="caps">URL</span> route that matches and responds to an <span class="caps">HTPP</span> request</li>
+<li>a view (template) to render as the response</li>
+<li>a function to get the data that the view expects.</li>
+</ul>
+<p>In the following code block, the <code>@app.get</code> decorator corresponds to a <span class="caps">URL</span> <em>route</em>; it responds to a <code>GET</code> request with no further arguments (<code>'/'</code>); however, by the time the request makes it to this point, the <span class="caps">URL</span> is actually <code>service/people</code>; that is what the root <span class="caps">URL</span> looks like to the <code>people</code> app.</p>
+<p>The <code>@view</code> decorator specifies the template to use to display the data in the response (that is, the template <code>views/people/people.tpl</code> ) </p>
+<p>The <code>people</code> function creates a cursor which gets all the records (<em>documents</em> in the MongoDB world) from the database, sorts those records on the <code>name</code> and returns them as a list under the key named <code>results</code>. </p>
+<div class="highlight"><pre><span class="nd">@app.get</span><span class="p">(</span><span class="s">'/'</span><span class="p">)</span>
+<span class="nd">@view</span><span class="p">(</span><span class="s">'people'</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">people</span><span class="p">():</span>
+    <span class="n">p</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">people</span><span class="o">.</span><span class="n">find</span><span class="p">()</span><span class="o">.</span><span class="n">sort</span><span class="p">([(</span><span class="s">'name'</span><span class="p">,</span> <span class="mi">1</span><span class="p">)])</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s">'results'</span><span class="p">:</span> <span class="nb">list</span><span class="p">(</span><span class="n">p</span><span class="p">)}</span>
+</pre></div>
+
+
+<p class="callout"><span class="note">Note: </span>
+The <code>sort</code> function in <code>pymongo</code> operates differently from the <code>mongo</code> shell; it uses a list of tuples to sort on instead of a document. This tripped me up at first. The <a href="http://api.mongodb.org/python/current/api/pymongo/cursor.html#pymongo.cursor.Cursor.sort">documentation</a> explains it well.</p>
+<p>Next, here is a route using the <code>@app.get</code> decorator which responds to a <span class="caps">GET</span> request of the form <code>service/people/somename</code>. It executes the <code>person</code> function and renders the resulting data using the <code>person</code> template (<code>views/people/person.tpl</code>).</p>
+<p>The <code>person</code> function gets the single (or first) document with a matching <code>name</code>, converts the <code>_id</code> value to a string and returns the data under the key named <code>person</code>. </p>
+<div class="highlight"><pre><span class="p">@</span><span class="nx">app.get</span><span class="p">(</span><span class="s1">'/&lt;name&gt;'</span><span class="p">)</span>
+<span class="p">@</span><span class="nx">view</span><span class="p">(</span><span class="s1">'person'</span><span class="p">)</span>
+<span class="nx">def</span> <span class="nx">person</span><span class="p">(</span><span class="nb">name</span><span class="p">):</span>
+    <span class="n">person</span> <span class="o">=</span> <span class="nb">db</span><span class="err">[</span><span class="s1">'people'</span><span class="cp">]</span>.find_one({'name':name})
+    person<span class="cp">[</span><span class="s1">'_id'</span><span class="cp">]</span> = str(person<span class="cp">[</span><span class="s1">'_id'</span><span class="cp">]</span>)
+    return {'person': person}
+</pre></div>
+
+
+<p>Why convert the <code>_id</code> from an ObjectID (as it exists in the MongDB database) to a string? If all you want to do is display the record, you could just delete the key, but if you want to interact with the record (possibly updating or deleting it through the client), you have to keep track of that <code>_id</code>. Otherwise there’s no way to map back to the record in the database.  So we transform it to a string on the way out to the client and as you’ll see in the next route function, we transform it back to an ObjectID on the way back in to the database.</p>
+<p>The last route in this example uses the <code>app.post</code> decorator to respond to a <span class="caps">POST</span> request. It creates a new dictionary populated with values from the request, converts the string <code>_id</code> value back to an ObjectID, and saves the record back to the database. It returns a bare string (“Thanks…”) so the user knows the data was updated.</p>
+<div class="highlight"><pre><span class="p">@</span><span class="nx">app.post</span><span class="p">(</span><span class="s1">'/&lt;name&gt;'</span><span class="p">)</span>
+<span class="nx">def</span> <span class="nx">update_person</span><span class="p">(</span><span class="nb">name</span><span class="p">):</span>
+    <span class="n">person</span> <span class="o">=</span> <span class="p">{</span><span class="s1">'name'</span><span class="p">:</span> <span class="nb">name</span><span class="p">}</span>
+    <span class="nx">person</span><span class="err">[</span><span class="s1">'age'</span><span class="cp">]</span> = request.POST.get('age')
+    person<span class="cp">[</span><span class="s1">'weight'</span><span class="cp">]</span> = request.POST.get('weight')
+    person<span class="cp">[</span><span class="s1">'height'</span><span class="cp">]</span> = request.POST.get('height')
+    person<span class="cp">[</span><span class="s1">'_id'</span><span class="cp">]</span> = ObjectId(request.POST.get('_id'))
+
+    db<span class="cp">[</span><span class="s1">'people'</span><span class="cp">]</span>.save(person)
+    return 'Thanks for your data.'
+</pre></div>
+
+
+<p class="callout">Keep in mind that this is just a simple toy example; if you have a bazillion records or a gazillion requests per second, you’ll want to do a lot of reading on MongoDB index creation, aggregation and filtering techniques.</p>
+<h3 class="article-title" id="summary-what-we-have-so-far">Summary: What We Have So Far</h3>
+<p>When a <span class="caps">GET</span> request comes in with this url:</p>
+<div class="highlight"><pre><span class="nl">http:</span><span class="c1">//example01/service/people</span>
+</pre></div>
+
+
+<p>that url is routed from Apache to the Bottle <code>wsgi</code> script and on to the <code>people.app</code> Bottle application and finally to the <code>/people</code> route. That route, in turn, invokes the <code>people</code> function, which retrieves all the MongoDB documents in the <code>people</code> database. The <span class="caps">JSON</span> data is returned in the response under the key named <code>results</code> and rendered by the <code>people</code> template.</p>
+<p>When a request comes in with this url:</p>
+<div class="highlight"><pre><span class="nl">http:</span><span class="c1">//example01/service/people/Sam</span>
+</pre></div>
+
+
+<p>If the request is a <code>GET</code>, the document with <code>name</code> = <code>Sam</code> is retrieved, the <code>_id</code> is converted to a string instead of an object (it is saved as an ObjectId in the MongoDB database). The <span class="caps">JSON</span> data is returned in the response under the key named <code>results</code> and rendered by the <code>person</code> template.</p>
+<p>If the request is a <code>POST</code>, the data is read from the request form, the <code>_id</code> is turned back into an <code>ObjectId</code> and the document is saved to the database.</p>
+<p class="callout"><span class="note">Note: </span>
+With this smidgen of code and a rational directory structure, before even talking about the <span class="caps">HTML</span> side, we have an simple, easy-to-understand <span class="caps">API</span> that can send and receive <span class="caps">JSON</span> documents, interacting with a MongoDB backend database.</p>
+<h3 class="article-title" id="a-sample-template-file">A Sample Template File</h3>
+<p>You can use plain <span class="caps">HTML</span> to display and update records if your underlying data has a simple structure, as our example data does.</p>
+<p>This is the view-only template <code>people.tpl</code> which displays the data on a <span class="caps">GET</span> request to <code>http://example02/service/people</code>:</p>
+<div class="highlight"><pre><span class="cp">&lt;!doctype html&gt;</span>
+<span class="nt">&lt;html&gt;</span>
+<span class="nt">&lt;head&gt;</span>
+  <span class="nt">&lt;title&gt;</span>People<span class="nt">&lt;/title&gt;</span>
+<span class="nt">&lt;/head&gt;</span>
+<span class="nt">&lt;body&gt;</span>
+     <span class="nt">&lt;h1&gt;</span>People<span class="nt">&lt;/h1&gt;</span>
+     <span class="nt">&lt;table&gt;</span>
+        <span class="nt">&lt;tr&gt;&lt;th&gt;</span>Name<span class="nt">&lt;/th&gt;&lt;th&gt;</span>Age<span class="nt">&lt;/th&gt;&lt;/tr&gt;</span>
+        %for person in results:
+            <span class="nt">&lt;tr&gt;</span>
+                <span class="nt">&lt;td&gt;</span>{{person['name']}}<span class="nt">&lt;/td&gt;</span>
+                <span class="nt">&lt;td&gt;</span>{{person['age']}}<span class="nt">&lt;/td&gt;</span>
+            <span class="nt">&lt;/tr&gt;</span>
+        %end for
+    <span class="nt">&lt;/table&gt;</span>
+<span class="nt">&lt;/body&gt;</span>
+<span class="nt">&lt;/html&gt;</span>
+</pre></div>
+
+
+<p>And this is the (unstyled) result:</p>
+<p><img alt="peoplelist" src="../images/peoplelist.png"/></p>
+<p>To view a particular person, the logic is similar, except we get back a single record: Here is the template <code>person.tpl</code>:</p>
+<div class="highlight"><pre><span class="cp">&lt;!doctype html&gt;</span>
+<span class="nt">&lt;html&gt;</span>
+<span class="nt">&lt;head&gt;</span>
+  <span class="nt">&lt;title&gt;</span>{{person['name']}} Stats<span class="nt">&lt;/title&gt;</span>
+<span class="nt">&lt;/head&gt;</span>
+<span class="nt">&lt;body&gt;</span>
+  <span class="nt">&lt;h1&gt;</span>{{person['name']}} Stats<span class="nt">&lt;/h1&gt;</span>
+     <span class="nt">&lt;table&gt;</span>
+     <span class="nt">&lt;tr&gt;&lt;th&gt;</span>Age<span class="nt">&lt;/th&gt;&lt;td&gt;</span>{{person['age']}}<span class="nt">&lt;/td&gt;&lt;/tr&gt;</span>
+     <span class="nt">&lt;tr&gt;&lt;th&gt;</span>Height<span class="nt">&lt;/th&gt;&lt;td&gt;</span>{{person['height']}}<span class="nt">&lt;/td&gt;&lt;/tr&gt;</span>
+     <span class="nt">&lt;tr&gt;&lt;th&gt;</span>Weight<span class="nt">&lt;/th&gt;&lt;td&gt;</span>{{person['weight']}}<span class="nt">&lt;/td&gt;&lt;/tr&gt;</span>
+   <span class="nt">&lt;/table&gt;</span>
+
+<span class="nt">&lt;/body&gt;</span>
+<span class="nt">&lt;/html&gt;</span>
+</pre></div>
+
+
+<p>If the url is <code>http://example01/service/people/Alphonse</code>, here is the result:</p>
+<p><img alt="person" src="../images/person.png"/></p>
+<h3 class="article-title" id="crud-operations"><span class="caps">CRUD</span> Operations</h3>
+<p>Performing updates, deletes, or creating records can get tricky, depending on the complexity of your data. If you have nested <span class="caps">JSON</span> data, you will need some Javascript to serialize the user-input data so the result has the correct structure when it gets back to MongoDB.  More on that later. For now let’s write a form that enables us to update a simple record and save it. </p>
+<h4 class="article-title" id="simple-case">Simple Case</h4>
+<p>First we need to view the data in a prepopulated form and then we need to update the database record with the changes made in the <span class="caps">HTML</span> client.</p>
+<p>We already have the Python code (the <code>person</code> and <code>update_person</code> functions), so we just need to write the <span class="caps">HTML</span> page. You might call the page <code>person_update.tpl</code>, and change the <code>@app.get(/&lt;name&gt;)</code> route to use that instead of the view-only template <code>person.tpl</code> from before.</p>
+<p>This page displays the data but now inside an <span class="caps">HTML</span> form. We keep the <code>_id</code> value because we must have it in order to update the database. If we don’t include the <code>_id</code> on the way back in to the database, our changed data will be added to the database as a new record instead of updating the original record.</p>
+<div class="highlight"><pre><span class="cp">&lt;!doctype html&gt;</span>
+<span class="nt">&lt;html&gt;</span>
+<span class="nt">&lt;head&gt;</span>
+  <span class="nt">&lt;title&gt;</span>{{person['name']}} Stats<span class="nt">&lt;/title&gt;</span>
+<span class="nt">&lt;/head&gt;</span>
+<span class="nt">&lt;body&gt;</span>
+  <span class="nt">&lt;h1&gt;</span>{{person['name']}} Stats<span class="nt">&lt;/h1&gt;</span>
+  <span class="nt">&lt;form</span> <span class="na">id=</span><span class="s">"persondata"</span> <span class="na">name=</span><span class="s">"person"</span> <span class="na">method=</span><span class="s">"post"</span> <span class="na">action=</span><span class="s">"http://example02/service/people/{{person['name']}}"</span><span class="nt">&gt;</span>
+    <span class="nt">&lt;input</span> <span class="na">type=</span><span class="s">"text"</span> <span class="na">name=</span><span class="s">"_id"</span> <span class="na">value=</span><span class="s">"{{person['_id']}}"</span> <span class="na">style=</span><span class="s">"display: none;"</span> <span class="nt">/&gt;</span>
+    <span class="nt">&lt;input</span> <span class="na">type=</span><span class="s">"text"</span> <span class="na">name=</span><span class="s">"name"</span> <span class="na">value=</span><span class="s">"{{person['name']}}"</span> <span class="na">style=</span><span class="s">"display: none;"</span> <span class="nt">/&gt;</span>
+     <span class="nt">&lt;table&gt;</span>
+     <span class="nt">&lt;tr&gt;&lt;th&gt;</span>Age<span class="nt">&lt;/th&gt;</span>
+      <span class="nt">&lt;td&gt;&lt;input</span> <span class="na">type=</span><span class="s">"text"</span> <span class="na">name=</span><span class="s">"age"</span> <span class="na">value=</span><span class="s">"{{person['age']}}"</span> <span class="nt">/&gt;&lt;/td&gt;</span>
+    <span class="nt">&lt;/tr&gt;</span>
+     <span class="nt">&lt;tr&gt;&lt;th&gt;</span>Height<span class="nt">&lt;/th&gt;</span>
+      <span class="nt">&lt;td&gt;&lt;input</span> <span class="na">type=</span><span class="s">"text"</span> <span class="na">name=</span><span class="s">"height"</span> <span class="na">value=</span><span class="s">"{{person['height']}}"</span> <span class="nt">/&gt;&lt;/td&gt;</span>
+    <span class="nt">&lt;/tr&gt;</span>
+     <span class="nt">&lt;tr&gt;&lt;th&gt;</span>Weight<span class="nt">&lt;/th&gt;</span>
+      <span class="nt">&lt;td&gt;&lt;input</span> <span class="na">type=</span><span class="s">"text"</span> <span class="na">name=</span><span class="s">"weight"</span> <span class="na">value=</span><span class="s">"{{person['weight']}}"</span> <span class="nt">/&gt;&lt;/td&gt;</span>
+    <span class="nt">&lt;/tr&gt;</span>
+    <span class="nt">&lt;tr&gt;&lt;button</span> <span class="na">type=</span><span class="s">"submit"</span><span class="nt">&gt;</span>Save<span class="nt">&lt;/button&gt;&lt;/tr&gt;</span>
+   <span class="nt">&lt;/table&gt;</span>
+  <span class="nt">&lt;/form&gt;</span>
+<span class="nt">&lt;/body&gt;</span>
+<span class="nt">&lt;/html&gt;</span>
+</pre></div>
+
+
+<h4 class="article-title" id="complex-case">Complex Case</h4>
+<p>If you have nested <span class="caps">JSON</span> data you will probably have to use Javascript. There are so many solutions that I’ll just point out some links. The library I use (and I have deeply nested <span class="caps">JSON</span>) is <a href="https://github.com/maxatwork/form2js">form2js</a>. It is a Javascript library for collecting form data and converting it to a Javascript object.</p>
+<p>In no particular order, here are some similar libraries that address the same situation:</p>
+<ul>
+<li><a href="https://github.com/Krinkle/jquery-json">jquery-json</a> jQuery plugin for conversion to and from <span class="caps">JSON</span>.</li>
+<li><a href="https://github.com/DubFriend/forminator">forminator</a> uses class names and data attributes to build ajax interfaces.</li>
+<li><a href="http://www.domajax.com/">domajax</a> jQuery plugin, enables ajax calls without javascript.</li>
+<li><a href="https://github.com/rdiazv/jquery.form.serializer">jquery.form.serializer</a> jQuery extension to serialize <span class="caps">HTML</span> forms to <span class="caps">JSON</span>.</li>
+</ul>
+<p>The following is an example of using the <code>form2js</code> library and jQuery. You can use the library with arbitrarily nested <span class="caps">JSON</span> documents. However, you need to make a couple of changes to your Bottle app. This example template and the changed app code are in the GitHub files <code>alt_people.py</code> and <code>alt_person_update.tpl</code>.</p>
+<p>The main change to the <code>people</code> app is the <code>update_person</code> function, which now looks like the following. It reads the <span class="caps">JSON</span> string from the request body and converts it. The <code>loads</code> function is included in the <code>pymongo</code> package; it provides conversion from a string instance to a <span class="caps">BSON</span> document. Finally, our function converts the <code>_id</code> to an ObjectId and saves the record back to the database.</p>
+<div class="highlight"><pre><span class="nd">@app.post</span><span class="p">(</span><span class="s">'/'</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">update_person</span><span class="p">():</span>
+    <span class="n">data</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">body</span><span class="o">.</span><span class="n">read</span><span class="p">()</span>
+    <span class="n">person</span> <span class="o">=</span> <span class="n">loads</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+    <span class="n">person</span><span class="p">[</span><span class="s">'_id'</span><span class="p">]</span> <span class="o">=</span> <span class="n">ObjectId</span><span class="p">(</span><span class="n">person</span><span class="p">[</span><span class="s">'_id'</span><span class="p">])</span>
+    <span class="n">db</span><span class="p">[</span><span class="s">'people'</span><span class="p">]</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="n">person</span><span class="p">)</span>
+</pre></div>
+
+
+<p>In the template, the form itself is identical but the <strong>submit</strong> button now calls a Javascript function.</p>
+<div class="highlight"><pre><span class="cp">&lt;!doctype html&gt;</span>
+<span class="nt">&lt;head&gt;</span>
+<span class="nt">&lt;title&gt;</span>{{person['name']}} Stats<span class="nt">&lt;/title&gt;</span>
+<span class="nt">&lt;/head&gt;</span>
+<span class="nt">&lt;body&gt;</span>
+<span class="nt">&lt;h1&gt;</span>{{person['name']}} Stats<span class="nt">&lt;/h1&gt;</span>
+<span class="nt">&lt;form</span> <span class="na">id=</span><span class="s">"persondata"</span> <span class="na">name=</span><span class="s">"person"</span><span class="nt">&gt;</span>
+  <span class="nt">&lt;input</span> <span class="na">type=</span><span class="s">"text"</span> <span class="na">name=</span><span class="s">"_id"</span> <span class="na">value=</span><span class="s">"{{person['_id']}}"</span> <span class="na">style=</span><span class="s">"display: none;"</span> <span class="nt">/&gt;</span>
+  <span class="nt">&lt;input</span> <span class="na">type=</span><span class="s">"text"</span> <span class="na">name=</span><span class="s">"name"</span> <span class="na">value=</span><span class="s">"{{person['name']}}"</span> <span class="na">style=</span><span class="s">"display: none;"</span> <span class="nt">/&gt;</span>
+  <span class="nt">&lt;table&gt;</span>
+    <span class="nt">&lt;tr&gt;</span>
+      <span class="nt">&lt;th&gt;</span>Age<span class="nt">&lt;/th&gt;</span>
+      <span class="nt">&lt;td&gt;&lt;input</span> <span class="na">type=</span><span class="s">"text"</span> <span class="na">name=</span><span class="s">"age"</span> <span class="na">value=</span><span class="s">"{{person['age']}}"</span> <span class="nt">/&gt;&lt;/td&gt;</span>
+    <span class="nt">&lt;/tr&gt;</span>
+    <span class="nt">&lt;tr&gt;</span>
+      <span class="nt">&lt;th&gt;</span>Height<span class="nt">&lt;/th&gt;</span>
+      <span class="nt">&lt;td&gt;&lt;input</span> <span class="na">type=</span><span class="s">"text"</span> <span class="na">name=</span><span class="s">"height"</span> <span class="na">value=</span><span class="s">"{{person['height']}}"</span> <span class="nt">/&gt;&lt;/td&gt;</span>
+    <span class="nt">&lt;/tr&gt;</span>
+    <span class="nt">&lt;tr&gt;</span>
+      <span class="nt">&lt;th&gt;</span>Weight<span class="nt">&lt;/th&gt;</span>
+      <span class="nt">&lt;td&gt;&lt;input</span> <span class="na">type=</span><span class="s">"text"</span> <span class="na">name=</span><span class="s">"weight"</span> <span class="na">value=</span><span class="s">"{{person['weight']}}"</span> <span class="nt">/&gt;&lt;/td&gt;</span>
+    <span class="nt">&lt;/tr&gt;</span>
+    <span class="nt">&lt;tr&gt;</span>
+      <span class="nt">&lt;td&gt;&lt;input</span> <span class="na">type=</span><span class="s">"submit"</span> <span class="nt">/&gt;&lt;/td&gt;</span>
+    <span class="nt">&lt;/tr&gt;</span>
+  <span class="nt">&lt;/table&gt;</span>
+<span class="nt">&lt;/form&gt;</span>
+</pre></div>
+
+
+<p>When the user clicks the <code>submit</code> button, the <code>save_data</code> function is called.</p>
+<p>First we load jQuery and the <code>form2js</code> library. Finally, we have two functions—one that executes when the submit button is clicked, and the <code>save_data</code> function.
+The <code>save_data</code> function reads the <span class="caps">JSON</span> data from the form into the variable <code>json_data</code>, stringifies it to the variable <code>jsonstr</code>, and fires an <span class="caps">AJAX</span> <span class="caps">POST</span> back to our <span class="caps">URL</span> route for updating a person (the only route in our app that accepts a <span class="caps">POST</span> request).</p>
+<div class="highlight"><pre><span class="o">&lt;</span><span class="nx">script</span> <span class="nx">type</span><span class="o">=</span><span class="s2">"text/javascript"</span> <span class="nx">src</span><span class="o">=</span><span class="s2">"/js/jquery.min.js"</span><span class="o">&gt;&lt;</span><span class="err">/script&gt;</span>
+<span class="o">&lt;</span><span class="nx">script</span> <span class="nx">type</span><span class="o">=</span><span class="s2">"text/javascript"</span> <span class="nx">src</span><span class="o">=</span><span class="s2">"/js/form2js.js"</span><span class="o">&gt;&lt;</span><span class="err">/script&gt;</span>
+<span class="o">&lt;</span><span class="nx">script</span> <span class="nx">type</span><span class="o">=</span><span class="s2">"text/javascript"</span><span class="o">&gt;</span>
+    <span class="nx">save_data</span> <span class="o">=</span> <span class="kd">function</span><span class="p">(</span><span class="nx">evt</span><span class="p">){</span>
+        <span class="kd">var</span> <span class="nx">json_data</span> <span class="o">=</span> <span class="nx">form2js</span><span class="p">(</span><span class="s1">'persondata'</span><span class="p">,</span> <span class="nx">skipEmpty</span><span class="o">=</span><span class="kc">false</span><span class="p">);</span>
+        <span class="kd">var</span> <span class="nx">jsonstr</span> <span class="o">=</span> <span class="nx">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">json_data</span><span class="p">,</span> <span class="kc">null</span><span class="p">,</span> <span class="s1">'\t'</span><span class="p">);</span>
+        <span class="nx">$</span><span class="p">.</span><span class="nx">ajax</span><span class="p">({</span>
+            <span class="nx">type</span><span class="o">:</span><span class="s2">"POST"</span><span class="p">,</span>
+            <span class="nx">url</span><span class="o">:</span> <span class="s1">'http://example02/service/people'</span><span class="p">,</span>
+            <span class="nx">data</span><span class="o">:</span> <span class="nx">jsonstr</span><span class="p">,</span>
+            <span class="nx">success</span><span class="o">:</span> <span class="kd">function</span><span class="p">(){</span>
+                <span class="nx">alert</span><span class="p">(</span><span class="s1">'Configuration saved.'</span><span class="p">)</span>
+            <span class="p">}</span>
+        <span class="p">});</span>
+    <span class="p">};</span>
+  <span class="p">(</span><span class="kd">function</span><span class="p">(</span><span class="nx">$</span><span class="p">){</span>
+     <span class="nx">$</span><span class="p">(</span><span class="kd">function</span><span class="p">(){</span>
+    <span class="nx">$</span><span class="p">(</span><span class="s1">'input[type=submit]'</span><span class="p">).</span><span class="nx">val</span><span class="p">(</span><span class="s1">'Submit'</span><span class="p">).</span><span class="nx">click</span><span class="p">(</span><span class="nx">save_data</span><span class="p">);</span>
+  <span class="p">});</span>
+   <span class="p">})(</span><span class="nx">jQuery</span><span class="p">);</span>
+   <span class="o">&lt;</span><span class="err">/script&gt;</span>
+<span class="o">&lt;</span><span class="err">/body&gt;</span>
+<span class="o">&lt;</span><span class="err">/html&gt;</span>
+</pre></div>
+
+
+<p>When a request comes in at this <span class="caps">URL</span>:</p>
+<div class="highlight"><pre><span class="nl">http:</span><span class="c1">//example01/service/people/Janice</span>
+</pre></div>
+
+
+<p>The result is displayed in a form:</p>
+<p><img alt="person_complex" src="../images/person_complex.png"/></p>
+<p>Check it out on <a href="https://github.com/tiarno/bam_example">GitHub</a> if you want to play around with it. It is very easy to add applications and get <span class="caps">CRUD</span> operations going on any mongoDB database.</p>
+<p>Let me know if you have any questions or if something needs changing on the GitHub repo.</p>
+
+
+
+
+
+	<h4>Comments</h4>
+    <p id="disqus_thread"/>
+    
+    <noscript>Please enable JavaScript to view the <a href="http://disqus.com/?ref_noscript">comments powered by Disqus.</a></noscript>
+</article>
+    </div></body></html>

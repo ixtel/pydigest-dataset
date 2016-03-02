@@ -1,0 +1,90 @@
+<html><body><div><div>
+<p>The Python <tt class="docutils literal">unittest.mock</tt> library (and the standalone <tt class="docutils literal">mock</tt> package for
+Python 2) includes an extremely handy feature in <tt class="docutils literal">patch()</tt>, which allows easy
+and safe monkey-patching for the purposes of testing.</p>
+<p>You can use <tt class="docutils literal">patch()</tt> as a context manager, class decorator or start and stop
+it yourself, but the most commonly used form (in my experience) is as a
+decorator, which monkey patches something for the duration of a single test
+function.  This is typically used to stub out some subsystem to allow testing
+of a single component in isolation.</p>
+<p>Say we wanted a test of an order processing system, then we might write it with
+<tt class="docutils literal">patch()</tt> like so:</p>
+<pre class="code python"><a name="rest_code_0ed271afbdd74bf996c13163236203ea-1"/><span class="nd">@patch</span><span class="p">(</span><span class="s">'billing.charge_card'</span><span class="p">)</span>
+<a name="rest_code_0ed271afbdd74bf996c13163236203ea-2"/><span class="k">def</span> <span class="nf">test_card</span><span class="p">(</span><span class="n">charge_card</span><span class="p">):</span>
+<a name="rest_code_0ed271afbdd74bf996c13163236203ea-3"/>    <span class="sd">"""Placing an order charges the credit card."""</span>
+<a name="rest_code_0ed271afbdd74bf996c13163236203ea-4"/>    <span class="n">orders</span><span class="o">.</span><span class="n">place_order</span><span class="p">(</span><span class="n">TEST_ORDER</span><span class="p">)</span>
+<a name="rest_code_0ed271afbdd74bf996c13163236203ea-5"/>    <span class="n">charge_card</span><span class="o">.</span><span class="n">assert_called_with</span><span class="p">(</span><span class="n">TEST_ORDER_TOTAL</span><span class="p">,</span> <span class="n">TEST_CREDIT_CARD</span><span class="p">)</span>
+</pre>
+<p>Here, the test verifies that <tt class="docutils literal">place_order()</tt> would call <tt class="docutils literal">charge_card()</tt>
+with the right arguments - while ensuring that <tt class="docutils literal">charge_card</tt> is not actually
+called in the test.</p>
+<p>One of my earliest contributions to the Quartz project at Bank of America
+Merrill Lynch was to recommend and justify the inclusion of <tt class="docutils literal">mock</tt> in the
+standard distribution of Python that is shipped to every machine (desktop and
+server) in the organisation. My rationale was that while dependency injection
+is a better principle, refactoring is a chicken-and-egg process - you need
+tests in place to support refactoring, and refactoring so that good tests are
+easy to write.  <tt class="docutils literal">mock.patch()</tt> was well-suited to wrap tests around my team's
+existing, poorly tested codebase, before refactoring, so that we could have
+tests in place to enable us to refactor.</p>
+<div class="section" id="dependency-injection">
+<h2>Dependency Injection</h2>
+<p><a class="reference external" href="http://en.wikipedia.org/wiki/Dependency_injection">Dependency Injection</a> is a simple technique where you pass in at runtime the
+key objects a function or class might need, rather than constructing those
+objects within the code. For example, we could have structured the previous
+example for dependency injection and passed in (injected) a mock dependency:</p>
+<pre class="code python"><a name="rest_code_65e206ad87e248c492bad83db9a8ed14-1"/><span class="k">def</span> <span class="nf">test_card</span><span class="p">():</span>
+<a name="rest_code_65e206ad87e248c492bad83db9a8ed14-2"/>    <span class="sd">"""Placing an order charges the credit card."""</span>
+<a name="rest_code_65e206ad87e248c492bad83db9a8ed14-3"/>    <span class="n">p</span> <span class="o">=</span> <span class="n">Mock</span><span class="p">()</span>
+<a name="rest_code_65e206ad87e248c492bad83db9a8ed14-4"/>    <span class="n">orders</span><span class="o">.</span><span class="n">place_order</span><span class="p">(</span><span class="n">TEST_ORDER</span><span class="p">,</span> <span class="n">card_processor</span><span class="o">=</span><span class="n">p</span><span class="p">)</span>
+<a name="rest_code_65e206ad87e248c492bad83db9a8ed14-5"/>    <span class="n">p</span><span class="o">.</span><span class="n">charge_card</span><span class="o">.</span><span class="n">assert_called_with</span><span class="p">(</span><span class="n">TEST_ORDER_TOTAL</span><span class="p">,</span> <span class="n">TEST_CREDIT_CARD</span><span class="p">)</span>
+</pre>
+<p>Dependency injection sounds like (and arises from) a strictly object-oriented
+and Java-ish technique, but it is absolutely a valuable approach in Python too.
+In Python we generally don't suffer the pain of having to define concrete
+subclasses of abstract interfaces; we can simply duck-type. But the benefits of
+dependency injection are great: as we can pass mock objects in testing, we can
+pass different concrete objects to be used in production, which makes for much
+more flexible, <a class="reference external" href="http://c2.com/cgi/wiki?RavioliCode">ravioli-style code</a>. For example, maybe we could define a
+<tt class="docutils literal">DeferredCardProcessor</tt> to satisfy a slightly different use case later. The
+possibilities are opened up.</p>
+</div>
+<div class="section" id="overuse-of-patch">
+<h2>Overuse of patch()</h2>
+<p>The value of <tt class="docutils literal">patch()</tt> is that is makes tests easier to write. But it doesn't
+add any extra value to you application. Dependency injection is perhaps a
+little more expensive at first but adds extra value later, when your code is
+genuinely better structured.</p>
+<p>In the past few days I've seen a couple of examples (via <a class="reference external" href="http://mauveweb.co.uk/posts/2014/04/code-quality-good-tools.html#code-review">Code Review</a>) of
+code that has numerous nested patch decorators:</p>
+<pre class="code python"><a name="rest_code_e2df908128014a069b38543d18e10dca-1"/><span class="nd">@patch</span><span class="p">(</span><span class="s">'my.project.trading.getEnrichedTradeData'</span><span class="p">,</span> <span class="k">lambda</span><span class="p">:</span> <span class="n">TEST_TRADE_DATA</span><span class="p">)</span>
+<a name="rest_code_e2df908128014a069b38543d18e10dca-2"/><span class="nd">@patch</span><span class="p">(</span><span class="s">'my.project.subledger.getSubledgerData'</span><span class="p">,</span> <span class="n">getTestSubledgerData</span><span class="p">)</span>
+<a name="rest_code_e2df908128014a069b38543d18e10dca-3"/><span class="nd">@patch</span><span class="p">(</span><span class="s">'my.project.metadata.getSubledgerCodes'</span><span class="p">,</span> <span class="n">return_value</span><span class="o">=</span><span class="n">TEST_CODES</span><span class="p">)</span>
+<a name="rest_code_e2df908128014a069b38543d18e10dca-4"/><span class="nd">@patch</span><span class="p">(</span><span class="s">'my.project.reports.storeReport'</span><span class="p">)</span>
+<a name="rest_code_e2df908128014a069b38543d18e10dca-5"/><span class="k">def</span> <span class="nf">test</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">storeReport</span><span class="p">):</span>
+<a name="rest_code_e2df908128014a069b38543d18e10dca-6"/>    <span class="n">buildReport</span><span class="p">()</span>
+<a name="rest_code_e2df908128014a069b38543d18e10dca-7"/>    <span class="n">storeReport</span><span class="o">.</span><span class="n">assert_called_with</span><span class="p">(</span><span class="n">EXPECTED_REPORT</span><span class="p">)</span>
+</pre>
+<p>The lack of useful dependency injection aside, I think this is rather hard to
+read. And if we look at the code for <tt class="docutils literal">buildReport()</tt> and see it does
+something like</p>
+<pre class="code python"><a name="rest_code_f6e516781f864baa921a32ea014f2b3e-1"/><span class="k">def</span> <span class="nf">buildReport</span><span class="p">():</span>
+<a name="rest_code_f6e516781f864baa921a32ea014f2b3e-2"/>    <span class="n">trades</span> <span class="o">=</span> <span class="n">getEnrichedTradeData</span><span class="p">()</span>
+<a name="rest_code_f6e516781f864baa921a32ea014f2b3e-3"/>    <span class="n">subledger</span> <span class="o">=</span> <span class="n">getSubledgerData</span><span class="p">()</span>
+<a name="rest_code_f6e516781f864baa921a32ea014f2b3e-4"/>    <span class="n">codes</span> <span class="o">=</span> <span class="n">getSubledgerCodes</span><span class="p">()</span>
+<a name="rest_code_f6e516781f864baa921a32ea014f2b3e-5"/>    <span class="n">report</span> <span class="o">=</span> <span class="n">Report</span><span class="p">(</span><span class="n">trades</span><span class="p">,</span> <span class="n">subledger</span><span class="p">,</span> <span class="n">codes</span><span class="p">)</span>
+<a name="rest_code_f6e516781f864baa921a32ea014f2b3e-6"/>    <span class="n">storeReport</span><span class="p">(</span><span class="n">report</span><span class="p">)</span>
+</pre>
+<p>then we've fallen into a trap of testing that the code does what the code says
+it does, rather than testing functional behaviour we care about.</p>
+<p>Seeing (or writing) code like this should cause you to think that perhaps the
+code wasn't structured right. To avoid failling into this trap, think of every
+<tt class="docutils literal">mock.patch()</tt> as a small <a class="reference external" href="http://c2.com/cgi/wiki?CodeSmell">code smell</a> - a missed opportunity for dependency
+injection.</p>
+<p>If you're struggling to refactor your code to build dependency injection in, a
+good way to start is to do a <a class="reference external" href="http://mauveweb.co.uk/posts/2014/01/crc-cards.html">CRC Cards</a> session, which will typically produce
+a design that includes opportunity for dependency injection, especially if you
+think about testability as one of your design criteria.</p>
+</div>
+</div>
+    </div></body></html>

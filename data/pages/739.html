@@ -1,0 +1,221 @@
+<html><body><div><div class="content html_format"><p>
+      Программисты очень по разному относятся к тестированию, и многие не любят писать тесты. Процесс TDD же для новичков не особенно понятен — ведь приходится вместо функционала программы писать вначале тест, который его проверяет, то есть количество работы увеличивается. Однако со временем приходит осознание того, что автоматическое тестирование необходимо. К примеру, возьмем процесс разработки даже несложного проекта на django, пока в проекте пара вьюх и моделек все просто. Когда приложение обрастает функциями, внезапно обнаруживается, что совершать такое тестирование все сложнее — кликов больше, надо вносить какие-то данные и т.д., вот тут-то и на помощь приходит behavior-driven development (BDD).</p>
+
+<img src="https://habrastorage.org/getpro/habr/post_images/f68/163/4b8/f681634b8b77c15bc4b620d431394583.png" alt="image"/>
+<p>
+Я хочу рассказать о BDD на примере создания примитивного приложения — рейтинга сайтов. Идея тривиальна — на странице отображается список сайтов, пользователь голосует за сайт, сайт поднимается в рейтинге и соответственно изменяет положение на странице.</p><a name="habracut"/>
+<p>
+Для начала в рабочей папке проекта создаем requirements.txt, с примерно таким содержанием: </p><pre><code>Django
+git+git://github.com/svfat/django-behave
+splinter</code></pre>
+<p>
+Обратите внимание, в разработке я использую свой форк django-behave. Код из официального репозитария отказался работать, видимо по причине несовместимости с текущими версиями программ.</p><pre><code class="bash">$ pip install -r requirements.txt
+$ django-admin.py startproject habratest
+$ cd habratest/
+$ ./manage.py startapp vote
+</code></pre>
+<p>
+По умолчанию должна установиться последняя стабильная версия Django, и для начала разработки нам потребуется добавить лишь несколько строчек в settings.py:</p><pre><code class="python">INSTALLED_APPS = (
+    ...
+    'vote',
+    'django_behave',
+)
+TEMPLATE_DIRS = (
+    os.path.join(BASE_DIR, 'templates/'), # не забываем создать папку habratest/templates
+)
+TEST_RUNNER = 'django_behave.runner.DjangoBehaveTestSuiteRunner'
+</code></pre>
+<p>
+Первым этапом добьемся отображения списка сайтов. Для разработки в BDD-стиле с помощью имеющихся у нас инструментов, создаем папки habratest/vote/features и habratest/vote/features/steps
+</p><p>
+Здесь мы будем описывать поведение, которого мы хотим добиться от приложения. В папке features создаем файл habra.features с таким содержимым:</p><pre><code>Feature: Habrarating
+
+  Scenario: Show a rating
+    Given I am a visitor
+    When I visit url "http://localhost:8081/"
+    Then I should see link contents url "habrahabr.ru"
+</code></pre>
+<p>
+Не очень похоже на компьютерный язык, да? Это — Gherkin. На нем можно описать поведение программы не вдаваясь в реализацию. Таким образом, писать тестовые задания может человек мало знакомый с программированием.
+</p><p>
+Мы указываем такой URL, потому что django-behave запускает тестовый сервер на порте 8081.
+</p><p>
+В той же папке создаем environment.py, код в котором выполняется до и после тестирования, и пока только обеспечивает работоспособность тестового браузера:</p><pre><code class="python">from splinter.browser import Browser
+
+def before_all(context):
+    context.browser = Browser()
+
+def after_all(context):
+    context.browser.quit()
+    context.browser = None
+</code></pre>
+<p>
+Запускаем </p><pre><code class="bash">$ ./manage.py test vote
+</code></pre>
+<p>
+Ничего не получилось — тестовое окружение не понимает, что делать с шагами в файле habra.features.Видите строки желтого (ну или коричнево-желтого) цвета? Смело копируйте их в habratest/vote/features/steps/habra.feature.py, в нем описывается реализация шагов, и его содержание должно стать примерно таким:</p><pre><code class="python">from behave import given, when, then
+
+@then(u'I should see link contents url "{content}"')
+def i_should_see_link_contents_url(context, content):
+    msg = context.browser.find_link_by_partial_href(content).first
+    assert msg
+
+@when(r'I visit url "{url}"')
+def i_visit_url(context, url):
+    br = context.browser
+    br.visit(url)
+
+@given(u'I am a visitor')
+def i_am_a_visitor(context):
+    pass
+</code></pre>
+<p>
+Запускаем еще раз</p><pre><code class="bash"> $ ./manage.py test vote
+</code></pre>
+<p>
+Так, теперь мы должны видеть что наш тест фейлится, и причина очевидна — мы еще не написали ни строчки кода функционала приложения, да и данных в базе нет. 
+</p><p>
+Создаем модельку в vote/models.py</p><pre><code class="python">class VoteItem(models.Model):
+    url = models.URLField()
+    rating = models.IntegerField(default=0)
+
+    class Meta:
+        # это для того чтобы в ListView наши сайты сортировались по рейтингу
+        ordering = ["-rating"]
+
+    def __unicode__(self):
+        return self.url
+</code></pre>
+<p>
+Делаем: </p><pre><code class="bash">$ ./manage.py syncdb
+</code></pre>
+<p>
+В habratest/urls.py импортируем </p><pre><code class="python">from vote.views import VoteListView
+</code></pre>
+<p>
+и добавляем в urlpatterns</p><pre><code class="python">    url(r'^$', VoteListView.as_view(), name="index"), 
+</code></pre>
+<p>
+в vote/views.py</p><pre><code class="python">from django.views.generic import ListView
+from models import VoteItem
+
+class VoteListView(ListView):
+    model=VoteItem
+    template_name="list.html"
+
+</code></pre>
+<p>
+в habratest/templates/list.html наш шаблон в стиле ретро:</p><pre><code class="html">&lt;!DOCTYPE html&gt;
+&lt;html&gt;
+    &lt;head&gt;
+        &lt;title&gt;Habra rating&lt;/title&gt;
+    &lt;/head&gt;
+    &lt;body&gt;
+        &lt;ol&gt;
+            {% for voteitem in object_list %}
+            &lt;li id="{{voteitem.pk}}"&gt;&lt;a href="{{ voteitem.url }}"&gt;{{ voteitem.url }}&lt;/a&gt;
+            | Rating:{{voteitem.rating}}&lt;/li&gt;
+            {% endfor %}
+        &lt;/ul&gt;
+    &lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+<p>
+При запуске тестов в памяти каждый раз создается новая БД, а после окончания удаляется, поэтому ее нам нужно заполнить какими-то данными. Для это в файл habratest/habratest/populate.py пишем:</p><pre><code class="python">from vote.models import VoteItem
+
+VoteItem(url="http://www.yandex.ru", rating=6).save()
+VoteItem(url="http://www.google.com", rating=5).save()
+VoteItem(url="http://www.habrahabr.ru", rating=6).save()
+</code></pre>
+<p>
+и дописываем импорт этого скрипта в environment.py</p><pre><code class="python">from habratest import populate
+</code></pre>
+<p>
+Теперь environment.py кроме обеспечения работы браузера еще и занимается тестовой базой. 
+</p><p>
+Снова запускаем </p><pre><code class="bash">$ ./manage.py test vote 
+</code></pre>
+<p>
+— отлично, тест пройден.Но как же рейтинг — нам надо ведь как-то голосовать за сайты
+</p><p>
+Добавляем новый сценарий в habra.feature:</p><pre><code>  Scenario: Vote for a site
+    Given I am a visitor
+    When I visit url "http://localhost:8081/"
+    When I click link contents "+"
+    Then I should see "Vote successful" somewhere in page
+</code></pre>
+<p>
+Тестовое окружение не знает как выполнить два последних шага, поэтому дописываем их в steps/habra.feature.py:</p><pre><code class="python">@then(u'I should see "{text}" somewhere in page')
+def i_should_see_text_somwhere_in_page(context, text):
+    assert text in context.browser.html
+
+@when(u'I click link contents "{text}"')
+def i_click_link_contents_text(context, text):
+    link = context.browser.find_link_by_text(text).first
+    assert link
+    link.click()
+</code></pre>
+<p>
+После чего опять запускаем тесты. Ошибка на шаге When I click link contents "+". Так — никакой ссылки "+" у нас в шаблоне нет, как и не предусмотрена реакция на нее, что мы и исправим следующим образом (не обращайте внимание, что код никак не защищен от накрутки, это всего лишь иллюстрация):
+</p><p>
+В habratest/templates/list.html добавляем «плюс»:</p><pre><code class="html">&lt;li id="{{voteitem.pk}}"&gt;&lt;a href="{{ voteitem.url }}"&gt;{{ voteitem.url }}&lt;/a&gt;
+             | Rating:{{voteitem.rating}}
+             | &lt;a href={% url 'addvote' voteitem.pk %}&gt;+&lt;a&gt;&lt;/li&gt;
+</code></pre>
+<p>
+Соответственно создаем примитивную вьюшку для addvote в vote/views.py:</p><pre><code class="python">from django.shortcuts import render_to_response
+
+def addvote(request, pk):
+    return render_to_response('successful.html', context)
+</code></pre>
+<p>
+добавляем ее в urls.py, </p><pre><code class="python">from vote.views import VoteListView, addvote
+</code></pre>
+<p>
+и</p><pre><code class="python">    url(r'^plus/(?P&lt;pk&gt;\d+)/$', addvote, name='addvote'),
+</code></pre> 
+<p>
+И шаблон templates/successful.html:</p><pre><code class="html">&lt;!DOCTYPE html&gt;
+&lt;html&gt;
+    &lt;head&gt;
+        &lt;title&gt;Habra rating&lt;/title&gt;
+    &lt;/head&gt;
+    &lt;body&gt;
+        &lt;p&gt;Vote successful&lt;/p&gt;
+    &lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+<p>
+Запускаем тесты — все должно пройти успешно.
+</p><p>
+А теперь напишем тест для проверки работоспособности увеличения рейтинга. Мы должны увидеть изменения в списке при голосовании, здесь воспользуемся тем, что знаем исходные данные (которые внесли в populate.py), так как y habrahabr.ru rating=6, при клике на "+" его рейтинг должен измениться на единицу, и по выполнению предыдущего сценария, его рейтинг должен стать равным «7».</p><pre><code>  Scenario: Vote for a site and look at the rating
+    Given I am a visitor
+    When I visit url "http://localhost:8081/"
+    Then I should see "Rating:7" somewhere in page
+</code></pre>
+<p>
+Опять последний шаг не выполняется. Для того, чтобы исправить это, дописываем вьюшку addvote:</p><pre><code class="python">def addvote(request, pk):
+    item = VoteItem.objects.get(pk=pk)
+    item.rating += 1
+    item.save()
+    return render_to_response('successful.html')
+</code></pre>
+<p>
+Проверяем, теперь тест проходит успешно.
+</p><p>
+Итак, продолжая писать тесты на gherkin (что, как я уже говорил выше, может делать даже человек не знакомый с программированием) мы фактически создадим часть технического задания и, одновременно, приемочного тестирования нашего приложения.
+</p><p>
+Я написал эту статью, так как на русском языке практически нет информации по BDD с django, и, если ее вдруг будут читать специалисты в этом вопросе, не поленитесь, напишите в комментариях о своей практике. Это будет полезно всем. С радостью приму ваши замечания, исправления и критику. Спасибо!
+</p><p>
+Что еще почитать:
+</p><a href="http://pythonhosted.org/behave/">Behave documentation</a>
+<a href="http://splinter.cobrateam.info/">Splinter — test framework for web applications</a>
+<a href="http://cilliano.com/2011/02/07/django-bdd-with-lettuce-and-splinter.html">Django Full Stack Testing and BDD with Lettuce and Splinter</a>
+
+
+      
+      <p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

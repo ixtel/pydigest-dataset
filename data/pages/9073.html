@@ -1,0 +1,86 @@
+<html><body><div><div class="blog-post">
+    <h2>Ownership in Python</h2>
+    <p class="meta">
+      written by
+      
+        <a href="https://twitter.com/_fengsp">Shipeng Feng</a>
+      
+      on 2016-01-09
+    </p>
+    <p>In C or C++, we are responsible for the allocation and deallocation of memory.
+Every piece of memory allocated should eventually be freed, otherwise we have
+a memory leak.  It is really hard to prevent leaks from happening by manual
+management.</p>
+<p>In Python, we use reference counting as the strategy to avoid memory leaks.
+The idea is simple: everything is one object and every object has a counter,
+which keeps the total number of references to this object.  When the counter
+drops to 0, the object should be freed, the operation is also safe because
+we know it is used in nowhere.</p>
+<p>What interests me most is how does this happen under the hood.  After some
+exploration, I think I have something here and want to share it with you.</p>
+<p>In CPython, two macros called <code>Py_INCREF(x)</code> and <code>Py_DECREF(x)</code> are used to
+handle the increment and decrement of the reference count.  There are a few
+questions though, when should we use them and how are they used in CPython
+implementation?</p>
+<p>We should use <code>Py_INCREF(x)</code> when we need ownership of an object.  What is
+ownership, if you want to use one object, you have to own it, otherwise it
+might be taken away from you by others, in our case, you have to inform the
+garbage collector that you are using the object, or gc might free it.  However
+it is totally free for you to <strong>borrow</strong> one object, if you are 100% sure
+the owners hold on to the object longer than you.  <strong>The ownership in Python
+means you keep a reference to one object.</strong>  All owners of one object should
+call <code>Py_DECREF(x)</code> after they finish using the object, otherwise a memory
+leak is created.  Here is one simple example:</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">hello</span><span class="p">():</span>
+    <span class="n">s</span> <span class="o">=</span> <span class="s">'hi'</span>  <span class="c"># s keeps a reference to 'hi' and have ownership</span>
+    <span class="k">print</span> <span class="n">s</span>   <span class="c"># use 'hi' for something</span>
+<span class="n">hello</span><span class="p">()</span>       <span class="c"># s finishes and decreases the reference count</span>
+</pre></div>
+<p>It is also possible to transfer the ownership to others, never heard of it?
+Trust me, it happens everywhere, everytime we create a new object, we need to
+pass ownership to the receiver:</p>
+<div class="highlight"><pre><span class="n">foo</span> <span class="o">=</span> <span class="p">(</span><span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="p">)</span>  <span class="c"># we need the bytecode of it</span>
+
+<span class="mi">0</span> <span class="n">LOAD_NAME</span>                <span class="mi">0</span> <span class="p">(</span><span class="n">a</span><span class="p">)</span>
+<span class="mi">3</span> <span class="n">LOAD_NAME</span>                <span class="mi">1</span> <span class="p">(</span><span class="n">b</span><span class="p">)</span>
+<span class="mi">6</span> <span class="n">BUILD_TUPLE</span>              <span class="mi">2</span>
+<span class="mi">9</span> <span class="n">STORE_NAME</span>               <span class="mi">2</span> <span class="p">(</span><span class="n">foo</span><span class="p">)</span>
+</pre></div>
+<p>In the above example, we can see that <code>foo</code> have ownership on a tuple object
+in the end, however, the <code>Py_INCREF(x)</code> was called when <em>BUILD_TUPLE</em> was
+executed, during the <em>BUILD_TUPLE</em> execution, <code>PyTuple_New</code> is called and it
+create a new tuple object, the object leaves the <code>PyTuple_New</code> function call
+and <code>Py_DECREF(x)</code> is not called, afterwards, the ownership is passed to
+Python Virtual Machine data stack, the VM passes it to the <code>foo</code> variable.</p>
+<p>What if I write code like this:</p>
+<div class="highlight"><pre><span class="p">(</span><span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="p">)</span>  <span class="c"># no final receiver for the ownership</span>
+
+<span class="mi">6</span> <span class="n">BUILD_TUPLE</span>
+<span class="mi">9</span> <span class="n">POP_TOP</span>
+</pre></div>
+<p>The compiler is smart enough to catch that, the ownership is passed to
+Python Virtual Machine data stack, during <em>POP_TOP</em> execution, the <code>Py_DECREF</code>
+is called.</p>
+<p>So far, everything is simple, we want to use one object, we just keep a
+reference to it, we finish using it, we <code>Py_DECREF</code> it or pass the ownership
+to others.  What about functions?  How to make sure everything works right
+for a returned value from function?  If you are calling a normal Python
+function, the returned object will pass its ownership to the receiver.  The
+Python itself makes sure that all returned object has the ownership.  Things
+get a little uncertain if you call a C function from Python, in order to make
+things work right, as a Python C Extension developer, you have to return
+an object that has its ownership:</p>
+<div class="highlight"><pre><span class="k">static</span> <span class="n">PyObject</span> <span class="o">*</span>
+<span class="nf">get_first_item</span><span class="p">(</span><span class="n">PyObject</span> <span class="o">*</span><span class="n">list</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="n">PyObject</span> <span class="o">*</span><span class="n">item</span> <span class="o">=</span> <span class="n">PyList_GetItem</span><span class="p">(</span><span class="n">list</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>  <span class="cm">/* do not have ownership */</span>
+    <span class="n">Py_INCREF</span><span class="p">(</span><span class="n">item</span><span class="p">);</span>  <span class="cm">/* get ownership */</span>
+    <span class="k">return</span> <span class="n">item</span><span class="p">;</span>  <span class="cm">/* safe to return */</span>
+<span class="p">}</span>
+</pre></div>
+
+    
+  </div>
+
+
+      </div></body></html>

@@ -1,0 +1,111 @@
+<html><body><div><div class="col-md-8 col-md-offset-2 blog-main">
+<header>
+  <h6 class="text-muted">Sat 30 January 2016
+  
+ 
+</h6></header>
+<p>As projects reach scale of moderate complexity, they must represent
+objects in many forms. As a json record from an API endpoint, cache, or 
+database, as a thrift object for RPC, or as an object in-memory.</p>
+<p>At Uber, we've begun to use the <code>schematics</code> library for our in-memory
+representations. It provides a canonical form for an object to take,
+which can then be serialized into thrift, sql, or various json forms.
+The native serialization works great for the base case.</p>
+<h2>Too Many Representations</h2>
+<p>However, you quickly run into scenarios where a field is referenced by a
+different attribute on different objects. Take our <code>Document</code> entity.
+It has <code>createdAt</code> in thrift, but <code>created_at</code> in memory. Moreover, in
+thrift it is a epoch integer and a DateTime in mysql.  It has <code>s3url</code> in
+our legacy API and <code>url</code> in our new database.</p>
+<p>Enter the Mapper class. Mappers define a way to convert between
+representations of the same data. Without care, it can very quickly
+explode your code complexity, writing rules that map nearly identical
+attribute names.</p>
+<p>Also, because (de)serialization operations are common, they need to be fairly
+fast. Here are the tricks we used to get fast optimization.</p>
+<h2>1. Pre-compute Attribute Maps</h2>
+<p>An early version of our Mappers computed the mapping between attribute
+names, like the <code>Document</code> entity above, on the fly. This is both slow
+and repetitive. We built a metaclass that creates a list of these
+attribute maps (e.g. from <code>created_at</code> to <code>createdAt</code>) at class
+defintion. Then, (de)serialization is simply iterating through the
+attribute pair list.</p>
+<div class="highlight"><pre><span class="k">class</span> <span class="nc">Meta</span><span class="p">(</span><span class="nb">type</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">__new__</span><span class="p">(</span><span class="n">mcs</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">bases</span><span class="p">,</span> <span class="n">dct</span><span class="p">):</span>
+        <span class="n">entity_cls</span> <span class="o">=</span> <span class="n">dct</span><span class="p">[</span><span class="s1">'entity_cls'</span><span class="p">]</span>
+
+        <span class="c1"># precompute the map</span>
+        <span class="n">record_mapper</span> <span class="o">=</span> <span class="p">{}</span>
+        <span class="k">for</span> <span class="n">field</span> <span class="ow">in</span> <span class="n">entity_cls</span><span class="o">.</span><span class="n">fields</span><span class="p">():</span>
+            <span class="n">record_mapper</span><span class="p">[</span><span class="n">field</span><span class="p">]</span> <span class="o">=</span> <span class="o">...</span>
+        <span class="n">dct</span><span class="p">[</span><span class="s1">'record_mapper'</span><span class="p">]</span> <span class="o">=</span> <span class="n">record_mapper</span>
+
+        <span class="k">return</span> <span class="nb">super</span><span class="p">(</span><span class="n">Meta</span><span class="p">,</span> <span class="n">mcs</span><span class="p">)</span><span class="o">.</span><span class="n">__new__</span><span class="p">(</span><span class="n">mcs</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">bases</span><span class="p">,</span> <span class="n">dct</span><span class="p">)</span>
+
+<span class="k">class</span> <span class="nc">Mapper</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
+    <span class="n">__metaclass__</span> <span class="o">=</span> <span class="n">Meta</span>
+    <span class="n">entity_cls</span> <span class="o">=</span> <span class="n">MyEntity</span>
+
+    <span class="nd">@classmethod</span>
+    <span class="k">def</span> <span class="nf">record_to_entity</span><span class="p">(</span><span class="n">cls</span><span class="p">,</span> <span class="n">record</span><span class="p">):</span>
+        <span class="n">entity_data</span> <span class="o">=</span> <span class="p">{}</span>
+        <span class="k">for</span> <span class="n">entity_field</span><span class="p">,</span> <span class="n">record_field</span> <span class="ow">in</span> <span class="n">record_mapper</span><span class="o">.</span><span class="n">iteritems</span><span class="p">():</span>
+            <span class="n">entity_data</span><span class="p">[</span><span class="n">entity_field</span><span class="p">]</span> <span class="o">=</span> <span class="o">...</span>
+        <span class="n">cls</span><span class="o">.</span><span class="n">entity_cls</span><span class="p">(</span><span class="n">raw_data</span><span class="o">=</span><span class="n">entity_data</span><span class="p">)</span>
+</pre></div>
+
+
+<h2>2. Fast Date Parsing</h2>
+<p><code>dateutil</code> is the standard for iso8601 parsing - it supports many
+variants (millisecond, timezone, a prefix of full iso8601). The problem
+is, it is slow as hell.</p>
+<div class="highlight"><pre>DocumentMapper.record_to_entity(record)
+10000 loops, best of 5: 513.436079 usec per loop # REALLY slow
+</pre></div>
+
+
+<p>Replace that with a c library, <code>ciso8601</code>, and hugely boost performance.</p>
+<div class="highlight"><pre>DocumentMapper.record_to_entity(record)
+10000 loops, best of 5: 62.783957 usec per loop  # 8.2x faster
+</pre></div>
+
+
+<h2>3. Disable Schematics Validation</h2>
+<p><code>schematics</code> helpfully does validation upon object <code>__init__</code>.
+However, we <em>know</em> the data is valid because it's from a Mapper. 
+And <code>schematics</code> has no option to skip the validation. There's a cool
+Python trick to create an object while skipping the <code>__init__</code> function.</p>
+<div class="highlight"><pre><span class="n">instance</span> <span class="o">=</span> <span class="n">MyClass</span><span class="o">.</span><span class="n">__new__</span><span class="p">(</span><span class="n">MyClass</span><span class="p">)</span>
+</pre></div>
+
+
+<p>will create an instance of MyClass without executing <code>__init__</code>.</p>
+<p>Removing the schematics constructor and assigning attributes directly
+gave us another improvement. </p>
+<div class="highlight"><pre>DocumentMapper.record_to_entity(record)
+10000 loops, best of 5: 9.325492 usec per loop  # 55x faster than original
+dict(**record)  # gives sense of baseline
+10000 loops, best of 5: 0.469947 usec per loop
+</pre></div>
+
+
+<p><code>dict(**record)</code> isn't a feasible option here, since there isn't a
+custom class, data validation, or field validation. We're 20x off from
+that baseline, which is large. But in absolute terms, we're below 10us,
+which I'm happy with.</p>
+<p>We haven't released the code publicly yet. If you use schematics and
+want to check out the library, reach out to me. Either way, I hope you
+find these optimizations useful in your work.</p>
+<hr/>
+
+
+
+
+<hr/>
+
+
+
+<noscript>Please enable JavaScript to view the <a href="http://disqus.com/?ref_noscript">comments powered by Disqus.</a></noscript>
+ 
+      </div>
+    </div></body></html>

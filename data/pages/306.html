@@ -1,0 +1,818 @@
+<html><body><div><div class="entry-content clearfix"><p>If you ever devoted much time to Django database transaction management, you know how confusing it can get. In the past, the documentation provided quite a bit of depth, but understanding only came through building and experimenting.</p>
+
+<p>There were a plethora of decorators to work with, like <code>commit_on_success</code>, <code>commit_manually</code>, <code>commit_unless_managed</code>, <code>rollback_unless_managed</code>, <code>enter_transaction_management</code>, <code>leave_transaction_management</code>, just to name a few. Fortunately, with Django 1.6 that all goes out the door. You really need to only know about a couple functions now. And we will get to those in just a second. First, we’ll address these topics:</p>
+
+<ul>
+<li><strong>What is transaction management?</strong></li>
+<li><strong>What’s wrong with transaction management prior to Django 1.6?</strong></li>
+</ul>
+
+
+<p>Before jumping into:</p>
+
+<ul>
+<li><strong>What’s right about transaction management in Django 1.6?</strong></li>
+</ul>
+
+
+<p>And then dealing with a detailed example:</p>
+
+<ul>
+<li><strong>Stripe Example</strong></li>
+<li><strong>Transactions</strong>
+
+<ul>
+<li><strong>The recommended way</strong></li>
+<li><strong>Using a decorator</strong></li>
+<li><strong>Transaction per HTTP Request</strong></li>
+</ul>
+</li>
+<li><strong>SavePoints</strong></li>
+<li><strong>Nested Transactions</strong></li>
+</ul>
+
+
+<a name="What.is.a.transaction."/>
+<h2>What is a transaction?</h2>
+
+<p>According to <a href="http://www.contrib.andrew.cmu.edu/~shadow/sql/sql1992.txt">SQL-92</a>, “An SQL-transaction (sometimes simply called a “transaction”) is a sequence of executions of SQL-statements that is atomic with respect to recovery”. In other words, all the SQL statements are executed and committed together. Likewise, when rolled back, all the statements get rolled back together.</p>
+
+<p>For example:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="c"># START</span>
+</span><span class="line"><span class="n">note</span> <span class="o">=</span> <span class="n">Note</span><span class="p">(</span><span class="n">title</span><span class="o">=</span><span class="s">"my first note"</span><span class="p">,</span> <span class="n">text</span><span class="o">=</span><span class="s">"Yay!"</span><span class="p">)</span>
+</span><span class="line"><span class="n">note</span> <span class="o">=</span> <span class="n">Note</span><span class="p">(</span><span class="n">title</span><span class="o">=</span><span class="s">"my second note"</span><span class="p">,</span> <span class="n">text</span><span class="o">=</span><span class="s">"Whee!"</span><span class="p">)</span>
+</span><span class="line"><span class="n">address1</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+</span><span class="line"><span class="n">address2</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+</span><span class="line"><span class="c"># COMMIT</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>So a transaction is a single unit of work in a database. And that single unit of work is demarcated by a start transaction and then a commit or an explicit rollback.</p>
+
+<a name="What.s.wrong.with.transaction.management.prior.to.Django.1.6."/>
+<h2>What’s wrong with transaction management prior to Django 1.6?</h2>
+
+<p>In order to fully answer this question, we must address how transactions are dealt with in the database, client libraries, and within Django.</p>
+
+<a name="Databases"/>
+<h3>Databases</h3>
+
+<p>Every statement in a database has to run in a transaction, even if the transaction includes only one statement.</p>
+
+<p>Most databases have an <code>AUTOCOMMIT</code> setting, which is usually set to True as a default. This <code>AUTOCOMMIT</code> wraps every statement in a transaction that is immediately committed if the statement succeeds. Of course you can manually call something like <code>START_TRANSACTION</code> which will temporarily suspend the <code>AUTOCOMMIT</code> until you call <code>COMMIT_TRANSACTION</code> or <code>ROLLBACK</code>.</p>
+
+<p><em>However, the take away here is that the <code>AUTOCOMMIT</code> setting applies an implicit commit after each statement</em>.</p>
+
+<a name="Client.Libraries"/>
+<h3>Client Libraries</h3>
+
+<p>Then there’s the Python <strong>client libraries</strong> like sqlite3 and mysqldb, which allow Python programs to interface with the databases themselves. Such libraries follow a set of standards for how to access and query the databases. That standard, DB API 2.0, is described in <a href="http://www.python.org/dev/peps/pep-0249/">PEP 249</a>. While it may make for some slightly dry reading, an important take away is that PEP 249 states that the database <code>AUTOCOMMIT</code> should be <em>OFF</em> by default.</p>
+
+<p>This clearly conflicts with what’s happening within the database:</p>
+
+<ul>
+<li>SQL statements always have to run in a transaction, which the database generally opens for you via <code>AUTOCOMMIT</code>.</li>
+<li>However, according to PEP 249, this should not happen.</li>
+<li>Client libraries must mirror what happens within the database, but since they are not allowed to turn <code>AUTOCOMMIT</code> on by default, they simply wrap your SQL statements in a transaction, just like the database.</li>
+</ul>
+
+
+<p>Okay. Stay with me a little longer.</p>
+
+<a name="Django"/>
+<h3>Django</h3>
+
+<p>Enter Django. <strong>Django</strong> also has something to say about transaction management. In Django 1.5 and earlier, Django basically ran with an open transaction and auto-committed that transaction when you wrote data to the database. So every time you called something like <code>model.save()</code> or <code>model.update()</code>, Django generated the appropriate SQL statements and committed the transaction.</p>
+
+<p>Also in Django 1.5 and earlier, it was recommended that you used the <code>TransactionMiddleware</code> to bind transactions to HTTP requests.  Each request was given a transaction. If the response returned with no exceptions, Django would commit the transaction but if your view function threw an error, <code>ROLLBACK</code> would be called.  This in effect, turned off <code>AUTOCOMMIT</code>. If you wanted standard, database level autocommit style transaction management you had to manage the transactions yourself – usually by using a transaction decorator on your view function such as <code>@transaction.commit_manually</code>, or <code>@transaction.commit_on_success</code>.</p>
+
+<p>Take a breath. Or two.</p>
+
+<a name="What.does.this.mean."/>
+<h3>What does this mean?</h3>
+
+<p>Yeah, there is a lot going on there, and it turns out most developers just want the standard database level autocommits – meaning transactions stay behind the scenes, doing their thing, until you need to manually adjust them.</p>
+
+<a name="What.s.right.about.transaction.management.in.Django.1.6."/>
+<h2>What’s right about transaction management in Django 1.6?</h2>
+
+<p>Now, welcome to Django 1.6. Do your best to forget everything we just talked about and simply remember that in Django 1.6, you use database <code>AUTOCOMMIT</code> and manage transactions manually when needed. Essentially, we have a much simpler model that basically does what the database was designed to do in the first place.</p>
+
+<p>Enough theory. Let’s code.</p>
+
+<a name="Stripe.Example"/>
+<h2>Stripe Example</h2>
+
+<p>Here we have this example view function that handles registering a user and calling out to Stripe for credit card processing.</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+<span class="line-number">14</span>
+<span class="line-number">15</span>
+<span class="line-number">16</span>
+<span class="line-number">17</span>
+<span class="line-number">18</span>
+<span class="line-number">19</span>
+<span class="line-number">20</span>
+<span class="line-number">21</span>
+<span class="line-number">22</span>
+<span class="line-number">23</span>
+<span class="line-number">24</span>
+<span class="line-number">25</span>
+<span class="line-number">26</span>
+<span class="line-number">27</span>
+<span class="line-number">28</span>
+<span class="line-number">29</span>
+<span class="line-number">30</span>
+<span class="line-number">31</span>
+<span class="line-number">32</span>
+<span class="line-number">33</span>
+<span class="line-number">34</span>
+<span class="line-number">35</span>
+<span class="line-number">36</span>
+<span class="line-number">37</span>
+<span class="line-number">38</span>
+<span class="line-number">39</span>
+<span class="line-number">40</span>
+<span class="line-number">41</span>
+<span class="line-number">42</span>
+<span class="line-number">43</span>
+<span class="line-number">44</span>
+<span class="line-number">45</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="k">def</span> <span class="nf">register</span><span class="p">(</span><span class="n">request</span><span class="p">):</span>
+</span><span class="line">    <span class="n">user</span> <span class="o">=</span> <span class="bp">None</span>
+</span><span class="line">    <span class="k">if</span> <span class="n">request</span><span class="o">.</span><span class="n">method</span> <span class="o">==</span> <span class="s">'POST'</span><span class="p">:</span>
+</span><span class="line">        <span class="n">form</span> <span class="o">=</span> <span class="n">UserForm</span><span class="p">(</span><span class="n">request</span><span class="o">.</span><span class="n">POST</span><span class="p">)</span>
+</span><span class="line">        <span class="k">if</span> <span class="n">form</span><span class="o">.</span><span class="n">is_valid</span><span class="p">():</span>
+</span><span class="line">
+</span><span class="line">            <span class="n">customer</span> <span class="o">=</span> <span class="n">Customer</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="s">"subscription"</span><span class="p">,</span>
+</span><span class="line">              <span class="n">email</span> <span class="o">=</span> <span class="n">form</span><span class="o">.</span><span class="n">cleaned_data</span><span class="p">[</span><span class="s">'email'</span><span class="p">],</span>
+</span><span class="line">              <span class="n">description</span> <span class="o">=</span> <span class="n">form</span><span class="o">.</span><span class="n">cleaned_data</span><span class="p">[</span><span class="s">'name'</span><span class="p">],</span>
+</span><span class="line">              <span class="n">card</span> <span class="o">=</span> <span class="n">form</span><span class="o">.</span><span class="n">cleaned_data</span><span class="p">[</span><span class="s">'stripe_token'</span><span class="p">],</span>
+</span><span class="line">              <span class="n">plan</span><span class="o">=</span><span class="s">"gold"</span><span class="p">,</span>
+</span><span class="line">            <span class="p">)</span>
+</span><span class="line">
+</span><span class="line">            <span class="n">cd</span> <span class="o">=</span> <span class="n">form</span><span class="o">.</span><span class="n">cleaned_data</span>
+</span><span class="line">            <span class="k">try</span><span class="p">:</span>
+</span><span class="line">                <span class="n">user</span> <span class="o">=</span> <span class="n">User</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">cd</span><span class="p">[</span><span class="s">'name'</span><span class="p">],</span> <span class="n">cd</span><span class="p">[</span><span class="s">'email'</span><span class="p">],</span> <span class="n">cd</span><span class="p">[</span><span class="s">'password'</span><span class="p">],</span>
+</span><span class="line">                   <span class="n">cd</span><span class="p">[</span><span class="s">'last_4_digits'</span><span class="p">])</span>
+</span><span class="line">
+</span><span class="line">                <span class="k">if</span> <span class="n">customer</span><span class="p">:</span>
+</span><span class="line">                    <span class="n">user</span><span class="o">.</span><span class="n">stripe_id</span> <span class="o">=</span> <span class="n">customer</span><span class="o">.</span><span class="n">id</span>
+</span><span class="line">                    <span class="n">user</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+</span><span class="line">                <span class="k">else</span><span class="p">:</span>
+</span><span class="line">                    <span class="n">UnpaidUsers</span><span class="p">(</span><span class="n">email</span><span class="o">=</span><span class="n">cd</span><span class="p">[</span><span class="s">'email'</span><span class="p">])</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+</span><span class="line">
+</span><span class="line">            <span class="k">except</span> <span class="n">IntegrityError</span><span class="p">:</span>
+</span><span class="line">                <span class="n">form</span><span class="o">.</span><span class="n">addError</span><span class="p">(</span><span class="n">cd</span><span class="p">[</span><span class="s">'email'</span><span class="p">]</span> <span class="o">+</span> <span class="s">' is already a member'</span><span class="p">)</span>
+</span><span class="line">            <span class="k">else</span><span class="p">:</span>
+</span><span class="line">                <span class="n">request</span><span class="o">.</span><span class="n">session</span><span class="p">[</span><span class="s">'user'</span><span class="p">]</span> <span class="o">=</span> <span class="n">user</span><span class="o">.</span><span class="n">pk</span>
+</span><span class="line">                <span class="k">return</span> <span class="n">HttpResponseRedirect</span><span class="p">(</span><span class="s">'/'</span><span class="p">)</span>
+</span><span class="line">
+</span><span class="line">    <span class="k">else</span><span class="p">:</span>
+</span><span class="line">      <span class="n">form</span> <span class="o">=</span> <span class="n">UserForm</span><span class="p">()</span>
+</span><span class="line">
+</span><span class="line">    <span class="k">return</span> <span class="n">render_to_response</span><span class="p">(</span>
+</span><span class="line">        <span class="s">'register.html'</span><span class="p">,</span>
+</span><span class="line">        <span class="p">{</span>
+</span><span class="line">          <span class="s">'form'</span><span class="p">:</span> <span class="n">form</span><span class="p">,</span>
+</span><span class="line">          <span class="s">'months'</span><span class="p">:</span> <span class="nb">range</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">12</span><span class="p">),</span>
+</span><span class="line">          <span class="s">'publishable'</span><span class="p">:</span> <span class="n">settings</span><span class="o">.</span><span class="n">STRIPE_PUBLISHABLE</span><span class="p">,</span>
+</span><span class="line">          <span class="s">'soon'</span><span class="p">:</span> <span class="n">soon</span><span class="p">(),</span>
+</span><span class="line">          <span class="s">'user'</span><span class="p">:</span> <span class="n">user</span><span class="p">,</span>
+</span><span class="line">          <span class="s">'years'</span><span class="p">:</span> <span class="nb">range</span><span class="p">(</span><span class="mi">2011</span><span class="p">,</span> <span class="mi">2036</span><span class="p">),</span>
+</span><span class="line">        <span class="p">},</span>
+</span><span class="line">        <span class="n">context_instance</span><span class="o">=</span><span class="n">RequestContext</span><span class="p">(</span><span class="n">request</span><span class="p">)</span>
+</span><span class="line">    <span class="p">)</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>This view first calls <code>Customer.create</code> which actually calls Stripe to handle the credit card processing. Then we create a new user. If we got a response back from Stripe we update the newly created customer with the <code>stripe_id</code>. If we don’t get a customer back (Stripe is down) we will add an entry to the <code>UnpaidUsers</code> table with the newly created customers email, so we can ask them to retry their credit card details later.</p>
+
+<p>The idea is that even if Stripe is down the user can still register and start using our site. We will just ask them again at a later date for the credit card info.</p>
+
+<blockquote><p>I understand this may be a bit of a contrived example, and it’s not the way I would implement such functionality if I had to, but the purpose is to demonstrate transactions.</p></blockquote>
+
+<p>Onward. Thinking about transactions, and keeping in mind that by default Django 1.6 gives us <code>AUTOCOMMIT</code> behavior for our database, let’s look at the database related code a little longer.</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="n">cd</span> <span class="o">=</span> <span class="n">form</span><span class="o">.</span><span class="n">cleaned_data</span>
+</span><span class="line"><span class="k">try</span><span class="p">:</span>
+</span><span class="line">    <span class="n">user</span> <span class="o">=</span> <span class="n">User</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">cd</span><span class="p">[</span><span class="s">'name'</span><span class="p">],</span> <span class="n">cd</span><span class="p">[</span><span class="s">'email'</span><span class="p">],</span> <span class="n">cd</span><span class="p">[</span><span class="s">'password'</span><span class="p">],</span> <span class="n">cd</span><span class="p">[</span><span class="s">'last_4_digits'</span><span class="p">])</span>
+</span><span class="line">
+</span><span class="line">    <span class="k">if</span> <span class="n">customer</span><span class="p">:</span>
+</span><span class="line">        <span class="n">user</span><span class="o">.</span><span class="n">stripe_id</span> <span class="o">=</span> <span class="n">customer</span><span class="o">.</span><span class="n">id</span>
+</span><span class="line">        <span class="n">user</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+</span><span class="line">    <span class="k">else</span><span class="p">:</span>
+</span><span class="line">        <span class="n">UnpaidUsers</span><span class="p">(</span><span class="n">email</span><span class="o">=</span><span class="n">cd</span><span class="p">[</span><span class="s">'email'</span><span class="p">])</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+</span><span class="line">
+</span><span class="line"><span class="k">except</span> <span class="n">IntegrityError</span><span class="p">:</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Can you spot any issues?  Well what happens if the <code>UnpaidUsers(email=cd['email']).save()</code> line fails?</p>
+
+<p>You will have a user, registered in the system, that the system thinks has verified their credit card, but in reality they haven’t verified the card.</p>
+
+<p>We only want one of two outcomes:</p>
+
+<ol>
+<li>The user is created (in the database) and has a <code>stripe_id</code>.</li>
+<li>The user is created (in the database) and doesn’t have a <code>stripe_id</code> AND an associated row in the <code>UnpaidUsers</code> table with the same email address is generated.</li>
+</ol>
+
+
+<p><em>Which means we want the two separate database statements to either both commit or both rollback. A perfect case for the humble transaction.</em></p>
+
+<p>First, let’s write some tests to verify things behave the way we want them to.</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+<span class="line-number">14</span>
+<span class="line-number">15</span>
+<span class="line-number">16</span>
+<span class="line-number">17</span>
+<span class="line-number">18</span>
+<span class="line-number">19</span>
+<span class="line-number">20</span>
+<span class="line-number">21</span>
+<span class="line-number">22</span>
+<span class="line-number">23</span>
+<span class="line-number">24</span>
+<span class="line-number">25</span>
+<span class="line-number">26</span>
+<span class="line-number">27</span>
+<span class="line-number">28</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="nd">@mock.patch</span><span class="p">(</span><span class="s">'payments.models.UnpaidUsers.save'</span><span class="p">,</span> <span class="n">side_effect</span> <span class="o">=</span> <span class="n">IntegrityError</span><span class="p">)</span>
+</span><span class="line"><span class="k">def</span> <span class="nf">test_registering_user_when_strip_is_down_all_or_nothing</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">save_mock</span><span class="p">):</span>
+</span><span class="line">
+</span><span class="line">    <span class="c">#create the request used to test the view</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">request</span><span class="o">.</span><span class="n">session</span> <span class="o">=</span> <span class="p">{}</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">request</span><span class="o">.</span><span class="n">method</span><span class="o">=</span><span class="s">'POST'</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">request</span><span class="o">.</span><span class="n">POST</span> <span class="o">=</span> <span class="p">{</span><span class="s">'email'</span> <span class="p">:</span> <span class="s">'python@rocks.com'</span><span class="p">,</span>
+</span><span class="line">                         <span class="s">'name'</span> <span class="p">:</span> <span class="s">'pyRock'</span><span class="p">,</span>
+</span><span class="line">                         <span class="s">'stripe_token'</span> <span class="p">:</span> <span class="s">'...'</span><span class="p">,</span>
+</span><span class="line">                         <span class="s">'last_4_digits'</span> <span class="p">:</span> <span class="s">'4242'</span><span class="p">,</span>
+</span><span class="line">                         <span class="s">'password'</span> <span class="p">:</span> <span class="s">'bad_password'</span><span class="p">,</span>
+</span><span class="line">                         <span class="s">'ver_password'</span> <span class="p">:</span> <span class="s">'bad_password'</span><span class="p">,</span>
+</span><span class="line">                        <span class="p">}</span>
+</span><span class="line">
+</span><span class="line">    <span class="c">#mock out stripe  and ask it to throw a connection error</span>
+</span><span class="line">    <span class="k">with</span> <span class="n">mock</span><span class="o">.</span><span class="n">patch</span><span class="p">(</span><span class="s">'stripe.Customer.create'</span><span class="p">,</span> <span class="n">side_effect</span> <span class="o">=</span>
+</span><span class="line">                    <span class="n">socket</span><span class="o">.</span><span class="n">error</span><span class="p">(</span><span class="s">"can't connect to stripe"</span><span class="p">))</span> <span class="k">as</span> <span class="n">stripe_mock</span><span class="p">:</span>
+</span><span class="line">
+</span><span class="line">        <span class="c">#run the test</span>
+</span><span class="line">        <span class="n">resp</span> <span class="o">=</span> <span class="n">register</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">request</span><span class="p">)</span>
+</span><span class="line">
+</span><span class="line">        <span class="c">#assert there is no record in the database without stripe id.</span>
+</span><span class="line">        <span class="n">users</span> <span class="o">=</span> <span class="n">User</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="n">email</span><span class="o">=</span><span class="s">"python@rocks.com"</span><span class="p">)</span>
+</span><span class="line">        <span class="bp">self</span><span class="o">.</span><span class="n">assertEquals</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">users</span><span class="p">),</span> <span class="mi">0</span><span class="p">)</span>
+</span><span class="line">
+</span><span class="line">        <span class="c">#check the associated table also didn't get updated</span>
+</span><span class="line">        <span class="n">unpaid</span> <span class="o">=</span> <span class="n">UnpaidUsers</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="n">email</span><span class="o">=</span><span class="s">"python@rocks.com"</span><span class="p">)</span>
+</span><span class="line">        <span class="bp">self</span><span class="o">.</span><span class="n">assertEquals</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">unpaid</span><span class="p">),</span> <span class="mi">0</span><span class="p">)</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>The decorator at the top of the test is a mock that will throw an ‘IntegrityError’ when we try to save to the <code>UnpaidUsers</code> table.</p>
+
+<p>This is to answer the question, “What happens if the <code>UnpaidUsers(email=cd['email']).save()</code> line fails?” The next bit of code just creates a mocked session, with the appropriate info we need for our registration function. And then the <code>with mock.patch</code> forces the system to believe that Stripe is down … finally we get to the test.</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="n">resp</span> <span class="o">=</span> <span class="n">register</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">request</span><span class="p">)</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>The above line just calls our register view function passing in the mocked request. Then we just check to ensure the tables are not updated:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="c">#assert there is no record in the database without stripe_id.</span>
+</span><span class="line"><span class="n">users</span> <span class="o">=</span> <span class="n">User</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="n">email</span><span class="o">=</span><span class="s">"python@rocks.com"</span><span class="p">)</span>
+</span><span class="line"><span class="bp">self</span><span class="o">.</span><span class="n">assertEquals</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">users</span><span class="p">),</span> <span class="mi">0</span><span class="p">)</span>
+</span><span class="line">
+</span><span class="line"><span class="c">#check the associated table also didn't get updated</span>
+</span><span class="line"><span class="n">unpaid</span> <span class="o">=</span> <span class="n">UnpaidUsers</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="n">email</span><span class="o">=</span><span class="s">"python@rocks.com"</span><span class="p">)</span>
+</span><span class="line"><span class="bp">self</span><span class="o">.</span><span class="n">assertEquals</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">unpaid</span><span class="p">),</span> <span class="mi">0</span><span class="p">)</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>So it should fail if we run the test:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="o">======================================================================</span>
+</span><span class="line">FAIL: test_registering_user_when_strip_is_down_all_or_nothing <span class="o">(</span>tests.payments.testViews.RegisterPageTests<span class="o">)</span>
+</span><span class="line">----------------------------------------------------------------------
+</span><span class="line">Traceback <span class="o">(</span>most recent call last<span class="o">)</span>:
+</span><span class="line">  File <span class="s2">"/Users/j1z0/.virtualenvs/django_1.6/lib/python2.7/site-packages/mock.py"</span>, line 1201, in patched
+</span><span class="line">    <span class="k">return </span>func<span class="o">(</span>*args, **keywargs<span class="o">)</span>
+</span><span class="line">  File <span class="s2">"/Users/j1z0/Code/RealPython/mvp_for_Adv_Python_Web_Book/tests/payments/testViews.py"</span>, line 266, in test_registering_user_when_strip_is_down_all_or_nothing
+</span><span class="line">    self.assertEquals<span class="o">(</span>len<span class="o">(</span>users<span class="o">)</span>, 0<span class="o">)</span>
+</span><span class="line">AssertionError: 1 !<span class="o">=</span> 0
+</span><span class="line">
+</span><span class="line">----------------------------------------------------------------------
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Nice. Seems funny to say but that’s exactly what we wanted. <em>Remember: we’re practicing TDD here.</em> The error message tells us that the User is indeed being stored in the database – which is exactly what we don’t want because they did not pay!</p>
+
+<p>Transactions to the rescue …</p>
+
+<a name="Transactions"/>
+<h2>Transactions</h2>
+
+<p>There are actually several ways to create transactions in Django 1.6.</p>
+
+<p>Let’s go through a few.</p>
+
+<a name="The.recommended.way"/>
+<h3>The recommended way</h3>
+
+<p>According to Django 1.6 <a href="https://docs.djangoproject.com/en/1.6/topics/db/transactions/">documentation</a>, “Django provides a single API to control database transactions. … Atomicity is the defining property of database transactions. atomic allows us to create a block of code within which the atomicity on the database is guaranteed. If the block of code is  successfully completed, the changes are committed to the database. If there is an exception, the changes are rolled back.”</p>
+
+<p>Atomic can be used as both a decorator or as a context_manager.  So if we use it as a context manager, the code in our register function would look like this:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+<span class="line-number">14</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="kn">from</span> <span class="nn">django.db</span> <span class="kn">import</span> <span class="n">transaction</span>
+</span><span class="line">
+</span><span class="line"><span class="k">try</span><span class="p">:</span>
+</span><span class="line">    <span class="k">with</span> <span class="n">transaction</span><span class="o">.</span><span class="n">atomic</span><span class="p">():</span>
+</span><span class="line">        <span class="n">user</span> <span class="o">=</span> <span class="n">User</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">cd</span><span class="p">[</span><span class="s">'name'</span><span class="p">],</span> <span class="n">cd</span><span class="p">[</span><span class="s">'email'</span><span class="p">],</span> <span class="n">cd</span><span class="p">[</span><span class="s">'password'</span><span class="p">],</span> <span class="n">cd</span><span class="p">[</span><span class="s">'last_4_digits'</span><span class="p">])</span>
+</span><span class="line">
+</span><span class="line">        <span class="k">if</span> <span class="n">customer</span><span class="p">:</span>
+</span><span class="line">            <span class="n">user</span><span class="o">.</span><span class="n">stripe_id</span> <span class="o">=</span> <span class="n">customer</span><span class="o">.</span><span class="n">id</span>
+</span><span class="line">            <span class="n">user</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+</span><span class="line">        <span class="k">else</span><span class="p">:</span>
+</span><span class="line">            <span class="n">UnpaidUsers</span><span class="p">(</span><span class="n">email</span><span class="o">=</span><span class="n">cd</span><span class="p">[</span><span class="s">'email'</span><span class="p">])</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+</span><span class="line">
+</span><span class="line"><span class="k">except</span> <span class="n">IntegrityError</span><span class="p">:</span>
+</span><span class="line">    <span class="n">form</span><span class="o">.</span><span class="n">addError</span><span class="p">(</span><span class="n">cd</span><span class="p">[</span><span class="s">'email'</span><span class="p">]</span> <span class="o">+</span> <span class="s">' is already a member'</span><span class="p">)</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Note the line <code>with transaction.atomic()</code>. All code inside that block will be executed inside a transaction. So if we re-run our tests, they all should pass! Remember a transaction is a single unit of work, so everything inside the context manager gets rolled back together when the <code>UnpaidUsers</code> call fails.</p>
+
+<a name="Using.a.decorator"/>
+<h3>Using a decorator</h3>
+
+<p>We can also try adding atomic as a decorator.</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+<span class="line-number">14</span>
+<span class="line-number">15</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="nd">@transaction.atomic</span><span class="p">():</span>
+</span><span class="line"><span class="k">def</span> <span class="nf">register</span><span class="p">(</span><span class="n">request</span><span class="p">):</span>
+</span><span class="line">    <span class="o">...</span><span class="n">snip</span><span class="o">....</span>
+</span><span class="line">
+</span><span class="line">    <span class="k">try</span><span class="p">:</span>
+</span><span class="line">        <span class="n">user</span> <span class="o">=</span> <span class="n">User</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">cd</span><span class="p">[</span><span class="s">'name'</span><span class="p">],</span> <span class="n">cd</span><span class="p">[</span><span class="s">'email'</span><span class="p">],</span> <span class="n">cd</span><span class="p">[</span><span class="s">'password'</span><span class="p">],</span> <span class="n">cd</span><span class="p">[</span><span class="s">'last_4_digits'</span><span class="p">])</span>
+</span><span class="line">
+</span><span class="line">        <span class="k">if</span> <span class="n">customer</span><span class="p">:</span>
+</span><span class="line">            <span class="n">user</span><span class="o">.</span><span class="n">stripe_id</span> <span class="o">=</span> <span class="n">customer</span><span class="o">.</span><span class="n">id</span>
+</span><span class="line">            <span class="n">user</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+</span><span class="line">        <span class="k">else</span><span class="p">:</span>
+</span><span class="line">                <span class="n">UnpaidUsers</span><span class="p">(</span><span class="n">email</span><span class="o">=</span><span class="n">cd</span><span class="p">[</span><span class="s">'email'</span><span class="p">])</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+</span><span class="line">
+</span><span class="line">    <span class="k">except</span> <span class="n">IntegrityError</span><span class="p">:</span>
+</span><span class="line">        <span class="n">form</span><span class="o">.</span><span class="n">addError</span><span class="p">(</span><span class="n">cd</span><span class="p">[</span><span class="s">'email'</span><span class="p">]</span> <span class="o">+</span> <span class="s">' is already a member'</span><span class="p">)</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>If we re-run our tests, they will fail with the same error we had before.</p>
+
+<p>Why is that? Why didn’t the transaction roll back correctly? The reason is because <code>transaction.atomic</code> is looking for some sort of Exception and well, we caught that error (i.e. the <code>IntegrityError</code> in our try except block), so <code>transaction.atomic</code> never saw it and thus the standard <code>AUTOCOMMIT</code> functionality took over.</p>
+
+<p>But of course removing the try except will cause the exception to just be thrown up the call chain and most likely blow up somewhere else. So we can’t do that either.</p>
+
+<p>So the trick is to put the atomic context manager inside of the try except block which is what we did in our first solution.  Looking at the correct code again:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+<span class="line-number">14</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="kn">from</span> <span class="nn">django.db</span> <span class="kn">import</span> <span class="n">transaction</span>
+</span><span class="line">
+</span><span class="line"><span class="k">try</span><span class="p">:</span>
+</span><span class="line">    <span class="k">with</span> <span class="n">transaction</span><span class="o">.</span><span class="n">atomic</span><span class="p">():</span>
+</span><span class="line">        <span class="n">user</span> <span class="o">=</span> <span class="n">User</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">cd</span><span class="p">[</span><span class="s">'name'</span><span class="p">],</span> <span class="n">cd</span><span class="p">[</span><span class="s">'email'</span><span class="p">],</span> <span class="n">cd</span><span class="p">[</span><span class="s">'password'</span><span class="p">],</span> <span class="n">cd</span><span class="p">[</span><span class="s">'last_4_digits'</span><span class="p">])</span>
+</span><span class="line">
+</span><span class="line">        <span class="k">if</span> <span class="n">customer</span><span class="p">:</span>
+</span><span class="line">            <span class="n">user</span><span class="o">.</span><span class="n">stripe_id</span> <span class="o">=</span> <span class="n">customer</span><span class="o">.</span><span class="n">id</span>
+</span><span class="line">            <span class="n">user</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+</span><span class="line">        <span class="k">else</span><span class="p">:</span>
+</span><span class="line">            <span class="n">UnpaidUsers</span><span class="p">(</span><span class="n">email</span><span class="o">=</span><span class="n">cd</span><span class="p">[</span><span class="s">'email'</span><span class="p">])</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+</span><span class="line">
+</span><span class="line"><span class="k">except</span> <span class="n">IntegrityError</span><span class="p">:</span>
+</span><span class="line">    <span class="n">form</span><span class="o">.</span><span class="n">addError</span><span class="p">(</span><span class="n">cd</span><span class="p">[</span><span class="s">'email'</span><span class="p">]</span> <span class="o">+</span> <span class="s">' is already a member'</span><span class="p">)</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>When <code>UnpaidUsers</code> fires the <code>IntegrityError</code> the <code>transaction.atomic()</code> context manager will catch it and perform the rollback. By the time our code executes in the exception handler, (i.e. the <code>form.addError</code> line) the rollback will be done and we could safely make database calls if necessary. Also note any database calls before or after the <code>transaction.atomic()</code> context manager will be unaffected regardless of the final outcome of the context_manager.</p>
+
+<a name="Transaction.per.HTTP.Request"/>
+<h3>Transaction per HTTP Request</h3>
+
+<p>Django 1.6 (like 1.5) also allows you to operate in a “Transaction per request” mode. In this mode Django will automatically wrap your view function in a transaction. If the function throws an exception Django will roll back the transaction, otherwise it will commit the transaction.</p>
+
+<p>To get it setup you have to set <code>ATOMIC_REQUEST</code> to True in the database configuration for each database that you want to have this behavior.  So in our “settings.py” we make the change like this:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="n">DATABASES</span> <span class="o">=</span> <span class="p">{</span>
+</span><span class="line">    <span class="s">'default'</span><span class="p">:</span> <span class="p">{</span>
+</span><span class="line">        <span class="s">'ENGINE'</span><span class="p">:</span> <span class="s">'django.db.backends.sqlite3'</span><span class="p">,</span>
+</span><span class="line">        <span class="s">'NAME'</span><span class="p">:</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">SITE_ROOT</span><span class="p">,</span> <span class="s">'test.db'</span><span class="p">),</span>
+</span><span class="line">        <span class="s">'ATOMIC_REQUEST'</span><span class="p">:</span> <span class="bp">True</span><span class="p">,</span>
+</span><span class="line">    <span class="p">}</span>
+</span><span class="line"><span class="p">}</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>In practice this just behaves exactly as if you put the decorator on our view function. So it doesn’t serve our purposes here.</p>
+
+<p>It is however worthwhile to note that with both <code>ATOMIC_REQUESTS</code> and the <code>@transaction.atomic</code> decorator it is possible to still catch / handle those errors after they are thrown from the view.  In order to catch those errors you would have to implement some custom middleware, or you could override <a href="https://docs.djangoproject.com/en/dev/topics/http/urls/#error-handling">urls.hadler500</a> or by making a <a href="https://docs.djangoproject.com/en/dev/topics/http/views/#the-500-server-error-view">500.html template</a>.</p>
+
+<a name="SavePoints"/>
+<h2>SavePoints</h2>
+
+<p>Even though transactions are atomic they can be further broken down into savepoints. Think of savepoints as partial transactions.</p>
+
+<p>So if you have a transaction that takes four SQL statements to complete, you could create a savepoint after the second statement.  Once that savepoint is created, even if the 3rd or 4th statement fail you can do a partial rollback, getting rid of the 3rd and 4th statement but keeping the first two.</p>
+
+<p>So it’s basically like splitting a transaction into smaller lightweight transactions allowing you to do partial rollbacks or commits.</p>
+
+<blockquote><p>But do keep in mind if the main transaction where to get rolled back (perhaps because of an <code>IntegrityError</code> that was raised and not caught, then all savepoints will get rolled back as well).</p></blockquote>
+
+<p>Lets look at an example of how savepoints work.</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+<span class="line-number">14</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="nd">@transaction.atomic</span><span class="p">()</span>
+</span><span class="line"><span class="k">def</span> <span class="nf">save_points</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span><span class="n">save</span><span class="o">=</span><span class="bp">True</span><span class="p">):</span>
+</span><span class="line">
+</span><span class="line">    <span class="n">user</span> <span class="o">=</span> <span class="n">User</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="s">'jj'</span><span class="p">,</span><span class="s">'inception'</span><span class="p">,</span><span class="s">'jj'</span><span class="p">,</span><span class="s">'1234'</span><span class="p">)</span>
+</span><span class="line">    <span class="n">sp1</span> <span class="o">=</span> <span class="n">transaction</span><span class="o">.</span><span class="n">savepoint</span><span class="p">()</span>
+</span><span class="line">
+</span><span class="line">    <span class="n">user</span><span class="o">.</span><span class="n">name</span> <span class="o">=</span> <span class="s">'starting down the rabbit hole'</span>
+</span><span class="line">    <span class="n">user</span><span class="o">.</span><span class="n">stripe_id</span> <span class="o">=</span> <span class="mi">4</span>
+</span><span class="line">    <span class="n">user</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+</span><span class="line">
+</span><span class="line">    <span class="k">if</span> <span class="n">save</span><span class="p">:</span>
+</span><span class="line">        <span class="n">transaction</span><span class="o">.</span><span class="n">savepoint_commit</span><span class="p">(</span><span class="n">sp1</span><span class="p">)</span>
+</span><span class="line">    <span class="k">else</span><span class="p">:</span>
+</span><span class="line">        <span class="n">transaction</span><span class="o">.</span><span class="n">savepoint_rollback</span><span class="p">(</span><span class="n">sp1</span><span class="p">)</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Here the entire function is in a transaction. After creating a new user we create a savepoint and get a reference to the savepoint.  The next three statements-</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="n">user</span><span class="o">.</span><span class="n">name</span> <span class="o">=</span> <span class="s">'starting down the rabbit hole'</span>
+</span><span class="line"><span class="n">user</span><span class="o">.</span><span class="n">stripe_id</span> <span class="o">=</span> <span class="mi">4</span>
+</span><span class="line"><span class="n">user</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>-are not part of the existing savepoint, so they stand the chance of being part of the next <code>savepoint_rollback</code>, or <code>savepoint_commit</code>. In the case of a <code>savepoint_rollback</code>, the line <code>user = User.create('jj','inception','jj','1234')</code> will still be committed to the database even though the rest of the updates won’t.</p>
+
+<p>Put another way, these following two tests describe how the savepoints work:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+<span class="line-number">14</span>
+<span class="line-number">15</span>
+<span class="line-number">16</span>
+<span class="line-number">17</span>
+<span class="line-number">18</span>
+<span class="line-number">19</span>
+<span class="line-number">20</span>
+<span class="line-number">21</span>
+<span class="line-number">22</span>
+<span class="line-number">23</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="k">def</span> <span class="nf">test_savepoint_rollbacks</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+</span><span class="line">
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">save_points</span><span class="p">(</span><span class="bp">False</span><span class="p">)</span>
+</span><span class="line">
+</span><span class="line">    <span class="c">#verify that everything was stored</span>
+</span><span class="line">    <span class="n">users</span> <span class="o">=</span> <span class="n">User</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="n">email</span><span class="o">=</span><span class="s">"inception"</span><span class="p">)</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">assertEquals</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">users</span><span class="p">),</span> <span class="mi">1</span><span class="p">)</span>
+</span><span class="line">
+</span><span class="line">    <span class="c">#note the values here are from the original create call</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">assertEquals</span><span class="p">(</span><span class="n">users</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">stripe_id</span><span class="p">,</span> <span class="s">''</span><span class="p">)</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">assertEquals</span><span class="p">(</span><span class="n">users</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="s">'jj'</span><span class="p">)</span>
+</span><span class="line">
+</span><span class="line">
+</span><span class="line"><span class="k">def</span> <span class="nf">test_savepoint_commit</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">save_points</span><span class="p">(</span><span class="bp">True</span><span class="p">)</span>
+</span><span class="line">
+</span><span class="line">    <span class="c">#verify that everything was stored</span>
+</span><span class="line">    <span class="n">users</span> <span class="o">=</span> <span class="n">User</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="n">email</span><span class="o">=</span><span class="s">"inception"</span><span class="p">)</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">assertEquals</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">users</span><span class="p">),</span> <span class="mi">1</span><span class="p">)</span>
+</span><span class="line">
+</span><span class="line">    <span class="c">#note the values here are from the update calls</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">assertEquals</span><span class="p">(</span><span class="n">users</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">stripe_id</span><span class="p">,</span> <span class="s">'4'</span><span class="p">)</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">assertEquals</span><span class="p">(</span><span class="n">users</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="s">'starting down the rabbit hole'</span><span class="p">)</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Also after we commit or rollback a savepoint we can continue to do work in the same transaction.  And that work will be unaffected by the outcome of the previous savepoint.</p>
+
+<p>For example if we update our <code>save_points</code> function as such-</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+<span class="line-number">14</span>
+<span class="line-number">15</span>
+<span class="line-number">16</span>
+<span class="line-number">17</span>
+<span class="line-number">18</span>
+<span class="line-number">19</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="nd">@transaction.atomic</span><span class="p">()</span>
+</span><span class="line"><span class="k">def</span> <span class="nf">save_points</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span><span class="n">save</span><span class="o">=</span><span class="bp">True</span><span class="p">):</span>
+</span><span class="line">
+</span><span class="line">    <span class="n">user</span> <span class="o">=</span> <span class="n">User</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="s">'jj'</span><span class="p">,</span><span class="s">'inception'</span><span class="p">,</span><span class="s">'jj'</span><span class="p">,</span><span class="s">'1234'</span><span class="p">)</span>
+</span><span class="line">    <span class="n">sp1</span> <span class="o">=</span> <span class="n">transaction</span><span class="o">.</span><span class="n">savepoint</span><span class="p">()</span>
+</span><span class="line">
+</span><span class="line">    <span class="n">user</span><span class="o">.</span><span class="n">name</span> <span class="o">=</span> <span class="s">'starting down the rabbit hole'</span>
+</span><span class="line">    <span class="n">user</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+</span><span class="line">
+</span><span class="line">    <span class="n">user</span><span class="o">.</span><span class="n">stripe_id</span> <span class="o">=</span> <span class="mi">4</span>
+</span><span class="line">    <span class="n">user</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+</span><span class="line">
+</span><span class="line">    <span class="k">if</span> <span class="n">save</span><span class="p">:</span>
+</span><span class="line">        <span class="n">transaction</span><span class="o">.</span><span class="n">savepoint_commit</span><span class="p">(</span><span class="n">sp1</span><span class="p">)</span>
+</span><span class="line">    <span class="k">else</span><span class="p">:</span>
+</span><span class="line">        <span class="n">transaction</span><span class="o">.</span><span class="n">savepoint_rollback</span><span class="p">(</span><span class="n">sp1</span><span class="p">)</span>
+</span><span class="line">
+</span><span class="line">    <span class="n">user</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="s">'limbo'</span><span class="p">,</span><span class="s">'illbehere@forever'</span><span class="p">,</span><span class="s">'mind blown'</span><span class="p">,</span>
+</span><span class="line">           <span class="s">'1111'</span><span class="p">)</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>-regardless of whether <code>savepoint_commit</code> or <code>savepoint_rollback</code> was called the ‘limbo’ user will still be created successfully. Unless something else causes the entire transaction to be rolled back.</p>
+
+<a name="Nested.Transactions"/>
+<h2>Nested Transactions</h2>
+
+<p>In addition to manually specifying savepoints, with <code>savepoint()</code>, <code>savepoint_commit</code>, and <code>savepoint_rollback</code>, creating a nested Transaction will automatically create a savepoint for us, and roll it back if we get an error.</p>
+
+<p>Extending our example a bit further we get:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+<span class="line-number">14</span>
+<span class="line-number">15</span>
+<span class="line-number">16</span>
+<span class="line-number">17</span>
+<span class="line-number">18</span>
+<span class="line-number">19</span>
+<span class="line-number">20</span>
+<span class="line-number">21</span>
+<span class="line-number">22</span>
+<span class="line-number">23</span>
+<span class="line-number">24</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="nd">@transaction.atomic</span><span class="p">()</span>
+</span><span class="line"><span class="k">def</span> <span class="nf">save_points</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span><span class="n">save</span><span class="o">=</span><span class="bp">True</span><span class="p">):</span>
+</span><span class="line">
+</span><span class="line">    <span class="n">user</span> <span class="o">=</span> <span class="n">User</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="s">'jj'</span><span class="p">,</span><span class="s">'inception'</span><span class="p">,</span><span class="s">'jj'</span><span class="p">,</span><span class="s">'1234'</span><span class="p">)</span>
+</span><span class="line">    <span class="n">sp1</span> <span class="o">=</span> <span class="n">transaction</span><span class="o">.</span><span class="n">savepoint</span><span class="p">()</span>
+</span><span class="line">
+</span><span class="line">    <span class="n">user</span><span class="o">.</span><span class="n">name</span> <span class="o">=</span> <span class="s">'starting down the rabbit hole'</span>
+</span><span class="line">    <span class="n">user</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+</span><span class="line">
+</span><span class="line">    <span class="n">user</span><span class="o">.</span><span class="n">stripe_id</span> <span class="o">=</span> <span class="mi">4</span>
+</span><span class="line">    <span class="n">user</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+</span><span class="line">
+</span><span class="line">    <span class="k">if</span> <span class="n">save</span><span class="p">:</span>
+</span><span class="line">        <span class="n">transaction</span><span class="o">.</span><span class="n">savepoint_commit</span><span class="p">(</span><span class="n">sp1</span><span class="p">)</span>
+</span><span class="line">    <span class="k">else</span><span class="p">:</span>
+</span><span class="line">        <span class="n">transaction</span><span class="o">.</span><span class="n">savepoint_rollback</span><span class="p">(</span><span class="n">sp1</span><span class="p">)</span>
+</span><span class="line">
+</span><span class="line">    <span class="k">try</span><span class="p">:</span>
+</span><span class="line">        <span class="k">with</span> <span class="n">transaction</span><span class="o">.</span><span class="n">atomic</span><span class="p">():</span>
+</span><span class="line">            <span class="n">user</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="s">'limbo'</span><span class="p">,</span><span class="s">'illbehere@forever'</span><span class="p">,</span><span class="s">'mind blown'</span><span class="p">,</span>
+</span><span class="line">                   <span class="s">'1111'</span><span class="p">)</span>
+</span><span class="line">            <span class="k">if</span> <span class="ow">not</span> <span class="n">save</span><span class="p">:</span> <span class="k">raise</span> <span class="n">DatabaseError</span>
+</span><span class="line">    <span class="k">except</span> <span class="n">DatabaseError</span><span class="p">:</span>
+</span><span class="line">        <span class="k">pass</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Here we can see that after we deal with our savepoints, we are using the <code>transaction.atomic</code> context manager to encase our creation of the ‘limbo’ user. When that context manager is called, it is in effect creating a savepoint (because we are already in a transaction) and that savepoint will be committed or rolled back upon exiting the context manager.</p>
+
+<p>Thus the following two tests describe their behavior:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+<span class="line-number">14</span>
+<span class="line-number">15</span>
+<span class="line-number">16</span>
+<span class="line-number">17</span>
+<span class="line-number">18</span>
+<span class="line-number">19</span>
+<span class="line-number">20</span>
+<span class="line-number">21</span>
+<span class="line-number">22</span>
+<span class="line-number">23</span>
+<span class="line-number">24</span>
+<span class="line-number">25</span>
+<span class="line-number">26</span>
+<span class="line-number">27</span>
+<span class="line-number">28</span>
+<span class="line-number">29</span>
+<span class="line-number">30</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"> <span class="k">def</span> <span class="nf">test_savepoint_rollbacks</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+</span><span class="line">
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">save_points</span><span class="p">(</span><span class="bp">False</span><span class="p">)</span>
+</span><span class="line">
+</span><span class="line">    <span class="c">#verify that everything was stored</span>
+</span><span class="line">    <span class="n">users</span> <span class="o">=</span> <span class="n">User</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="n">email</span><span class="o">=</span><span class="s">"inception"</span><span class="p">)</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">assertEquals</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">users</span><span class="p">),</span> <span class="mi">1</span><span class="p">)</span>
+</span><span class="line">
+</span><span class="line">    <span class="c">#savepoint was rolled back so we should have original values</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">assertEquals</span><span class="p">(</span><span class="n">users</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">stripe_id</span><span class="p">,</span> <span class="s">''</span><span class="p">)</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">assertEquals</span><span class="p">(</span><span class="n">users</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="s">'jj'</span><span class="p">)</span>
+</span><span class="line">
+</span><span class="line">    <span class="c">#this save point was rolled back because of DatabaseError</span>
+</span><span class="line">    <span class="n">limbo</span> <span class="o">=</span> <span class="n">User</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="n">email</span><span class="o">=</span><span class="s">"illbehere@forever"</span><span class="p">)</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">assertEquals</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">limbo</span><span class="p">),</span><span class="mi">0</span><span class="p">)</span>
+</span><span class="line">
+</span><span class="line"><span class="k">def</span> <span class="nf">test_savepoint_commit</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">save_points</span><span class="p">(</span><span class="bp">True</span><span class="p">)</span>
+</span><span class="line">
+</span><span class="line">    <span class="c">#verify that everything was stored</span>
+</span><span class="line">    <span class="n">users</span> <span class="o">=</span> <span class="n">User</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="n">email</span><span class="o">=</span><span class="s">"inception"</span><span class="p">)</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">assertEquals</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">users</span><span class="p">),</span> <span class="mi">1</span><span class="p">)</span>
+</span><span class="line">
+</span><span class="line">    <span class="c">#savepoint was committed</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">assertEquals</span><span class="p">(</span><span class="n">users</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">stripe_id</span><span class="p">,</span> <span class="s">'4'</span><span class="p">)</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">assertEquals</span><span class="p">(</span><span class="n">users</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="s">'starting down the rabbit hole'</span><span class="p">)</span>
+</span><span class="line">
+</span><span class="line">    <span class="c">#save point was committed by exiting the context_manager without an exception</span>
+</span><span class="line">    <span class="n">limbo</span> <span class="o">=</span> <span class="n">User</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="n">email</span><span class="o">=</span><span class="s">"illbehere@forever"</span><span class="p">)</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">assertEquals</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">limbo</span><span class="p">),</span><span class="mi">1</span><span class="p">)</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>So in reality you can use either <code>atomic</code> or <code>savepoint</code> to create savepoints inside a transaction. With <code>atomic</code> you don’t have to worry explicitly about the commit / rollback, where as with <code>savepoint</code> you have full control over when that happens.</p>
+
+<a name="Conclusion"/>
+<h2>Conclusion</h2>
+
+<p>If you had any previous experience with earlier versions of Django transactions, you can see how much simpler the transaction model is. Also having <code>AUTOCOMMIT</code> on by default is a great example of “sane” defaults that Django and Python both pride themselves on delivering. For many systems you won’t need to deal directly with transactions, just let <code>AUTOCOMMIT</code> do its work. But if you do, hopefully this post will have given you the information you need to manage transactions in Django like a pro.</p>
+</div>
+
+
+      </div></body></html>

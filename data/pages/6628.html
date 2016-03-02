@@ -1,0 +1,317 @@
+<html><body><div><div class="content html_format">
+      <a href="http://habrahabr.ru/company/itinvest/blog/266623/"><img src="https://habrastorage.org/files/ecc/936/679/ecc9366797aa47e2a868041d4cd98c7b.png"/></a>
+<p>
+В предыдущих статьях мы говорили о том, что такое событийно-ориентированная система бэктестинга, разобрали </p><a href="http://habrahabr.ru/company/itinvest/blog/263097/">иерархию классов</a><p>, которую необходимо для нее разработать, и обсудили то, как подобные системы </p><a href="http://habrahabr.ru/company/itinvest/blog/264141/">используют рыночные данные</a><p> в контексте исторического тестирования и для «живой» работы на бирже.
+</p><p>
+Сегодня мы опишем объект NaivePortfolio, который отвечает за отслеживание позиций в портфолио и на основе поступающих сигналов генерирует приказы с ограниченным количеством акций.</p><a name="habracut"/>
+
+<h4>Отслеживание позиций и работа с ордерами</h4><p>
+Система управления ордерами является одним из самых сложных компонентов событийно-ориентированного бэктестера. Ее роль заключается в отслеживании текущих рыночных позиций и их рыночной стоимости. Таким образом на основе данных, полученных из соответствующего компонента бэктестера, рассчитывается ликвидационная стоимость позиции.
+</p><p>
+Помимо анализа позиций компонент портфолио должен учитывать факторы риска и уметь применять техники определения размера позиций — это нужно для оптимизации ордеров, отправляемых на рынок через торговую систему брокера.
+</p><p>
+Объект </p><code>Portfolio</code><p> должен уметь обрабатывать объекты </p><code>SignalEvent</code><p>, генерировать объекты </p><code>OrderEvent</code><p> и интерпретировать объекты </p><code>FillEvent</code><p>, чтобы обновлять позиции. Таким образом, нет ничего удивительного в том, что объекты Portfolio обычно являются наиболее объемными элементами системы бэктестинта с точки зрения строк кода.
+
+</p><h4>Реализация</h4><p>
+Создадим новый файл portfolio.py и импортируем необходимые библиотеки — те же реализации абстрактного базового класса, что мы использовали ранее. Нужно импортировать функцию floor из библиотеки math, чтобы генерировать целочисленные приказы. Также необходимы объекты </p><code>FillEvent</code><p> и </p><code>OrderEvent</code><p> — объект </p><code>Portfolio</code><p> обрабатывает каждый из них.
+
+</p><pre><code class="python"># portfolio.py
+
+import datetime
+import numpy as np
+import pandas as pd
+import Queue
+
+from abc import ABCMeta, abstractmethod
+from math import floor
+
+from event import FillEvent, OrderEvent
+</code></pre><p>
+Создается абстрактный базовый класс для Portfolio и два абстрактных метода </p><code>update_signal</code><p> и </p><code>update_fill</code><p>. Первый обрабатывает новые торговые сигналы, которые забираются из очереди событий, а последний работает с информацией об исполненных ордерах, получаемых из движка объекта-обработчика.
+
+</p><pre><code class="python"># portfolio.py
+
+class Portfolio(object):
+    """
+    Класс Portfolio обрабатывает позиции и рыночную стоимость всех инструментов на основе баров: секунда, минута, 5 минут, 30 мин, 60 минут или день.
+    """
+
+    __metaclass__ = ABCMeta
+
+    @abstractmethod
+    def update_signal(self, event):
+        """
+        Использует SignalEvent для генерации новых ордеров в соответствие с логикой портфолио.
+
+        """
+        raise NotImplementedError("Should implement update_signal()")
+
+    @abstractmethod
+    def update_fill(self, event):
+        """
+        Обновляет текущие позиции и зарезервированные средства в портфолио на основе      FillEvent.
+
+        """
+        raise NotImplementedError("Should implement update_fill()")
+
+</code></pre><p>
+Главный объект сегодняшней статьи — класс </p><code>NaivePortfolio</code><p>. Он создан для расчета размеров позиций и зарезервированных средств и обработки торговых приказов в простой манере — просто отправляя их в брокерскую торговую систему с заданным количеством акций. В реальном мире все сложнее, но подобные упрощения помогают понять, как должна функционировать система обработки приказов портфолио в событийно-ориентированных продуктах.
+
+</p><code>NaivePortfolio</code><p> требует величину начального капитала — в примере она установлена на $100000. Также необходимо задать день и время начала работы.
+</p><p>
+Портфолио содержит </p><code>all_positions</code><p> и </p><code>current_positions</code><p>. Первый элемент хранит список всех предыдущий позиций, записанных по временной метке рыночного события. Позиция — это просто количество финансвого инструмента. Негативные позиции означают, что акции проданы «в короткую». Второй элемент хранит словарь, содержащий текущие позиции для последнего обновления баров.
+</p><p>
+В добавок к элементами, отвечающим за позиции, в портфолио хранится информация о текущей рыночной стоимости открытых позиций (holdings). «Текущая рыночная стоимость» в данном случае означает цену закрытия, полученную из текущего бара, которая является приблизительной, но достаточно правдоподобной на данный момент. Элемент </p><code>all_holdings</code><p> хранит исторический список стоимости всех позиций, а </p><code>current_holdings</code><p> хранит наиболее свежий словарь значений:
+
+</p><pre><code class="python"># portfolio.py
+
+class NaivePortfolio(Portfolio):
+    """
+    
+Объект NaivePortfolio создан для слепой (т.е. без всякого риск-менеджмента)  отправки приказов на покупку/продажу установленного количество акций, в брокерскую систему. Используется для тестирования простых стратегий вроде BuyAndHoldStrategy.
+    """
+    
+    def __init__(self, bars, events, start_date, initial_capital=100000.0):
+        """
+        Инициализирует портфолио на основе информации из баров и очереди событий. Также включает дату и время начала и размер начального капитала (в долларах, если не указана другая валюта).
+
+        Parameters:
+        bars - The DataHandler object with current market data.
+        events - The Event Queue object.
+        start_date - The start date (bar) of the portfolio.
+        initial_capital - The starting capital in USD.
+        """
+        self.bars = bars
+        self.events = events
+        self.symbol_list = self.bars.symbol_list
+        self.start_date = start_date
+        self.initial_capital = initial_capital
+        
+        self.all_positions = self.construct_all_positions()
+        self.current_positions = dict( (k,v) for k, v in [(s, 0) for s in self.symbol_list] )
+
+        self.all_holdings = self.construct_all_holdings()
+        self.current_holdings = self.construct_current_holdings()
+</code></pre><p>
+Следующий метод construct_all_positions просто создает словарь для каждого финансового инструмента, устанавливает каждое значение в ноль а затем добавляет ключ даты и времени. Используется генераторы словарей Python.
+
+</p><pre><code class="python"># portfolio.py
+
+    def construct_all_positions(self):
+        """
+        Конструирует список позиций, используя start_date для определения момента, с которой должен начинаться временной индекс.
+        """
+        d = dict( (k,v) for k, v in [(s, 0) for s in self.symbol_list] )
+        d['datetime'] = self.start_date
+        return [d]
+</code></pre><p>
+Метож </p><code>construct_all_hldings</code><p> похож на описанный выше, но добавляет некоторые дополнительные ключи для свободных средств, комиссий и остаток денег на счету после совершения сделок, общую уплаченную комиссию и общий объём имеющихся активов (открытые позиции и деньги). Короткие позиции рассматриваются как «негативные». Величины </p><code>starting cash</code><p> и </p><code>total account</code><p> равняются первоначальному капиталу:
+
+</p><pre><code class="python"># portfolio.py
+
+    def construct_all_holdings(self):
+        """
+        Конструирует список величин текущей стоимости позиций, используя start_date для определения момента, с которой должен начинаться временной индекс.
+        """
+        d = dict( (k,v) for k, v in [(s, 0.0) for s in self.symbol_list] )
+        d['datetime'] = self.start_date
+        d['cash'] = self.initial_capital
+        d['commission'] = 0.0
+        d['total'] = self.initial_capital
+        return [d]
+</code></pre><p>
+Метод </p><code>construct_current_holdings</code><p> практически идентичен предыдущему, за исключением того, что не «оборачивает» словарь в список:
+
+</p><pre><code class="python"># portfolio.py
+
+    def construct_current_holdings(self):
+        """
+        Конструирует словарь, который будет содержать мгновенное значение портфолио по всем инструментам.
+      
+        """
+        d = dict( (k,v) for k, v in [(s, 0.0) for s in self.symbol_list] )
+        d['cash'] = self.initial_capital
+        d['commission'] = 0.0
+        d['total'] = self.initial_capital
+        return d
+</code></pre><p>
+На каждом «ударе сердца», то есть при каждом запросе рыночных данных из объекта </p><code>DataHandler</code><p>, портфолио должно обновлять текущее рыночное значение удерживаемых позиций. В сценарии реального трейдинга эту информацию можно загрузать и парсить напрямую из брокерской системы, но для системы бэктестинга необходимо отдельно высчитывать эти значения.
+</p><p>
+К сожалению, из-за спредов бидов/асков и ликвидности, такой вещи, как «текущее рыночное значение» не существует. Поэтому необходимо его оценивать умножая количество удерживаемого актива на «цену». В нашем примере используется цена закрытия предыдущего полученного бара.Для стратегий торговли внутри дня это довольно реалистичный подход, но для торговли на временных промежутках больше дня, все уже не столь правдоподобно, поскольку цена открытия может значительно отличаться от цены открытия следующего бара.
+</p><p>
+Метод </p><code>update_timeindex</code><p> отвечает за обработку текущей стоимости новых позиций. Он получает последние цены из обработчика рыночных данных и создает новый словарь инструментов, которые представляют текущие позиции, и приравнивая «новые» позиции к «текущим» позициям. Эта схема меняется только при получении </p><code>FillEvent</code><p>. После этого метод присоединяет набор текущих позиций к списку </p><code>all_positions</code><p>. Затем величины текущей стоимости обновляются схожим образом за исключением того, что рыночное значение вычисляется с помощью умножения числа текущих позиций на цену закрытия последнего бара (</p><code>self.current_positions[s] * bars[s][0][5]</code><p>). Новые полученные значения добавляются к списку </p><code>all_holdings</code><p>:
+
+</p><pre><code class="python"># portfolio.py
+
+    def update_timeindex(self, event):
+        """
+        Добавляет новую запись в матрицу позиций для текущего бара рыночных данных. Отражает ПРЕДЫДУЩИЙ бар, т.е. на этой стадии известны все рыночные данные (OLHCVI). Используется MarketEvent из очередий событий.
+
+        """
+        bars = {}
+        for sym in self.symbol_list:
+            bars[sym] = self.bars.get_latest_bars(sym, N=1)
+
+        # Update positions
+        dp = dict( (k,v) for k, v in [(s, 0) for s in self.symbol_list] )
+        dp['datetime'] = bars[self.symbol_list[0]][0][1]
+
+        for s in self.symbol_list:
+            dp[s] = self.current_positions[s]
+
+        # Append the current positions
+        self.all_positions.append(dp)
+
+        # Update holdings
+        dh = dict( (k,v) for k, v in [(s, 0) for s in self.symbol_list] )
+        dh['datetime'] = bars[self.symbol_list[0]][0][1]
+        dh['cash'] = self.current_holdings['cash']
+        dh['commission'] = self.current_holdings['commission']
+        dh['total'] = self.current_holdings['cash']
+
+        for s in self.symbol_list:
+            # Approximation to the real value
+            market_value = self.current_positions[s] * bars[s][0][5]
+            dh[s] = market_value
+            dh['total'] += market_value
+
+        # Append the current holdings
+        self.all_holdings.append(dh)
+</code></pre><p>
+Метод </p><code>update_positions_from_fill</code><p> определяет, каким конкретно был </p><code>FillEvent</code><p> (покупка или продажа), а затем обновляет словарь current_positions, добавляя или удаляя соответствующее количество акций:
+
+</p><pre><code class="python"># portfolio.py
+
+    def update_positions_from_fill(self, fill):
+        """
+        Обрабатывает объект FillEvent и обновляет матрицу позиций так, чтобы она отражала новые позиции.
+       
+        Parameters:
+        fill - The FillEvent object to update the positions with.
+        """
+        # Check whether the fill is a buy or sell
+        fill_dir = 0
+        if fill.direction == 'BUY':
+            fill_dir = 1
+        if fill.direction == 'SELL':
+            fill_dir = -1
+
+        #Список позиций обновляется новыми значениями
+        self.current_positions[fill.symbol] += fill_dir*fill.quantity
+</code></pre><p>
+Соответствующий метод </p><code>update_holdings_from_fill</code><p> похож на описанный выше, но обновляет величину </p><i>holdings</i><p>. Для симуляции стоимости исполнения, метод не использует цену, связанную с </p><code>FillEvent</code><p>. Почему так просиходит? В среде бэктестинга цена исполнения на самом деле неизвестна, а значит ее нужно предположить. Таким образом, цена исполнения устанавливается как «текущая рыночная цена» (цена закрытия последнего бара). Значение текущих позиций для конкретного инструмента потом приравнивается к цене исполнения, умноженной на количество ценных бумаг в ордере.
+</p><p>
+После определения цены исполнения текущее значение holdings, доступных средств и общих величин могут обновляться. Также обновляется общая комиссия:
+
+</p><pre><code class="python"># portfolio.py
+
+    def update_holdings_from_fill(self, fill):
+        """
+        Использует объект FillEvent и обновляет матрицу holdings для отображения изменений.
+
+    Параметры:
+        fill - Объект FillEvent, который используется для обновлений.
+        """
+        # Check whether the fill is a buy or sell
+        fill_dir = 0
+        if fill.direction == 'BUY':
+            fill_dir = 1
+        if fill.direction == 'SELL':
+            fill_dir = -1
+
+        # Update holdings list with new quantities
+        fill_cost = self.bars.get_latest_bars(fill.symbol)[0][5]  # Close price
+        cost = fill_dir * fill_cost * fill.quantity
+        self.current_holdings[fill.symbol] += cost
+        self.current_holdings['commission'] += fill.commission
+        self.current_holdings['cash'] -= (cost + fill.commission)
+        self.current_holdings['total'] -= (cost + fill.commission)
+</code></pre><p>
+Далее реализуется абстрактный метод </p><code>update_fill</code><p> из абстрактного базового класса </p><code>Portfolio</code><p>. Он просто исполняет два предыдущих метода </p><code>update_positions_from_fill</code><p> и </p><code>update_holdings_from_fill</code><p>:
+
+</p><pre><code class="python"># portfolio.py
+
+    def update_fill(self, event):
+        """
+        Обновляет текущие позиции в портфолио и их рыночную стоимость на основе FillEvent.
+     
+        """
+        if event.type == 'FILL':
+            self.update_positions_from_fill(event)
+            self.update_holdings_from_fill(event)
+
+</code></pre><p>
+Объект Portfolio должен не только обратывать события </p><code>FillEvent</code><p>, но еще и генерировать </p><code>OrderEvent</code><p> при получении сигнальных событий </p><code>SignalEvent</code><p>. Метод generate_naive_order использует сигнал на открытие длинной или короткой позиции, целевой финансовый инструмент и затем посылает соответствующий ордер со 100 акциями нужного актива. 100 здесь — произвольное значение. В ходе реальной торговли оно было бы определено системой риск-менеджмента или модулем расчета величины позиций. Однако в </p><code>NaivePortfolio</code><p> можно «наивно» посылать приказы прямо после получения сигналов без всякого риск-менеджмента.
+</p><p>
+Метод обрабатывает открытие длинных и коротких позиций, а также выход из них на основе текущего количество и конкретного финансового инструмента. Затем генерируется соответствующий объект </p><code>OrderEvent</code><p>:
+
+</p><pre><code class="python"># portfolio.py
+
+    def generate_naive_order(self, signal):
+        """
+        Просто передает OrderEvent как постоянное число акций на основе сигнального объекта без анализа рисков.
+       
+        Параметры:
+        signal - Сигнальная информация SignalEvent.
+        """
+        order = None
+
+        symbol = signal.symbol
+        direction = signal.signal_type
+        strength = signal.strength
+
+        mkt_quantity = floor(100 * strength)
+        cur_quantity = self.current_positions[symbol]
+        order_type = 'MKT'
+
+        if direction == 'LONG' and cur_quantity == 0:
+            order = OrderEvent(symbol, order_type, mkt_quantity, 'BUY')
+        if direction == 'SHORT' and cur_quantity == 0:
+            order = OrderEvent(symbol, order_type, mkt_quantity, 'SELL')   
+    
+        if direction == 'EXIT' and cur_quantity &gt; 0:
+            order = OrderEvent(symbol, order_type, abs(cur_quantity), 'SELL')
+        if direction == 'EXIT' and cur_quantity &lt; 0:
+            order = OrderEvent(symbol, order_type, abs(cur_quantity), 'BUY')
+        return order
+</code></pre><p>
+Метод </p><code>update_signal</code><p> просто вызывает описанный выше метод и добавляет сгенерированный приказ в очередь событий.
+
+</p><pre><code class="python"># portfolio.py
+
+    def update_signal(self, event):
+        """
+        На основе SignalEvent генерирует новые приказы в соответствии с логикой портфолио.
+      
+        """
+        if event.type == 'SIGNAL':
+            order_event = self.generate_naive_order(event)
+            self.events.put(order_event)
+</code></pre><p>
+Финальный метод в </p><code>NaivePortfolio</code><p> — это генерации кривой капитала. Создается поток с информацией о прибыли, что полезно для расчетов производительности стратегии, затем кривая нормализуется на процентной основе. Первоначальный размер счета устанавливается раным 1.0:
+
+</p><pre><code class="python"># portfolio.py
+
+    def create_equity_curve_dataframe(self):
+        """
+        Создает pandas DataFrame из списка словарей all_holdings.
+
+        """
+        curve = pd.DataFrame(self.all_holdings)
+        curve.set_index('datetime', inplace=True)
+        curve['returns'] = curve['total'].pct_change()
+        curve['equity_curve'] = (1.0+curve['returns']).cumprod()
+        self.equity_curve = curve
+</code></pre><p>
+Объект </p><code>Portfolio</code><p> — это наиболее сложный аспект всего событийно-ориентированного бэктестера. Несмотря на сложность, обработка позиций здесь реализована на очень простом уровне. 
+</p><p>
+В следующей статье мы рассмотрим последнюю часть событийно-ориентированной системы исторического тестирования — объект </p><code>ExecutionHandler</code><p>, который использует объекты </p><code>OrderEvent</code><p> для создания из них </p><code>FillEvent</code><p>.
+
+</p><i>Продолжение следует…</i>
+<p>
+P. S. Ранее в нашем блоге на Хабре мы уже </p><a href="http://habrahabr.ru/company/itinvest/blog/224353/">рассматривали</a><p> различные этапы разработки торговых систем. </p><a href="http://www.itinvest.ru/promo/adv/">ITinvest</a><p> и наши партнеры проводят </p><a href="http://www.itinvest.ru/education/schedule/">онлайн-курсы</a><p> по данной тематике.
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

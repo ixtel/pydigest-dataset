@@ -1,0 +1,165 @@
+<html><body><div><div class="entrytext">
+				<p>If you aren’t wowed by Python’s super() builtin, chances are you don’t really know what it is capable of doing or how to use it effectively.</p>
+<p>Much has been written about super() and much of that writing has been a failure. This article seeks to improve on the situation by:</p>
+<ul>
+<li>providing practical use cases</li>
+<li>giving a clear mental model of how it works</li>
+<li>showing the tradecraft for getting it to work every time</li>
+<li>concrete advice for building classes that use super()</li>
+<li>favoring real examples over abstract ABCD <a href="http://en.wikipedia.org/wiki/Diamond_problem">diamond diagrams</a>.</li>
+</ul>
+<p>The examples for this post are available in both <a href="http://code.activestate.com/recipes/577721-how-to-use-super-effectively-python-27-version/">Python 2 syntax</a> and <a href="http://code.activestate.com/recipes/577720-how-to-use-super-effectively/">Python 3 syntax</a>.</p>
+<p>Using Python 3 syntax, let’s start with a basic use case, a subclass for extending a method from one of the builtin classes:</p>
+<pre>class LoggingDict(dict):
+    def __setitem__(self, key, value):
+        logging.info('Setting %r to %r' % (key, value))
+        super().__setitem__(key, value)</pre>
+<p>This class has all the same capabilities as its parent, <em>dict</em>, but it extends the __setitem__ method to make log entries whenever a key is updated. After making a log entry, the method uses super() to delegate the work for actually updating the dictionary with the key/value pair.</p>
+<p>Before super() was introduced, we would have hardwired the call with <em>dict.__setitem__(self, key, value)</em>. However, super() is better because it is a computed indirect reference.</p>
+<p>One benefit of indirection is that we don’t have to specify the delegate class by name. If you edit the source code to switch the base class to some other mapping, the super() reference will automatically follow. You have a single source of truth:</p>
+<pre>class LoggingDict(SomeOtherMapping):            # new base class
+    def __setitem__(self, key, value):
+        logging.info('Setting %r to %r' % (key, value))
+        super().__setitem__(key, value)         # no change needed</pre>
+<p>In addition to isolating changes, there is another major benefit to computed indirection, one that may not be familiar to people coming from static languages. Since the indirection is computed at runtime, we have the freedom to influence the calculation so that the indirection will point to some other class.</p>
+<p>The calculation depends on both the class where super is called and on the instance’s tree of ancestors. The first component, the class where super is called, is determined by the source code for that class. In our example, super() is called in the <em>LoggingDict.__setitem__</em> method. That component is fixed. The second and more interesting component is variable (we can create new subclasses with a rich tree of ancestors).</p>
+<p>Let’s use this to our advantage to construct a logging ordered dictionary without modifying our existing classes:</p>
+<pre>class LoggingOD(LoggingDict, collections.OrderedDict):
+    pass</pre>
+<p>The ancestor tree for our new class is: <em>LoggingOD</em>,<em> LoggingDict</em>,<em> OrderedDict</em>,<em> dict</em>,<em> object</em>. For our purposes, the important result is that <em>OrderedDict</em> was inserted after <em>LoggingDict</em> and before <em>dict</em>! This means that the super() call in <em>LoggingDict.__setitem__</em> now dispatches the key/value update to <em>OrderedDict</em> instead of <em>dict</em>.</p>
+<p>Think about that for a moment. We did not alter the source code for <em>LoggingDict</em>. Instead we built a subclass whose only logic is to compose two existing classes and control their search order.</p>
+<p>__________________________________________________________________________________________________________________</p>
+<p><strong>Search Order</strong></p>
+<p>What I’ve been calling the search order or ancestor tree is officially known as the Method Resolution Order or MRO. It’s easy to view the MRO by printing the __mro__ attribute:</p>
+<pre>&gt;&gt;&gt; pprint(LoggingOD.__mro__)
+(&lt;class '__main__.LoggingOD'&gt;,
+ &lt;class '__main__.LoggingDict'&gt;,
+ &lt;class 'collections.OrderedDict'&gt;,
+ &lt;class 'dict'&gt;,
+ &lt;class 'object'&gt;)</pre>
+<p>If our goal is to create a subclass with an MRO to our liking, we need to know how it is calculated. The basics are simple. The sequence includes the class, its base classes, and the base classes of those bases and so on until reaching <em>object</em> which is the root class of all classes. The sequence is ordered so that a class always appears before its parents, and if there are multiple parents, they keep the same order as the tuple of base classes.</p>
+<p>The MRO shown above is the one order that follows from those constraints:</p>
+<ul>
+<li>LoggingOD precedes its parents, LoggingDict and OrderedDict</li>
+<li>LoggingDict precedes OrderedDict because LoggingOD.__bases__ is (LoggingDict, OrderedDict)</li>
+<li>LoggingDict precedes its parent which is dict</li>
+<li>OrderedDict precedes its parent which is dict</li>
+<li>dict precedes its parent which is object</li>
+</ul>
+<p>The process of solving those constraints is known as linearization. There are a number of good papers on the subject, but to create subclasses with an MRO to our liking, we only need to know the two constraints: children precede their parents and the order of appearance in <em>__bases__</em> is respected.</p>
+<p>__________________________________________________________________________________________________________________</p>
+<p><strong>Practical Advice</strong></p>
+<p>super() is in the business of delegating method calls to some class in the instance’s ancestor tree. For reorderable method calls to work, the classes need to be designed cooperatively. This presents three easily solved practical issues:</p>
+<ul>
+<li>the method being called by super() needs to exist</li>
+<li>the caller and callee need to have a matching argument signature</li>
+<li>and every occurrence of the method needs to use super()</li>
+</ul>
+<p>1) Let’s first look at strategies for getting the caller’s arguments to match the signature of the called method. This is a little more challenging than traditional method calls where the callee is known in advance. With super(), the callee is not known at the time a class is written (because a subclass written later may introduce new classes into the MRO).</p>
+<p>One approach is to stick with a fixed signature using positional arguments. This works well with methods like __setitem__ which have a fixed signature of two arguments, a key and a value. This technique is shown in the <em>LoggingDict</em> example where __setitem__ has the same signature in both <em>LoggingDict</em> and <em>dict</em>.</p>
+<p>A more flexible approach is to have every method in the ancestor tree cooperatively designed to accept keyword arguments and a keyword-arguments dictionary, to remove any arguments that it needs, and to forward the remaining arguments using **kwds, eventually leaving the dictionary empty for the final call in the chain.</p>
+<p>Each level strips-off the keyword arguments that it needs so that the final empty dict can be sent to a method that expects no arguments at all (for example, <em>object.__init__</em> expects zero arguments):</p>
+<pre>class Shape:
+    def __init__(self, shapename, **kwds):
+        self.shapename = shapename
+        super().__init__(**kwds)        
+
+class ColoredShape(Shape):
+    def __init__(self, color, **kwds):
+        self.color = color
+        super().__init__(**kwds)
+
+cs = ColoredShape(color='red', shapename='circle')</pre>
+<p>2) Having looked at strategies for getting the caller/callee argument patterns to match, let’s now look at how to make sure the target method exists.</p>
+<p>The above example shows the simplest case. We know that <em>object</em> has an __init__ method and that <em>object</em> is always the last class in the MRO chain, so any sequence of calls to <em>super().__init__</em> is guaranteed to end with a call to <em>object.__init__</em> method. In other words, we’re guaranteed that the target of the super() call is guaranteed to exist and won’t fail with an <em>AttributeError</em>.</p>
+<p>For cases where <em>object</em> doesn’t have the method of interest (a draw() method for example), we need to write a root class that is guaranteed to be called before <em>object</em>. The responsibility of the root class is simply to eat the method call without making a forwarding call using super().</p>
+<p><em>Root.draw</em> can also employ <a href="http://en.wikipedia.org/wiki/Defensive_programming">defensive programming</a> using an assertion to ensure it isn’t masking some other draw() method later in the chain.  This could happen if a subclass erroneously incorporates a class that has a draw() method but doesn’t inherit from <em>Root</em>.:</p>
+<pre>class Root:
+    def draw(self):
+        # the delegation chain stops here
+        assert not hasattr(super(), 'draw')
+
+class Shape(Root):
+    def __init__(self, shapename, **kwds):
+        self.shapename = shapename
+        super().__init__(**kwds)
+    def draw(self):
+        print('Drawing.  Setting shape to:', self.shapename)
+        super().draw()
+
+class ColoredShape(Shape):
+    def __init__(self, color, **kwds):
+        self.color = color
+        super().__init__(**kwds)
+    def draw(self):
+        print('Drawing.  Setting color to:', self.color)
+        super().draw()
+
+cs = ColoredShape(color='blue', shapename='square')
+cs.draw()</pre>
+<p>If subclasses want to inject other classes into the MRO, those other classes also need to inherit from <em>Root</em> so that no path for calling draw() can reach <em>object</em> without having been stopped by <em>Root.draw</em>. This should be clearly documented so that someone writing new cooperating classes will know to subclass from <em>Root</em>. This restriction is not much different than Python’s own requirement that all new exceptions must inherit from <em>BaseException</em>.</p>
+<p>3) The techniques shown above assure that super() calls a method that is known to exist and that the signature will be correct; however, we’re still relying on super() being called at each step so that the chain of delegation continues unbroken. This is easy to achieve if we’re designing the classes cooperatively – just add a super() call to every method in the chain.</p>
+<p>The three techniques listed above provide the means to design cooperative classes that can be composed or reordered by subclasses.</p>
+<p>__________________________________________________________________________________________________________________</p>
+<p><strong>How to Incorporate a Non-cooperative Class</strong></p>
+<p>Occasionally, a subclass may want to use cooperative multiple inheritance techniques with a third-party class that wasn’t designed for it (perhaps its method of interest doesn’t use super() or perhaps the class doesn’t inherit from the root class). This situation is easily remedied by creating an <a href="http://en.wikipedia.org/wiki/Adapter_pattern">adapter class</a> that plays by the rules.</p>
+<p>For example, the following <em>Moveable</em> class does not make super() calls, and it has an __init__() signature that is incompatible with <em>object.__init__</em>, and it does not inherit from <em>Root</em>:</p>
+<pre>class Moveable:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+    def draw(self):
+        print('Drawing at position:', self.x, self.y)</pre>
+<p>If we want to use this class with our cooperatively designed <em>ColoredShape</em> hierarchy, we need to make an adapter with the requisite super() calls:</p>
+<pre>class MoveableAdapter(Root):
+    def __init__(self, x, y, **kwds):
+        self.movable = Moveable(x, y)
+        super().__init__(**kwds)
+    def draw(self):
+        self.movable.draw()
+        super().draw()
+
+class MovableColoredShape(ColoredShape, MoveableAdapter):
+    pass
+
+MovableColoredShape(color='red', shapename='triangle',
+                    x=10, y=20).draw()</pre>
+<p>__________________________________________________________________________________________________________________</p>
+<p><strong>Complete Example – Just for Fun</strong></p>
+<p>In Python 2.7 and 3.2, the collections module has both a <em>Counter</em> class and an <em>OrderedDict</em> class. Those classes are easily composed to make an <em>OrderedCounter</em>:</p>
+<pre>from collections import Counter, OrderedDict
+
+class OrderedCounter(Counter, OrderedDict):
+     'Counter that remembers the order elements are first seen'
+     def __repr__(self):
+         return '%s(%r)' % (self.__class__.__name__,
+                            OrderedDict(self))
+     def __reduce__(self):
+         return self.__class__, (OrderedDict(self),)
+
+oc = OrderedCounter('abracadabra')</pre>
+<p>__________________________________________________________________________________________________________________</p>
+<p><strong>Notes and References</strong></p>
+<p><strong>*</strong> When subclassing a builtin such as dict(), it is often necessary to override or extend multiple methods at a time. In the above examples, the __setitem__ extension isn’t used by other methods such as <em>dict.update</em>, so it may be necessary to extend those also. This requirement isn’t unique to super(); rather, it arises whenever builtins are subclassed.</p>
+<p><strong>*</strong> If a class relies on one parent class preceding another (for example, <em>LoggingOD</em> depends on <em>LoggingDict</em> coming before <em>OrderedDict</em> which comes before <em>dict</em>), it is easy to add assertions to validate and document the intended method resolution order:</p>
+<pre>position = LoggingOD.__mro__.index
+assert position(LoggingDict) &lt; position(OrderedDict)
+assert position(OrderedDict) &lt; position(dict)</pre>
+<p><strong>*</strong> Good write-ups for linearization algorithms can be found at <a href="http://www.python.org/download/releases/2.3/mro/">Python MRO documentation</a> and at <a href="http://en.wikipedia.org/wiki/C3_linearization">Wikipedia entry for C3 Linearization</a>.</p>
+<p><strong>*</strong> The <a href="http://en.wikipedia.org/wiki/Dylan_(programming_language)">Dylan programming language</a> has a <em>next-method</em> construct that works like Python’s super(). See <a href="http://www.opendylan.org/books/dpg/db_347.html">Dylan’s class docs</a> for a brief write-up of how it behaves.</p>
+<p><strong>*</strong> The Python 3 version of super() is used in this post. The full working source code can be found at:  <a href="http://code.activestate.com/recipes/577720-how-to-use-super-effectively/">Recipe 577720</a>. The Python 2 syntax differs in that the <em>type</em> and <em>object</em> arguments to super() are explicit rather than implicit. Also, the Python 2 version of super() only works with new-style classes (those that explicitly inherit from <em>object</em> or other builtin type). The full working source code using Python 2 syntax is at <a href="http://code.activestate.com/recipes/577721-how-to-use-super-effectively-python-27-version/">Recipe 577721</a>.<br/>
+__________________________________________________________________________________________________________________</p>
+<p><strong>Acknowledgements</strong></p>
+<p>Serveral Pythonistas did a pre-publication review of this article.  Their comments helped improve it quite a bit.</p>
+<p>They are:  Laura Creighton, Alex Gaynor, Philip Jenvey, Brian Curtin, David Beazley, Chris Angelico, Jim Baker, Ethan Furman, and Michael Foord.  Thanks one and all.</p>
+		<div id="jp-post-flair" class="sharedaddy sd-like-enabled sd-sharing-enabled"><div class="sharedaddy sd-block sd-like jetpack-likes-widget-wrapper jetpack-likes-widget-unloaded" id="like-post-wrapper-11889699-134-56d5a0acba1a2" data-src="//widgets.wp.com/likes/#blog_id=11889699&amp;post_id=134&amp;origin=rhettinger.wordpress.com&amp;obj_id=11889699-134-56d5a0acba1a2" data-name="like-post-frame-11889699-134-56d5a0acba1a2"><h3 class="sd-title">Like this:</h3><p class="likes-widget-placeholder post-likes-widget-placeholder"><span class="button"><span>Like</span></span> <span class="loading">Loading...</span></p><span class="sd-text-color"/><a class="sd-link-color"/></div></div>				<strong>Explore posts in the same categories:</strong> <a href="https://rhettinger.wordpress.com/category/algorithms/" rel="category tag">Algorithms</a><p>, </p><a href="https://rhettinger.wordpress.com/category/documentation/" rel="category tag">Documentation</a><p>, </p><a href="https://rhettinger.wordpress.com/category/inheritance/" rel="category tag">Inheritance</a><p>, </p><a href="https://rhettinger.wordpress.com/category/open-source/" rel="category tag">Open Source</a><p>, </p><a href="https://rhettinger.wordpress.com/category/python/" rel="category tag">Python</a>
+				
+				<p class="postmetadata alt">
+					<small>
+						This entry was posted on May 26, 2011 at 9:15 am and is filed under <a href="https://rhettinger.wordpress.com/category/algorithms/" rel="category tag">Algorithms</a>, <a href="https://rhettinger.wordpress.com/category/documentation/" rel="category tag">Documentation</a>, <a href="https://rhettinger.wordpress.com/category/inheritance/" rel="category tag">Inheritance</a>, <a href="https://rhettinger.wordpress.com/category/open-source/" rel="category tag">Open Source</a>, <a href="https://rhettinger.wordpress.com/category/python/" rel="category tag">Python</a>. You can subscribe via <a href="https://rhettinger.wordpress.com/2011/05/26/super-considered-super/feed/">RSS 2.0</a> feed to this post's comments.												                            You can <a href="#respond">comment below</a>, or <a href="https://rhettinger.wordpress.com/2011/05/26/super-considered-super/trackback/">link to this permanent URL</a>  from your own site.
+						
+					</small>
+				</p>
+
+			</div>
+		</div></body></html>

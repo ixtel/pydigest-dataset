@@ -1,0 +1,238 @@
+<html><body><div><div class="entry-content">
+		<p>We at Tryolabs are big fans of Elasticsearch, so much we are even <a href="http://blog.tryolabs.com/2015/02/06/sponsoring-elasticon/">sponsoring the first ever Elasticon</a> which is taking place in March in San Francisco.</p>
+<p>We are diving a little deeper in more interesting features and this time we are going to talk about Analyzers and how to do cool things with them.</p>
+<h3>Analyzers</h3>
+<p>As you may know Elasticsearch provides the way to customize the way things are indexed with the Analyzers of the <a href="http://www.elasticsearch.org/guide/en/elasticsearch/reference/current/analysis.html">index analysis module</a>. Analyzers are the way the Lucene process and indexes the data. Each one is composed of:</p>
+<ul>
+<li>0 or more CharFilters</li>
+<li>1 Tokenizer</li>
+<li>0 or more TokenFilters</li>
+</ul>
+<p>The Tokenizers are used to split a string into a stream of tokens. For example a basic Tokenizer will do the following:<strong><strong><br/>
+</strong></strong></p>
+<pre>“Our goal at Tryolabs is to help Startups”
+-&gt; Tokenizer -&gt;
+[“Our”, “goal”, “at”, Tryolabs”, “is”, “to”, “help”, “Startups”]</pre>
+<p>The TokenFilters on the other hand accept a stream of tokens and can modify them, remove them or add new tokens. For example to name some possibilities a TokenFilter can apply stemming, remove stop words, add synonyms.</p>
+<p>We are not focusing on CharFilters since they are used to pre process chars before sending them to the tokenizer.</p>
+<p>Elasticsearch provides a great deal of <a href="http://www.elasticsearch.org/guide/en/elasticsearch/reference/current/analysis-tokenizers.html">Tokenizers</a>, and <a href="http://www.elasticsearch.org/guide/en/elasticsearch/reference/current/analysis-tokenfilters.html">TokenFilters</a>, and you can create custom ones and install them as a plugin (although you may need to dive deep into <a href="http://github.com/elasticsearch/elasticsearch/">Elasticsearch’s code base</a>).</p>
+<h3>How to use Analyzers</h3>
+<p>In order to use different combinations of Tokenizers and TokenFilters you need to create an Analyzer in your index settings and then use it in your mapping.</p>
+<p>For example, lets suppose we want an Analyzer to tokenize in a standard way, and apply lowercase filter and stemming.</p>
+<pre>curl -X POST http://127.0.0.1:9200/tryoindex/ -d'
+{
+  "settings": {
+    "analysis": {
+      "filter": {
+        "custom_english_stemmer": {
+          "type": "stemmer",
+          "name": "english"
+        }
+      },
+      "analyzer": {
+        "custom_lowercase_stemmed": {
+          "tokenizer": "standard",
+          "filter": [
+            "lowercase",
+            "custom_english_stemmer"
+          ]
+        }
+      }
+    }
+  },
+  "mappings": {
+    "test": {
+      "properties": {
+        "text": {
+          "type": "string",
+          "analyzer": "custom_lowercase_stemmed"
+        }
+      }
+    }
+  }
+}'
+</pre>
+<p>This may seem like a load of gibberish but let me explain it <em>step by step</em>.</p>
+<p>On the first level we have two keys “settings” and “mappings”. “settings” is where all the index settings needs to go, and “mappings” is where you put all the mappings for the types of your index.</p>
+<p>First let’s focus on “settings”. There are a lot of possible index settings, replica settings, read settings, cache settings, and of course  analysis settings which we are interested on.</p>
+<p>In the analysis json we have both analyzers and filter defined. When using a custom analyzer, some of the filters available need to be defined because they have mandatory options. In our case the stemming filter need to have a language defined, that is why we first need to define our “custom_english_stemmer”.</p>
+<pre>{
+  "custom_english_stemmer": {
+    "type": "stemmer",
+    "name": "english"
+  }
+}
+</pre>
+<p>Now that the filter is defined we can define the analyzer which will use it.</p>
+<pre>{
+  "analyzer": {
+    "custom_lowercase_stemmed": {
+      "tokenizer": "standard",
+      "filter": [
+        "lowercase",
+        "custom_english_stemmer"
+      ]
+    }
+  }
+}
+</pre>
+<p>We name the analyzer “custom_lowercase_stemmed” but you can put any name you want. In this example we are using the “standard” tokenizer and we define the list of filters to use.</p>
+<ul>
+<li><a href="http://www.elasticsearch.org/guide/en/elasticsearch/reference/current/analysis-lowercase-tokenfilter.html">lowercase</a>, is the Elasticsearch provided filter that doesn’t need extra configuration (though you can provide a language parameter for some non-standard languages).</li>
+<li>custom_english_stemmer, the one we defined before.</li>
+</ul>
+<p>The order of the list is important since it will be the order the tokens are processed in the indexing pipeline.</p>
+<p>Finally, we can use this newly created analyzer in the mapping.</p>
+<pre>{
+  "mappings": {
+    "test": {
+      "properties": {
+        "text": {
+          "type": "string",
+          "analyzer": "custom_lowercase_stemmed"
+        }
+      }
+    }
+  }
+}
+</pre>
+<p>This way we are telling Elasticsearch there is type called “test” that has a field called “text” that needs to be analyzed using the “custom_lowercase_stemmed” analyzer.</p>
+<h3>Testing the analyzer</h3>
+<p>There is a special endpoint /index/_analyze where you can see the stream of tokens after applying the analyzer.</p>
+<pre>curl http://192.168.59.103:9200/tryoindex/_analyze?analyzer=custom_lowercase_stemmed \
+
+-d 'Tryolabs running monkeys KANGAROOS and jumping elephants'</pre>
+<pre>{
+  "tokens": [
+    {
+      "token": "tryolab",
+      "start_offset": 0,
+      "end_offset": 9,
+      "type": "<alphanum>",
+      "position": 1
+    },
+    {
+      "token": "run",
+      "start_offset": 10,
+      "end_offset": 17,
+      "type": "<alphanum>",
+      "position": 2
+    },
+    {
+      "token": "monkei",
+      "start_offset": 18,
+      "end_offset": 25,
+      "type": "<alphanum>",
+      "position": 3
+    },
+    {
+      "token": "kangaroo",
+      "start_offset": 26,
+      "end_offset": 35,
+      "type": "<alphanum>",
+      "position": 4
+    },
+    {
+      "token": "and",
+      "start_offset": 36,
+      "end_offset": 39,
+      "type": "<alphanum>",
+      "position": 5
+    },
+    {
+      "token": "jump",
+      "start_offset": 40,
+      "end_offset": 47,
+      "type": "<alphanum>",
+      "position": 6
+    },
+    {
+      "token": "eleph",
+      "start_offset": 48,
+      "end_offset": 57,
+      "type": "<alphanum>",
+      "position": 7
+    }
+  ]
+}
+</alphanum></alphanum></alphanum></alphanum></alphanum></alphanum></alphanum></pre>
+<table>
+<tbody>
+<tr>
+<td>Tryolabs</td>
+<td rowspan="7">lowercase&amp;stemming</td>
+<td>tryolab</td>
+</tr>
+<tr>
+<td>running</td>
+<td>run</td>
+</tr>
+<tr>
+<td>monkeys</td>
+<td>monkei</td>
+</tr>
+<tr>
+<td>KANGAROOS</td>
+<td>kangaroo</td>
+</tr>
+<tr>
+<td>and</td>
+<td>and</td>
+</tr>
+<tr>
+<td>jumping</td>
+<td>jump</td>
+</tr>
+<tr>
+<td>elephants</td>
+<td>eleph</td>
+</tr>
+</tbody>
+</table>
+<h3>Querying using the analyzer</h3>
+<p>So you created the analyzer, used it in some mapping and indexed documents. To use it, you just need to create a match query. Match queries automatically apply the same analyzer before querying.</p>
+<p>For example, if you index</p>
+<pre>{
+  "text": "JOHN LIKES RUNNING IN THE RAIN"
+}
+</pre>
+<p>Then you can create a query:</p>
+<pre>curl -XGET ‘http://127.0.0.1:9200/tryoindex/test/_search’ -d '
+{
+  "query": {
+    "match": {
+      "text": "run"
+    }
+  }
+}'</pre>
+<p>This would return the document you have just indexed that would normally wouldn’t be returned if it wasn’t for a custom analyzer.</p>
+<pre>{
+  "took": 25,
+  "timed_out": false,
+  "_shards": {
+    "total": 5,
+    "successful": 5,
+    "failed": 0
+  },
+  "hits": {
+    "total": 1,
+    "max_score": 0.5,
+    "hits": [
+      {
+        "_index": "tryoindex",
+        "_type": "test",
+        "_id": "AUtgVQpqJh3uf--po6Ij",
+        "_score": 0.5,
+        "_source": {
+          "text": "john likes running"
+        }
+      }
+    ]
+  }
+}
+</pre>
+<h3>Conclusion</h3>
+<p>Analyzers are a powerful and essential tool for relevance engineering. When starting with Elasticsearch you need to get acquainted with the different filters and tokenizers Elasticsearch provides so you can seize its full potential.</p>
+<p><strong>In future posts we are going to detail how you can use more powerful filters like n-grams, shingles and synonyms for more specific use cases. Please <a href="https://twitter.com/tryolabs">follow us on Twitter</a> so we can let you know when we publish more interesting information!</strong></p>
+			  </div>
+	  </div></body></html>

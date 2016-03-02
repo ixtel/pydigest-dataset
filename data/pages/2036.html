@@ -1,0 +1,84 @@
+<html><body><div><li class="post text">
+
+    <div class="postHead">
+      
+          
+      
+
+      
+        <span class="postAuthor hideOnIndex">
+          
+              Posted by: <a href="http://twitter.com/alexjc">Alex Champandard</a>
+          
+
+          
+              on 8 November 2014
+          
+
+        
+
+        </span>
+      
+    </div>
+
+    <p>Last week, the project reached a stage where raw computation speed was a bottleneck.  Originally, the generation of random inner loops with 16-18 track pieces took about half a minute, and connecting two open junctions with 14 pieces also needed a few minutes.  Now with algorithmic optimizations, both are down to seconds — but it’s still noticeable.</p>
+<p>Multiprocessing is generally a reasonable option to get around CPython’s very limited multi-threading capabilities, and since my previous experiments with PyPy yielded <a href="http://project-trains.tumblr.com/post/99640650875/track-building-benchmark">gains of 22x</a> for raw track building, I considered combining the two.  It turns out it’s relatively easy to offload any computation from CPython to PyPy using the standard multiprocessing module.</p>
+<p>Here’s what’s necessary to make it work with CPython 3.4.2 (as a master) and PyPy3 2.3.1 (as a slave).</p>
+<h4>1. CPython Master</h4>
+<pre><code>import multiprocessing
+multiprocessing.set_start_method('spawn')
+multiprocessing.set_executable('/usr/local/bin/pypy3')
+</code></pre>
+<p>This initialization code tells Python’s multiprocessing to spawn another executable rather than fork the existing one, and it’s given a full path to the PyPy interpreter.</p>
+<pre><code>from multiprocessing import Process, Pipe<br/><br/>def dispatchToSubprocess(function, *args, **kwargs):
+    master_conn, slave_conn = Pipe()
+    try:
+        p = Process(target=runFromSubprocess,<br/>                    args=(slave_conn,function,args,kwargs))
+        p.start()
+        result = master_conn.recv()
+        p.join()<br/>        return result
+    except Exception as e:
+        logging.warn("Caught exception on the master side.")<br/>        logging.exception(e)
+    finally:
+        master_conn.close()<br/></code></pre>
+<p>This code can be used to communicate to any function in a subprocess.  Here we only need to spawn one function so a single multiprocessing.Pipe is sufficient.</p>
+<h4>2. PyPy Slave</h4>
+<pre><code>def runFromSubprocess(conn, function, args, kwargs):
+    try:
+        result = function(*args, **kwargs)
+        conn.send(result)
+    except Exception as e:
+        logging.warning("Exception caught from the slave.")
+        logging.exception(e)
+    finally:
+        conn.close()</code></pre>
+<p>This is the wrapper function that’s used to pass back the result from PyPy over the pipe to CPython. It will be loaded by default by the multiprocessing module as long as there’s some basic setup.</p>
+<pre><code>if __name__ != "__main__":
+    import sys
+    sys.path = ['/usr/local/Cellar/pypy3/2.3.1/libexec/lib-python/3/',
+                '/usr/local/Cellar/pypy3/2.3.1/libexec/site-packages']
+</code></pre>
+<p>By default, multiprocessing synchronizes the sys.path so this needs to be reset manually at the top of the main.py file. Fixing this would require patching the standard multiprocessing module.</p>
+<h4>3. Hacks Required</h4>
+<p>If you run this code it won’t execute by default, for a few reasons:</p>
+<ol><li>To specify the target executable and the spawn method, you need <a href="http://t.umblr.com/redirect?z=https%3A%2F%2Fdocs.python.org%2F3%2Flibrary%2Fmultiprocessing.html%23multiprocessing.set_start_method&amp;t=NjhlY2UxMjMyODhmMWY5MTk1ZmU3ZmI2OTBhZjRiODk5Yjk3OTg1YywyVkVUaDNTdA%3D%3D">version 3.4</a> of CPython.</li>
+<li>PyPy3 only supports Python 3.2 currently, so you’ll need to back-port the multiprocessing module.</li>
+<li>The Process and Pipe functionality is easy to port, but things like Pool require <a href="http://t.umblr.com/redirect?z=https%3A%2F%2Fdocs.python.org%2F3%2Flibrary%2Fselectors.html&amp;t=NjUyYjA3Njg5NjdhNTNhMTRmMDJjNjM3MWU0N2Y0M2MxZDczMWVlNywyVkVUaDNTdA%3D%3D">selectors</a> from 3.4.</li>
+</ol><p>This model could also be applied to Python 2.7 assuming a few minor changes to the multiprocessing library, rather than a backport.</p>
+<h4>4. Preliminary Results</h4>
+<p>Similarly to previous tests, this is geometry heavy track building code that uses the PyEuclid library.  The first test generates 500,000 randomized loop mutations for tracks of size 16, and picks one that correctly joins up again.  I measured <strong>performance improvements of 5.92x</strong>.</p>
+<p><img alt="image" src="http://38.media.tumblr.com/e65d6e44ed155fae4c3e9080acc94164/tumblr_inline_neplt3q8cX1shtruh.png"/></p>
+
+<p>The second test establishes connections between junctions using an A* heuristic search to determine the most suitable pieces to fill the gap.  There are 100,000 iterations performed. <strong> Performance gains above 20x were measured</strong> in this case.</p>
+<p><img alt="image" src="http://31.media.tumblr.com/f1f02bb998daee5dfeca4ab42d23b63d/tumblr_inline_nepni6XuRy1shtruh.png"/></p>
+<p>These results are surprisingly close to early prototypes showing 22x, but now multiprocessing is in place it should be a bit easier to use many different subprocesses when generating large procedural tracks.</p>
+<p>In general, it takes a bit of work to make sure PyPy can import and run CPython code with results that can pickled over the pipe.  However, it’s a simpler option than fully switching to PyPy and provides many performance benefits too.</p>
+
+    
+
+    
+
+  </li>
+
+  
+    </div></body></html>

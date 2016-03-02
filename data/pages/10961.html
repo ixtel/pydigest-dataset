@@ -1,0 +1,107 @@
+<html><body><div><div class="content html_format">
+      <img src="https://habrastorage.org/getpro/habr/post_images/ad3/802/710/ad3802710ec84a344d96f0996768959c.jpg" alt="image"/>
+<p>
+Как-то так получилось, что я написал на Хабре уже несколько статей о библиотеках для хуков. </p><a href="https://habrahabr.ru/company/infopulse/blog/140456/">Первая</a><p> была об общих принципах и реализации на базе Detours, </p><a href="https://habrahabr.ru/company/infopulse/blog/213309/">вторая</a><p> — о более дешевой (но не менее функциональной) библиотеке madCodeHook. Сегодня я расскажу об ещё одном варианте — библиотеке </p><a href="http://www.nektra.com/products/deviare-api-hook-windows/">Deviare</a><p> от компании Nektra. «Ещё одна точно такая же библиотека для хуков?» — спросите вы. «Такая же, да не такая» — отвечу я. У Deviare есть несколько особенностей, отличающих её и от Detours и от madCodeHook и делающей её в некоторых случаях намного более полезной.
+</p><a name="habracut"/>
+<h5><b>Библиотека распространяется по двойной лицензии — GPL\коммерческая</b>.</h5><p>Для опенсорсных проектов она живёт на </p><a href="https://github.com/nektra/Deviare-InProc/">GitHub</a><p>, а для тех, кому нужна поддержка и право внедрять код библиотеки в закрытые продукты — добро пожаловать на официальный сайт.То есть да, вы можете прямо взять и почитать код библиотеки, забрать её с GitHub и внедрить в своём опенсорс-проекте прямо сейчас не заплатив никому ни копейки. Чудо, не доступное для Detours и madCodeHook. Нужно сказать, что проект долгое время был закрытым, но потом Nektra решили, что надо быть как-то ближе к людям. 
+
+</p><h5><b>На базе библиотеки сделан мощный продукт <a href="http://nektra.com/products/spystudio-api-monitor/">SpyStudio</a> </b></h5><p>Перед тем, как писать какой-то код для хуков, можно просто запустить данную утилиту и посмотреть, на что она способна. На базе Detours и madCodeHook тоже, конечно, много всякого сделано, но вот аналогичного ПО от авторов самих библиотек как-то нет.
+
+</p><h5><b>Авторы накидали в своём блоге кучу практических примеров использования хуков</b></h5><p>Тут вам и </p><a href="http://blog.nektra.com/main/2013/06/26/sql-server-interception-and-sql-injection-attacks-prevention/">хуки на SQL Server</a><p> для предотвращения SQL-инъекций, и </p><a href="http://blog.nektra.com/main/2013/07/23/instrumenting-direct3d-applications-to-capture-video-and-calculate-frames-per-second/">запись видео из игр</a><p>, рисуемых через DirectX, и </p><a href="https://github.com/nektra/Direct3D-Invisible-Walls">читы</a><p>, и </p><a href="http://blog.nektra.com/main/2012/06/13/controlling-the-speed-of-youtube-flash-html5-and-desktop-videos-with-deviare-hooks/">изменения скорости работы плеера в браузере</a><p>. Читаешь — и сразу становится ясно, для чего можно использовать хуки.
+
+</p><h5><b>Кроме классического С++ предлагается COM-компонент, который позволяет ставить хуки откуда угодно (C#, Python, VB, Delphi и т.д.)</b></h5><p>Да, наконец-то можно начать использовать хуки, не разбираясь в том, что такое указатель на указатель на массив указателей.
+
+</p><h5><b>Хуки можно вешать не только на нативные функции или методы COM-объектов, но и на .NET-методы</b></h5><p>Данная фича кажется мне не такой уж убойной, поскольку в .NET и так вроде бы неплохо с метаинформацией и рефлексией, а значит кому надо было — умел это делать и сам. Но так, в качестве вишенки на пироге — почему бы и нет.
+
+</p><h5><b>Библиотека давно пережила все «детские» болезни</b></h5><p>Сегодня её используют компании из Fortune 500, а партнёрство с VmWare позволяет делать, </p><a href="http://blog.nektra.com/main/2013/11/05/nektra-and-vmware-are-collaborating-to-simplify-application-virtualization-packaging/">например</a><p>, портабельные версии установленных приложений.
+</p><p>
+Я не буду тут расписывать километры кода (глупо это делать для опенсорсной библиотеки с </p><a href="https://github.com/nektra/Deviare-InProc/tree/master/Samples">примерами</a><p> на GitHub). Ну чисто так, обзорно.
+</p><p>
+Инъекция своей библиотеки в чужой процесс:
+</p><pre><code class="cpp">#include "NktHookLib.h"
+NktHookLibHelpers::InjectDllByPidW(dwPid, L"myDll.dll");
+</code></pre>
+<p>
+Установка хука на функцию:
+</p><pre><code class="cpp">#include "NktHookLib.h"
+
+typedef int (WINAPI *lpfnMessageBoxW)(__in_opt HWND hWnd, __in_opt LPCWSTR lpText, __in_opt LPCWSTR lpCaption, __in UINT uType);
+static int WINAPI Hooked_MessageBoxW(__in_opt HWND hWnd, __in_opt LPCWSTR lpText, __in_opt LPCWSTR lpCaption, __in UINT uType);
+
+static struct {
+  SIZE_T nHookId;
+  lpfnMessageBoxW fnMessageBoxW;
+} sMessageBoxW_Hook = { 0, NULL };
+
+int WinMainCRTStartup()
+{
+  CNktHookLib cHookMgr;
+  HINSTANCE hUser32Dll;
+  LPVOID fnOrigMessageBoxW;
+  DWORD dwOsErr;
+
+  hUser32Dll = NktHookLibHelpers::GetModuleBaseAddress(L"user32.dll");
+  if (hUser32Dll == NULL) {
+    ::MessageBoxW(0, L"Error: Cannot get handle of user32.dll", L"HookTest", MB_OK|MB_ICONERROR);
+    return 0;
+  }
+  fnOrigMessageBoxW = NktHookLibHelpers::GetProcedureAddress(hUser32Dll, "MessageBoxW");
+  if (fnOrigMessageBoxW == NULL) {
+    ::MessageBoxW(0, L"Error: Cannot get address of MessageBoxW", L"HookTest", MB_OK|MB_ICONERROR);
+    return 0;
+  }
+
+  dwOsErr = cHookMgr.Hook(&amp;(sMessageBoxW_Hook.nHookId), (LPVOID*)&amp;(sMessageBoxW_Hook.fnMessageBoxW),
+                          fnOrigMessageBoxW, Hooked_MessageBoxW,
+                          NKTHOOKLIB_DisallowReentrancy);
+
+  ::MessageBoxW(0, L"This should be hooked", L"HookTest", MB_OK);
+  dwOsErr = cHookMgr.Unhook(sMessageBoxW_Hook.nHookId);
+
+  ::MessageBoxW(0, L"This should NOT be hooked", L"HookTest", MB_OK);
+
+  return 0;
+}
+
+static int WINAPI Hooked_MessageBoxW(__in_opt HWND hWnd, __in_opt LPCWSTR lpText, __in_opt LPCWSTR lpCaption, __in UINT uType)
+{
+  return ::MessageBoxW(hWnd, lpText, L"HOOKED!!!", uType);
+}
+</code></pre>
+<p>
+А вот как-то так из Python запускается Notepad, в котором вешается хук на функцию CreateFileW:
+
+</p><pre><code class="python">import win32com.client
+import ctypes, sys
+
+from EventHandlers import NktSpyMgrEvents
+from AuxFunctions import *
+
+if sys.version_info.major &lt; 3:
+	warnings.warn("Need Python 3.0 for this program to run", RuntimeWarning)
+	sys.exit(0)
+
+win32com.client.pythoncom.CoInitialize()
+spyManager = win32com.client.DispatchWithEvents("DeviareCOM.NktSpyMgr", NktSpyMgrEvents)
+result = spyManager.Initialize()
+
+if not result == 0:
+	print ("ERROR: Could not initialize the SpyManager. Error code: %d" % (result))
+	sys.exit(0)
+
+notepad = StartNotepadAndHook(spyManager)
+
+MessageBox = ctypes.windll.user32.MessageBoxW
+MessageBox(None, "Press OK to end the demo.", "Deviare Python Demo", 0)
+
+notepad.Terminate(0)
+</code></pre>
+<p>
+Удачи с библиотекой!
+
+      
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

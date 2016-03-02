@@ -1,0 +1,217 @@
+<html><body><div><div class="content">
+      
+        <h1 class="content-title">Saturday morning hacks: Adding full-text search to the flask note-taking app</h1>
+      
+      
+      
+  
+  
+  
+    <p><a href="http://media.charlesleifer.com/blog/photos/coffee-cup-scaled.jpg" title="Saturday morning hacks"><img alt="Saturday morning hacks" class="img-responsive" src="http://m.charlesleifer.com/t/800x-/blog/photos/coffee-cup-scaled.jpg?key=xFJansgcRXa5MCBauZSUhQ"/></a></p>
+<p>In preparation for the fourth and final installment in the "Flask Note-taking app" series, I found it necessary to improve the search feature of the note-taking app. In this post we will use SQLite's full-text search extension to improve the search feature.</p>
+<p>To recap, the note-taking app provides a lightweight interface for storing markdown-formatted notes. Because I frequently find myself wanting to take notes on the spur of the moment, the note-taking app needed to be very mobile-friendly. By using twitter bootstrap and a hefty dose of JavaScript, <a href="/blog/saturday-morning-hack-a-little-note-taking-app-with-flask/">we made an app</a> that matches our spec and manages to look good doing it!</p>
+<p>In <a href="/blog/saturday-morning-hacks-revisiting-the-notes-app/">part 2</a>, we added email reminders and check-able task lists to the note-taking app. We also converted the backend to use flask-peewee's REST API extension, which made it easy to add pagination and search. And that is how I've left it for the last three months or so.</p>
+<p>Below is a screenshot of the latest version of the notes app. The UI is much cleaner thanks to a stylesheet from <a href="http://bootswatch.com/superhero/">bootswatch</a>. The bootswatch stylesheet works as a drop-in replacement for the default bootstrap CSS file.</p>
+<p><a href="http://media.charlesleifer.com/blog/photos/p1412692599.23.png" title="photos/p1412692599.23.png"><img alt="photos/p1412692599.23.png" class="img-responsive" src="http://m.charlesleifer.com/t/800x-/blog/photos/p1412692599.23.png?key=TzSu0hXQNmNtDQ4PMGMxDw"/></a></p>
+<p>All together, the note-taking app has the following features:</p>
+<ul>
+<li>Flexible <em>pinterest</em>-style tiled layout that looks great on a variety of screen sizes.</li>
+<li>Easy to create notes and reminders from the phone.</li>
+<li>Notes support markdown and there is also a simple <a href="http://en.wikipedia.org/wiki/WYSIWYM">WYSIWYM</a> markdown editing toolbar.</li>
+<li>Links are converted to rich media objects where possible (e.g. a YouTube URL becomes an embedded player).</li>
+<li>To-do lists (or task lists) can be embedded in notes.</li>
+<li>Email reminders can be scheduled for a given note.</li>
+<li>Simple full-text search.</li>
+<li>Pagination.</li>
+</ul>
+<p>You can browse or download the finished code from part 2 in <a href="https://gist.github.com/coleifer/69ec9d09b2efe05527eb">this gist</a>. If you're in a hurry, you can find all the code from this post <a href="https://gist.github.com/coleifer/d93d6c43e59698d149c0">in this gist</a>.</p>
+<p>In case you were curious, I've been using the notes app for things like:</p>
+<ul>
+<li>Bookmarking interesting sites to read later.</li>
+<li>Creating short to-do lists or writing down particular items to get from the store, etc.</li>
+<li>Writing down interesting dreams or ideas I get in the middle of the night.</li>
+<li>Appointment reminders, reminders to call people, etc.</li>
+<li>Saving funny cat pics.</li>
+<li>Writing down ideas for programming projects.</li>
+<li>Saving code snippets or useful commands.</li>
+</ul>
+<h3>Adding full-text search</h3>
+<p>In this installment, we'll be using SQLite's full-text search (FTS) extension to dramatically improve the search result quality. Besides giving us better results, SQLite's FTS extension supports <em>boolean</em>-type search expressions as well as custom constructs like <em>NEAR</em>. A full list of supported queries can be found <a href="http://www.sqlite.org/fts3.html#section_3">in the SQLite documentation</a>. Most importantly, by using full-text search we are now able to sort our search results by match quality. For a detailed write-up on using SQLite's FTS with Python, <a href="/blog/using-sqlite-full-text-search-with-python/">check out this post</a>.</p>
+<p>To use the FTS extension, we need to create a special table called a <em>virtual table</em>. Virtual tables are meta-tables that present a high-level interface for working with special extension data. The FTS virtual table allows us to store search content, and behind-the-scenes several hidden tables will be created to store the actual search data-structures. The peewee <a href="http://docs.peewee-orm.com/en/latest/peewee/playhouse.html#sqlite-ext">playhouse Sqlite extension</a> provides a model sub-class designed for working with virtual tables, and more specifically, a virtual model subclass for the FTS extension.</p>
+<p>So without further ado, let's get started!</p>
+<h3>Sqlite extension database</h3>
+<p>The first step is to replace our peewee database class, swapping out the default <code>SqliteDatabase</code> for the playhouse's <code>SqliteExtDatabase</code>, which provides support for virtual tables.</p>
+<p>Open <code>app.py</code> and add the following import to the top of the module below the <code>peewee</code> import:</p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">playhouse.sqlite_ext</span> <span class="kn">import</span> <span class="n">SqliteExtDatabase</span>
+</pre></div>
+<p>Below you will find the database declaration. We will replace the original declaration with the following:</p>
+<div class="highlight"><pre><span class="n">db</span> <span class="o">=</span> <span class="n">SqliteExtDatabase</span><span class="p">(</span><span class="n">app</span><span class="o">.</span><span class="n">config</span><span class="p">[</span><span class="s1">'DATABASE'</span><span class="p">],</span> <span class="n">threadlocals</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+</pre></div>
+<p>Now that we have updated our database class, we can start using the FTS extension in our peewee code.</p>
+<h3>Indexing notes for full-text search</h3>
+<p>In order to search our notes, we need to create a separate model to store the search content we wish to index. The <em>playhouse.sqlite_ext</em> module provides the <em>FTSModel</em> class which we will subclass to create the <code>FTSNote</code> model. This model will store, along with the content for the search index, a pointer back to the note it references. Open <code>models.py</code> and add the following model definition (the import goes at the top of the module):</p>
+<div class="highlight"><pre><span class="c1"># Place these imports at the top of the module.</span>
+<span class="kn">import</span> <span class="nn">re</span>
+<span class="kn">from</span> <span class="nn">playhouse.sqlite_ext</span> <span class="kn">import</span> <span class="n">FTSModel</span>
+
+
+<span class="c1"># The FTSNote class should go just below the Note class.</span>
+<span class="k">class</span> <span class="nc">FTSNote</span><span class="p">(</span><span class="n">FTSModel</span><span class="p">):</span>
+    <span class="c1"># Simple regex for stripping out any HTML tags.</span>
+    <span class="n">HTML_RE</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span><span class="s1">'&lt;.+?&gt;'</span><span class="p">)</span>
+
+    <span class="n">note</span> <span class="o">=</span> <span class="n">ForeignKeyField</span><span class="p">(</span><span class="n">Note</span><span class="p">,</span> <span class="n">primary_key</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+    <span class="n">content</span> <span class="o">=</span> <span class="n">TextField</span><span class="p">()</span>
+
+    <span class="k">class</span> <span class="nc">Meta</span><span class="p">:</span>
+        <span class="n">database</span> <span class="o">=</span> <span class="n">db</span>
+</pre></div>
+<p>Now that we have a place to store our note content, we need to determine exactly what content to store. As is hinted by the <code>HTML_RE</code> attribute, I opted to strip out HTML from the note -- which also would seem to indicate that I'm processing any markdown or oEmbed content as well.</p>
+<p>Here is the method I came up with that extracts the useful search content from a note. It belongs as a <em>staticmethod</em> on the <em>FTSNote</em> class. This method calls the note's <em>html()</em> method, which will convert any oEmbed links into rich media objects, and process any markdown. The HTML tags are then stripped out since they will mostly be noise, and finally, the same process is done for each task item attached to the note (if any exist):</p>
+<div class="highlight"><pre><span class="nd">@staticmethod</span>
+<span class="k">def</span> <span class="nf">get_search_content</span><span class="p">(</span><span class="n">note</span><span class="p">):</span>
+    <span class="n">content</span> <span class="o">=</span> <span class="p">[</span><span class="n">FTSNote</span><span class="o">.</span><span class="n">HTML_RE</span><span class="o">.</span><span class="n">sub</span><span class="p">(</span><span class="s1">''</span><span class="p">,</span> <span class="n">note</span><span class="o">.</span><span class="n">html</span><span class="p">())]</span>
+    <span class="k">for</span> <span class="n">task</span> <span class="ow">in</span> <span class="n">note</span><span class="o">.</span><span class="n">get_tasks</span><span class="p">():</span>
+        <span class="n">content</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">FTSNote</span><span class="o">.</span><span class="n">HTML_RE</span><span class="o">.</span><span class="n">sub</span><span class="p">(</span><span class="s1">''</span><span class="p">,</span> <span class="n">task</span><span class="o">.</span><span class="n">html</span><span class="p">()))</span>
+    <span class="k">return</span> <span class="s1">'</span><span class="se">\n</span><span class="s1">'</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">line</span> <span class="k">for</span> <span class="n">line</span> <span class="ow">in</span> <span class="n">content</span> <span class="k">if</span> <span class="n">line</span><span class="p">)</span>
+</pre></div>
+<p>The last method we will add to the <em>FTSNote</em> class will be responsible for the actual storing of the note's search content in the special virtual table:</p>
+<div class="highlight"><pre><span class="nd">@classmethod</span>
+<span class="k">def</span> <span class="nf">store_note</span><span class="p">(</span><span class="n">cls</span><span class="p">,</span> <span class="n">note</span><span class="p">):</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">fts_note</span> <span class="o">=</span> <span class="n">FTSNote</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">FTSNote</span><span class="o">.</span><span class="n">note</span> <span class="o">==</span> <span class="n">note</span><span class="p">)</span>
+    <span class="k">except</span> <span class="n">FTSNote</span><span class="o">.</span><span class="n">DoesNotExist</span><span class="p">:</span>
+        <span class="n">fts_note</span> <span class="o">=</span> <span class="n">FTSNote</span><span class="p">(</span><span class="n">note</span><span class="o">=</span><span class="n">note</span><span class="p">)</span>
+        <span class="n">force_insert</span> <span class="o">=</span> <span class="bp">True</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">force_insert</span> <span class="o">=</span> <span class="bp">False</span>
+    <span class="n">fts_note</span><span class="o">.</span><span class="n">content</span> <span class="o">=</span> <span class="n">FTSNote</span><span class="o">.</span><span class="n">get_search_content</span><span class="p">(</span><span class="n">note</span><span class="p">)</span>
+    <span class="n">fts_note</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="n">force_insert</span><span class="o">=</span><span class="n">force_insert</span><span class="p">)</span>
+</pre></div>
+<p>The final step is to ensure that whenever a new note is added to the database we simultaneously add it to the search index. To do this, add a single line to the <em>Note.save()</em> method calling the <em>FTSNote.store_note()</em> method:</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">save</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="c1"># ... note.save() method body ...</span>
+
+    <span class="c1"># Right before we return from this method, and after our call</span>
+    <span class="c1"># to the super-class save() method, we will store the note in</span>
+    <span class="c1"># the search index.</span>
+
+    <span class="c1"># Store the content for full-text search.</span>
+    <span class="n">FTSNote</span><span class="o">.</span><span class="n">store_note</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">ret</span>
+</pre></div>
+<h3>Performing searches</h3>
+<p>In order to make use of our search index, we will write a new <em>Note.search</em> method. SQLite uses a special operator <em>MATCH</em> to perform a full-text search query, and this operator is exposed, for convenience, as a method on the playhouse <em>FTSModel</em> class. The only other interesting part is to ensure the results are ordered by relevance. SQLite does not provide an out-of-the-box search ranking algorithm, but the <em>playhouse.FTSModel</em> provides two algorithms you can use (see <a href="http://docs.peewee-orm.com/en/latest/peewee/playhouse.html#Rank">documentation</a> for more details).</p>
+<p>Our search method will be responsible for sanitizing any junk user input, then selecting the notes that match the search term and returning them ordered by rank:</p>
+<div class="highlight"><pre><span class="nd">@classmethod</span>
+<span class="k">def</span> <span class="nf">search</span><span class="p">(</span><span class="n">cls</span><span class="p">,</span> <span class="n">search_term</span><span class="p">):</span>
+    <span class="n">words</span> <span class="o">=</span> <span class="p">[</span><span class="n">word</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span> <span class="k">for</span> <span class="n">word</span> <span class="ow">in</span> <span class="n">search_term</span><span class="o">.</span><span class="n">split</span><span class="p">()</span> <span class="k">if</span> <span class="n">word</span><span class="p">]</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">words</span><span class="p">:</span>
+        <span class="c1"># Return an intentionally empty query.</span>
+        <span class="k">return</span> <span class="n">Note</span><span class="o">.</span><span class="n">select</span><span class="p">()</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">Note</span><span class="o">.</span><span class="n">id</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="c1"># Recombine the cleaned search phrase.</span>
+        <span class="n">search</span> <span class="o">=</span> <span class="s1">' '</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">words</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="p">(</span><span class="n">Note</span>
+            <span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">Note</span><span class="p">,</span> <span class="n">FTSNote</span><span class="p">,</span> <span class="n">FTSNote</span><span class="o">.</span><span class="n">rank</span><span class="p">()</span><span class="o">.</span><span class="n">alias</span><span class="p">(</span><span class="s1">'score'</span><span class="p">))</span>
+            <span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">FTSNote</span><span class="p">)</span>
+            <span class="o">.</span><span class="n">where</span><span class="p">(</span>
+                <span class="p">(</span><span class="n">Note</span><span class="o">.</span><span class="n">status</span> <span class="o">==</span> <span class="n">Note</span><span class="o">.</span><span class="n">STATUS_VISIBLE</span><span class="p">)</span> <span class="o">&amp;</span>
+                <span class="p">(</span><span class="n">FTSNote</span><span class="o">.</span><span class="n">match</span><span class="p">(</span><span class="n">search</span><span class="p">)))</span>
+            <span class="o">.</span><span class="n">order_by</span><span class="p">(</span><span class="n">SQL</span><span class="p">(</span><span class="s1">'score'</span><span class="p">)</span><span class="o">.</span><span class="n">desc</span><span class="p">(),</span> <span class="n">Note</span><span class="o">.</span><span class="n">timestamp</span><span class="o">.</span><span class="n">desc</span><span class="p">()))</span>
+</pre></div>
+<h3>Preparing the database</h3>
+<p>At this point you're probably ready to give the new search function a try! Before we can do that, we need to create a table in our database for the <em>FTSNote</em> model, and then populate it with the content from our existing notes. Using either a one-off script or the interactive interpreter, run the following code:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">models</span> <span class="kn">import</span> <span class="n">db</span><span class="p">,</span> <span class="n">FTSNote</span><span class="p">,</span> <span class="n">Note</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="k">with</span> <span class="n">db</span><span class="o">.</span><span class="n">transaction</span><span class="p">():</span>
+<span class="gp">... </span>    <span class="n">FTSNote</span><span class="o">.</span><span class="n">create_table</span><span class="p">()</span>
+<span class="gp">... </span>    <span class="k">for</span> <span class="n">note</span> <span class="ow">in</span> <span class="n">Note</span><span class="o">.</span><span class="n">select</span><span class="p">():</span>
+<span class="gp">... </span>        <span class="n">FTSNote</span><span class="o">.</span><span class="n">store_note</span><span class="p">(</span><span class="n">note</span><span class="p">)</span>
+</pre></div>
+<p>And that's it! You can now try searching the notes database:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="p">[</span><span class="n">note</span><span class="o">.</span><span class="n">content</span> <span class="k">for</span> <span class="n">note</span> <span class="ow">in</span> <span class="n">Note</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="s1">'lua'</span><span class="p">)]</span>
+<span class="go">['Learn Lua in 15 minutes: http://tylerneylon.com/a/learn-lua/',</span>
+<span class="go"> 'Programming in Lua : 9.1 -- http://www.lua.org/pil/9.1.html',</span>
+<span class="go"> 'Programming in Lua (first edition), free eBook at http://www.lua.org/pil/contents.html']</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="p">[</span><span class="n">note</span><span class="o">.</span><span class="n">content</span> <span class="k">for</span> <span class="n">note</span> <span class="ow">in</span> <span class="n">Note</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="s1">'learn NEAR/3 lua'</span><span class="p">)]</span>
+<span class="go">['Learn Lua in 15 minutes: http://tylerneylon.com/a/learn-lua/']</span>
+</pre></div>
+<h3>Wiring up the front-end</h3>
+<p>When we implement search in part 2 of the series, we simply passed an additional filtering parameter to the API endpoint (<em>content__ilike=search terms</em>). In order to use our new search method, we'll need to create a custom search endpoint. Luckily, this is quite easy -- we just add a new URL route to our NoteResource class and call it from the front-end.</p>
+<p>Open <code>api.py</code> and make the following changes:</p>
+<div class="highlight"><pre><span class="c1"># Add this import to the top of the module.</span>
+<span class="kn">from</span> <span class="nn">flask</span> <span class="kn">import</span> <span class="n">request</span>
+
+<span class="c1"># Add the following methods to the NoteResource class.</span>
+<span class="k">class</span> <span class="nc">NoteResource</span><span class="p">(</span><span class="n">RestResouce</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">get_urls</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">(</span>
+            <span class="p">(</span><span class="s1">'/search/'</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">search</span><span class="p">),</span>
+        <span class="p">)</span> <span class="o">+</span> <span class="nb">super</span><span class="p">(</span><span class="n">NoteResource</span><span class="p">,</span> <span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="n">get_urls</span><span class="p">()</span>
+
+    <span class="k">def</span> <span class="nf">search</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">query</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">args</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'query'</span><span class="p">)</span>
+        <span class="n">notes</span> <span class="o">=</span> <span class="n">Note</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">request</span><span class="o">.</span><span class="n">args</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'query'</span><span class="p">)</span> <span class="ow">or</span> <span class="s1">''</span><span class="p">)</span>
+        <span class="n">notes</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">process_query</span><span class="p">(</span><span class="n">notes</span><span class="p">)</span>  <span class="c1"># Apply any filters, etc.</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">paginated_object_list</span><span class="p">(</span><span class="n">notes</span><span class="p">)</span>
+</pre></div>
+<p>Finally we will modify the <em>notes.js</em> script to use the search endpoint when performing a search.</p>
+<p>The <code>Editor.getList()</code> method controls how we retrieve notes from the API. When a search term is present, we need to use the custom endpoint. Make the following changes to <code>Editor.getList()</code>:</p>
+<div class="highlight"><pre><span class="nx">Editor</span><span class="p">.</span><span class="nx">prototype</span><span class="p">.</span><span class="nx">getList</span> <span class="o">=</span> <span class="kd">function</span><span class="p">(</span><span class="nx">page</span><span class="p">,</span> <span class="nx">search</span><span class="p">)</span> <span class="p">{</span>
+  <span class="kd">var</span> <span class="nx">requestData</span> <span class="o">=</span> <span class="p">{};</span>
+  <span class="kd">var</span> <span class="nx">self</span> <span class="o">=</span> <span class="k">this</span><span class="p">;</span>
+  <span class="kd">var</span> <span class="nx">url</span> <span class="o">=</span> <span class="nx">search</span> <span class="o">?</span> <span class="s1">'/api/note/search/'</span> <span class="o">:</span> <span class="s1">'/api/note/'</span><span class="p">;</span> <span class="c1">// New.</span>
+
+  <span class="k">this</span><span class="p">.</span><span class="nx">container</span><span class="p">.</span><span class="nx">empty</span><span class="p">();</span>
+
+  <span class="k">if</span> <span class="p">(</span><span class="nx">page</span><span class="p">)</span> <span class="nx">requestData</span><span class="p">[</span><span class="s1">'page'</span><span class="p">]</span> <span class="o">=</span> <span class="nx">page</span><span class="p">;</span>
+  <span class="k">if</span> <span class="p">(</span><span class="nx">search</span><span class="p">)</span> <span class="nx">requestData</span><span class="p">[</span><span class="s1">'query'</span><span class="p">]</span> <span class="o">=</span> <span class="nx">search</span><span class="p">;</span>  <span class="c1">// New: include the search query.</span>
+
+  <span class="c1">// New: this call changed from a hard-coded URL to the new url variable.</span>
+  <span class="k">this</span><span class="p">.</span><span class="nx">makeRequest</span><span class="p">(</span><span class="nx">url</span><span class="p">,</span> <span class="s1">'GET'</span><span class="p">,</span> <span class="nx">requestData</span><span class="p">,</span> <span class="kd">function</span><span class="p">(</span><span class="nx">data</span><span class="p">)</span> <span class="p">{</span>
+    <span class="nx">data</span><span class="p">.</span><span class="nx">objects</span><span class="p">.</span><span class="nx">reverse</span><span class="p">();</span>
+    <span class="nx">$</span><span class="p">.</span><span class="nx">each</span><span class="p">(</span><span class="nx">data</span><span class="p">.</span><span class="nx">objects</span><span class="p">,</span> <span class="kd">function</span><span class="p">(</span><span class="nx">idx</span><span class="p">,</span> <span class="nx">note</span><span class="p">)</span> <span class="p">{</span>
+      <span class="nx">self</span><span class="p">.</span><span class="nx">addNoteToList</span><span class="p">(</span><span class="nx">note</span><span class="p">.</span><span class="nx">rendered</span><span class="p">);</span>
+    <span class="p">});</span>
+    <span class="nx">imagesLoaded</span><span class="p">(</span><span class="nx">self</span><span class="p">.</span><span class="nx">container</span><span class="p">,</span> <span class="kd">function</span><span class="p">()</span> <span class="p">{</span>
+      <span class="nx">self</span><span class="p">.</span><span class="nx">container</span><span class="p">.</span><span class="nx">masonry</span><span class="p">(</span><span class="s1">'layout'</span><span class="p">);</span>
+    <span class="p">});</span>
+    <span class="nx">self</span><span class="p">.</span><span class="nx">updatePagination</span><span class="p">(</span><span class="nx">data</span><span class="p">);</span>
+  <span class="p">});</span>
+<span class="p">}</span>
+</pre></div>
+<h3>Wrapping up</h3>
+<p>That's it! Our notes app now has very robust full-text searching capabilities. Thanks for following along, I hope you enjoyed this post. In the next installment we will be building a command-line client for working with the notes app. This client will make it very easy to work with the notes app from the command-line. Since we won't be able to easily browse lists of notes, having a quality search interface will be very helpful for finding notes.</p>
+<div class="callout callout-success">
+<h4>Note-taking app code</h4>
+<p>You can download or browse the source code for the entire note-taking app up to this point using this Gist:</p>
+<p><a href="https://gist.github.com/coleifer/d93d6c43e59698d149c0">https://gist.github.com/coleifer/d93d6c43e59698d149c0</a></p>
+<p>This gist also contains some additional changes which were not covered in this post for reasons of brevity, but which may be useful to you.</p>
+<ul>
+<li>Added capability to edit notes after they've been saved.</li>
+<li>Re-wrote the reminders task to be more robust.</li>
+<li>Simplified the Note model, and included a migration script.</li>
+<li>Added an optional <em>days</em> parameter to the search function to limit our search to a certain number of days in the past.</li>
+</ul>
+<p>You can browse a diff of the changes <a href="https://gist.github.com/coleifer/d93d6c43e59698d149c0#file-xx_v2_v3-diff">here</a>.</p>
+</div>
+<h3>Links</h3>
+
+<p>Here are the other posts in the series:</p>
+
+<p>Or simply look at <a href="/blog/tags/saturday-morning-hacks/">all of the saturday-morning hack posts</a>.</p>
+  
+  
+
+
+<hr/>
+
+  <p>Commenting has been closed, but please feel free to <a href="/contact/">contact me</a></p>
+
+
+    </div>
+
+    </div></body></html>

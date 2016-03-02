@@ -1,0 +1,270 @@
+<html><body><div><div class="content">
+      
+        <h1 class="content-title">Postgresql HStore, JSON data-type and Arrays with Peewee ORM</h1>
+      
+      
+      
+  <div class="post-info"><p>
+    
+    
+      September 12, 2014 23:13
+      </p><span class="separator">/</span>
+      <a href="#comments">2 comments</a>
+      <span class="separator">/</span>
+      
+        <a href="/blog/tags/peewee/">peewee</a>
+      
+        <a href="/blog/tags/postgresql/">postgresql</a>
+      
+        <a href="/blog/tags/python/">python</a>
+      
+    
+  </div>
+  
+  
+    <p>I've developed an interest in some of the more advanced features of <a href="http://www.sqlite.org/docs.html">SQLite</a> after
+reading the O'Reilly title <a href="http://shop.oreilly.com/product/9780596521196.do">Using SQLite</a>
+(<strong>Small. Fast. Reliable. Choose Any Three</strong>). For personal projects I like
+using SQLite, but when I need something
+more powerful I turn to <a href="http://www.postgresql.org/docs/">Postgresql</a>. Because
+peewee supports both of these databases (as well as MySQL), it is limited to a
+lowest-common-denominator feature set.  While this encompasses a broad range of
+features, each database engine has its own extensions and I've been interested
+in adding some pythonic support for the cooler extensions.</p>
+<p>Here are some of the fun things you can find in peewee's <a href="http://docs.peewee-orm.com/en/latest/peewee/playhouse.html">playhouse</a> (collection of extensions):</p>
+<ul>
+<li>Postgresql features
+</li>
+<li>SQLite features
+</li>
+</ul>
+<p>This post will showcase the peewee support for HStore, JSON document store, and arrays. I've written elsewhere about <a href="http://charlesleifer.com/blog/using-sqlite-full-text-search-with-python/">SQLite's full-text search</a>, so if you're a SQLite user you may want to check out that post.</p>
+<p>To follow along at home, feel free to install peewee:</p>
+
+<h3>Postgresql HStore</h3>
+<p><a href="http://www.postgresql.org/docs/current/static/hstore.html">HStore</a> is a Postgresql
+module that provides support for storing and querying arbitrary key/value pairs.
+As of version 2.3, the popular python driver <a href="http://initd.org/psycopg/docs/">psycopg2</a> has
+supported hstore as a part of its <em>extras</em> module.  I've packaged up integration with
+the peewee orm in an extension module, <a href="http://docs.peewee-orm.com/en/latest/peewee/playhouse.html#postgres-ext">playhouse.postgres_ext</a>.</p>
+<p>HStore is great for storing partially structured data.  For example, if you've ever worked with
+real estate data, you probably share my feelings that modelling for real estate is a total
+pain in the ass. The sheer amount of features a house may have can lead to a very wide, sparse table if each feature is given its own column, so instead it can be nice to store things as key/value pairs.  Let's say we're building a simple table for home data:</p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">playhouse.postgres_ext</span> <span class="kn">import</span> <span class="o">*</span>
+
+<span class="c1"># Note that we are using PostgresqlExtDatabase as opposed to</span>
+<span class="c1"># the usual peewee.PostgresqlDatabase.</span>
+<span class="n">db</span> <span class="o">=</span> <span class="n">PostgresqlExtDatabase</span><span class="p">(</span><span class="s1">'home_data'</span><span class="p">,</span> <span class="n">user</span><span class="o">=</span><span class="s1">'postgres'</span><span class="p">)</span>
+
+<span class="k">class</span> <span class="nc">House</span><span class="p">(</span><span class="n">Model</span><span class="p">):</span>
+    <span class="n">address</span> <span class="o">=</span> <span class="n">CharField</span><span class="p">()</span>
+    <span class="n">features</span> <span class="o">=</span> <span class="n">HStoreField</span><span class="p">()</span>
+
+    <span class="k">class</span> <span class="nc">Meta</span><span class="p">:</span>
+        <span class="n">database</span> <span class="o">=</span> <span class="n">db</span>
+</pre></div>
+<p>Now that we have a <code>House</code> model, let's see what HStore can do. Below we're just
+storing and retrieving a python dictionary:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">h</span> <span class="o">=</span> <span class="n">House</span><span class="o">.</span><span class="n">create</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">address</span><span class="o">=</span><span class="s1">'123 Main St'</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">features</span><span class="o">=</span><span class="p">{</span><span class="s1">'garage'</span><span class="p">:</span> <span class="s1">'2 cars'</span><span class="p">,</span> <span class="s1">'bath'</span><span class="p">:</span> <span class="s1">'2 bath'</span><span class="p">})</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="n">h_from_db</span> <span class="o">=</span> <span class="n">House</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">House</span><span class="o">.</span><span class="n">id</span> <span class="o">==</span> <span class="n">h</span><span class="o">.</span><span class="n">id</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">h_from_db</span><span class="o">.</span><span class="n">features</span>
+<span class="go">{'bath': '2 bath', 'garage': '2 cars'}</span>
+</pre></div>
+<p>So that's pretty cool, we can store arbitrary key/value pairs in the database and work with them using python dictionaries, but the real power comes from the ways we can query the stored data.  Below are three examples showing search for a single key, multiple keys, and finally searching for a partial dictionary:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">features</span> <span class="o">=</span> <span class="n">House</span><span class="o">.</span><span class="n">features</span>  <span class="c1"># Create a reference to the HStore field.</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">House</span><span class="o">.</span><span class="n">select</span><span class="p">()</span><span class="o">.</span><span class="n">where</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">features</span><span class="o">.</span><span class="n">contains</span><span class="p">(</span><span class="s1">'garage'</span><span class="p">))</span> <span class="c1"># All houses with a garage.</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="n">House</span><span class="o">.</span><span class="n">select</span><span class="p">()</span><span class="o">.</span><span class="n">where</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">features</span><span class="o">.</span><span class="n">contains</span><span class="p">([</span><span class="s1">'garage'</span><span class="p">,</span> <span class="s1">'bath'</span><span class="p">]))</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="n">House</span><span class="o">.</span><span class="n">select</span><span class="p">()</span><span class="o">.</span><span class="n">where</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">features</span><span class="o">.</span><span class="n">contains</span><span class="p">({</span><span class="s1">'garage'</span><span class="p">:</span> <span class="s1">'2 cars'</span><span class="p">}))</span> <span class="c1"># Houses with a 2-car garage.</span>
+</pre></div>
+<p>You can perform atomic updates and deletes using a special function:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">query</span> <span class="o">=</span> <span class="n">House</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">features</span><span class="o">=</span><span class="n">House</span><span class="o">.</span><span class="n">features</span><span class="o">.</span><span class="n">update</span><span class="p">({</span>
+<span class="gp">... </span>    <span class="s1">'bath'</span><span class="p">:</span> <span class="s1">'2.5 bath'</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="s1">'sqft'</span><span class="p">:</span> <span class="s1">'2000'</span><span class="p">}))</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">query</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">House</span><span class="o">.</span><span class="n">id</span> <span class="o">==</span> <span class="n">h</span><span class="o">.</span><span class="n">id</span><span class="p">)</span><span class="o">.</span><span class="n">execute</span><span class="p">()</span>
+<span class="go">1</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="n">h</span> <span class="o">=</span> <span class="n">House</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">House</span><span class="o">.</span><span class="n">id</span> <span class="o">==</span> <span class="n">h</span><span class="o">.</span><span class="n">id</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">h</span><span class="o">.</span><span class="n">features</span>  <span class="c1"># The features now contains our updates.</span>
+<span class="go">{'bath': '2.5 bath', 'garage': '2 cars', 'sqft': '2000'}</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="n">query</span> <span class="o">=</span> <span class="n">House</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">features</span><span class="o">=</span><span class="n">House</span><span class="o">.</span><span class="n">features</span><span class="o">.</span><span class="n">delete</span><span class="p">(</span><span class="s1">'bath'</span><span class="p">))</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">query</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="nb">id</span><span class="o">=</span><span class="n">h</span><span class="o">.</span><span class="n">id</span><span class="p">)</span><span class="o">.</span><span class="n">execute</span><span class="p">()</span>
+<span class="go">1</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="n">h</span> <span class="o">=</span> <span class="n">House</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">House</span><span class="o">.</span><span class="n">id</span> <span class="o">==</span> <span class="n">h</span><span class="o">.</span><span class="n">id</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">h</span><span class="o">.</span><span class="n">features</span>
+<span class="go">{'garage': '2 cars', 'sqft': '2000'}</span>
+</pre></div>
+<p>The <a href="http://docs.peewee-orm.com/en/latest/peewee/playhouse.html#hstore">documentation</a> provides a
+complete reference of the supported HStore functions along with examples, so please
+check them out for more details! Topics covered include:</p>
+<ul>
+<li>Selecting keys, values or tuples of items.</li>
+<li>Retrieving slices of data.</li>
+<li>Checking for the existence of a key in a dictionary.</li>
+</ul>
+<h3>JSON Documents</h3>
+<p>Being able to store and query JSON data along with your other relational data is one of Postgresql's coolest new features. Postgresql supports a JSON data type natively as of 9.2 (with full support in 9.3). In order to use peewee's JSON functionality, you must be using an up-to-date version of Postgres with psycopg2 version 2.5 or greater.</p>
+<p>Let's build a simple peewee model for storing API responses. Our model will have a single classmethod <code>request()</code> which will be used to fetch a JSON response for storage in the database.</p>
+<div class="highlight"><pre><span class="kn">import</span> <span class="nn">json</span>
+<span class="kn">import</span> <span class="nn">urllib2</span>
+<span class="kn">from</span> <span class="nn">playhouse.postgres_ext</span> <span class="kn">import</span> <span class="o">*</span>
+
+<span class="n">db</span> <span class="o">=</span> <span class="n">PostgresqlExtDatabase</span><span class="p">(</span><span class="s1">'my_database'</span><span class="p">)</span>  <span class="c1"># note</span>
+
+<span class="k">class</span> <span class="nc">APIResponse</span><span class="p">(</span><span class="n">Model</span><span class="p">):</span>
+    <span class="n">url</span> <span class="o">=</span> <span class="n">CharField</span><span class="p">()</span>
+    <span class="n">response</span> <span class="o">=</span> <span class="n">JSONField</span><span class="p">()</span>
+
+    <span class="k">class</span> <span class="nc">Meta</span><span class="p">:</span>
+        <span class="n">database</span> <span class="o">=</span> <span class="n">db</span>
+
+    <span class="nd">@classmethod</span>
+    <span class="k">def</span> <span class="nf">request</span><span class="p">(</span><span class="n">cls</span><span class="p">,</span> <span class="n">url</span><span class="p">):</span>
+        <span class="n">fh</span> <span class="o">=</span> <span class="n">urllib2</span><span class="o">.</span><span class="n">urlopen</span><span class="p">(</span><span class="n">url</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">cls</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">url</span><span class="o">=</span><span class="n">url</span><span class="p">,</span> <span class="n">response</span><span class="o">=</span><span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">fh</span><span class="o">.</span><span class="n">read</span><span class="p">()))</span>
+</pre></div>
+<p>Now here's the really cool part: we can query these JSON responses almost as if they were Python objects. First let's use DuckDuckGo's <a href="https://duckduckgo.com/api">instant answer API</a> to generate some data:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">APIResponse</span><span class="o">.</span><span class="n">create_table</span><span class="p">()</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">categories</span> <span class="o">=</span> <span class="p">[</span><span class="s1">'Lawrence,KS'</span><span class="p">,</span> <span class="s1">'Python'</span><span class="p">,</span> <span class="s1">'Postgresql'</span><span class="p">,</span> <span class="s1">'Kittens'</span><span class="p">]</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="k">for</span> <span class="n">category</span> <span class="ow">in</span> <span class="n">categories</span><span class="p">:</span>
+<span class="gp">... </span>    <span class="n">APIResponse</span><span class="o">.</span><span class="n">request</span><span class="p">(</span><span class="s1">'http://api.duckduckgo.com/?q=</span><span class="si">%s</span><span class="s1">&amp;format=json'</span> <span class="o">%</span> <span class="n">category</span><span class="p">)</span>
+</pre></div>
+<p>The response data looks something like this:</p>
+<div class="highlight"><pre><span class="p">{</span>
+   <span class="s2">"Heading"</span> <span class="o">:</span> <span class="s2">"Python"</span><span class="p">,</span>
+   <span class="s2">"AbstractURL"</span> <span class="o">:</span> <span class="s2">"https://en.wikipedia.org/wiki/Python"</span><span class="p">,</span>
+   <span class="s2">"Definition"</span> <span class="o">:</span> <span class="s2">""</span><span class="p">,</span>
+   <span class="s2">"AbstractSource"</span> <span class="o">:</span> <span class="s2">"Wikipedia"</span><span class="p">,</span>
+   <span class="s2">"Image"</span> <span class="o">:</span> <span class="s2">""</span><span class="p">,</span>
+   <span class="s2">"Results"</span> <span class="o">:</span> <span class="p">[],</span>
+   <span class="s2">"RelatedTopics"</span> <span class="o">:</span> <span class="p">[</span>
+      <span class="p">{</span>
+         <span class="s2">"Result"</span> <span class="o">:</span> <span class="s2">"&lt;a href=\"https://duckduckgo.com/Python_(programming_language)\"&gt;Python (programming language)&lt;/a&gt; A widely used general-purpose, high-level programming language."</span><span class="p">,</span>
+         <span class="s2">"Icon"</span> <span class="o">:</span> <span class="p">{</span><span class="s2">"URL"</span> <span class="o">:</span> <span class="s2">""</span><span class="p">,</span> <span class="s2">"Height"</span> <span class="o">:</span> <span class="s2">""</span><span class="p">,</span> <span class="s2">"Width"</span> <span class="o">:</span> <span class="s2">""</span><span class="p">},</span>
+         <span class="s2">"FirstURL"</span> <span class="o">:</span> <span class="s2">"https://duckduckgo.com/Python_(programming_language)"</span><span class="p">,</span>
+         <span class="s2">"Text"</span> <span class="o">:</span> <span class="s2">"Python (programming language) A widely used general-purpose, high-level programming language."</span>
+      <span class="p">},</span>
+      <span class="p">...</span>
+    <span class="p">]</span>
+<span class="p">}</span>
+</pre></div>
+<p>Let's find all the responses that contain something in the Image field, and print it out:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">Image</span> <span class="o">=</span> <span class="n">APIResponse</span><span class="o">.</span><span class="n">response</span><span class="p">[</span><span class="s1">'Image'</span><span class="p">]</span>  <span class="c1"># Alias the lookups.</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">Heading</span> <span class="o">=</span> <span class="n">APIResponse</span><span class="o">.</span><span class="n">response</span><span class="p">[</span><span class="s1">'Heading'</span><span class="p">]</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">has_image</span> <span class="o">=</span> <span class="n">APIResponse</span><span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">Heading</span><span class="p">,</span> <span class="n">Image</span><span class="p">)</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">Image</span> <span class="o">!=</span> <span class="s1">''</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="p">[</span><span class="n">data</span> <span class="k">for</span> <span class="n">data</span> <span class="ow">in</span> <span class="n">has_image</span><span class="o">.</span><span class="n">tuples</span><span class="p">()]</span>
+<span class="go">[(u'Lawrence, Kansas', u'https://duckduckgo.com/i/ce07740b.jpg'),</span>
+<span class="go"> (u'PostgreSQL', u'https://duckduckgo.com/i/270e21a9.png')]</span>
+</pre></div>
+<p>We can select individual fields from the JSON data, and also filter on these fields in the <code>WHERE</code> clause. Peewee exposes access to the fields using Python's normal dictionary access method (<code>__getitem__</code>).</p>
+<p>Let's grab the text for the first related topic of each response. This example mixes access by key and access by index:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="p">[</span><span class="n">topic</span> <span class="k">for</span> <span class="n">topic</span> <span class="ow">in</span>
+<span class="gp">... </span> <span class="n">APIResponse</span><span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">APIResponse</span><span class="o">.</span><span class="n">response</span><span class="p">[</span><span class="s1">'RelatedTopics'</span><span class="p">][</span><span class="mi">0</span><span class="p">][</span><span class="s1">'Text'</span><span class="p">])</span><span class="o">.</span><span class="n">tuples</span><span class="p">()]</span>
+
+<span class="go">[(u'Lawrence, Kansas Category',),</span>
+<span class="go"> (u'Python (programming language) A widely used general-purpose, high-level programming language.',),</span>
+<span class="go"> (u'PostgreSQL Category',),</span>
+<span class="go"> (u'KittenA juvenile domesticated cat. A feline litter usually consists of two to five kittens.',)]</span>
+</pre></div>
+<p>These examples are trivial, but hopefully they show you some of the things that are possible with Postgresql's JSON data-type. In the next release of Peewee I plan on adding support for Postgresql 9.4's binary JSON data-type as well as the new operators it supports (contains, contains_any).</p>
+<h4>A note on JSONB</h4>
+<p>One of the limitations of HStore is that it does not support nested key/value pairs. The upside is that HStore supports more flexible (and powerful) querying operations than the JSON data-type. With the addition of JSONB, Postgresql will allow you to store nested key/value pairs as well as query them using special operations like <em>contains</em> and <em>contains_any</em>. It's a very cool feature and I'm looking forward to adding support for it soon.</p>
+<h3>Arrays</h3>
+<p>Postgresql arrays allow you to store lists of items alongside your relational data. While lists of items are commonly stored in a related table for normalization, for small lists that can sometimes be overkill. To show off peewee's support for Postgresql arrays, we'll make a simple Note model that supports an arbitrary number of tags.</p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">playhouse.postgres_ext</span> <span class="kn">import</span> <span class="o">*</span>
+
+<span class="n">db</span> <span class="o">=</span> <span class="n">PostgresqlExtDatabase</span><span class="p">(</span><span class="s1">'notes'</span><span class="p">)</span>
+
+<span class="k">class</span> <span class="nc">Note</span><span class="p">(</span><span class="n">Model</span><span class="p">):</span>
+    <span class="n">text</span> <span class="o">=</span> <span class="n">TextField</span><span class="p">()</span>
+    <span class="n">tags</span> <span class="o">=</span> <span class="n">ArrayField</span><span class="p">(</span><span class="n">CharField</span><span class="p">)</span>
+
+    <span class="k">class</span> <span class="nc">Meta</span><span class="p">:</span>
+        <span class="n">database</span> <span class="o">=</span> <span class="n">db</span>
+</pre></div>
+<p>Storing arrays in the database is as easy as storing a normal Python list:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">Note</span><span class="o">.</span><span class="n">create_table</span><span class="p">()</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">data</span> <span class="o">=</span> <span class="p">(</span>
+<span class="gp">... </span>    <span class="p">(</span><span class="s1">'Write a blog post'</span><span class="p">,</span> <span class="p">[</span><span class="s1">'todo'</span><span class="p">]),</span>
+<span class="gp">... </span>    <span class="p">(</span><span class="s1">'Check out https://duckduckgo.com/api'</span><span class="p">,</span> <span class="p">[</span><span class="s1">'link'</span><span class="p">,</span> <span class="s1">'todo'</span><span class="p">]),</span>
+<span class="gp">... </span>    <span class="p">(</span><span class="s1">'"Programming bottom-up": http://paulgraham.com/progbot.html'</span><span class="p">,</span> <span class="p">[</span><span class="s1">'link'</span><span class="p">]),</span>
+<span class="gp">... </span>    <span class="p">(</span><span class="s1">'Blah'</span><span class="p">,</span> <span class="p">[</span><span class="s1">'foo'</span><span class="p">,</span> <span class="s1">'bar'</span><span class="p">,</span> <span class="s1">'baz'</span><span class="p">]),</span>
+<span class="gp">... </span>    <span class="p">(</span><span class="s1">'A note with no tags.'</span><span class="p">,</span> <span class="p">[]),</span>
+<span class="gp">... </span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="k">for</span> <span class="n">text</span><span class="p">,</span> <span class="n">tags</span> <span class="ow">in</span> <span class="n">data</span><span class="p">:</span>
+<span class="gp">... </span>    <span class="n">Note</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">text</span><span class="o">=</span><span class="n">text</span><span class="p">,</span> <span class="n">tags</span><span class="o">=</span><span class="n">tags</span><span class="p">)</span>
+</pre></div>
+<p>Now let's look at the various ways we can query these arrays of tags. First of all, when retrieving our notes from the database, the tags are returned as a normal list:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">Note</span><span class="o">.</span><span class="n">select</span><span class="p">()</span><span class="o">.</span><span class="n">first</span><span class="p">()</span><span class="o">.</span><span class="n">tags</span>
+<span class="go">['todo']</span>
+</pre></div>
+<p>The interesting stuff happens when we begin searching and indexing our arrays:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">todo_notes</span> <span class="o">=</span> <span class="n">Note</span><span class="o">.</span><span class="n">select</span><span class="p">()</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">Note</span><span class="o">.</span><span class="n">tags</span><span class="o">.</span><span class="n">contains</span><span class="p">(</span><span class="s1">'todo'</span><span class="p">))</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="p">[</span><span class="n">note</span><span class="o">.</span><span class="n">text</span> <span class="k">for</span> <span class="n">note</span> <span class="ow">in</span> <span class="n">todo_notes</span><span class="p">]</span>
+<span class="go">['Write a blog post',</span>
+<span class="go"> 'Check out https://duckduckgo.com/api']</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="n">todo_with_link</span> <span class="o">=</span> <span class="n">Note</span><span class="o">.</span><span class="n">select</span><span class="p">()</span><span class="o">.</span><span class="n">where</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">Note</span><span class="o">.</span><span class="n">tags</span><span class="o">.</span><span class="n">contains</span><span class="p">(</span><span class="s1">'todo'</span><span class="p">,</span> <span class="s1">'link'</span><span class="p">))</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="p">[</span><span class="n">note</span><span class="o">.</span><span class="n">text</span> <span class="k">for</span> <span class="n">note</span> <span class="ow">in</span> <span class="n">todo_with_link</span><span class="p">]</span>
+<span class="go">['Check out https://duckduckgo.com/api']</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="n">todo_or_link</span> <span class="o">=</span> <span class="n">Note</span><span class="o">.</span><span class="n">select</span><span class="p">()</span><span class="o">.</span><span class="n">where</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">Note</span><span class="o">.</span><span class="n">tags</span><span class="o">.</span><span class="n">contains_any</span><span class="p">(</span><span class="s1">'todo'</span><span class="p">,</span> <span class="s1">'link'</span><span class="p">))</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="p">[</span><span class="n">note</span><span class="o">.</span><span class="n">text</span> <span class="k">for</span> <span class="n">note</span> <span class="ow">in</span> <span class="n">todo_or_link</span><span class="p">]</span>
+<span class="go">['Write a blog post',</span>
+<span class="go"> 'Check out https://duckduckgo.com/api',</span>
+<span class="go"> '"Programming bottom-up": http://paulgraham.com/progbot.html']</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="n">first_tag</span> <span class="o">=</span> <span class="n">Note</span><span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">Note</span><span class="o">.</span><span class="n">tags</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="p">[</span><span class="n">tags</span> <span class="k">for</span> <span class="n">tags</span> <span class="ow">in</span> <span class="n">first_tag</span><span class="o">.</span><span class="n">tuples</span><span class="p">()]</span>
+<span class="go">[('todo',), ('link',), ('link',), ('foo',), (None,)]</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="n">first_two_tags</span> <span class="o">=</span> <span class="n">Note</span><span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">Note</span><span class="o">.</span><span class="n">tags</span><span class="p">[:</span><span class="mi">1</span><span class="p">])</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="p">[</span><span class="n">tags</span> <span class="k">for</span> <span class="n">tags</span> <span class="ow">in</span> <span class="n">first_two_tags</span><span class="o">.</span><span class="n">tuples</span><span class="p">()]</span>
+<span class="go">[(['todo'],),</span>
+<span class="go"> ([u'link', u'todo'],),</span>
+<span class="go"> ([u'link'],),</span>
+<span class="go"> ([u'foo', u'bar'],),</span>
+<span class="go"> ([],)]</span>
+</pre></div>
+<p>Peewee's <code>ArrayField</code> can also store multi-dimensional data by specifying <code>dimensions</code> when instantiating the field:</p>
+<div class="highlight"><pre><span class="n">the_matrix</span> <span class="o">=</span> <span class="n">ArrayField</span><span class="p">(</span><span class="n">IntegerField</span><span class="p">,</span> <span class="n">dimensions</span><span class="o">=</span><span class="mi">2</span><span class="p">)</span>
+</pre></div>
+<p>If you're curious about the implementation, you can find the source code in <code>postgres_ext.py</code>, or browse <a href="https://github.com/coleifer/peewee/blob/master/playhouse/postgres_ext.py">on GitHub</a>.</p>
+<h2>Other cool stuff</h2>
+<p>There is some other cool stuff in the <code>playhouse</code> modules, including:</p>
+
+<p>If you would like to see support for your favorite extension or database feature, feel free to drop
+me a line:</p>
+
+<p>Hope you enjoyed reading this!</p>
+  
+  
+
+  
+  
+  
+
+  
+  
+  
+
+
+<hr/>
+
+  <p>Commenting has been closed, but please feel free to <a href="/contact/">contact me</a></p>
+
+
+    </div>
+
+    </div></body></html>

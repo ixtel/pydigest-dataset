@@ -1,0 +1,572 @@
+<html><body><div><div class="post-text" itemprop="text">
+<h1>TL;DR</h1>
+
+<ul>
+<li><p>The actual speed difference is closer to 70% (or more) once a lot of the overhead is removed, for Python 2.</p></li>
+<li><p>Object creation is <strong>not</strong> at fault. Neither method creates a new object, as one-character strings are cached.</p></li>
+<li><p>The difference is unobvious, but is likely created from a greater number of checks on string indexing, with regards to the type and well-formedness. It is also quite likely thanks to the need to check what to return.</p></li>
+<li><p>List indexing is remarkably fast.</p></li>
+</ul>
+
+<hr/>
+
+<hr/>
+
+<pre><code>&gt;&gt;&gt; python3 -m timeit '[x for x in "abc"]'
+1000000 loops, best of 3: 0.388 usec per loop
+
+&gt;&gt;&gt; python3 -m timeit '[x for x in ["a", "b", "c"]]'
+1000000 loops, best of 3: 0.436 usec per loop
+</code></pre>
+
+<p>This disagrees with what you've found...</p>
+
+<p>You must be using Python 2, then.</p>
+
+<pre><code>&gt;&gt;&gt; python2 -m timeit '[x for x in "abc"]'
+1000000 loops, best of 3: 0.309 usec per loop
+
+&gt;&gt;&gt; python2 -m timeit '[x for x in ["a", "b", "c"]]'
+1000000 loops, best of 3: 0.212 usec per loop
+</code></pre>
+
+<p>Let's explain the difference between the versions. I'll examine the compiled code.</p>
+
+<p><strong>For Python 3:</strong></p>
+
+<pre><code>import dis
+
+def list_iterate():
+    [item for item in ["a", "b", "c"]]
+
+dis.dis(list_iterate)
+#&gt;&gt;&gt;   4           0 LOAD_CONST               1 (&lt;code object &lt;listcomp&gt; at 0x7f4d06b118a0, file "", line 4&gt;)
+#&gt;&gt;&gt;               3 LOAD_CONST               2 ('list_iterate.&lt;locals&gt;.&lt;listcomp&gt;')
+#&gt;&gt;&gt;               6 MAKE_FUNCTION            0
+#&gt;&gt;&gt;               9 LOAD_CONST               3 ('a')
+#&gt;&gt;&gt;              12 LOAD_CONST               4 ('b')
+#&gt;&gt;&gt;              15 LOAD_CONST               5 ('c')
+#&gt;&gt;&gt;              18 BUILD_LIST               3
+#&gt;&gt;&gt;              21 GET_ITER
+#&gt;&gt;&gt;              22 CALL_FUNCTION            1 (1 positional, 0 keyword pair)
+#&gt;&gt;&gt;              25 POP_TOP
+#&gt;&gt;&gt;              26 LOAD_CONST               0 (None)
+#&gt;&gt;&gt;              29 RETURN_VALUE
+
+def string_iterate():
+    [item for item in "abc"]
+
+dis.dis(string_iterate)
+#&gt;&gt;&gt;  21           0 LOAD_CONST               1 (&lt;code object &lt;listcomp&gt; at 0x7f4d06b17150, file "", line 21&gt;)
+#&gt;&gt;&gt;               3 LOAD_CONST               2 ('string_iterate.&lt;locals&gt;.&lt;listcomp&gt;')
+#&gt;&gt;&gt;               6 MAKE_FUNCTION            0
+#&gt;&gt;&gt;               9 LOAD_CONST               3 ('abc')
+#&gt;&gt;&gt;              12 GET_ITER
+#&gt;&gt;&gt;              13 CALL_FUNCTION            1 (1 positional, 0 keyword pair)
+#&gt;&gt;&gt;              16 POP_TOP
+#&gt;&gt;&gt;              17 LOAD_CONST               0 (None)
+#&gt;&gt;&gt;              20 RETURN_VALUE
+</code></pre>
+
+<p>You see here that the list variant is likely to be slower due to the building of the list each time.</p>
+
+<p>This is the</p>
+
+<pre><code> 9 LOAD_CONST   3 ('a')
+12 LOAD_CONST   4 ('b')
+15 LOAD_CONST   5 ('c')
+18 BUILD_LIST   3
+</code></pre>
+
+<p>part. The string variant only has</p>
+
+<pre><code> 9 LOAD_CONST   3 ('abc')
+</code></pre>
+
+<p>You can check that this does seem to make a difference:</p>
+
+<pre><code>def string_iterate():
+    [item for item in ("a", "b", "c")]
+
+dis.dis(string_iterate)
+#&gt;&gt;&gt;  35           0 LOAD_CONST               1 (&lt;code object &lt;listcomp&gt; at 0x7f4d068be660, file "", line 35&gt;)
+#&gt;&gt;&gt;               3 LOAD_CONST               2 ('string_iterate.&lt;locals&gt;.&lt;listcomp&gt;')
+#&gt;&gt;&gt;               6 MAKE_FUNCTION            0
+#&gt;&gt;&gt;               9 LOAD_CONST               6 (('a', 'b', 'c'))
+#&gt;&gt;&gt;              12 GET_ITER
+#&gt;&gt;&gt;              13 CALL_FUNCTION            1 (1 positional, 0 keyword pair)
+#&gt;&gt;&gt;              16 POP_TOP
+#&gt;&gt;&gt;              17 LOAD_CONST               0 (None)
+#&gt;&gt;&gt;              20 RETURN_VALUE
+</code></pre>
+
+<p>This produces just</p>
+
+<pre><code> 9 LOAD_CONST               6 (('a', 'b', 'c'))
+</code></pre>
+
+<p>as tuples are immutable. Test:</p>
+
+<pre><code>&gt;&gt;&gt; python3 -m timeit '[x for x in ("a", "b", "c")]'
+1000000 loops, best of 3: 0.369 usec per loop
+</code></pre>
+
+<p>Great, back up to speed.</p>
+
+<p><strong>For Python 2:</strong></p>
+
+<pre><code>def list_iterate():
+    [item for item in ["a", "b", "c"]]
+
+dis.dis(list_iterate)
+#&gt;&gt;&gt;   2           0 BUILD_LIST               0
+#&gt;&gt;&gt;               3 LOAD_CONST               1 ('a')
+#&gt;&gt;&gt;               6 LOAD_CONST               2 ('b')
+#&gt;&gt;&gt;               9 LOAD_CONST               3 ('c')
+#&gt;&gt;&gt;              12 BUILD_LIST               3
+#&gt;&gt;&gt;              15 GET_ITER            
+#&gt;&gt;&gt;         &gt;&gt;   16 FOR_ITER                12 (to 31)
+#&gt;&gt;&gt;              19 STORE_FAST               0 (item)
+#&gt;&gt;&gt;              22 LOAD_FAST                0 (item)
+#&gt;&gt;&gt;              25 LIST_APPEND              2
+#&gt;&gt;&gt;              28 JUMP_ABSOLUTE           16
+#&gt;&gt;&gt;         &gt;&gt;   31 POP_TOP             
+#&gt;&gt;&gt;              32 LOAD_CONST               0 (None)
+#&gt;&gt;&gt;              35 RETURN_VALUE        
+
+def string_iterate():
+    [item for item in "abc"]
+
+dis.dis(string_iterate)
+#&gt;&gt;&gt;   2           0 BUILD_LIST               0
+#&gt;&gt;&gt;               3 LOAD_CONST               1 ('abc')
+#&gt;&gt;&gt;               6 GET_ITER            
+#&gt;&gt;&gt;         &gt;&gt;    7 FOR_ITER                12 (to 22)
+#&gt;&gt;&gt;              10 STORE_FAST               0 (item)
+#&gt;&gt;&gt;              13 LOAD_FAST                0 (item)
+#&gt;&gt;&gt;              16 LIST_APPEND              2
+#&gt;&gt;&gt;              19 JUMP_ABSOLUTE            7
+#&gt;&gt;&gt;         &gt;&gt;   22 POP_TOP             
+#&gt;&gt;&gt;              23 LOAD_CONST               0 (None)
+#&gt;&gt;&gt;              26 RETURN_VALUE        
+</code></pre>
+
+<p>The odd thing is that we have the <em>same</em> building of the list, but it's still faster for this. Python 2 is acting strangely fast.</p>
+
+<p>Let's remove the comprehensions and re-time. The <code>_ =</code> is to prevent it getting optimised out.</p>
+
+<pre><code>&gt;&gt;&gt; python3 -m timeit '_ = ["a", "b", "c"]'
+10000000 loops, best of 3: 0.0707 usec per loop
+
+&gt;&gt;&gt; python3 -m timeit '_ = "abc"'
+100000000 loops, best of 3: 0.0171 usec per loop
+</code></pre>
+
+<p>We can see that initialisation is not significant enough to account for the difference between the versions (those numbers are small)! We can thus conclude that Python 3 has slower comprehensions. This makes sense as Python 3 changed comprehensions to have saner scoping.</p>
+
+<p>Well, now improve the benchmark (I'm just removing overhead that isn't iteration). This removes the building of the iterable by pre-assigning it:</p>
+
+<pre><code>&gt;&gt;&gt; python3 -m timeit -s 'iterable = "abc"'           '[x for x in iterable]'
+1000000 loops, best of 3: 0.387 usec per loop
+
+&gt;&gt;&gt; python3 -m timeit -s 'iterable = ["a", "b", "c"]' '[x for x in iterable]'
+1000000 loops, best of 3: 0.368 usec per loop
+</code></pre>
+
+
+
+<pre><code>&gt;&gt;&gt; python2 -m timeit -s 'iterable = "abc"'           '[x for x in iterable]'
+1000000 loops, best of 3: 0.309 usec per loop
+
+&gt;&gt;&gt; python2 -m timeit -s 'iterable = ["a", "b", "c"]' '[x for x in iterable]'
+10000000 loops, best of 3: 0.164 usec per loop
+</code></pre>
+
+<p>We can check if calling <code>iter</code> is the overhead:</p>
+
+<pre><code>&gt;&gt;&gt; python3 -m timeit -s 'iterable = "abc"'           'iter(iterable)'
+10000000 loops, best of 3: 0.099 usec per loop
+
+&gt;&gt;&gt; python3 -m timeit -s 'iterable = ["a", "b", "c"]' 'iter(iterable)'
+10000000 loops, best of 3: 0.1 usec per loop
+</code></pre>
+
+
+
+<pre><code>&gt;&gt;&gt; python2 -m timeit -s 'iterable = "abc"'           'iter(iterable)'
+10000000 loops, best of 3: 0.0913 usec per loop
+
+&gt;&gt;&gt; python2 -m timeit -s 'iterable = ["a", "b", "c"]' 'iter(iterable)'
+10000000 loops, best of 3: 0.0854 usec per loop
+</code></pre>
+
+<p>No. No it is not. The difference is too small, especially for Python 3.</p>
+
+<p>So let's remove yet more unwanted overhead... by making the whole thing slower! The aim is just to have a longer iteration so the time hides overhead.</p>
+
+<pre><code>&gt;&gt;&gt; python3 -m timeit -s 'import random; iterable = "".join(chr(random.randint(0, 127)) for _ in range(100000))' '[x for x in iterable]'
+100 loops, best of 3: 3.12 msec per loop
+
+&gt;&gt;&gt; python3 -m timeit -s 'import random; iterable =        [chr(random.randint(0, 127)) for _ in range(100000)]' '[x for x in iterable]'
+100 loops, best of 3: 2.77 msec per loop
+</code></pre>
+
+
+
+<pre><code>&gt;&gt;&gt; python2 -m timeit -s 'import random; iterable = "".join(chr(random.randint(0, 127)) for _ in range(100000))' '[x for x in iterable]'
+100 loops, best of 3: 2.32 msec per loop
+
+&gt;&gt;&gt; python2 -m timeit -s 'import random; iterable =        [chr(random.randint(0, 127)) for _ in range(100000)]' '[x for x in iterable]'
+100 loops, best of 3: 2.09 msec per loop
+</code></pre>
+
+<p>This hasn't actually changed <em>much</em>, but it's helped a little.</p>
+
+<p>So remove the comprehension. It's overhead that's not part of the question:</p>
+
+<pre><code>&gt;&gt;&gt; python3 -m timeit -s 'import random; iterable = "".join(chr(random.randint(0, 127)) for _ in range(100000))' 'for x in iterable: pass'
+1000 loops, best of 3: 1.71 msec per loop
+
+&gt;&gt;&gt; python3 -m timeit -s 'import random; iterable =        [chr(random.randint(0, 127)) for _ in range(100000)]' 'for x in iterable: pass'
+1000 loops, best of 3: 1.36 msec per loop
+</code></pre>
+
+
+
+<pre><code>&gt;&gt;&gt; python2 -m timeit -s 'import random; iterable = "".join(chr(random.randint(0, 127)) for _ in range(100000))' 'for x in iterable: pass'
+1000 loops, best of 3: 1.27 msec per loop
+
+&gt;&gt;&gt; python2 -m timeit -s 'import random; iterable =        [chr(random.randint(0, 127)) for _ in range(100000)]' 'for x in iterable: pass'
+1000 loops, best of 3: 935 usec per loop
+</code></pre>
+
+<p>That's more like it! We can get slightly faster still by using <code>deque</code> to iterate. It's basically the same, but it's <em>faster</em>:</p>
+
+<pre><code>&gt;&gt;&gt; python3 -m timeit -s 'import random; from collections import deque; iterable = "".join(chr(random.randint(0, 127)) for _ in range(100000))' 'deque(iterable, maxlen=0)'
+1000 loops, best of 3: 777 usec per loop
+
+&gt;&gt;&gt; python3 -m timeit -s 'import random; from collections import deque; iterable =        [chr(random.randint(0, 127)) for _ in range(100000)]' 'deque(iterable, maxlen=0)'
+1000 loops, best of 3: 405 usec per loop
+</code></pre>
+
+
+
+<pre><code>&gt;&gt;&gt; python2 -m timeit -s 'import random; from collections import deque; iterable = "".join(chr(random.randint(0, 127)) for _ in range(100000))' 'deque(iterable, maxlen=0)'
+1000 loops, best of 3: 805 usec per loop
+
+&gt;&gt;&gt; python2 -m timeit -s 'import random; from collections import deque; iterable =        [chr(random.randint(0, 127)) for _ in range(100000)]' 'deque(iterable, maxlen=0)'
+1000 loops, best of 3: 438 usec per loop
+</code></pre>
+
+<p>What impresses me is that Unicode is competitive with bytestrings. We can check this explicitly by trying <code>bytes</code> and <code>unicode</code> in both:</p>
+
+<ul>
+<li><p><code>bytes</code></p>
+
+<pre><code>&gt;&gt;&gt; python3 -m timeit -s 'import random; from collections import deque; iterable = b"".join(chr(random.randint(0, 127)).encode("ascii") for _ in range(100000))' 'deque(iterable, maxlen=0)'                                                                    :(
+1000 loops, best of 3: 571 usec per loop
+
+&gt;&gt;&gt; python3 -m timeit -s 'import random; from collections import deque; iterable =         [chr(random.randint(0, 127)).encode("ascii") for _ in range(100000)]' 'deque(iterable, maxlen=0)'
+1000 loops, best of 3: 394 usec per loop
+</code></pre>
+
+
+
+<pre><code>&gt;&gt;&gt; python2 -m timeit -s 'import random; from collections import deque; iterable = b"".join(chr(random.randint(0, 127))                 for _ in range(100000))' 'deque(iterable, maxlen=0)'
+1000 loops, best of 3: 757 usec per loop
+
+&gt;&gt;&gt; python2 -m timeit -s 'import random; from collections import deque; iterable =         [chr(random.randint(0, 127))                 for _ in range(100000)]' 'deque(iterable, maxlen=0)'
+1000 loops, best of 3: 438 usec per loop
+</code></pre>
+
+<p>Here you see Python 3 actually <em>faster</em> than Python 2.</p></li>
+<li><p><code>unicode</code></p>
+
+<pre><code>&gt;&gt;&gt; python3 -m timeit -s 'import random; from collections import deque; iterable = u"".join(   chr(random.randint(0, 127)) for _ in range(100000))' 'deque(iterable, maxlen=0)'
+1000 loops, best of 3: 800 usec per loop
+
+&gt;&gt;&gt; python3 -m timeit -s 'import random; from collections import deque; iterable =         [   chr(random.randint(0, 127)) for _ in range(100000)]' 'deque(iterable, maxlen=0)'
+1000 loops, best of 3: 394 usec per loop
+</code></pre>
+
+
+
+<pre><code>&gt;&gt;&gt; python2 -m timeit -s 'import random; from collections import deque; iterable = u"".join(unichr(random.randint(0, 127)) for _ in range(100000))' 'deque(iterable, maxlen=0)'
+1000 loops, best of 3: 1.07 msec per loop
+
+&gt;&gt;&gt; python2 -m timeit -s 'import random; from collections import deque; iterable =         [unichr(random.randint(0, 127)) for _ in range(100000)]' 'deque(iterable, maxlen=0)'
+1000 loops, best of 3: 469 usec per loop
+</code></pre>
+
+<p>Again, Python 3 is faster, although this is to be expected (<code>str</code> has had a lot of attention in Python 3).</p></li>
+</ul>
+
+<p>In fact, this <code>unicode</code>-<code>bytes</code> difference is very small, which is impressive.</p>
+
+<p>So let's analyse this one case, seeing as it's fast and convenient for me:</p>
+
+<pre><code>&gt;&gt;&gt; python3 -m timeit -s 'import random; from collections import deque; iterable = "".join(chr(random.randint(0, 127)) for _ in range(100000))' 'deque(iterable, maxlen=0)'
+1000 loops, best of 3: 777 usec per loop
+
+&gt;&gt;&gt; python3 -m timeit -s 'import random; from collections import deque; iterable =        [chr(random.randint(0, 127)) for _ in range(100000)]' 'deque(iterable, maxlen=0)'
+1000 loops, best of 3: 405 usec per loop
+</code></pre>
+
+<p><strong>We can actually rule out Tim Peter's 10-times-upvoted answer!</strong></p>
+
+<pre><code>&gt;&gt;&gt; foo = iterable[123]
+&gt;&gt;&gt; iterable[36] is foo
+True
+</code></pre>
+
+<h1>These are not new objects!</h1>
+
+<p>But this is worth mentioning: indexing <em>costs</em>. The difference will likely be in the indexing, so remove the iteration and just index:</p>
+
+<pre><code>&gt;&gt;&gt; python3 -m timeit -s 'import random; iterable = "".join(chr(random.randint(0, 127)) for _ in range(100000))' 'iterable[123]'
+10000000 loops, best of 3: 0.0397 usec per loop
+
+&gt;&gt;&gt; python3 -m timeit -s 'import random; iterable =        [chr(random.randint(0, 127)) for _ in range(100000)]' 'iterable[123]'
+10000000 loops, best of 3: 0.0374 usec per loop
+</code></pre>
+
+<p>The difference seems small, but <em>at least</em> half of the cost is overhead:</p>
+
+<pre><code>&gt;&gt;&gt; python3 -m timeit -s 'import random; iterable =        [chr(random.randint(0, 127)) for _ in range(100000)]' 'iterable; 123'
+100000000 loops, best of 3: 0.0173 usec per loop
+</code></pre>
+
+<p>so the speed difference is sufficient to decide to blame it. I think.</p>
+
+<p>So why is indexing a list so much faster?</p>
+
+<p>Well, I'll come back to you on that, but my guess is that's is down to the check for <em>interned</em> strings (or cached characters if it's a seperate mechanism). This will be less fast than optimal. But I'll go check the source (although I'm not comfortable in C...) :).</p>
+
+<hr/>
+
+<p>So here's the source:</p>
+
+<pre><code>static PyObject *
+unicode_getitem(PyObject *self, Py_ssize_t index)
+{
+    void *data;
+    enum PyUnicode_Kind kind;
+    Py_UCS4 ch;
+    PyObject *res;
+
+    if (!PyUnicode_Check(self) || PyUnicode_READY(self) == -1) {
+        PyErr_BadArgument();
+        return NULL;
+    }
+    if (index &lt; 0 || index &gt;= PyUnicode_GET_LENGTH(self)) {
+        PyErr_SetString(PyExc_IndexError, "string index out of range");
+        return NULL;
+    }
+    kind = PyUnicode_KIND(self);
+    data = PyUnicode_DATA(self);
+    ch = PyUnicode_READ(kind, data, index);
+    if (ch &lt; 256)
+        return get_latin1_char(ch);
+
+    res = PyUnicode_New(1, ch);
+    if (res == NULL)
+        return NULL;
+    kind = PyUnicode_KIND(res);
+    data = PyUnicode_DATA(res);
+    PyUnicode_WRITE(kind, data, 0, ch);
+    assert(_PyUnicode_CheckConsistency(res, 1));
+    return res;
+}
+</code></pre>
+
+<p>Walking from the top, we'll have some checks. These are boring. Then some assigns, which should also be boring. The first interesting line is</p>
+
+<pre><code>ch = PyUnicode_READ(kind, data, index);
+</code></pre>
+
+<p>but we'd <em>hope</em> that is fast, as we're reading from a contiguous C array by indexing it. The result, <code>ch</code>, will be less than 256 so we'll return the cached character in <code>get_latin1_char(ch)</code>.</p>
+
+<p>So we'll run (dropping the first checks)</p>
+
+<pre><code>kind = PyUnicode_KIND(self);
+data = PyUnicode_DATA(self);
+ch = PyUnicode_READ(kind, data, index);
+return get_latin1_char(ch);
+</code></pre>
+
+<p>Where</p>
+
+<pre><code>#define PyUnicode_KIND(op) \
+    (assert(PyUnicode_Check(op)), \
+     assert(PyUnicode_IS_READY(op)),            \
+     ((PyASCIIObject *)(op))-&gt;state.kind)
+</code></pre>
+
+<p>(which is boring because asserts get ignored in debug [so I can check that they're fast] and <code>((PyASCIIObject *)(op))-&gt;state.kind)</code> is (I think) an indirection and a C-level cast);</p>
+
+<pre><code>#define PyUnicode_DATA(op) \
+    (assert(PyUnicode_Check(op)), \
+     PyUnicode_IS_COMPACT(op) ? _PyUnicode_COMPACT_DATA(op) :   \
+     _PyUnicode_NONCOMPACT_DATA(op))
+</code></pre>
+
+<p>(which is also boring for similar reasons, assuming the macros (<code>Something_CAPITALIZED</code>) are all fast),</p>
+
+<pre><code>#define PyUnicode_READ(kind, data, index) \
+    ((Py_UCS4) \
+    ((kind) == PyUnicode_1BYTE_KIND ? \
+        ((const Py_UCS1 *)(data))[(index)] : \
+        ((kind) == PyUnicode_2BYTE_KIND ? \
+            ((const Py_UCS2 *)(data))[(index)] : \
+            ((const Py_UCS4 *)(data))[(index)] \
+        ) \
+    ))
+</code></pre>
+
+<p>(which involves indexes but really isn't slow at all) and</p>
+
+<pre><code>static PyObject*
+get_latin1_char(unsigned char ch)
+{
+    PyObject *unicode = unicode_latin1[ch];
+    if (!unicode) {
+        unicode = PyUnicode_New(1, ch);
+        if (!unicode)
+            return NULL;
+        PyUnicode_1BYTE_DATA(unicode)[0] = ch;
+        assert(_PyUnicode_CheckConsistency(unicode, 1));
+        unicode_latin1[ch] = unicode;
+    }
+    Py_INCREF(unicode);
+    return unicode;
+}
+</code></pre>
+
+<p>Which confirms my suspicion that:</p>
+
+<ul>
+<li><p>This is cached:</p>
+
+<pre><code>PyObject *unicode = unicode_latin1[ch];
+</code></pre></li>
+<li><p>This should be fast. The <code>if (!unicode)</code> is not run, so it's literally equivalent in this case to</p>
+
+<pre><code>PyObject *unicode = unicode_latin1[ch];
+Py_INCREF(unicode);
+return unicode;
+</code></pre></li>
+</ul>
+
+<p>Honestly, after testing the <code>assert</code>s are fast (by disabling them [I <em>think</em> it works on the C-level asserts...]), the only plausibly-slow parts are:</p>
+
+<pre><code>PyUnicode_IS_COMPACT(op)
+_PyUnicode_COMPACT_DATA(op)
+_PyUnicode_NONCOMPACT_DATA(op)
+</code></pre>
+
+<p>Which are:</p>
+
+<pre><code>#define PyUnicode_IS_COMPACT(op) \
+    (((PyASCIIObject*)(op))-&gt;state.compact)
+</code></pre>
+
+<p>(fast, as before),</p>
+
+<pre><code>#define _PyUnicode_COMPACT_DATA(op)                     \
+    (PyUnicode_IS_ASCII(op) ?                   \
+     ((void*)((PyASCIIObject*)(op) + 1)) :              \
+     ((void*)((PyCompactUnicodeObject*)(op) + 1)))
+</code></pre>
+
+<p>(fast if the macro <code>IS_ASCII</code> is fast), and</p>
+
+<pre><code>#define _PyUnicode_NONCOMPACT_DATA(op)                  \
+    (assert(((PyUnicodeObject*)(op))-&gt;data.any),        \
+     ((((PyUnicodeObject *)(op))-&gt;data.any)))
+</code></pre>
+
+<p>(also fast as it's an assert plus an indirection plus a cast).</p>
+
+<p>So we're down (the rabbit hole) to:</p>
+
+<pre><code>PyUnicode_IS_ASCII
+</code></pre>
+
+<p>which is</p>
+
+<pre><code>#define PyUnicode_IS_ASCII(op)                   \
+    (assert(PyUnicode_Check(op)),                \
+     assert(PyUnicode_IS_READY(op)),             \
+     ((PyASCIIObject*)op)-&gt;state.ascii)
+</code></pre>
+
+<p>Hmm... that seems fast too...</p>
+
+<hr/>
+
+<p>Well, OK, but let's compare it to <code>PyList_GetItem</code>. (Yeah, <em>thanks</em> Tim Peters for giving me more work to do :P.)</p>
+
+<pre><code>PyObject *
+PyList_GetItem(PyObject *op, Py_ssize_t i)
+{
+    if (!PyList_Check(op)) {
+        PyErr_BadInternalCall();
+        return NULL;
+    }
+    if (i &lt; 0 || i &gt;= Py_SIZE(op)) {
+        if (indexerr == NULL) {
+            indexerr = PyUnicode_FromString(
+                "list index out of range");
+            if (indexerr == NULL)
+                return NULL;
+        }
+        PyErr_SetObject(PyExc_IndexError, indexerr);
+        return NULL;
+    }
+    return ((PyListObject *)op) -&gt; ob_item[i];
+}
+</code></pre>
+
+<p>We can see that on non-error cases this is just going to run:</p>
+
+<pre><code>PyList_Check(op)
+Py_SIZE(op)
+((PyListObject *)op) -&gt; ob_item[i]
+</code></pre>
+
+<p>Where <code>PyList_Check</code> is</p>
+
+<pre><code>#define PyList_Check(op) \
+     PyType_FastSubclass(Py_TYPE(op), Py_TPFLAGS_LIST_SUBCLASS)
+</code></pre>
+
+<p><strike>(<a href="https://github.com/python/cpython/blob/237284d0a73e472f836adc72f090432ae7c5dfad/Include/listobject.h#L49"><strong>TABS! TABS!!!</strong></a>) (<a href="http://bugs.python.org/issue21587">issue21587</a>)</strike> That got fixed and merged in <strong>5 minutes</strong>. Like... yeah. Damn. They put Skeet to shame.</p>
+
+<pre><code>#define Py_SIZE(ob)             (((PyVarObject*)(ob))-&gt;ob_size)
+</code></pre>
+
+
+
+<pre><code>#define PyType_FastSubclass(t,f)  PyType_HasFeature(t,f)
+</code></pre>
+
+
+
+<pre><code>#ifdef Py_LIMITED_API
+#define PyType_HasFeature(t,f)  ((PyType_GetFlags(t) &amp; (f)) != 0)
+#else
+#define PyType_HasFeature(t,f)  (((t)-&gt;tp_flags &amp; (f)) != 0)
+#endif
+</code></pre>
+
+<p>So this is normally really trivial (two indirections and a couple of boolean checks) unless <code>Py_LIMITED_API</code> is on, in which case... ???</p>
+
+<p>Then there's the indexing and a cast (<code>((PyListObject *)op) -&gt; ob_item[i]</code>) and we're done.</p>
+
+<p>So there are definitely <em>fewer</em> checks for lists, and the small speed differences certainly imply that it could be relevant.</p>
+
+<hr/>
+
+<p>I think in general, there's just more type-checking and indirection <code>(-&gt;)</code> for unicode. It seems I'm missing a point, but <em>what</em>?</p>
+    </div>
+    </div></body></html>

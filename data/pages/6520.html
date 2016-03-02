@@ -1,0 +1,72 @@
+<html><body><div><div class="entry-content">
+            <p>Недавно уже <a href="http://djbook.ru/examples/65/">было описано</a>, как создать свой плагин для CMS. И упомянуто, что у плагина могут быть настройки. Поскольку эти настройки хранятся в самой обыкновенной джанговской модели, в них и может быть размещено всё, что может быть размещено в модели. Но если с полями вроде <code>CharField</code> или <code>TextField</code> работать очень просто, то бывают и менее очевидные ситуации.</p>
+<p>Наример, плагин должен отображать контактную информацию компании, включая адрес, телефон, чего-там-ещё-придумают, и карту. Примерно так:
+<img alt="Пример блока с контактной информацией" src="http://s28.postimg.org/5x89qtfu5/image.jpg"/></p>
+<p>Точка на карте должна устанавливаться через настройки плагина:
+<img alt="карта в админке" src="http://s6.postimg.org/44028rqwh/2015_09_04_01_31_30_127_0_0_1_8000_edit.png"/></p>
+<p>А сами контактные данные должны быть набором пар ключ-значение, при этом их должно быть произвольное количество. Мало ли, завтра компания откроет аккаунт в фэйсбуке и сочтёт нужным указать его в этом списке. Нужно будет добавить новую пару, не меняя код. Самым удобным будет нечто вроде инлайнов в админке:
+<img alt="инлайны в настройках плагина" src="http://s6.postimg.org/6cx2sg8hd/2015_09_04_01_38_41_127_0_0_1_8000_edit.png"/></p>
+<p>Интерфейс редактирования плагинов тесно связан с админкой, это как раз и поможет.</p>
+<h3>Карта</h3>
+<p>В данном случае модель настройки плагина будет содержать одно поле — выбор точки на карте. Несмотря на то, что задача кажется весьма тривиальной, частой, обыденной, нормального готового решения под эту задачу мне найти не удалось. Каждое из множества решений, представленных на djangopackages, обладает какими-либо недостатками. Но своё писать — как из пушки по воробьям. В моём случае применено <a href="https://github.com/Wildhind/django-addresspicker">это решение</a>. После лёгкого допила его можно использовать с python3. Весь код настроек плагина уложился в пару строк:</p>
+<pre><code>from addresspicker.fields import AddressPickerField
+
+class MapPluginSettings(CMSPlugin):
+    address = AddressPickerField("Расположение на карте")
+</code></pre>
+<h3>Связанная модель</h3>
+<p>Здесь всё несколько мудрёнее.</p>
+<p>Начало простое. Всё крайне очевидно:</p>
+<pre><code>class ContactPluginSettings(CMSPlugin):
+title = models.CharField("заголовок", max_length=32)
+
+
+class ContactPluginDataSettings(models.Model):
+    plugin = models.ForeignKey(ContactPluginSettings, related_name="contact_data")
+    key = models.CharField("название свойства", max_length=64)
+    value = models.TextField("значение свойства", max_length=512)
+    ordering = models.IntegerField("сортировка", default=100)
+
+    def __str__(self):
+        return "{}: {}".format(self.key, self.value)
+
+    class Meta:
+        ordering = ['ordering']
+        verbose_name = "клочок инфы"
+        verbose_name_plural = "контактная информация"
+</code></pre>
+<p>Но теперь нужно вынести связанную модель в интерфейс редактирования. Для этого воспользуемся классами из <code>django.contrib.admin</code>:</p>
+<pre><code>from django.contrib import admin
+
+class ItemInlineAdmin(admin.StackedInline):
+    model = ContactPluginDataSettings
+
+class ContactPlugin(CMSPluginBase):
+    model = ContactPluginSettings
+    inlines = [ItemInlineAdmin]
+</code></pre>
+<p>После этого окно редактирования настроек будет выглядеть как на скриншоте выше. И работать будет. Данные будут сохраняться. А вот при попытке опубликовать изменения случится неудача.
+Дело в том, что в Django-CMS каждая страница существует в двух экземплярах — опубликованная и черновик. Всё редактирование происходит на черновике. При публикации черновик копируется в чистовую версию. А вот как раз связанные свойства по умолчанию не копируются. И это нужно сделать вручную. В модели плагина нужно определить метод <code>copy_relations()</code>. В нашем случае так:</p>
+<pre><code>class ContactPluginSettings(CMSPlugin):
+    title = models.CharField("заголовок", max_length=32)
+
+    def copy_relations(self, oldinstance):
+        for c in oldinstance.contact_data.all():
+            c.pk = None
+            c.plugin = self
+            c.save()
+</code></pre>
+<p>В шаблоне плагина связанные данные можно использовать так же, как и в любых других шаблонах:</p>
+<pre><code>    &lt;dl class="contact_data"&gt;
+{% for item in instance.contact_data.all %}
+        &lt;dt&gt;{{ item.key }}&lt;/dt&gt;
+        &lt;dd&gt;{{ item.value|safe }}&lt;/dd&gt;
+{% endfor %}
+    &lt;/dl&gt;
+</code></pre>
+        </div>
+        
+
+        
+
+        </div></body></html>

@@ -1,0 +1,252 @@
+<html><body><div><p>Django app for database data synchronization.</p>
+
+
+
+
+
+
+
+
+<div id="aim-purpose">
+<h2>Aim &amp; purpose</h2>
+<p>This app is for synchronization of django objects between databases.</p>
+<p>It logs information about objects’ manipulations (additions, changes, deletions).
+When synchronization is launched, all objects logged from the last checkpoint are synced to another database.</p>
+<p><strong>Important note</strong>: This app doesn’t log detailed information about changes (e.g. which fields were updated),
+just that such manipulation occured. When the synchronization is performed, the objects are synced with their newest, actual values.
+(however, you can specify some fields to be <cite>skipped</cite> during synchronization, see <a href="#skipping-fields" rel="nofollow">below</a>).</p>
+<div id="example-1">
+<h3>Example 1</h3>
+<p>Consider scenario:</p>
+<ul>
+<li>there is one production project deployed on the web</li>
+<li>and the same project is deployed on some office computer in case of main server failure</li>
+</ul>
+<p>Assuming that the local database is regularly synced (eg. once a day the main database is exported and imported into the local system),
+in case of a long main server downtime the staff may use the local project (inserting objects etc.).</p>
+<p>After the server is up again, the local changes (from the point of the last checkpoint) can be painlessly synchronized to the remote server.</p>
+</div>
+<div id="example-2">
+<h3>Example 2</h3>
+<p>You can also synchronize databases both ways, not only in the slave-master model like in the previous example.</p>
+<p>However, it is probably better (if possible) to have a common database rather than to have
+one for every project deployment and to perform synchronization between them.</p>
+</div>
+</div>
+<div id="remarks-and-features">
+<h2>Remarks and features</h2>
+<div id="queryset-update-issue">
+<h3>QuerySet <tt>update</tt> issue</h3>
+<p>Django-synchro logs information about objects modifications and later use it when asked for synchronization.</p>
+<p>The logging take place using the <tt>post_save</tt> and <tt>post_delete</tt> signal handlers.</p>
+<p>That means that actions which don’t emmit those signals (like <tt>objects.update</tt> method) would result
+in no log stored, hence no synchronization of actions’ objects.</p>
+<p><strong>So, please remind</strong>: objects modified via <tt>objects.update</tt> won’t be synchronized unless some special code is prepared
+(eg. calling <tt>save</tt> on all updated objects or manually invoking <tt>post_save</tt> signal).</p>
+</div>
+<div id="natural-keys">
+<h3>Natural keys</h3>
+<p>For efficient objects finding, it is <strong>highly suggested</strong> to provide <tt>natural_key</tt> object method
+and <tt>get_by_natural_key</tt> manager method.
+This will allow easy finding whether the synchronized object exists in <cite>REMOTE</cite> and to prevent duplicating.</p>
+<p>Although adding <tt>natural_key</tt> to model definition is relatively quick, extending a manager may
+require extra work in cases when the default manager is used:</p>
+<pre>class MyManager(models.Manager):
+    def get_by_natural_key(self, code, day):
+        return self.get(code=code, day=day)
+
+class MyModel(models.Model):
+    ...
+    objects = MyManager()
+    def natural_key(self):
+        return self.code, self.day
+</pre>
+<p>To minimalize the effort of implementing a custom manager, a shortcut is provided:</p>
+<pre>from synchro import NaturalManager
+
+class MyModel(models.Model):
+    ...
+    objects = NaturalManager('code', 'day')
+    def natural_key(self):
+        return self.code, self.day
+</pre>
+<p>Or even easier (effect is exactly the same):</p>
+<pre>from synchro import NaturalKeyModel
+
+class MyModel(NaturalKeyModel):
+    ...
+    _natural_key = ('code', 'day')
+</pre>
+<p><tt>NaturalManager</tt> extends the built-in Manager by default; you can change its superclass using <tt>manager</tt> keyword:</p>
+<pre>from synchro import NaturalManager
+
+class MyVeryCustomManager(models.Manager):
+    ... # some mumbo-jumbo magic
+
+class MyModel(models.Model):
+    ...
+    objects = NaturalManager('code', 'day', manager=MyVeryCustomManager)
+    def natural_key(self):
+        return self.code, self.day
+</pre>
+<p>When using <tt>NaturalKeyModel</tt>, <tt>NaturalManager</tt> will extend the defined (<tt>objects</tt>) manager:</p>
+<pre>from synchro import NaturalKeyModel
+
+class MyVeryCustomManager(models.Manager):
+    ... # some mumbo-jumbo magic
+
+class MyModel(NaturalKeyModel):
+    ...
+    _natural_key = ('code', 'day')
+    objects = MyVeryCustomManager()
+</pre>
+<p>Side note: in fact invoking <tt>NaturalManager</tt> creates a new class being <tt>NaturalManager</tt>’s subclass.</p>
+<p>The purpose of a natural key is to <em>uniquely</em> distinguish among model instances;
+however, there are situations where it is impossible. You can choose such fields that will cause
+<tt>get_by_natural_key</tt> to find more than one object. In such a situation, it will raise
+<tt>MultipleObjectsReturned</tt> exception and the synchronization will fail.</p>
+<p>But you can tell <tt>NaturalManager</tt> that you are aware of such a situation and that it
+should just take the first object found:</p>
+<pre>class Person(models.Model):
+    ...
+    # combination of person name and city is not unique
+    objects = NaturalManager('first_name', 'last_name', 'city', allow_many=True)
+    def natural_key(self):
+        return self.first_name, self.last_name, self.city
+</pre>
+<p>Or with <tt>NaturalKeyModel</tt>:</p>
+<pre>class Person(NaturalKeyModel):
+    ...
+    # combination of person name and city is not unique
+    _natural_key = ('first_name', 'last_name', 'city')
+    _natural_manager_kwargs = {'allow_many': True}  # I know, it looks quite ugly
+</pre>
+<p>Don’t use <tt>allow_many</tt> unless you are completely sure what you are doing and what
+you want to achieve.</p>
+<p>Side note: if <tt>natural_key</tt> consist of only one field, be sure to return a tuple anyway:</p>
+<pre>class MyModel(models.Model):
+    ...
+    objects = NaturalManager('code')
+    def natural_key(self):
+        return self.code,  # comma makes it tuple
+</pre>
+<p>Or to assign tuple in <tt>NaturalKeyModel</tt>:</p>
+<pre>_natural_key = ('code',)
+</pre>
+<p>Previously, there were <tt>natural_manager</tt> function that was used instead of <tt>NaturalManager</tt>
+- however, it’s deprecated.</p>
+</div>
+<div id="skipping-fields">
+<h3>Skipping fields</h3>
+<p>If your model has some fields that should not be synchronized, like computed fields
+(eg. field with payment balances, which is updated on every order save - in <tt>order.post_save</tt> signal),
+you can exclude them from synchronization:</p>
+<pre>class MyModel(models.Model):
+    ...
+    SYNCHRO_SKIP = ('balance',)
+</pre>
+<p>When a new object is synchronized, all its skipped fields will be reset to default values on <cite>REMOTE</cite>.
+Of course, the <cite>LOCAL</cite> object will stay untouched.</p>
+</div>
+<div id="temporary-logging-disabling">
+<h3>Temporary logging disabling</h3>
+<p>If you don’t want to log some actions:</p>
+<pre>from synchro import DisableSynchroLog
+
+with DisableSynchroLog():
+    mymodel.name = foo
+    mymodel.save()
+</pre>
+<p>Or, in a less robust way, with a decorator:</p>
+<pre>from synchro import disable_synchro_log
+
+@disable_synchro_log
+def foo(mymodel):
+    mymodel.name = foo
+    mymodel.save()
+</pre>
+</div>
+<div id="signals">
+<h3>Signals</h3>
+<p>That’s a harder part.</p>
+<p>If your signal handlers modify other objects, such an action will be probably reproduced twice:</p>
+<ul>
+<li>first, when the model will be updated on <cite>REMOTE</cite>, then normal <cite>REMOTE</cite> signal handler will launch</li>
+<li>second time, because the original signal handler’s action was logged, the whole modified object will be synchronized;
+this is probably undesirable.</li>
+</ul>
+<p>Consider a bad scenario:</p>
+<ol>
+<li>Initially databases are synced. There is an object <tt>A</tt> in each of the databases. <tt>A.foo</tt> and <tt>A.bar</tt> values are both 1.</li>
+<li>On <cite>REMOTE</cite>, we change <tt>A.foo</tt> to 42 and save.</li>
+<li>On <cite>LOCAL</cite>, we save object <tt>X</tt>. In some <tt>X</tt> signal handler, <tt>A.bar</tt> is incremented.</li>
+<li>We perform synchronization:<ol>
+<li><tt>X</tt> is synced.</li>
+<li><tt>X</tt> signal handler is invoked on <cite>REMOTE</cite>, resulting in <cite>REMOTE</cite>’s <tt>A.bar</tt> incrementation.
+So far so good. <cite>REMOTE</cite>’s <tt>A.bar == 2</tt> and <tt>A.foo == 42</tt>, just like it should.</li>
+<li>Because <tt>A</tt> change (during step 3) was logged, <tt>A</tt> is synced. <em>Not good</em> -
+<cite>REMOTE</cite> value of <tt>A.foo</tt> will be overwritten with 1
+(because <cite>LOCAL</cite> version is considered newer, as it was saved later).</li>
+</ol>
+</li>
+</ol>
+<p>It happened because the signal handler actions were logged.</p>
+<p>To prevent this from happening, wrap handler with <tt>DisableSynchroLog</tt>:</p>
+<pre>@receiver(models.signals.post_delete, sender=Parcel)
+def update_agent_balance_delete(sender, instance, *args, **kwargs):
+    with DisableSynchroLog():
+        instance.agent.balance -= float(instance.payment_left))
+        instance.agent.save()
+</pre>
+<p>Or with the decorator:</p>
+<pre>@receiver(models.signals.post_delete, sender=Parcel)
+@disable_synchro_log
+def update_agent_balance_delete(sender, instance, *args, **kwargs):
+    instance.agent.balance -= float(instance.payment_left))
+    instance.agent.save()
+</pre>
+<p>If using the decorator, be sure to place it after connecting to the signal, not before - otherwise it won’t work.</p>
+<div id="update-issue-again">
+<h4><tt>Update</tt> issue again</h4>
+<p>One can benefit from the fact that <tt>objects.update</tt> is not logged and use it in signal handlers instead of <tt>DisableSynchroLog</tt>.</p>
+</div>
+<div id="signal-handlers-for-multi-db">
+<h4>Signal handlers for multi-db</h4>
+<p>Just a reminder note.</p>
+<p>When a synchronization is performed, signal handlers are invoked for created/updated/deleted <cite>REMOTE</cite> objects.
+And those signals are of course handled on the <cite>LOCAL</cite> machine.</p>
+<p>That means: signal handlers (and probably other part of project code) must be ready to handle both <cite>LOCAL</cite>
+and <cite>REMOTE</cite> objects. It must use <tt><span class="pre">using(...)</span></tt> clause or <tt><span class="pre">db_manager(...)</span></tt> to ensure that the proper database
+is used:</p>
+<pre>def reset_specials(sender, instance, *args, **kwargs):
+    Offer.objects.db_manager(instance._state.db).filter(date__lt=instance.date).update(special=False)
+</pre>
+<p>Plain <tt>objects</tt>, without <tt>db_manager</tt> or <tt>using</tt>, always use the <tt>default</tt> database (which means <cite>LOCAL</cite>).</p>
+<p>But that is normal in multi-db projects.</p>
+</div>
+</div>
+<div id="synchro-on-remote-and-time-comparing">
+<span id="synchro-on-remote"/><h3>Synchro on <cite>REMOTE</cite> and time comparing</h3>
+<p>If you wish only to synchronize one-way (always from <cite>LOCAL</cite> to <cite>REMOTE</cite>), you may be tempted not to include
+<tt>synchro</tt> in <cite>REMOTE</cite> <tt>INSTALLED_APPS</tt>.</p>
+<p>Yes, you can do that and you will save some resources - logs won’t be stored.</p>
+<p>But keeping <tt>synchro</tt> active on <cite>REMOTE</cite> is a better idea. It will pay at synchonization: the synchro will look
+at logs and determine which object is newer. If the <cite>LOCAL</cite> one is older, it won’t be synced.</p>
+<p>You probably should set <tt>SYNCHRO_REMOTE = None</tt> on <cite>REMOTE</cite> if no synchronizations will be
+performed there (alternatively, you can add some dummy sqlite database to <tt>DATABASES</tt>).</p>
+</div>
+<div id="checkpoints">
+<h3>Checkpoints</h3>
+<p>If you wish to reset sychronization status (that is - delete logs and set checkpoint):</p>
+<pre>from synchro import reset_synchro
+
+reset_synchro()
+</pre>
+<p>Or raw way of manually changing synchro checkpoint:</p>
+<pre>from synchro.models import options
+
+options.last_check = datetime.datetime.now()  # or any time you wish
+</pre>
+</div>
+</div>
+</div></body></html>

@@ -1,0 +1,150 @@
+<html><body><div><div class="post-body entry-content">
+
+<p>
+</p><p>Have you ever wanted to enable your users to access your Gopher server without the need of them installing a browser plugin, installing a standalone software, or using a third part proxy service?  Now you can, by adding this simple Django app to any existing Django project.  It doesn't depend on anything by my updated <a href="http://iamkevin.ca/Gopher/0library/gopherlib.py">gopherlib.py</a>, and the following app which I will explain here.  I have already developed it and deployed it, so I will not be covering every single detail.  For the most part, it's a very basic Django app that only uses function-based views to get the job done.  So, this app might be good as a starting point for people new to Django, as there's nothing terribly complex going on here.  You can see a fully working example <a href="http://iamkevin.ca/Gopher/">here</a>.  First let's cover the <strong>urls.py</strong>:</p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">django.conf.urls</span> <span class="kn">import</span> <span class="n">patterns</span><span class="p">,</span> <span class="n">url</span>
+
+<span class="n">urlpatterns</span> <span class="o">=</span> <span class="n">patterns</span><span class="p">(</span><span class="s">'djgopher.views'</span><span class="p">,</span>
+    <span class="n">url</span><span class="p">(</span><span class="s">r'^$'</span><span class="p">,</span> <span class="s">'root_menu'</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="s">'gopher_root_menu'</span><span class="p">),</span>
+    <span class="n">url</span><span class="p">(</span><span class="s">r'^RemoteDoc$'</span><span class="p">,</span> <span class="s">'remote_document'</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="s">'gopher_remote'</span><span class="p">),</span>
+    <span class="n">url</span><span class="p">(</span><span class="s">r'^(?P&lt;selector&gt;.+)$'</span><span class="p">,</span> <span class="s">'selector'</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="s">'gopher_selector'</span><span class="p">),</span>
+<span class="p">)</span>
+</pre></div>
+
+<p>This isn't the most elegant way to grab the selector from the URL, but it gets the job done.  This may have some security implications behind it, I am hoping that my code which handles this selector can't be easily exploited.  Feel free to point out to me any possible security concerns and a way to fix it.  Let's move onto the <strong>views.py</strong>:</p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">djgopher.gopherlib</span> <span class="kn">import</span> <span class="n">Gopher</span><span class="p">,</span> <span class="n">GopherMenu</span><span class="p">,</span> <span class="n">TextFile</span>
+<span class="kn">from</span> <span class="nn">django.shortcuts</span> <span class="kn">import</span> <span class="n">render</span>
+<span class="kn">from</span> <span class="nn">django.http</span> <span class="kn">import</span> <span class="n">HttpResponse</span><span class="p">,</span> <span class="n">Http404</span><span class="p">,</span> <span class="n">HttpResponseRedirect</span>
+<span class="kn">from</span> <span class="nn">PIL</span> <span class="kn">import</span> <span class="n">Image</span>
+<span class="kn">from</span> <span class="nn">StringIO</span> <span class="kn">import</span> <span class="n">StringIO</span>
+
+<span class="k">def</span> <span class="nf">root_menu</span><span class="p">(</span><span class="n">req</span><span class="p">):</span>
+    <span class="n">g</span> <span class="o">=</span> <span class="n">Gopher</span><span class="p">(</span><span class="s">'gopher.veroneau.net'</span><span class="p">)</span>
+    <span class="n">menu</span> <span class="o">=</span> <span class="n">g</span><span class="o">.</span><span class="n">get_root_menu</span><span class="p">()</span>
+    <span class="k">return</span> <span class="n">render</span><span class="p">(</span><span class="n">req</span><span class="p">,</span> <span class="s">'djgopher/menu.html'</span><span class="p">,</span> <span class="p">{</span><span class="s">'menu'</span><span class="p">:</span><span class="n">menu</span><span class="o">.</span><span class="n">get_data</span><span class="p">(),</span> <span class="s">'title'</span><span class="p">:</span><span class="s">'Root Menu'</span><span class="p">})</span>
+</pre></div>
+
+<p>Here is the first function based view, it's only task is to display the initial gopher menu to the user.  I did hardcode my own Gopher server here, but for most use cases, you can actually put in <i>127.0.0.1</i> to refer to the local Gopher server.  Here, we initialize the Gopher class, and obtain the root menu of that server.  Then we send it off to a template which we will get into shortly.</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">selector</span><span class="p">(</span><span class="n">req</span><span class="p">,</span> <span class="n">selector</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">req</span><span class="o">.</span><span class="n">META</span><span class="p">[</span><span class="s">'QUERY_STRING'</span><span class="p">]</span> <span class="o">!=</span> <span class="s">''</span><span class="p">:</span>
+        <span class="n">selector</span> <span class="o">+=</span> <span class="s">'?'</span><span class="o">+</span><span class="n">req</span><span class="o">.</span><span class="n">META</span><span class="p">[</span><span class="s">'QUERY_STRING'</span><span class="p">]</span>
+    <span class="n">gtype</span> <span class="o">=</span> <span class="n">selector</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+    <span class="n">query</span> <span class="o">=</span> <span class="n">req</span><span class="o">.</span><span class="n">POST</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'query'</span><span class="p">,</span> <span class="bp">None</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">gtype</span> <span class="o">==</span> <span class="s">'7'</span> <span class="ow">and</span> <span class="n">query</span> <span class="ow">is</span> <span class="bp">None</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">render</span><span class="p">(</span><span class="n">req</span><span class="p">,</span> <span class="s">'djgopher/search.html'</span><span class="p">,</span> <span class="p">{</span><span class="s">'selector'</span><span class="p">:</span> <span class="n">selector</span><span class="p">,</span> <span class="s">'title'</span><span class="p">:</span><span class="n">selector</span><span class="p">[</span><span class="mi">1</span><span class="p">:]})</span>
+    <span class="n">g</span> <span class="o">=</span> <span class="n">Gopher</span><span class="p">(</span><span class="s">'gopher.veroneau.net'</span><span class="p">)</span>
+    <span class="n">data</span> <span class="o">=</span> <span class="n">g</span><span class="o">.</span><span class="n">get_selector</span><span class="p">(</span><span class="n">selector</span><span class="p">,</span> <span class="n">query</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">data</span><span class="p">,</span> <span class="n">GopherMenu</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">render</span><span class="p">(</span><span class="n">req</span><span class="p">,</span> <span class="s">'djgopher/menu.html'</span><span class="p">,</span> <span class="p">{</span><span class="s">'menu'</span><span class="p">:</span><span class="n">data</span><span class="o">.</span><span class="n">get_data</span><span class="p">(),</span> <span class="s">'title'</span><span class="p">:</span><span class="n">selector</span><span class="p">[</span><span class="mi">1</span><span class="p">:]})</span>
+    <span class="k">elif</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">data</span><span class="p">,</span> <span class="n">TextFile</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">HttpResponse</span><span class="p">(</span><span class="s">'</span><span class="si">%s</span><span class="s">'</span> <span class="o">%</span> <span class="n">data</span><span class="p">,</span> <span class="n">mimetype</span><span class="o">=</span><span class="s">'text/plain'</span><span class="p">)</span>
+    <span class="k">elif</span> <span class="n">gtype</span> <span class="o">==</span> <span class="s">'I'</span><span class="p">:</span>
+        <span class="n">typ</span> <span class="o">=</span> <span class="n">selector</span><span class="p">[</span><span class="o">-</span><span class="mi">3</span><span class="p">:]</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+        <span class="k">if</span> <span class="n">typ</span> <span class="ow">not</span> <span class="ow">in</span> <span class="p">(</span><span class="s">'png'</span><span class="p">,</span> <span class="s">'jpg'</span><span class="p">,</span> <span class="s">'jpeg'</span><span class="p">):</span>
+            <span class="n">typ</span> <span class="o">=</span> <span class="n">Image</span><span class="o">.</span><span class="n">open</span><span class="p">(</span><span class="n">StringIO</span><span class="p">(</span><span class="n">data</span><span class="p">))</span><span class="o">.</span><span class="n">format</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+        <span class="k">return</span> <span class="n">HttpResponse</span><span class="p">(</span><span class="n">data</span><span class="p">,</span> <span class="n">mimetype</span><span class="o">=</span><span class="s">'image/</span><span class="si">%s</span><span class="s">'</span> <span class="o">%</span> <span class="n">typ</span><span class="p">)</span>
+    <span class="k">elif</span> <span class="n">gtype</span> <span class="o">==</span> <span class="s">'g'</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">HttpResponse</span><span class="p">(</span><span class="n">data</span><span class="p">,</span> <span class="n">mimetype</span><span class="o">=</span><span class="s">'image/gif'</span><span class="p">)</span>
+    <span class="k">elif</span> <span class="n">gtype</span> <span class="o">==</span> <span class="s">'9'</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">HttpResponse</span><span class="p">(</span><span class="n">data</span><span class="p">,</span> <span class="n">mimetype</span><span class="o">=</span><span class="s">'application/octet-stream'</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">HttpResponse</span><span class="p">(</span><span class="s">'Unhandled.'</span><span class="p">,</span> <span class="n">mimetype</span><span class="o">=</span><span class="s">'text/plain'</span><span class="p">)</span>
+</pre></div>
+
+<p>This function based view handles the actual rendering of the chosen selector.  Here we check for a query string and append it to the selector so that the Gopher server can manage it.  Then we check if the item type is a search, if so, then we display a special template if no query came in.  This template is a basic form that will prompt the user for their search query.  Finally, if we're still processing here, we grab our selector from the server and check what type we are handling.  Technically, we should check if we support the type before even downloading any data to save bandwidth, but for now this should be fine.  I believe I will update it shortly so that the item type is properly checked beforehand.  Depending on the item type, we either display a menu, a text file, image, or perform a binary download.  We also use the PIL library if the image file doesn't have a valid extension to make sure we serve the correct information to the browser.</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">remote_document</span><span class="p">(</span><span class="n">req</span><span class="p">):</span>
+    <span class="n">url</span> <span class="o">=</span> <span class="n">req</span><span class="o">.</span><span class="n">GET</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'uri'</span><span class="p">,</span> <span class="bp">None</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">url</span> <span class="ow">is</span> <span class="bp">None</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">Http404</span>
+    <span class="n">hostname</span><span class="p">,</span> <span class="n">path</span> <span class="o">=</span> <span class="n">url</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s">'/'</span><span class="p">,</span><span class="mi">1</span><span class="p">)</span>
+    <span class="n">host</span><span class="p">,</span> <span class="n">port</span> <span class="o">=</span> <span class="n">hostname</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s">':'</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">path</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">!=</span> <span class="s">'0'</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">HttpResponseRedirect</span><span class="p">(</span><span class="s">'http://gopher.floodgap.com/gopher/gw?gopher://</span><span class="si">%s</span><span class="s">:</span><span class="si">%s</span><span class="s">/</span><span class="si">%s</span><span class="s">'</span> <span class="o">%</span> <span class="p">(</span><span class="n">host</span><span class="p">,</span> <span class="n">port</span><span class="p">,</span> <span class="n">selector</span><span class="p">))</span>
+    <span class="n">g</span> <span class="o">=</span> <span class="n">Gopher</span><span class="p">(</span><span class="n">host</span><span class="p">,</span> <span class="nb">int</span><span class="p">(</span><span class="n">port</span><span class="p">))</span>
+    <span class="n">data</span> <span class="o">=</span> <span class="n">g</span><span class="o">.</span><span class="n">get_selector</span><span class="p">(</span><span class="n">path</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">data</span><span class="p">,</span> <span class="n">TextFile</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">HttpResponse</span><span class="p">(</span><span class="s">'</span><span class="si">%s</span><span class="s">'</span> <span class="o">%</span> <span class="n">data</span><span class="p">,</span> <span class="n">mimetype</span><span class="o">=</span><span class="s">'text/plain'</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">HttpResponseRedirect</span><span class="p">(</span><span class="s">'http://gopher.floodgap.com/gopher/gw?gopher://</span><span class="si">%s</span><span class="s">:</span><span class="si">%s</span><span class="s">/</span><span class="si">%s</span><span class="s">'</span> <span class="o">%</span> <span class="p">(</span><span class="n">host</span><span class="p">,</span> <span class="n">port</span><span class="p">,</span> <span class="n">selector</span><span class="p">))</span>
+</pre></div>
+
+<p>This final function based view is to enable users to retrieve remote documents, such as <a href="http://iamkevin.ca/Gopher/RemoteDoc?uri=gopher.quux.org:70/0/Computers/Standards%20and%20Specs/RFC/docs/rfc1436.txt">this one here</a>.  I only want to enable text document linking, not anything else to limit bandwidth and overall complexity.  There are other clients and proxies out there that can easily grab resources from any Gopher server, so it's best to leverage those services for this.</p>
+<h3>The Templates</h3>
+<p>The templates are pretty dead simple, as this is a very basic client application, nothing too fancy is required to display Gopher content.  Here is our <strong>base.html</strong> template:</p>
+<div class="highlight"><pre><span class="nt">&lt;html&gt;</span>
+  <span class="nt">&lt;head&gt;&lt;title&gt;</span><span class="cp">{{</span><span class="nv">title</span><span class="cp">}}</span> | Django Gopher Client<span class="nt">&lt;/title&gt;&lt;/head&gt;</span>
+  <span class="nt">&lt;body&gt;</span>
+    <span class="cp">{{</span><span class="nv">title</span><span class="cp">}}</span> | Django Gopher Client<span class="nt">&lt;hr/&gt;</span>
+    <span class="cp">{%</span> <span class="k">block</span> <span class="nv">content</span> <span class="cp">%}{%</span> <span class="k">endblock</span> <span class="cp">%}</span>
+  <span class="nt">&lt;/body&gt;</span>
+<span class="nt">&lt;/html&gt;</span>
+</pre></div>
+
+<p>See?  Nothing too complex, not even a stylesheet, although feel free to skin your own client all you want.  Here is the template which renders a Gopher menu for us in HTML:</p>
+<div class="highlight"><pre><span class="cp">{%</span> <span class="k">extends</span> <span class="s2">"djgopher/base.html"</span> <span class="cp">%}</span>
+<span class="cp">{%</span> <span class="k">load</span> <span class="nv">gopher</span> <span class="cp">%}</span>
+
+<span class="cp">{%</span> <span class="k">block</span> <span class="nv">content</span> <span class="cp">%}</span>
+<span class="nt">&lt;pre&gt;</span><span class="cp">{%</span> <span class="k">for</span> <span class="nv">item</span> <span class="k">in</span> <span class="nv">menu</span> <span class="cp">%}{%</span> <span class="k">if</span> <span class="nv">item.type</span> <span class="o">==</span> <span class="s1">'i'</span> <span class="k">or</span> <span class="nv">item.type</span> <span class="o">==</span> <span class="s1">'3'</span> <span class="cp">%}{{</span><span class="nv">item.type</span><span class="o">|</span><span class="nf">icon</span><span class="o">:</span><span class="nv">STATIC_URL</span><span class="cp">}}{{</span><span class="nv">item.name</span><span class="cp">}}</span>
+<span class="cp">{%</span> <span class="k">else</span> <span class="cp">%}</span><span class="nt">&lt;a</span> <span class="na">href=</span><span class="s">"</span><span class="cp">{{</span><span class="nv">item</span><span class="o">|</span><span class="nf">selector</span><span class="cp">}}</span><span class="s">"</span><span class="nt">&gt;</span><span class="cp">{{</span><span class="nv">item.type</span><span class="o">|</span><span class="nf">icon</span><span class="o">:</span><span class="nv">STATIC_URL</span><span class="cp">}}{{</span><span class="nv">item.name</span><span class="cp">}}</span><span class="nt">&lt;/a&gt;</span>
+<span class="cp">{%</span> <span class="k">endif</span> <span class="cp">%}{%</span> <span class="k">endfor</span> <span class="cp">%}</span><span class="nt">&lt;/pre&gt;</span>
+<span class="cp">{%</span> <span class="k">endblock</span> <span class="cp">%}</span>
+</pre></div>
+
+<p>We are using <strong>pre</strong> tags here to ensure the content in the menu is rendered correctly.  Lots of Gopherholes, including my own use ASCII art in the menus.  <a href="gopher://gopherpedia.com">Gopherpedia</a> is another example of this.  This template uses some custom template filters to enable us to dynamically place in URLs and icons using Python code.  Like they say, the template is not for logic! Our final template is the <strong>search.html</strong> template:</p>
+<div class="highlight"><pre><span class="cp">{%</span> <span class="k">extends</span> <span class="s2">"djgopher/base.html"</span> <span class="cp">%}</span>
+
+<span class="cp">{%</span> <span class="k">block</span> <span class="nv">content</span> <span class="cp">%}</span>
+<span class="nt">&lt;form</span> <span class="na">action=</span><span class="s">"</span><span class="cp">{%</span> <span class="k">url</span> <span class="nv">gopher_selector</span> <span class="nv">selector</span> <span class="cp">%}</span><span class="s">"</span> <span class="na">method=</span><span class="s">"post"</span><span class="nt">&gt;</span><span class="cp">{%</span> <span class="k">csrf_token</span> <span class="cp">%}</span>
+Query: <span class="nt">&lt;input</span> <span class="na">type=</span><span class="s">"text"</span> <span class="na">name=</span><span class="s">"query"</span><span class="nt">/&gt;&lt;input</span> <span class="na">type=</span><span class="s">"submit"</span> <span class="na">value=</span><span class="s">"Go"</span><span class="nt">/&gt;</span>
+<span class="nt">&lt;/form&gt;</span>
+<span class="cp">{%</span> <span class="k">endblock</span> <span class="cp">%}</span>
+</pre></div>
+
+<p>The search template is pretty normal, just a basic HTML post form.  Now, finally here is the template tag library to render those filters:</p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">django</span> <span class="kn">import</span> <span class="n">template</span>
+<span class="kn">from</span> <span class="nn">django.core.urlresolvers</span> <span class="kn">import</span> <span class="n">reverse</span>
+<span class="kn">from</span> <span class="nn">django.utils.safestring</span> <span class="kn">import</span> <span class="n">mark_safe</span>
+
+<span class="n">register</span> <span class="o">=</span> <span class="n">template</span><span class="o">.</span><span class="n">Library</span><span class="p">()</span>
+
+<span class="n">ICON_TYPES</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s">'0'</span><span class="p">:</span> <span class="s">'text.png'</span><span class="p">,</span>
+    <span class="s">'1'</span><span class="p">:</span> <span class="s">'dir.png'</span><span class="p">,</span>
+    <span class="s">'h'</span><span class="p">:</span> <span class="s">'html.png'</span><span class="p">,</span>
+    <span class="s">'9'</span><span class="p">:</span> <span class="s">'binary.png'</span><span class="p">,</span>
+    <span class="s">'I'</span><span class="p">:</span> <span class="s">'image.png'</span><span class="p">,</span>
+    <span class="s">'g'</span><span class="p">:</span> <span class="s">'image.png'</span><span class="p">,</span>
+    <span class="s">'7'</span><span class="p">:</span> <span class="s">'search.png'</span><span class="p">,</span>
+    <span class="s">'3'</span><span class="p">:</span> <span class="s">'error.png'</span><span class="p">,</span>
+    <span class="s">'8'</span><span class="p">:</span> <span class="s">'telnet.png'</span><span class="p">,</span>
+<span class="p">}</span>
+
+<span class="nd">@register.filter</span>
+<span class="k">def</span> <span class="nf">selector</span><span class="p">(</span><span class="n">value</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">value</span><span class="p">[</span><span class="s">'selector'</span><span class="p">][:</span><span class="mi">5</span><span class="p">]</span> <span class="o">==</span> <span class="s">'hURL:'</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">value</span><span class="p">[</span><span class="s">'selector'</span><span class="p">][</span><span class="mi">5</span><span class="p">:]</span>
+    <span class="k">if</span> <span class="n">value</span><span class="p">[</span><span class="s">'host'</span><span class="p">]</span> <span class="o">!=</span> <span class="s">'gopher.veroneau.net'</span><span class="p">:</span>
+        <span class="n">uri</span> <span class="o">=</span> <span class="s">'</span><span class="si">%s</span><span class="s">:</span><span class="si">%s</span><span class="s">/</span><span class="si">%s</span><span class="s">'</span> <span class="o">%</span> <span class="p">(</span><span class="n">value</span><span class="p">[</span><span class="s">'host'</span><span class="p">],</span> <span class="n">value</span><span class="p">[</span><span class="s">'port'</span><span class="p">],</span> <span class="n">value</span><span class="p">[</span><span class="s">'selector'</span><span class="p">])</span>
+        <span class="k">if</span> <span class="n">value</span><span class="p">[</span><span class="s">'type'</span><span class="p">]</span> <span class="o">==</span> <span class="s">'0'</span><span class="p">:</span>
+            <span class="k">return</span> <span class="s">'</span><span class="si">%s</span><span class="s">?uri=</span><span class="si">%s</span><span class="s">'</span> <span class="o">%</span> <span class="p">(</span><span class="n">reverse</span><span class="p">(</span><span class="s">'gopher_remote'</span><span class="p">),</span> <span class="n">uri</span><span class="p">)</span>
+        <span class="k">elif</span> <span class="n">value</span><span class="p">[</span><span class="s">'type'</span><span class="p">]</span> <span class="o">==</span> <span class="s">'8'</span><span class="p">:</span>
+            <span class="k">return</span> <span class="s">'telnet://</span><span class="si">%s</span><span class="s">:</span><span class="si">%s</span><span class="s">/'</span> <span class="o">%</span> <span class="p">(</span><span class="n">value</span><span class="p">[</span><span class="s">'host'</span><span class="p">],</span> <span class="n">value</span><span class="p">[</span><span class="s">'port'</span><span class="p">])</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">return</span> <span class="s">'http://gopher.floodgap.com/gopher/gw?gopher://</span><span class="si">%s</span><span class="s">'</span> <span class="o">%</span> <span class="n">uri</span>
+    <span class="k">return</span> <span class="n">reverse</span><span class="p">(</span><span class="s">'gopher_selector'</span><span class="p">,</span> <span class="n">args</span><span class="o">=</span><span class="p">[</span><span class="n">value</span><span class="p">[</span><span class="s">'selector'</span><span class="p">]])</span>
+
+<span class="nd">@register.filter</span>
+<span class="k">def</span> <span class="nf">icon</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">static_url</span><span class="p">):</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">mark_safe</span><span class="p">(</span><span class="s">'&lt;img src="</span><span class="si">%s</span><span class="s">djgopher/</span><span class="si">%s</span><span class="s">"/&gt;'</span> <span class="o">%</span> <span class="p">(</span><span class="n">static_url</span><span class="p">,</span> <span class="n">ICON_TYPES</span><span class="p">[</span><span class="n">value</span><span class="p">]))</span>
+    <span class="k">except</span> <span class="ne">KeyError</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s">''</span>
+</pre></div>
+
+<p>The first dictionary you see there is to make selecting the icon like a case-select, which is much more efficient than a ton of if statements.  The first filter here, <strong>selector</strong> is used to resolve a menu item into a URL that WWW browsers can understand.  Here, we check various attributes based on the Gopher standard and write an HTTP compatible URL link the user can click on.  Anything from the supported Gopher server is handled internally by our selector view.  Anything that has an external host is handled according to it's type.  This makes it so that all Gopher menu items work regardless if the local client supports remote servers.  Finally, we have the simple <strong>icon</strong> filter that does nothing more by write out a proper <strong>IMG</strong> tag with the icon for the menu item.</p>
+<p>And there you have it, a fully functional Gopher client all done from within a Django app!  So now you have no excuse not to run your own Gopher server.  For some interesting places to visit on Gopher, check out my <a href="http://iamkevin.ca/Gopher/1Bookmarks.g">Bookmarks</a>.</p>
+<p>As mentioned in my previous post about Gopher, I will soon be making all my Python Diary content available in Gopherspace, it will contain both full HTML versions and text versions.  So, if you ever wanted to try browsing a less distracting side of the Internet where advertisers and trackers can't find you, now is a great time!  Over time, I am planning on developing many gateway applications for the Internets most popular online locations, such as Twitter, and various news outlets.  I think I'd personally like to add RSS feeds to my Gopherspace to enable the easy reading of many popular Python blogs from Planet Python.  If your on Android, be sure to check out the <a href="http://iamkevin.ca/Gopher/1library/OverbiteAndroid">updated Gopher client</a>, which can really save you on your mobile bandwidth!</p>
+<p/>
+</div>
+</div></body></html>

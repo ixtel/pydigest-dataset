@@ -1,0 +1,179 @@
+<html><body><div><div class="content html_format">
+      <h3>Введение</h3><p>
+Bottle — это мини-фреймворк для Python, позволяющий писать веб-приложения с высокой скоростью. 
+</p><p>
+Вот только слово «мини» добавляет ограничения, например, здесь нет быстрого способа создать административную панель. Если нужна работа с БД, то ее надо подключать отдельно. Таким образом, bottle — это инструмент для написания линейных web-приложений, которые не требуют слишком сильного взаимодействия между элементами приложения. 
+</p><p>
+Если вам надо написать handler, который будет принимать ссылку на файл, а потом скачивать его в s3 с какой-то обработкой, то для проверки функционала bottle отлично подойдет.
+</p><p>
+Для работы с bottle достаточно описывать сами обработчики, например:
+
+</p><pre><code class="python">from bottle import route, run, template
+@route('/hello/&lt;name&gt;')
+def index(name):
+    return template('&lt;b&gt;Hello {{name}}&lt;/b&gt;!', name=name)
+run(host='localhost', port=8080)
+</code></pre><p>
+(Пример из </p><a href="http://bottlepy.org/docs/dev/index.html">документации</a><p>.)
+</p><p>
+При написании более смысловых функций (например, телефонная книга с сохранением в БД), очень быстро возникает необходимость работы то с БД, то с кэшем, то с сессиями. Это порождает необходимость пихать функционал работы с БД в сам обработчик, затем выносить в отдельные модули, чтобы не дублировать код. А после этого код CRUDL для разных объектов переписываем в виде что-то типа мета-функций.
+</p><p>
+Но можно пойти и по другому пути: начать использовать </p><a href="http://bottlepy.org/docs/dev/plugins/index.html">bottle plugin</a><p>. О механизме плагинов и пойдет речь в этой публикации.
+</p><a name="habracut"/>
+<h3>О плагинах bottle</h3><p>
+В Python есть сильный механизм расширения возможностей функции без переписывания — </p><a href="http://habrahabr.ru/post/187482/">декораторы</a><p>.
+</p><p>
+Этот же механизм применяется в качестве основного для плагинов. 
+</p><p>
+По сути, плагин — это декоратор, который вызывается для каждого обработчика, когда на него падает запрос.
+</p><p>
+Можно даже написать такой код и он будет считаться за плагин:
+
+</p><pre><code class="python">from bottle import response, install
+import time
+def stopwatch(callback):
+    def wrapper(*args, **kwargs):
+        start = time.time()
+        body = callback(*args, **kwargs)
+        end = time.time()
+        response.headers['X-Exec-Time'] = str(end - start)
+        return body
+    return wrapper
+install(stopwatch)
+</code></pre><p>
+(Пример из </p><a href="http://bottlepy.org/docs/dev/plugindev.html">Документации</a><p>.)
+</p><p>
+Однако, лучше писать плагины согласно интерфейсу, описанному в </p><a href="http://bottlepy.org/docs/dev/plugindev.html#plugin-api">документации</a><p>.
+</p><p>
+В возможности плагина входит:
+
+</p><ul>
+<li> Получение информации о входящем запросе <br/>
+ <ul>
+<li> какой URL вызван </li>
+<li> содержание HTTP-запроса, т.е. все о запросе </li>
+</ul><br/>
+ </li>
+<li> Формирование выходного запроса <br/>
+<br/>
+<ul>
+<li> можно изменить HTTP-заголовок </li>
+<li> добавить свою переменную </li>
+<li> установить свое содержание ответа (хоть пустое) </li>
+</ul><br/>
+ </li>
+</ul>
+<p>
+Иными словами, плагины являются инструментом полного контроля над обработкой запроса.
+
+</p><h3>Как использовать плагин</h3><p>
+Здесь не буду перепечатывать плагин </p><a href="http://bottlepy.org/docs/dev/plugindev.html#plugin-example-sqliteplugin">bottle-sqlite</a><p>, а вот само использование достойно внимания:
+
+</p><pre><code class="python">sqlite = SQLitePlugin(dbfile='/tmp/test.db')
+bottle.install(sqlite)
+@route('/show/:page')
+def show(page, db):
+    row = db.execute('SELECT * from pages where name=?', page).fetchone()
+    if row:
+        return template('showpage', page=row)
+    return HTTPError(404, "Page not found")
+
+@route('/admin/set/:db#[a-zA-Z]+#', skip=[sqlite])
+def change_dbfile(db):
+    sqlite.dbfile = '/tmp/%s.db' % db
+    return "Switched DB to %s.db" % db
+</code></pre><p>
+(Пример из </p><a href="http://bottlepy.org/docs/dev/plugindev.html">Документации</a><p>.)
+</p><p>
+В примере показано, как устанавливать плагин, а также как использовать. Это то, о чем писал выше. При использовании плагина, появляется возможность включить в сам обработчик объект (в данном случае db — sqlite БД), который спокойно можно использовать.
+</p><p>
+Рассмотрев примеры из документации, перейду к реальному применению.
+
+</p><h3>Use cases к использованию плагинов</h3><p>
+Первым вариантом использования можно назвать проброс какого-то объекта к самому обработчику. Это можно увидеть в примере использования bottle-sqlite (см. выше код).
+</p><p>
+Вторым вариантом можно назвать такой.
+</p><p>
+При написании web-приложения в команде разработчика могут сложиться некоторые соглашения по принимаемым и возвращаемым типам данных. 
+</p><p>
+Дабы далеко не ходить, приведу вымышленный код:
+
+</p><pre><code class="python">@route('/report/generate/:filename')
+def example_handler(filename):
+    try
+        result = generate_report(filename)
+    except Exception as e:
+        result = {'ok': False, 'error': str(e)}
+    response.content_type = 'application/json'
+    return json.dumps(result)
+</code></pre><p>
+То есть в команде пришли к соглашению, что возвращаемым типом будет json. Можно каждый раз дублировать строки:
+
+</p><pre><code class="python">response.content_type = 'application/json'
+return json.dumps(result)
+</code></pre><p>
+В этом вроде ничего страшного, да только мозолят одни и те же строки от функции к функции. А если это «ничего страшного» длится не две строки, а десять? В этом случае могут спасти плагины, пишем элементарную функцию:
+
+</p><pre><code class="python">def wrapper(*args, **kwargs):
+    response.content_type = 'application/json'
+    return json.dumps(callback(*args, **kwargs))
+</code></pre><p>
+(Остальной кусок плагина не буду приводить, ибо он очень похож на sqlite.)
+</p><p>
+И уменьшаем количество кода.
+</p><p>
+Пойдем дальше. В соглашениях мы условились не только отдавать в json, но и принимать. Было бы замечательно не только проверить HTTP-заголовок на тип, но и проверить существование определенных ключей. Это можно сделать, например, так:
+
+</p><pre><code class="python">def wrapper(*args, **kwargs):
+    def gen_error(default_error, text_msg):
+        res = default_error
+        res.update(dict(error=text_msg))
+        return res
+
+    if request.get_header('CONTENT_TYPE', '') == 'application/json':
+        if request.json:
+            not_found_keys = []
+            not_found_keys_flag = False
+            for key in keys:
+                if key not in request.json:
+                    not_found_keys.append(key)
+                    not_found_keys_flag = True
+
+            if not_found_keys_flag:
+                wr_res = gen_error(self.default_error,
+                                   'Not found keys: | %s | in request' % ', '.join(not_found_keys))
+            else:
+                wr_res = callback(*args, **kwargs)
+        else:
+            wr_res = gen_error(
+                self.default_error, 'Not found json in request')
+    else:
+        wr_res = gen_error(
+            self.default_error, 'it is not json request')
+
+    response.content_type = 'application/json'
+    return json.dumps(wr_res)
+</code></pre><p>
+И применять примерно так:
+
+</p><pre><code class="python">@route('/observer/add',
+           keys=['name', 'latitude', 'longitude', 'elevation'])
+def observer_add():
+    return set_observer(request.json)
+</code></pre><p>
+Плагин сам проверит существование ключей в json, а затем еще и ответ обернет в json.
+</p><p>
+Вариантов использования, конечно, больше, как и с декораторами. Зависит от того, кто и как придумывает их применять.
+
+</p><h3>Существующие плагины</h3><p>
+Список плагинов для bottle не очень </p><a href="http://bottlepy.org/docs/dev/plugins/index.html">обширен</a><p>.
+</p><p>
+На github можно найти плагины для управления сессией, i18n, facebook, matplotlib, cql, логгирования, регистрации и авторизации. Однако их количество в значительной мере уступает flask и django.
+
+</p><h3>Выводы</h3><p>
+Bottle-плагины позволяют уменьшить количество дублирования кода, вытащить общие проверки (такие, как «авторизован ли пользователь») в общее место, расширить функционал и создать модули, которые можно использовать повторно.
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

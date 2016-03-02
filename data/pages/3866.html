@@ -1,0 +1,619 @@
+<html><body><div><div class="content html_format"><p>
+      Приветствую, хабросообщество.</p>
+<p>
+Решил написать немного про работу python с xlsx.</p><p>
+Да, я знаю, что про это написано много, но тем не менее, я не смог найти готовое решение для своей задачи.</p><p>
+Нужно заполнять несколько десятков ячеек у готового файла xls.
+</p><p>
+Все бы ничего, но файл содержал макросы, картинки, объекты media-art, внедреные объекты и много чего еще.</p><p>
+Перебрав популярные решения (openpyxl, xlutils.copy и пару других), я понял, что они немного портят файл.</p><p>
+А задача сводилась именно к точечной правке ячеек и чтоб все остальное осталось как было.
+
+</p><a name="habracut"/>
+<p>
+Предыстория
+</p><p>
+Неожиданно оказалось, что у одного банка в одной стране нет информационной системы </p><p>
+для принятия решения о выдаче кредита.</p><p>
+Ее заменяет файл excel, который передавался по наследству из незопамятных времен</p><p>
+и прошел через руки «чуть больше чем много» «программистов на Excel».
+</p><p>
+И нужно как-то передавать в банк заявки на кредит.</p><p>
+То есть, нужно взять этот файл, вбить в него немного данных и отправить по почте.
+</p><p>
+Я подумал «не я первый, ни я последний» и пошел искать готовые решения.</p><p>
+Тут все оказалось не так просто.</p><p>
+openpyxl:</p><p>
+ почему-то не полностью сохранял обводку ячеек, которые я даже не трогал (оставлял границу только нижнего левого угла)</p><p>
+ Даже при использовании keep_vba=True, получались «битые» файлы xlsm (которые могут содержать макросы)</p><p>
+xlutils:</p><p>
+ Терял картинки и объекты media-art и нужно было работать с xls, вместо xlsm</p><p>
+Попробовав еще пару вариантов, я решил вооружится напильником, гаечными ключами и приступить к написанию своего велосипеда с более удобной формой седла, который не норовит избавиться от пары лишних деталей в процессе употребления по назначению.
+</p><p>
+На самом деле, задача предельно проста, </p><p>
+потому что это просто zip-архив с кучкой XML-ек.</p><p>
+Нам нужно просто внести чуть-чуть изменений и запаковать все это обратно, оставив все остальное как было.
+</p><p>
+Итак, поехали
+</p><p>
+Нам для этого потребуется ZipFile, lxml и больше ничего.
+</p><pre><code class="python">import os
+import re
+from datetime import datetime, date
+from StringIO import StringIO
+from zipfile import ZipFile, ZIP_DEFLATED
+from lxml import etree
+</code></pre>
+<p>
+Конструктор.</p><p>
+Сразу узнаем, где лежат наши листы, вызвав self._get_sheet_locations()</p><p>
+компилируем регулярку для поиска номера строки из индекса ячейки
+
+</p><pre><code class="python">def __init__(self, zip_folder):
+    u"""
+    @param zip_folder: Путь к директории, где лежит распакованный исходный файл xlsx
+    То есть файл '[Content_Types].xml' должен находится в этой директории
+    """
+    self._zip_folder = zip_folder
+    self._data = {}
+    self._zip_stream = StringIO()
+    self._row_finder = re.compile(r'\d+$')
+    self._namespaces = {
+        'ws': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
+        'rel': 'http://schemas.openxmlformats.org/package/2006/relationships'
+    }
+
+    self._sheet_paths = self._get_sheet_locations()
+    
+    # Словарь строк
+    self._shared_strings = None
+    self._shared_strings_root = None
+    self._shared_strings_index = None
+</code></pre>
+<p>
+Делаем функцию, которая достает нам объекты lxml etree </p><p>
+по пути к файлу xml, чтоб не делать одинаковые действия
+</p><pre><code class="python">def _get_xml(self, file_path):
+    u""" 
+    Вытащить XML-объект из папки по пути 
+    @param file_path: Путь к файлу относительно директории шаблона
+    """
+    return etree.parse(os.path.join(self._zip_folder, file_path))
+</code></pre>
+<p>
+Строки в xlsx хранятся в отдельном файле. </p><p>
+В ячейках (узлах xml) физически храняться индексы на записи в словаре.</p><p>
+Это немного похоже на архиватор.
+</p><p>
+Инициализируем словарь.</p><p>
+Преобразуем его объект xml, удобный для добавления новых значений.
+</p><p>
+Это не очень правильно, но мы не будем искать, есть ли строка в словаре и использовать ее повторно.</p><p>
+Так как объем вносимых изменений небольшой (по сравнению с кол-вом строк, которые в файле уже есть),</p><p>
+мы просто добавляем в словарь еще одно значение.
+</p><p>
+Нам потребуется </p><p>
+_shared_strings (потом из него мы будем сохранять изменный словарь)</p><p>
+_shared_strings_root — в него мы будем добавлять новые строки</p><p>
+_shared_strings_index — текущий индекс (для отслеживания счетчика добавленой строки)
+</p><pre><code class="python">def _init_shared_strings(self):
+    u""" 
+    Ленивым образом инициализируем работу со словарем строк.
+    Лениво - потому что работа со строками может не понадобиться.
+    Вызывается при первом вызове self._add_shared_string
+    """
+    self._shared_strings = self._get_xml('xl/sharedStrings.xml')
+    self._shared_strings_root = self._shared_strings.xpath('/ws:sst', namespaces=self._namespaces)[0]
+    self._shared_strings_index = int(self._shared_strings_root.attrib['uniqueCount'])
+</code></pre>
+<p>
+Добавим строку в словарь и вернем ее индекс.</p><p>
+Это будет нужно для внесения изменений строковых значений
+</p><pre><code class="python">def _add_shared_string(self, value):
+    u""" 
+    Добавить строку в словарь sharedStrings
+    Не учитывает тот момент, что строка уже может тут быть.
+    Но из-за малого кол-ва модификаций пофигу на раздувание словаря.
+    uniqueCount и Count не модифицирует (и без этого все работает)
+
+    @param value: Строка для добавления в словарь
+    @return: Индекс в словаре sharedStrings
+    """
+    if self._shared_strings is None:
+        self._init_shared_strings()
+
+    node_t = etree.Element('t')
+    node_t.text = value
+
+    node_si = etree.Element('si')
+    node_si.append(node_t)
+
+    self._shared_strings_root.append(node_si)
+    self._shared_strings_index += 1
+
+    return (self._shared_strings_index - 1)
+</code></pre>
+<p>
+Соберем данные о том, где какой лист находится в архиве.</p><p>
+Эти данные распределены по 2-м XML-файлам:</p><p>
+ — xl/workbook.xml</p><p>
+ где хранится информация о том, что в книге есть</p><p>
+ — xl/_rels/workbook.xml.rels</p><p>
+где лежит информация о том, где все это лежит
+</p><pre><code class="python">def _get_sheet_locations(self):
+    u""" 
+    Узнаем где хранятся листы
+    @return: Словарь. {название_листа: путь_к_xml}
+    """
+    
+    # Книги
+    sheets_id = {}
+    workbook_xml = self._get_xml('xl/workbook.xml')
+    for sheet_xml in workbook_xml.xpath('/ws:workbook/ws:sheets/ws:sheet', namespaces=self._namespaces):
+        sheet_name = sheet_xml.attrib['name']
+        sheet_rid = sheet_xml.attrib['{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id']
+        sheets_id[sheet_rid] = sheet_name
+
+    # Названия файлов
+    paths = {}
+    xml = self._get_xml('xl/_rels/workbook.xml.rels')
+    for node in xml.xpath('/rel:Relationships/rel:Relationship', namespaces=self._namespaces):
+        r_id = node.attrib['Id']
+        path = os.path.join('xl', node.attrib['Target'])
+
+        if r_id in sheets_id:
+            sheet_label = sheets_id[r_id]
+            paths[sheet_label] = path
+
+    return paths
+</code></pre>
+<p>
+Создаем zip-архив, собирая в него все файлы, которые не менялись (без exclude_files)
+</p><pre><code class="python">def _create_base_zip(self, exclude_files):
+    u""" 
+    Создать базовый объект на основе шаблона в папке zip_folder для модификации.
+    В него не входят листы с изменными ячейками.
+    Они будут добавлены туда в методе _add_changes
+    @param exclude_files: Список исключенных файлов
+    @return: объект ZipFile
+    """
+
+    zip_file = ZipFile(self._zip_stream, mode='a', compression=ZIP_DEFLATED)
+
+    for path, dirs, files in os.walk(self._zip_folder):
+        rel_path = path[len(self._zip_folder):]
+        
+        for file_name in files:
+            if rel_path == '':
+                zip_name = file_name
+            else:
+                zip_name = os.path.join(rel_path, file_name)
+
+            if zip_name not in exclude_files:
+                zip_file.write(os.path.join(path, file_name), zip_name)
+
+    return zip_file
+</code></pre>
+<p>
+Добавим измененные листы в zip-файл, переданый в виде аргумента.</p><p>
+Смотрим все накопленные данные по листам, запрашиваем измененные листы и добавляем их в архив
+</p><pre><code class="python">def _add_changes(self, zip_file):
+    u""" 
+    Применить изменения.
+    Открываем и модифицируем файлы и заливаем их в zip поверх файлов по умолчанию
+
+    @param zip_file: объект ZipFile без листов, на которых есть измененные ячейки
+    """
+    
+    # Обходим листы и модифицируем
+    for sheet_name, data in self._data.items():
+        sheet_file = self._sheet_paths[sheet_name]
+        
+        sheet_content = self._get_changed_sheet(sheet_file=sheet_file, data=data)
+        zip_file.writestr(sheet_file, sheet_content)
+</code></pre>
+<p>
+Вносим изменения в лист и возвращаем строку XML с внесенными изменениями
+</p><pre><code class="python">def _get_changed_sheet(self, sheet_file, data):
+    u""" 
+    Возвращает отредактированный файл с данными для записи в ZIP-архив 
+    @param sheet_file: Путь к xml-файлу с листом
+    @param data: Словарь с изменениями {cell: value}
+    @return: xml-строка с измененным листом
+    """
+
+    xml = etree.parse(os.path.join(self._zip_folder, sheet_file))
+    for cell, value in data.items():
+        self._change_cell(xml, cell, value)
+
+    return etree.tostring(xml, xml_declaration=True, encoding="UTF-8", standalone="yes")
+</code></pre>
+<p>
+Редактируем отдельную ячейку, принимая на вход лист, адрес ячейки и значение.</p><p>
+Тут очень важный момент.</p><p>
+Ячейка в XML должна быть (потому что рассматриваем именно изменение значений в ячейках).</p><p>
+Эта ячейка, как правило, отформатирована и раскрашена.</p><p>
+Данное решение не рассматривает отсутствие узла с ячейкой.</p><p>
+Вы всегда можете самостоятельно добавить обработку наличия ячейки в строке </p><p>
+или самой строке в книге.
+</p><pre><code class="python">def _change_cell(self, xml, cell, value):
+    u""" 
+    Изменить параметр ячейки в листе xml 
+    Мутабельный метод по отношению к параметру xml
+    
+    @param xml: Объект lxml
+    @param cell: Индекс ячейки в формате "C2"
+    @param value: Значение
+    """
+
+    row_index = self._row_finder.search(cell).group()
+    value_type = type(value)
+
+    pattern_params = {'row_index': row_index, 'cell': cell}
+    pattern = '/ws:worksheet/ws:sheetData/ws:row[@r="%(row_index)s"]/ws:c[@r="%(cell)s"]' % pattern_params
+    node_c = xml.xpath(pattern, namespaces=self._namespaces)[0]
+    node_v = node_c.find('ws:v', namespaces=self._namespaces)
+    
+    # В шаблоне было пусто - добавим туда значение
+    if node_v is None:
+        node_v = etree.Element('v')
+        node_c.append(node_v)
+
+    # Пусто
+    if value == None:
+        node_c.remove(node_v)
+        if node_c.attrib.get('t') == 's':
+           del node_c.attrib['t']
+
+    # Расшареная строка
+    elif value_type in (unicode, str):
+        value = str(self._add_shared_string(value))
+        node_c.attrib['t'] = 's'
+
+    # Числовые или приравненные к ним данные
+    else:
+        if node_c.attrib.get('t') == 's':
+           del node_c.attrib['t']
+
+        if value_type == datetime:
+            value = value.date()
+
+        if value_type == date:
+            value = (value - date(1899, 12, 30)).days
+
+    node_v.text = unicode(value)
+</code></pre>
+<p>
+Публичных методов всего два.
+</p><p>
+Собираем изменения в словарь. На этом этапе не вносим изменений.</p><p>
+Сюда можно передавать только простые типы данных:</p><p>
+ — None</p><p>
+ — Число (int, float)</p><p>
+ — Строка (str, unicode)</p><p>
+ — Дата
+</p><pre><code class="python">def write(self, sheet, cell, value):
+    u""" 
+    Установить значение для ячейки на листе
+    Набирает все изменения в память.
+    Они применяться только в момент сборки файл-архива xlsx
+    
+    @param sheet: Название листа
+    @param cell: Название ячейки (например C4)
+    @param value: Значение для записи в ячейку
+    """
+
+    if value is not None and type(value) not in (int, float, str, unicode):
+        raise TypeError(u'Только None, int, float, str, unicode')
+
+    if sheet not in self._data:
+        self._data[sheet] = {}
+    self._data[sheet][cell] = value
+</code></pre>
+<p>
+Получить контент архива.</p><p>
+Не стал делать это в виде файла, zip-архива, потому что контент более универсален</p><p>
+и его удобно отдавать через HttpResponse
+</p><pre><code class="python">def get_content(self):
+    u""" 
+    Получить контент файл xlsx с изменениями. 
+    Листы, которые будут вставлены с изменениями, не включаем 
+    """
+
+    exclude_files = ['/%s' % e[1] for e in self._sheet_paths.items() if e[0] in self._data.keys()]
+    exclude_files.append('/xl/sharedStrings.xml')
+
+    zip_file = self._create_base_zip(exclude_files=exclude_files)
+    self._add_changes(zip_file)
+
+    zip_file.writestr('xl/sharedStrings.xml', 
+                      etree.tostring(self._shared_strings, 
+                                     xml_declaration=True, 
+                                     encoding="UTF-8", 
+                                     standalone="yes"))
+
+    zip_file.close()
+    
+    return self._zip_stream.getvalue()
+</code></pre>
+<p>
+Вроде, и все.</p><p>
+Пользоваться этим вот так:
+</p><pre><code class="python">xlsx = XLSXEdit('path_to_unzip_folder')
+
+xlsx.write('Sheet1', 'A1', 333)
+xlsx.write('Sheet1', 'A2', 44444)
+xlsx.write('Sheet1', 'A3', datetime.now())
+xlsx.write('Sheet1', 'A4', u'Строка')
+
+with open('/Users/dibrovsd/Desktop/out.xlsx', 'w') as zip_file:
+    zip_file.write(xlsx.get_content())
+</code></pre>
+<p>
+Я думаю, что самое большое преимущество решения в том, что тут понятно, что происходит</p><p>
+и тут ничего сложного нет. При необходимости, вы можете доработать решение, </p><p>
+если в текущем виде оно вас не устраивает.
+
+</p><div class="spoiler"><b class="spoiler_title">В итоге получилось вот что</b><div class="spoiler_text"><pre><code class="python">
+import os
+import re
+from datetime import datetime, date
+from StringIO import StringIO
+from zipfile import ZipFile, ZIP_DEFLATED
+from lxml import etree
+
+
+class XLSXEdit(object):
+    u""" 
+    Редактирование файла xlsx через прямую модификацию файлов xml
+    
+    Зачем:
+    Это бываем нужным, когда есть большой с кучей формул и картинок, макросов, объектов медиа-арт, 
+    разных внедренных объектов, MS query настроек (кто-то знал excel)
+    и нужно просто в пару ячеек вставить значения 
+    
+    Особенности:
+    Мы аккуратно правим отдельные куски XML внутри и не трогаем все остальное
+    """
+
+    def __init__(self, zip_folder):
+        u"""
+        @param zip_folder: Путь к директории, где лежит распакованный исходный файл xlsx
+        То есть файл '[Content_Types].xml' должен находится в этой директории
+        """
+        self._zip_folder = zip_folder
+        self._data = {}
+        self._zip_stream = StringIO()
+        self._row_finder = re.compile(r'\d+$')
+        self._namespaces = {
+            'ws': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
+            'rel': 'http://schemas.openxmlformats.org/package/2006/relationships'
+        }
+
+        self._sheet_paths = self._get_sheet_locations()
+        
+        # Словарь строк
+        self._shared_strings = None
+        self._shared_strings_root = None
+        self._shared_strings_index = None
+
+    def write(self, sheet, cell, value):
+        u""" 
+        Установить значение для ячейки на листе
+        Набирает все изменения в память.
+        Они применяться только в момент сборки файл-архива xlsx
+        
+        @param sheet: Название листа
+        @param cell: Название ячейки (например C4)
+        @param value: Значение для записи в ячейку
+        """
+
+        if value is not None and type(value) not in (int, float, str, unicode, date, datetime):
+            raise TypeError(u'Только None, int, float, str, unicode')
+
+        if sheet not in self._data:
+            self._data[sheet] = {}
+        self._data[sheet][cell] = value
+
+    def get_content(self):
+        u""" 
+        Получить контент файл xlsx с изменениями. 
+        Листы, которые будут вставлены с изменениями, не включаем 
+        """
+
+        exclude_files = ['/%s' % e[1] for e in self._sheet_paths.items() if e[0] in self._data.keys()]
+        exclude_files.append('/xl/sharedStrings.xml')
+
+        zip_file = self._create_base_zip(exclude_files=exclude_files)
+        self._add_changes(zip_file)
+
+        zip_file.writestr('xl/sharedStrings.xml', 
+                          etree.tostring(self._shared_strings, 
+                                         xml_declaration=True, 
+                                         encoding="UTF-8", 
+                                         standalone="yes"))
+
+        zip_file.close()
+        
+        return self._zip_stream.getvalue()
+
+    def _get_xml(self, file_path):
+        u""" 
+        Вытащить XML-объект из папки по пути 
+        @param file_path: Путь к файлу относительно директории шаблона
+        """
+        return etree.parse(os.path.join(self._zip_folder, file_path))
+
+    def _init_shared_strings(self):
+        u""" 
+        Ленивым образом инициализируем работу со словарем строк.
+        Лениво - потому что работа со строками может не понадобиться.
+        Вызывается при первом вызове self._add_shared_string
+        """
+        self._shared_strings = self._get_xml('xl/sharedStrings.xml')
+        self._shared_strings_root = self._shared_strings.xpath('/ws:sst', namespaces=self._namespaces)[0]
+        self._shared_strings_index = int(self._shared_strings_root.attrib['uniqueCount'])
+
+    def _add_shared_string(self, value):
+        u""" 
+        Добавить строку в словарь sharedStrings
+        Не учитывает тот момент, что строка уже может тут быть.
+        Но из-за малого кол-ва модификаций пофигу на раздувание словаря.
+        uniqueCount и Count не модифицирует (и без этого все работает)
+
+        @param value: Строка для добавления в словарь
+        @return: Индекс в словаре sharedStrings
+        """
+        if self._shared_strings is None:
+            self._init_shared_strings()
+
+        node_t = etree.Element('t')
+        node_t.text = value
+
+        node_si = etree.Element('si')
+        node_si.append(node_t)
+
+        self._shared_strings_root.append(node_si)
+        self._shared_strings_index += 1
+
+        return (self._shared_strings_index - 1)
+
+    def _get_sheet_locations(self):
+        u""" 
+        Узнаем где хранятся листы
+        @return: Словарь. {название_листа: путь_к_xml}
+        """
+        
+        # Книги
+        sheets_id = {}
+        workbook_xml = self._get_xml('xl/workbook.xml')
+        for sheet_xml in workbook_xml.xpath('/ws:workbook/ws:sheets/ws:sheet', namespaces=self._namespaces):
+            sheet_name = sheet_xml.attrib['name']
+            sheet_rid = sheet_xml.attrib['{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id']
+            sheets_id[sheet_rid] = sheet_name
+
+        # Названия файлов
+        paths = {}
+        xml = self._get_xml('xl/_rels/workbook.xml.rels')
+        for node in xml.xpath('/rel:Relationships/rel:Relationship', namespaces=self._namespaces):
+            r_id = node.attrib['Id']
+            path = os.path.join('xl', node.attrib['Target'])
+
+            if r_id in sheets_id:
+                sheet_label = sheets_id[r_id]
+                paths[sheet_label] = path
+
+        return paths    
+
+    def _create_base_zip(self, exclude_files):
+        u""" 
+        Создать базовый объект на основе шаблона в папке zip_folder для модификации.
+        В него не входят листы с изменными ячейками.
+        Они будут добавлены туда в методе _add_changes
+        @param exclude_files: Список исключенных файлов
+        @return: объект ZipFile
+        """
+
+        zip_file = ZipFile(self._zip_stream, mode='a', compression=ZIP_DEFLATED)
+
+        for path, dirs, files in os.walk(self._zip_folder):
+            rel_path = path[len(self._zip_folder):]
+            
+            for file_name in files:
+                if rel_path == '':
+                    zip_name = file_name
+                else:
+                    zip_name = os.path.join(rel_path, file_name)
+
+                if zip_name not in exclude_files:
+                    zip_file.write(os.path.join(path, file_name), zip_name)
+
+        return zip_file
+
+    def _add_changes(self, zip_file):
+        u""" 
+        Применить изменения.
+        Открываем и модифицируем файлы и заливаем их в zip поверх файлов по умолчанию
+
+        @param zip_file: объект ZipFile без листов, на которых есть измененные ячейки
+        """
+        
+        # Обходим листы и модифицируем
+        for sheet_name, data in self._data.items():
+            sheet_file = self._sheet_paths[sheet_name]
+            
+            sheet_content = self._get_changed_sheet(sheet_file=sheet_file, data=data)
+            zip_file.writestr(sheet_file, sheet_content)
+
+    def _get_changed_sheet(self, sheet_file, data):
+        u""" 
+        Возвращает отредактированный файл с данными для записи в ZIP-архив 
+        @param sheet_file: Путь к xml-файлу с листом
+        @param data: Словарь с изменениями {cell: value}
+        @return: xml-строка с измененным листом
+        """
+
+        xml = etree.parse(os.path.join(self._zip_folder, sheet_file))
+        for cell, value in data.items():
+            self._change_cell(xml, cell, value)
+
+        return etree.tostring(xml, xml_declaration=True, encoding="UTF-8", standalone="yes")
+
+    def _change_cell(self, xml, cell, value):
+        u""" 
+        Изменить параметр ячейки в листе xml 
+        Мутабельный метод по отношению к параметру xml
+        
+        @param xml: Объект lxml
+        @param cell: Индекс ячейки в формате "C2"
+        @param value: Значение
+        """
+
+        row_index = self._row_finder.search(cell).group()
+        value_type = type(value)
+
+        pattern_params = {'row_index': row_index, 'cell': cell}
+        pattern = '/ws:worksheet/ws:sheetData/ws:row[@r="%(row_index)s"]/ws:c[@r="%(cell)s"]' % pattern_params
+        node_c = xml.xpath(pattern, namespaces=self._namespaces)[0]
+        node_v = node_c.find('ws:v', namespaces=self._namespaces)
+        
+        # В шаблоне было пусто - добавим туда значение
+        if node_v is None:
+            node_v = etree.Element('v')
+            node_c.append(node_v)
+
+        # Пусто
+        if value == None:
+            node_c.remove(node_v)
+            if node_c.attrib.get('t') == 's':
+               del node_c.attrib['t']
+
+        # Расшареная строка
+        elif value_type in (unicode, str):
+            value = str(self._add_shared_string(value))
+            node_c.attrib['t'] = 's'
+
+        # Числовые или приравненные к ним данные
+        else:
+            if node_c.attrib.get('t') == 's':
+               del node_c.attrib['t']
+
+            if value_type == datetime:
+                value = value.date()
+
+            if value_type == date:
+                value = (value - date(1899, 12, 30)).days
+
+        node_v.text = unicode(value)
+
+</code></pre>
+</div></div>
+<p>
+Спасибо за внимание, если вы таки, дочитали до конца.
+
+      
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

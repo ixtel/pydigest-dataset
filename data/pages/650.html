@@ -1,0 +1,411 @@
+<html><body><div><article class="js-autolink contributed"><div class="contribution">
+<h4>This article was contributed by <a href="http://flyingsparx.net" target="_blank">Will Webberley</a>
+</h4>
+<p>Will is a computer scientist and is enthused by nearly all aspects of the technology domain. He is specifically interested in mobile and social computing and is currently a researcher in this area at Cardiff University.</p>
+</div>
+<h1>Direct to S3 File Uploads in Python</h1>
+<p class="last-updated"><span class="icon-clock"/>Last updated 12 February 2016</p>
+
+<p>Web applications often require the ability to allow users to upload files such as images, movies and archives.  Amazon S3 is a popular and reliable storage option for these files.</p>
+
+<p>This article demonstrates how to create a Python application that uploads files directly to S3 instead of via a web application, utilising S3’s Cross-Origin Resource Sharing (CORS) support. The article and companion repository consider Python 2.7, but should be mostly also compatible with Python 3.3 and above except where noted below.</p>
+
+<h2 id="uploading-directly-to-s3">Uploading directly to S3</h2>
+
+<div class="callout">
+<p>A complete example of the code discussed in this article is available for direct use in this <a href="https://github.com/flyingsparx/FlaskDirectUploader">GitHub repository</a>.</p>
+</div>
+
+<p>The main advantage of direct uploading is that the load on your application’s dynos would be considerably reduced. Using server-side processes for receiving files and transferring to S3 can needlessly tie up your dynos and will mean that they will not be able to respond to simultaneous web requests as efficiently.</p>
+
+<div class="note">
+<p>If your application relies on some form of file processing between the client’s computer and S3 (such as parsing Exif information or applying watermarks to images), then you may need to employ the use of extra dynos and consider the <a href="https://github.com/boto/boto">boto</a> Python library for handling the S3 upload.</p>
+</div>
+
+<p>The application uses client-side JavaScript and Python for signing the requests. It will therefore be a suitable guide for developing applications for the Flask, Bottle and Django web frameworks. The upload is carried out asynchronously so that you can decide how to handle your application’s flow after the upload has completed (for example,  a page redirect upon successful upload rather than a full page refresh).</p>
+
+<p>An example simple account-editing scenario is used as a guide for completing the various steps required to accomplish the direct upload and to relate the application of this to a wider range of use-cases. More information on this scenario is provided later.</p>
+
+<h2 id="overview">Overview</h2>
+
+<p>S3 is comprised of a set of buckets, each with a globally unique name, in which individual files (known as objects) and directories, can be stored.</p>
+
+<p>For uploading files to S3, you will need an Access Key ID and a Secret Access Key, which act as a username and password. The access key account will need to have sufficient access privileges to the target bucket in order for the upload to be successful.</p>
+
+<div class="note">
+<p>Please see the <a href="https://devcenter.heroku.com/articles/s3">S3 Article</a> for more information on this, creating buckets and finding your Access Key ID and Secret Access Key.</p>
+</div>
+
+<p>The method described in this article involves the use of client-side JavaScript and server-side Python. In general, the completed image-upload process follows these steps:</p>
+
+<ul>
+<li>A file is selected for upload by the user in their web browser;</li>
+<li>JavaScript is then responsible for making a request to your web application on Heroku, which produces a temporary signature with which to sign the upload request;</li>
+<li>The temporary signed request is returned to the browser in JSON format;</li>
+<li>JavaScript then uploads the file directly to Amazon S3 using the signed request supplied by your Python application.</li>
+</ul>
+
+<p>This guide includes information on how to implement the client-side and server-side code to form the complete system. After following the guide, you should have a working barebones system, allowing your users to upload files to S3. However, it is usually worth adding extra functionality to help improve the security of the system and to tailor it for your own particular uses. Pointers for this are mentioned in the appropriate parts of the guide.</p>
+
+<h2 id="prerequisites">Prerequisites</h2>
+
+<ul>
+<li>The <a href="https://toolbelt.heroku.com/">Heroku Toolbelt</a> has been installed;</li>
+<li>A Heroku application has been created for the current project;</li>
+<li>An AWS S3 bucket has been created.</li>
+</ul>
+
+<h2 id="initial-setup">Initial setup</h2>
+
+<h3 id="heroku-setup">Heroku setup</h3>
+
+<p>In order for your application to access the AWS credentials for signing upload requests, they will need to be added as configuration variables in Heroku:</p>
+
+<div class="callout">
+<p>If you are testing locally before deployment, remember to add the credentials to your local machine’s environment, too.</p>
+</div>
+
+<div class="CodeRay">
+  <div class="code"><pre><span class="prompt">$</span><span class="function"> heroku config:set AWS_ACCESS_KEY=xxx AWS_SECRET_KEY=yyy
+</span><span class="string">Adding config vars and restarting app... done, v21
+</span><span class="string">    AWS_ACCESS_KEY     =&gt; xxx
+</span><span class="string">    AWS_SECRET_KEY =&gt; yyy
+</span></pre></div>
+</div>
+
+
+<p>In addition to the AWS access credentials, set your target S3 bucket’s name:</p>
+
+<div class="CodeRay">
+  <div class="code"><pre><span class="prompt">$</span><span class="function"> heroku config:set S3_BUCKET = zzz
+</span><span class="string">Adding config vars and restarting app... done, v21
+</span><span class="string">    S3_BUCKET     =&gt; zzz
+</span></pre></div>
+</div>
+
+
+<div class="warning">
+<p>Using config vars is preferable over configuration files for security reasons. Try to avoid placing passwords and access keys directly in your application’s code or in configuration files.</p>
+</div>
+
+<h3 id="s3-setup">S3 setup</h3>
+
+<p>You will now need to edit some of the permissions properties of the target S3 bucket so that the final request has sufficient privileges to write to the bucket. In a web-browser, sign in to the AWS console and select the S3 section. Select the appropriate bucket and click the ‘Properties’ tab. Select the Permissions section and three options are provided (Add more permissions, Edit bucket policy and Edit CORS configuration).</p>
+
+<p>CORS (Cross-Origin Resource Sharing) will allow your application to access content in the S3 bucket. Each rule should specify a set of domains from which access to the bucket is granted and also the methods and headers permitted from those domains.</p>
+
+<p><img src="https://s3.amazonaws.com/heroku-devcenter-files/article-images/1643-imported-1443570482-1643-imported-1443554958-cors1.png" alt="Locating the ‘Properties’ tab and CORS configuration editor"/></p>
+
+<p>For this to work in your application, click ‘Add CORS Configuration’ and enter the following XML:</p>
+
+<div class="CodeRay">
+  <div class="code"><pre><span class="preprocessor">&lt;?xml version="1.0" encoding="UTF-8"?&gt;</span>
+<span class="tag">&lt;CORSConfiguration</span> <span class="attribute-name">xmlns</span>=<span class="string"><span class="delimiter">"</span><span class="content">http://s3.amazonaws.com/doc/2006-03-01/</span><span class="delimiter">"</span></span><span class="tag">&gt;</span>
+   <span class="tag">&lt;CORSRule&gt;</span>
+        <span class="tag">&lt;AllowedOrigin&gt;</span>yourdomain.com<span class="tag">&lt;/AllowedOrigin&gt;</span>
+        <span class="tag">&lt;AllowedMethod&gt;</span>GET<span class="tag">&lt;/AllowedMethod&gt;</span>
+        <span class="tag">&lt;AllowedMethod&gt;</span>POST<span class="tag">&lt;/AllowedMethod&gt;</span>
+        <span class="tag">&lt;AllowedMethod&gt;</span>PUT<span class="tag">&lt;/AllowedMethod&gt;</span>
+        <span class="tag">&lt;AllowedHeader&gt;</span>*<span class="tag">&lt;/AllowedHeader&gt;</span>
+    <span class="tag">&lt;/CORSRule&gt;</span>
+<span class="tag">&lt;/CORSConfiguration&gt;</span>
+</pre></div>
+</div>
+
+
+<p>Click ‘Save’ in the CORS window and then ‘Save’ again in the bucket’s ‘Properties’ tab.</p>
+
+<p>This tells S3 to allow any domain access to the bucket and that requests can contain any headers. For security, you can change the ‘AllowedOrigin’ to only accept requests from your domain.</p>
+
+<div class="note">
+<p>If you wish to use S3 credentials specifically for this application, then more keys can be generated in the AWS account pages. This provides further security, since you can designate a very specific set of requests that this set of keys are able to perform. If this is preferable to you, then you will need to also set up an IAM user in the Edit bucket policy option in your S3 bucket. There are various guides on AWS’s web pages detailing how this can be accomplished.</p>
+</div>
+
+<h2 id="direct-uploading">Direct uploading</h2>
+
+<p>The processes and steps required to accomplish a direct upload to S3 will be demonstrated through the use of a simple profile-editing scenario for the purposes of this article. This example will involve the user being permitted to select an avatar image to upload and enter some basic information to be stored as part of their account.</p>
+
+<p>In this scenario, the following procedure will take place:</p>
+
+<ul>
+<li>The user is presented with a web page, containing elements encouraging the user to choose an image to upload as their avatar and to enter a username and their own name.</li>
+<li>An element is responsible for maintaining a preview of the chosen image by the user. By default, and if no image is chosen for upload, a default avatar image is used instead (making the image-upload effectively optional to the user in this scenario).</li>
+<li>When a user selects an image to be uploaded, the upload to S3 is handled automatically and asynchronously with the process described earlier in this article. The image preview is then updated with the selected image once the upload is complete and successful.</li>
+<li>The user is then free to move on to filling in the rest of the information.</li>
+<li>The user then clicks the “submit” button, which posts the username, name and the URL of the uploaded image to the Python application to be checked and/or stored. If no image was uploaded by the user earlier the default avatar image URL is posted instead.</li>
+</ul>
+
+<p><img src="https://s3.amazonaws.com/heroku-devcenter-files/article-images/1643-imported-1443570483-1643-imported-1443554959-account1.png" alt="An example of what the simple finished product will consist of"/></p>
+
+<h3 id="setting-up-the-client-side-code">Setting up the client-side code</h3>
+
+<p>No third-party code is required to complete the implementation on the client-side.</p>
+
+<p>The HTML and JavaScript can now be created to handle the file selection, obtain the request and signature from your Python application, and then finally make the upload request.</p>
+
+<p>Firstly, create a file called <code>account.html</code> in your application’s templates directory and populate the <code>head</code> and other necessary HTML tags appropriately for your application. In the body of this HTML file, include a file input and an element that will contain status updates on the upload progress. In addition to this, create a form to allow the user to enter their username and full name and a hidden <code>input</code> element to hold the URL of the chosen avatar image:</p>
+
+<div class="callout">
+<p>To see the completed HTML file, please see the appropriate code in the companion <a href="https://github.com/flyingsparx/FlaskDirectUploader/blob/master/templates/account.html">repository</a>.</p>
+</div>
+
+<div class="CodeRay">
+  <div class="code"><pre><span class="tag">&lt;input</span> <span class="attribute-name">type</span>=<span class="string"><span class="delimiter">"</span><span class="content">file</span><span class="delimiter">"</span></span> <span class="attribute-name">id</span>=<span class="string"><span class="delimiter">"</span><span class="content">file_input</span><span class="delimiter">"</span></span><span class="tag">/&gt;</span>
+<span class="tag">&lt;p</span> <span class="attribute-name">id</span>=<span class="string"><span class="delimiter">"</span><span class="content">status</span><span class="delimiter">"</span></span><span class="tag">&gt;</span>Please select a file<span class="tag">&lt;/p&gt;</span>
+<span class="tag">&lt;img</span> <span class="attribute-name">id</span>=<span class="string"><span class="delimiter">"</span><span class="content">preview</span><span class="delimiter">"</span></span> <span class="attribute-name">src</span>=<span class="string"><span class="delimiter">"</span><span class="content">/static/default.png</span><span class="delimiter">"</span></span> <span class="tag">/&gt;</span>
+
+<span class="tag">&lt;form</span> <span class="attribute-name">method</span>=<span class="string"><span class="delimiter">"</span><span class="content">POST</span><span class="delimiter">"</span></span> <span class="attribute-name">action</span>=<span class="string"><span class="delimiter">"</span><span class="content">/submit_form/</span><span class="delimiter">"</span></span><span class="tag">&gt;</span>
+    <span class="tag">&lt;input</span> <span class="attribute-name">type</span>=<span class="string"><span class="delimiter">"</span><span class="content">hidden</span><span class="delimiter">"</span></span> <span class="attribute-name">id</span>=<span class="string"><span class="delimiter">"</span><span class="content">avatar_url</span><span class="delimiter">"</span></span> <span class="attribute-name">name</span>=<span class="string"><span class="delimiter">"</span><span class="content">avatar_url</span><span class="delimiter">"</span></span> <span class="attribute-name">value</span>=<span class="string"><span class="delimiter">"</span><span class="content">/static/default.png</span><span class="delimiter">"</span></span> <span class="tag">/&gt;</span>
+    <span class="tag">&lt;input</span> <span class="attribute-name">type</span>=<span class="string"><span class="delimiter">"</span><span class="content">text</span><span class="delimiter">"</span></span> <span class="attribute-name">name</span>=<span class="string"><span class="delimiter">"</span><span class="content">username</span><span class="delimiter">"</span></span> <span class="attribute-name">placeholder</span>=<span class="string"><span class="delimiter">"</span><span class="content">Username</span><span class="delimiter">"</span></span> <span class="tag">/&gt;</span><span class="tag">&lt;br</span> <span class="tag">/&gt;</span>
+    <span class="tag">&lt;input</span> <span class="attribute-name">type</span>=<span class="string"><span class="delimiter">"</span><span class="content">text</span><span class="delimiter">"</span></span> <span class="attribute-name">name</span>=<span class="string"><span class="delimiter">"</span><span class="content">full_name</span><span class="delimiter">"</span></span> <span class="attribute-name">placeholder</span>=<span class="string"><span class="delimiter">"</span><span class="content">Full name</span><span class="delimiter">"</span></span> <span class="tag">/&gt;</span><span class="tag">&lt;br</span> <span class="tag">/&gt;</span><span class="tag">&lt;br</span> <span class="tag">/&gt;</span>
+    <span class="tag">&lt;input</span> <span class="attribute-name">type</span>=<span class="string"><span class="delimiter">"</span><span class="content">submit</span><span class="delimiter">"</span></span> <span class="attribute-name">value</span>=<span class="string"><span class="delimiter">"</span><span class="content">Update profile</span><span class="delimiter">"</span></span> <span class="tag">/&gt;</span>
+<span class="tag">&lt;/form&gt;</span>
+</pre></div>
+</div>
+
+
+<p>The <code>preview</code> element initially holds a default avatar image (which would become the user’s avatar if a new image is not chosen), and the <code>avatar_url</code> input maintains the current URL of the user’s chosen avatar image. Both of these are updated by the JavaScript, discussed below, when the user selects a new avatar.</p>
+
+<p>Thus when the user finally clicks the submit button, the URL of the avatar is submitted, along with the username and full name of the user, to your desired endpoint for server-side handling.</p>
+
+<p>The client-side code is responsible for achieving two things:</p>
+
+<ol>
+<li>Retrieve a signed request from the app with which the image can be PUT to S3</li>
+<li>Actually PUT the image to S3 using the signed request</li>
+</ol>
+
+<p>JavaScript’s <code>XMLHttpRequest</code> objects can be created and used for making asynchronous HTTP requests.</p>
+
+<p>To accomplish this, first create a <code>&lt;script&gt;</code> block and write some code that listens for changes in the file input, once the document has loaded, and starts the upload process.</p>
+
+<div class="CodeRay">
+  <div class="code"><pre>(<span class="keyword">function</span>() {
+    document.getElementById(<span class="string"><span class="delimiter">"</span><span class="content">file_input</span><span class="delimiter">"</span></span>).<span class="function">onchange</span> = <span class="keyword">function</span>(){
+        <span class="keyword">var</span> files = document.getElementById(<span class="string"><span class="delimiter">"</span><span class="content">file_input</span><span class="delimiter">"</span></span>).files;
+        <span class="keyword">var</span> file = files[<span class="integer">0</span>];
+        <span class="keyword">if</span>(file == <span class="predefined-constant">null</span>){
+            alert(<span class="string"><span class="delimiter">"</span><span class="content">No file selected.</span><span class="delimiter">"</span></span>);
+        }
+        <span class="keyword">else</span>{
+            get_signed_request(file);
+        }
+    };
+})();
+</pre></div>
+</div>
+
+
+<p>The code also determines the file object itself to be uploaded. If one has been selected properly, it proceeds to call a function to obtain a signed PUT request for the file. Next, therefore, write a function that accepts the file object and retrieves an appropriate signed request for it from the app.</p>
+
+<div class="CodeRay">
+  <div class="code"><pre><span class="keyword">function</span> <span class="function">get_signed_request</span>(file){
+    <span class="keyword">var</span> xhr = <span class="keyword">new</span> XMLHttpRequest();
+    xhr.open(<span class="string"><span class="delimiter">"</span><span class="content">GET</span><span class="delimiter">"</span></span>, <span class="string"><span class="delimiter">"</span><span class="content">/sign_s3?file_name=</span><span class="delimiter">"</span></span>+file.name+<span class="string"><span class="delimiter">"</span><span class="content">&amp;file_type=</span><span class="delimiter">"</span></span>+file.type);
+    xhr.<span class="function">onreadystatechange</span> = <span class="keyword">function</span>(){
+        <span class="keyword">if</span>(xhr.readyState === <span class="integer">4</span>){
+            <span class="keyword">if</span>(xhr.status === <span class="integer">200</span>){
+                <span class="keyword">var</span> response = JSON.parse(xhr.responseText);
+                upload_file(file, response.signed_request, response.url);
+            }
+            <span class="keyword">else</span>{
+                alert(<span class="string"><span class="delimiter">"</span><span class="content">Could not get signed URL.</span><span class="delimiter">"</span></span>);
+            }
+        }
+    };
+    xhr.send();
+}
+</pre></div>
+</div>
+
+
+<p>The above function passes the file’s name and mime type as parameters to the GET request since these are needed in the construction of the signed request, as will be covered later in this article. If the retrieval of the signed request was successful, the function continues by calling a function to upload the actual file:</p>
+
+<div class="CodeRay">
+  <div class="code"><pre><span class="keyword">function</span> <span class="function">upload_file</span>(file, signed_request, url){
+    <span class="keyword">var</span> xhr = <span class="keyword">new</span> XMLHttpRequest();
+    xhr.open(<span class="string"><span class="delimiter">"</span><span class="content">PUT</span><span class="delimiter">"</span></span>, signed_request);
+    xhr.setRequestHeader(<span class="string"><span class="delimiter">'</span><span class="content">x-amz-acl</span><span class="delimiter">'</span></span>, <span class="string"><span class="delimiter">'</span><span class="content">public-read</span><span class="delimiter">'</span></span>);
+    xhr.<span class="function">onload</span> = <span class="keyword">function</span>() {
+        <span class="keyword">if</span> (xhr.status === <span class="integer">200</span>) {
+            document.getElementById(<span class="string"><span class="delimiter">"</span><span class="content">preview</span><span class="delimiter">"</span></span>).src = url;
+            document.getElementById(<span class="string"><span class="delimiter">"</span><span class="content">avatar_url</span><span class="delimiter">"</span></span>).value = url;
+        }
+    };
+    xhr.<span class="function">onerror</span> = <span class="keyword">function</span>() {
+        alert(<span class="string"><span class="delimiter">"</span><span class="content">Could not upload file.</span><span class="delimiter">"</span></span>);
+    };
+    xhr.send(file);
+}
+</pre></div>
+</div>
+
+
+<p>This function accepts the file to be uploaded, the signed request, and generated URL representing the eventual retrieval URL of the avatar image. The latter two arguments will be returned as part of the response from the app. The function sets a single header (which specifies that the uploaded file should be publicly available) before making the request, which, if successful, updates the preview element to the new avatar image and stores the URL in the hidden input so that it can be submitted for storage in the app.</p>
+
+<p>Now, once the user has completed the rest of the form and clicked submit, the name, username, and avatar image can all be posted to the same endpoint.</p>
+
+<div class="warning">
+<p>If you find that the page isn’t working as you intend after implementing the system, then consider using <code>console.log()</code> to record any errors that occur inside the <code>onerror</code> function and use your browser’s error console to help diagnose the problem.</p>
+</div>
+
+<p class="devcenter-parser-special-block-separator"> </p>
+
+<div class="note">
+<p>It is good practice to inform the user of any prolonged activity in any form of application (web- or device-based) and to display updates on changes. Therefore a loading indicator could be displayed between selecting a file and the upload being completed.
+Without this sort of information, users may suspect that the page has crashed, and could try to refresh the page or otherwise disrupt the upload process.</p>
+</div>
+
+<h3 id="setting-up-the-server-side-python-code">Setting up the server-side Python code</h3>
+
+<p>This section discusses the use of Python for generating a temporary signature with which the upload request can be signed. This temporary signature uses the AWS access key and secret access key as a basis for the signature, but users will not have direct access to this information. After the signature has expired, then upload requests with the same signature will not be successful.</p>
+
+<p>As mentioned previously, this article covers the production of an application for the Flask framework, although the steps for other Python frameworks will be similar. Readers using Python 3 should consider the <a href="http://flask.pocoo.org/docs/python3">relevant information</a> on Flask’s website before continuing.</p>
+
+<div class="callout">
+<p>To see the completed Python file, please see the appropriate code in the companion <a href="https://github.com/flyingsparx/FlaskDirectUploader/blob/master/application.py">repository</a>.</p>
+</div>
+
+<p>Start by creating your main application file, <code>application.py</code>, and set up your skeleton application appropriately:</p>
+
+<div class="CodeRay">
+  <div class="code"><pre><span class="keyword">from</span> <span class="include">flask</span> <span class="keyword">import</span> <span class="include">Flask</span>, <span class="include">render_template</span>, <span class="include">request</span>
+<span class="keyword">from</span> <span class="include">hashlib</span> <span class="keyword">import</span> <span class="include">sha1</span>
+<span class="keyword">import</span> <span class="include">time</span>, <span class="include">os</span>, <span class="include">json</span>, <span class="include">base64</span>, <span class="include">hmac</span>, <span class="include">urllib</span>
+
+app = Flask(__name__)
+
+<span class="keyword">if</span> __name__ == <span class="string"><span class="delimiter">'</span><span class="content">__main__</span><span class="delimiter">'</span></span>:
+    port = <span class="predefined">int</span>(os.environ.get(<span class="string"><span class="delimiter">'</span><span class="content">PORT</span><span class="delimiter">'</span></span>, <span class="integer">5000</span>))
+    app.run(host=<span class="string"><span class="delimiter">'</span><span class="content">0.0.0.0</span><span class="delimiter">'</span></span>, port=port)
+</pre></div>
+</div>
+
+
+<p>The currently-unused import statements will be necessary later on.</p>
+
+<div class="note">
+<p>Readers using Python 3 should import <code>urllib.parse</code> in place of <code>urllib</code>.</p>
+</div>
+
+<p>Next, in the same file, you will need to create the views responsible for returning the correct information back to the user’s browser when requests are made to various URLs. First define view for requests to <code>/account</code> to return the page <code>account.html</code>, which contains the form for the user to complete:</p>
+
+<div class="CodeRay">
+  <div class="code"><pre><span class="decorator">@app.route</span>(<span class="string"><span class="delimiter">"</span><span class="content">/account/</span><span class="delimiter">"</span></span>)
+<span class="keyword">def</span> <span class="function">account</span>():
+    <span class="keyword">return</span> render_template(<span class="string"><span class="delimiter">'</span><span class="content">account.html</span><span class="delimiter">'</span></span>)
+</pre></div>
+</div>
+
+
+<div class="note">
+<p>Please note that the views for the application will need to be placed between the <code>app = Flask(__name__)</code> and <code>if __name__ == '__main__':</code> lines in <code>application.py</code>.</p>
+</div>
+
+<p>Now create the view, in the same Python file,  that is responsible for generating and returning the signature with which the client-side JavaScript can upload the image. This is the first request made by the client before attempting an upload to S3. This view responds with requests to <code>/sign_s3/</code>:</p>
+
+<div class="CodeRay">
+  <div class="code"><pre><span class="decorator">@app.route</span>(<span class="string"><span class="delimiter">'</span><span class="content">/sign_s3/</span><span class="delimiter">'</span></span>)
+<span class="keyword">def</span> <span class="function">sign_s3</span>():
+    AWS_ACCESS_KEY = os.environ.get(<span class="string"><span class="delimiter">'</span><span class="content">AWS_ACCESS_KEY</span><span class="delimiter">'</span></span>)
+    AWS_SECRET_KEY = os.environ.get(<span class="string"><span class="delimiter">'</span><span class="content">AWS_SECRET_KEY</span><span class="delimiter">'</span></span>)
+    S3_BUCKET = os.environ.get(<span class="string"><span class="delimiter">'</span><span class="content">S3_BUCKET</span><span class="delimiter">'</span></span>)
+
+    object_name = urllib.quote_plus(request.args.get(<span class="string"><span class="delimiter">'</span><span class="content">file_name</span><span class="delimiter">'</span></span>))
+    mime_type = request.args.get(<span class="string"><span class="delimiter">'</span><span class="content">file_type</span><span class="delimiter">'</span></span>)
+
+    expires = <span class="predefined">int</span>(time.time()+<span class="integer">60</span>*<span class="integer">60</span>*<span class="integer">24</span>)
+    amz_headers = <span class="string"><span class="delimiter">"</span><span class="content">x-amz-acl:public-read</span><span class="delimiter">"</span></span>
+
+    string_to_sign = <span class="string"><span class="delimiter">"</span><span class="content">PUT</span><span class="char">\n</span><span class="char">\n</span><span class="content">%s</span><span class="char">\n</span><span class="content">%d</span><span class="char">\n</span><span class="content">%s</span><span class="char">\n</span><span class="content">/%s/%s</span><span class="delimiter">"</span></span> % (mime_type, expires, amz_headers, S3_BUCKET, object_name)
+
+    signature = base64.encodestring(hmac.new(AWS_SECRET_KEY.encode(), string_to_sign.encode(<span class="string"><span class="delimiter">'</span><span class="content">utf8</span><span class="delimiter">'</span></span>), sha1).digest())
+    signature = urllib.quote_plus(signature.strip())
+
+    url = <span class="string"><span class="delimiter">'</span><span class="content">https://%s.s3.amazonaws.com/%s</span><span class="delimiter">'</span></span> % (S3_BUCKET, object_name)
+
+    content = json.dumps({
+        <span class="string"><span class="delimiter">'</span><span class="content">signed_request</span><span class="delimiter">'</span></span>: <span class="string"><span class="delimiter">'</span><span class="content">%s?AWSAccessKeyId=%s&amp;Expires=%s&amp;Signature=%s</span><span class="delimiter">'</span></span> % (url, AWS_ACCESS_KEY, expires, signature),
+        <span class="string"><span class="delimiter">'</span><span class="content">url</span><span class="delimiter">'</span></span>: url,
+    })
+    <span class="keyword">return</span> content
+</pre></div>
+</div>
+
+
+<div class="note">
+<p>Readers using Python 3 should use <code>urllib.parse.quote_plus()</code> to quote the signature. Additionally, <code>hmac.digest()</code> returns bytes rather than a string, so <code>base64.encodebytes</code> is required in place of <code>base64.encodestring</code>. A full example of this is available <a href="https://gist.github.com/RyanBalfanz/f07d827a4818fda0db81">here</a>.</p>
+</div>
+
+<p>This code performs the following steps:</p>
+
+<ul>
+<li>The request is received to <code>/sign_s3/</code> and the AWS keys and S3 bucket name are loaded from the environment.</li>
+<li>The name and mime type of the object to be uploaded are extracted from the <code>GET</code> parameters of the request (this stage may differ in other frameworks). The parameters are provided by the JavaScript discussed in the previous section.</li>
+<li>The expiry time of the signature is set (in this example, to one day from now) and forms the basis of the temporary nature of the signature. As shown, this is best used as a function relative to the current UNIX time.</li>
+<li>The headers line tells S3 what access permissions to grant. In this case, the object will be publicly available for download. This must be equal to the header set in the PUT request made by the client-side code.</li>
+<li>Now the <code>PUT</code> request can be constructed from the object information, headers and expiry time.</li>
+<li>The signature is generated as an SHA hash of the compiled AWS secret key and the actual <code>PUT</code> request.</li>
+<li>In addition, surrounding whitespace is stripped from the signature and special characters are escaped (using <code>quote_plus</code>) for safer transmission through HTTP.</li>
+<li>The prospective URL of the object to be uploaded is produced as a combination of the S3 bucket name and the object name.</li>
+<li>Finally, the signed request can be returned, along with the prospective URL, to the browser in JSON format.</li>
+</ul>
+
+<p>You may wish to assign another, customised name to the object instead of using the one that the file is already named with, which is useful for preventing accidental overwrites in the S3 bucket. This name could be related to the ID of the user’s account, for example. If not, you should provide some method for properly quoting the name in case there are spaces or other awkward characters present. In addition, this is the stage at which you could provide checks on the uploaded file in order to restrict access to certain file types. For example, a simple check could be implemented to allow only <code>.png</code> files to proceed beyond this point.</p>
+
+<div class="warning">
+<p>It is sometimes possible for S3 to respond with 403 (forbidden) errors for requests which are signed by temporary signatures containing special characters. Therefore, it is important to appropriately quote the signature as demonstrated above.</p>
+</div>
+
+<p>Finally, in <code>application.py</code>, create the view responsible for receiving the account information after the user has uploaded an avatar, filled in the form, and clicked submit. Since this will be a <code>POST</code> request, this will also need to be defined as an ‘allowed access method’. This method will respond to requests to the URL <code>/submit_form/</code>:</p>
+
+<div class="CodeRay">
+  <div class="code"><pre><span class="decorator">@app.route</span>(<span class="string"><span class="delimiter">"</span><span class="content">/submit_form/</span><span class="delimiter">"</span></span>, methods=[<span class="string"><span class="delimiter">"</span><span class="content">POST</span><span class="delimiter">"</span></span>])
+<span class="keyword">def</span> <span class="function">submit_form</span>():
+    username = request.form[<span class="string"><span class="delimiter">"</span><span class="content">username</span><span class="delimiter">"</span></span>]
+    full_name = request.form[<span class="string"><span class="delimiter">"</span><span class="content">full_name</span><span class="delimiter">"</span></span>]
+    avatar_url = request.form[<span class="string"><span class="delimiter">"</span><span class="content">avatar_url</span><span class="delimiter">"</span></span>]
+    update_account(username, full_name, avatar_url)
+    <span class="keyword">return</span> redirect(url_for(<span class="string"><span class="delimiter">'</span><span class="content">profile</span><span class="delimiter">'</span></span>))
+</pre></div>
+</div>
+
+
+<p>In this example, an <code>update_account()</code> function has been called, but creation of this method is not covered in this article. In your application, you should provide some functionality, at this stage, to allow the app to store these account details in some form of database and correctly associate the information with the rest of the user’s account details.</p>
+
+<p>In addition, the URL for the profile page has not been defined in this article (or companion code). Ideally, for example, after updating the account, the user would be redirected back to their own profile so that they can see the updated information.</p>
+
+<h2 id="running-the-app">Running the app</h2>
+
+<p>Everything should now be in place to perform the direct uploads to S3. To test the upload, save any changes and use <code>heroku local</code> to start the application:</p>
+
+<div class="callout">
+<p>You will need a Procfile for this to be successful. See <a href="https://devcenter.heroku.com/articles/getting-started-with-python">Getting Started with Python on Heroku</a> for information on the Heroku toolbelt and running your app locally. Also remember to correctly set your environment variables on your own machine before running the application locally.</p>
+</div>
+
+<div class="CodeRay">
+  <div class="code"><pre><span class="prompt">$</span><span class="function"> heroku local
+</span><span class="string">15:44:36 web.1  | started with pid 12417
+</span></pre></div>
+</div>
+
+
+<p>Press <code>Ctrl+C</code> to return to the prompt. If your application is returning <code>500</code> errors (or other server-based issues), then start your server in debug mode and view the output in the Terminal emulator to help fix your problem. For example, in Flask:</p>
+
+<div class="CodeRay">
+  <div class="code"><pre>...
+app.debug = <span class="predefined-constant">True</span>
+port = <span class="predefined">int</span>(os.environ.get(<span class="string"><span class="delimiter">'</span><span class="content">PORT</span><span class="delimiter">'</span></span>, <span class="integer">5000</span>))
+app.run(host=<span class="string"><span class="delimiter">'</span><span class="content">0.0.0.0</span><span class="delimiter">'</span></span>, port=port)
+</pre></div>
+</div>
+
+
+<div class="warning">
+<p>If you are receiving 403 errors back from S3, then the most common reason is that there is an issue with your signature. As mentioned earlier, you should consider quoting the signature properly and removing any whitespace.</p>
+</div>
+
+<h2 id="summary">Summary</h2>
+
+<p>This article covers uploading to Amazon S3 directly from the browser using Python to temporarily sign the upload request. Although the guide and companion code focuses on the Flask framework, the idea should easily carry over to other Python applications.</p>
+</article></div></body></html>

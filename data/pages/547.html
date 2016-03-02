@@ -1,0 +1,268 @@
+<html><body><div><div class="post-entry">
+			<p>I needed an endpoint that streamed the output of an external program to the remote client. In this article I describe how I did it and discuss a few issues I encountered. Note that if you just want to stream events back to the browser, I’ll also cover that. An external command is just what I needed, and is the more difficult case.</p>
+<h3>A simple stream</h3>
+<p>The program below is a simple Flask server. To run it you need to <code>pip install flask shelljob</code>. Save it to a file <code>server.py</code> and then run <code>python server.py</code>.</p>
+<div class="codehilitewrap">
+<table class="codehilitetable">
+<tr>
+<td class="linenos">
+<div class="linenodiv">
+<pre> 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20</pre>
+</div>
+</td>
+<td class="code">
+<div class="codehilite">
+<pre><span class="kn">import</span> <span class="nn">flask</span>
+<span class="kn">from</span> <span class="nn">shelljob</span> <span class="kn">import</span> <span class="n">proc</span>
+
+<span class="n">app</span> <span class="o">=</span> <span class="n">flask</span><span class="o">.</span><span class="n">Flask</span><span class="p">(</span><span class="n">__name__</span><span class="p">)</span>
+
+<span class="nd">@app.route</span><span class="p">(</span> <span class="s">'/stream'</span> <span class="p">)</span>
+<span class="k">def</span> <span class="nf">stream</span><span class="p">():</span>
+    <span class="n">g</span> <span class="o">=</span> <span class="n">proc</span><span class="o">.</span><span class="n">Group</span><span class="p">()</span>
+    <span class="n">p</span> <span class="o">=</span> <span class="n">g</span><span class="o">.</span><span class="n">run</span><span class="p">(</span> <span class="p">[</span> <span class="s">"bash"</span><span class="p">,</span> <span class="s">"-c"</span><span class="p">,</span> <span class="s">"for ((i=0;i&lt;100;i=i+1)); do echo $i; sleep 1; done"</span> <span class="p">]</span> <span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">read_process</span><span class="p">():</span>
+        <span class="k">while</span> <span class="n">g</span><span class="o">.</span><span class="n">is_pending</span><span class="p">():</span>
+            <span class="n">lines</span> <span class="o">=</span> <span class="n">g</span><span class="o">.</span><span class="n">readlines</span><span class="p">()</span>
+            <span class="k">for</span> <span class="n">proc</span><span class="p">,</span> <span class="n">line</span> <span class="ow">in</span> <span class="n">lines</span><span class="p">:</span>
+                <span class="k">yield</span> <span class="n">line</span>
+
+    <span class="k">return</span> <span class="n">flask</span><span class="o">.</span><span class="n">Response</span><span class="p">(</span> <span class="n">read_process</span><span class="p">(),</span> <span class="n">mimetype</span><span class="o">=</span> <span class="s">'text/plain'</span> <span class="p">)</span>
+
+<span class="k">if</span> <span class="n">__name__</span> <span class="o">==</span> <span class="s">"__main__"</span><span class="p">:</span>
+    <span class="n">app</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">debug</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+</pre>
+</div>
+</td>
+</tr>
+</table>
+</div>
+<p>Once running you can issue a <code>curl</code> request to see that it’s streaming: <code>curl <a href="http://127.0.0.1:5000/stream" rel="nofollow">http://127.0.0.1:5000/stream</a></code>. This assumes it started on port <code>5000</code>, just check the server output.</p>
+<p>The streamed data in this example is a simple bash loop that generates a sequence of number and pauses in between. You’ll probably want to put some useful command in its place.</p>
+<p>The <code>Group</code> class is part of the <a href="https://pypi.python.org/pypi/shelljob">shelljob</a> package I wrote before. It takes care of the ugly streaming of data from a subprocess in Python. (I’ve not yet tested/ported it to Python 3. Let me know if you need that.) Here I’m just reading the data from the process and yielding it to the stream. If you’re already familiar with <code>yield</code> that bit should be clear. If not, then I suggest you read up on <code>yield</code> as its too much to cover here.</p>
+<h4>Timeout?</h4>
+<p>Since you’re a responsible server programmer you probably have a question about timeouts. At the moment that above loop is hopeful that the subprocess eventually exits. To change that we need to have a timeout. I have taken care that <code>readlines</code> itself has a default timeout of two seconds and will simply return an empty list after that time. This gives you a chance to put in your own premature termination conditions.</p>
+<p>Here is a modified <code>read_process</code> function that prints an interval message every 5 seconds (very roughly).</p>
+<div class="codehilitewrap">
+<table class="codehilitetable">
+<tr>
+<td class="linenos">
+
+</td>
+<td class="code">
+<div class="codehilite">
+<pre>    <span class="k">def</span> <span class="nf">read_process</span><span class="p">():</span>
+        <span class="n">trigger_time</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">()</span> <span class="o">+</span> <span class="mi">5</span>
+        <span class="k">while</span> <span class="n">g</span><span class="o">.</span><span class="n">is_pending</span><span class="p">():</span>
+            <span class="n">lines</span> <span class="o">=</span> <span class="n">g</span><span class="o">.</span><span class="n">readlines</span><span class="p">()</span>
+            <span class="k">for</span> <span class="n">proc</span><span class="p">,</span> <span class="n">line</span> <span class="ow">in</span> <span class="n">lines</span><span class="p">:</span>
+                <span class="k">yield</span> <span class="n">line</span>
+
+            <span class="n">now</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">()</span>
+            <span class="k">if</span> <span class="n">now</span> <span class="o">&gt;</span> <span class="n">trigger_time</span><span class="p">:</span>
+                <span class="k">yield</span> <span class="s">"*** Interval"</span>
+                <span class="n">trigger_time</span> <span class="o">=</span> <span class="n">now</span> <span class="o">+</span> <span class="mi">5</span>
+</pre>
+</div>
+</td>
+</tr>
+</table>
+</div>
+<h3>Does that block my server?</h3>
+<p>Running the server directly will cause the loop to block the server. If you do another <code>curl</code> request in a second console you won’t get any response. Kill the first request and then suddenly you’ll start getting data. This isn’t very satisfying.</p>
+<p>Chances are you already have a solution for your server, like gunicorn or uwsgi. In case you don’t I’ll go over how to do it with gunicorn. First <code>pip install gunicorn eventlet</code>. Now don’t run the server directly, instead use the command <code>gunicorn -k eventlet stream_server:app</code>. Note this launches the server on a different port (usually 8000).</p>
+<p>Unfortunately, if you do a curl request now, it won’t work. It’s something I don’t yet understand. It only applies to external subprocess calls; if you stream internally generated data everything is fine. The fix is to add a call to <code>monkey_patch</code> at the top of the server code, after the other imports.</p>
+<div class="codehilitewrap">
+<table class="codehilitetable">
+<tr>
+<td class="linenos">
+
+</td>
+<td class="code">
+<div class="codehilite">
+<pre><span class="kn">import</span> <span class="nn">flask</span>
+<span class="kn">from</span> <span class="nn">shelljob</span> <span class="kn">import</span> <span class="n">proc</span>
+
+<span class="kn">import</span> <span class="nn">eventlet</span>
+<span class="n">eventlet</span><span class="o">.</span><span class="n">monkey_patch</span><span class="p">()</span>
+
+<span class="n">app</span> <span class="o">=</span> <span class="n">flask</span><span class="o">.</span><span class="n">Flask</span><span class="p">(</span><span class="n">__name__</span><span class="p">)</span>
+</pre>
+</div>
+</td>
+</tr>
+</table>
+</div>
+<p>Good. Now you can issue a bunch of curl requests in multiple consoles and all of them will stream the results.</p>
+<blockquote>
+<p>I would be appreciative if somebody could explain the reason why I need <code>monkey_patch</code> here. It feels like a defect somewhere, possibility compatiblity between gunicorn and shelljob. I’d like to find the proper fix.</p>
+</blockquote>
+<h3>Now my Python process doesn’t work</h3>
+<p>It seems to work until you call a Python subprocess. Now it appears to block for a long-time, possibly until the end of the process, and then give all the data at once — or timeout.</p>
+<p>This happens because Python is trying to be <em>clever</em>. If the output of the command is not a console it goes into a buffered output mode. So instead of flushing on every line of output it accumulates a lot more text before anything is actually written.</p>
+<p>To get around this the python process can be launched with a <code>-u</code> parameter. This turns off the buffering.</p>
+<p>I made a simple external script to test this, called <code>slow.py</code>.</p>
+<div class="codehilitewrap">
+<table class="codehilitetable">
+<tr>
+<td class="linenos">
+
+</td>
+<td class="code">
+<div class="codehilite">
+<pre><span class="kn">import</span> <span class="nn">time</span>
+
+<span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="mi">100</span><span class="p">):</span>
+    <span class="k">print</span><span class="p">(</span><span class="n">i</span><span class="p">)</span>
+    <span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+</pre>
+</div>
+</td>
+</tr>
+</table>
+</div>
+<p>In the server I changed the process I run to <code>p = g.run( [ "python", "-u", "slow.py" ] )</code>. A curl request now reports the lines as we hoped. To see the broken behaviour just remove the <code>-u</code> part.</p>
+<h3>Stream events to a browser</h3>
+<p>The above can be combined with an <code>EventSource</code> in a browser (at least those that support it). First create the following <code>page.html</code> file.</p>
+<div class="codehilitewrap">
+<table class="codehilitetable">
+<tr>
+<td class="linenos">
+<div class="linenodiv">
+<pre> 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15</pre>
+</div>
+</td>
+<td class="code">
+<div class="codehilite">
+<pre><span class="cp">&lt;!DOCTYPE html&gt;</span>
+<span class="nt">&lt;html&gt;</span>
+<span class="nt">&lt;head&gt;</span>
+    <span class="nt">&lt;script&gt;</span>
+    <span class="kd">var</span> <span class="nx">source</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">EventSource</span><span class="p">(</span><span class="s2">"/stream"</span><span class="p">);</span>
+    <span class="nx">source</span><span class="p">.</span><span class="nx">onmessage</span> <span class="o">=</span> <span class="kd">function</span><span class="p">(</span><span class="nx">event</span><span class="p">)</span> <span class="p">{</span>
+        <span class="nb">document</span><span class="p">.</span><span class="nx">getElementById</span><span class="p">(</span><span class="s2">"output"</span><span class="p">).</span><span class="nx">innerHTML</span> <span class="o">+=</span> <span class="nx">event</span><span class="p">.</span><span class="nx">data</span> <span class="o">+</span> <span class="s2">"&lt;br/&gt;"</span>
+    <span class="p">}</span>
+    <span class="nt">&lt;/script&gt;</span>
+<span class="nt">&lt;/head&gt;</span>
+<span class="nt">&lt;body&gt;</span>
+    <span class="nt">&lt;h1&gt;</span>Output<span class="nt">&lt;/h1&gt;</span>
+    <span class="nt">&lt;div</span> <span class="na">id=</span><span class="s">"output"</span><span class="nt">&gt;&lt;/div&gt;</span>
+<span class="nt">&lt;/body&gt;</span>
+<span class="nt">&lt;/html&gt;</span>
+</pre>
+</div>
+</td>
+</tr>
+</table>
+</div>
+<p>A few lines in the server must be modified. The <code>yield</code> line needs to format a message response. This is merely a <code>data:</code> header and two line-feeds. The response must be marked as <code>text/event-stream</code> to tell the browser it’s a stream. Finally we need an endpoint to serve the HTML page — don’t load the file directly in the browser as cross-domain restrictions will break it. The below is the modified server.</p>
+<div class="codehilitewrap">
+<table class="codehilitetable">
+<tr>
+<td class="linenos">
+<div class="linenodiv">
+<pre> 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27</pre>
+</div>
+</td>
+<td class="code">
+<div class="codehilite">
+<pre><span class="kn">import</span> <span class="nn">flask</span>
+<span class="kn">from</span> <span class="nn">shelljob</span> <span class="kn">import</span> <span class="n">proc</span>
+
+<span class="kn">import</span> <span class="nn">eventlet</span>
+<span class="n">eventlet</span><span class="o">.</span><span class="n">monkey_patch</span><span class="p">()</span>
+
+<span class="n">app</span> <span class="o">=</span> <span class="n">flask</span><span class="o">.</span><span class="n">Flask</span><span class="p">(</span><span class="n">__name__</span><span class="p">)</span>
+
+<span class="nd">@app.route</span><span class="p">(</span> <span class="s">'/stream'</span> <span class="p">)</span>
+<span class="k">def</span> <span class="nf">stream</span><span class="p">():</span>
+    <span class="n">g</span> <span class="o">=</span> <span class="n">proc</span><span class="o">.</span><span class="n">Group</span><span class="p">()</span>
+    <span class="n">p</span> <span class="o">=</span> <span class="n">g</span><span class="o">.</span><span class="n">run</span><span class="p">(</span> <span class="p">[</span> <span class="s">"bash"</span><span class="p">,</span> <span class="s">"-c"</span><span class="p">,</span> <span class="s">"for ((i=0;i&lt;100;i=i+1)); do echo $i; sleep 1; done"</span> <span class="p">]</span> <span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">read_process</span><span class="p">():</span>
+        <span class="k">while</span> <span class="n">g</span><span class="o">.</span><span class="n">is_pending</span><span class="p">():</span>   
+            <span class="n">lines</span> <span class="o">=</span> <span class="n">g</span><span class="o">.</span><span class="n">readlines</span><span class="p">()</span>
+            <span class="k">for</span> <span class="n">proc</span><span class="p">,</span> <span class="n">line</span> <span class="ow">in</span> <span class="n">lines</span><span class="p">:</span>
+                <span class="k">yield</span> <span class="s">"data:"</span> <span class="o">+</span> <span class="n">line</span> <span class="o">+</span> <span class="s">"</span><span class="se">\n\n</span><span class="s">"</span>
+
+    <span class="k">return</span> <span class="n">flask</span><span class="o">.</span><span class="n">Response</span><span class="p">(</span> <span class="n">read_process</span><span class="p">(),</span> <span class="n">mimetype</span><span class="o">=</span> <span class="s">'text/event-stream'</span> <span class="p">)</span>
+
+<span class="nd">@app.route</span><span class="p">(</span><span class="s">'/page'</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">get_page</span><span class="p">():</span>
+    <span class="k">return</span> <span class="n">flask</span><span class="o">.</span><span class="n">send_file</span><span class="p">(</span><span class="s">'page.html'</span><span class="p">)</span>
+
+<span class="k">if</span> <span class="n">__name__</span> <span class="o">==</span> <span class="s">"__main__"</span><span class="p">:</span>
+    <span class="n">app</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">debug</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+</pre>
+</div>
+</td>
+</tr>
+</table>
+</div>
+<p>Navigate to <code><a href="http://127.0.0.1:8000/page" rel="nofollow">http://127.0.0.1:8000/page</a></code> in your browser and the stream should start appearing. If you have the gunicorn stuff setup correctly you should be able to open multiple tabs. Each load of this page will have its own stream.</p>
+<p>Also interesting, <code>EventSource</code> restarts the connection when it is done. Once you reach the final number it will just start counting again. Try reducing the bash loop to see this effect. I don’t know much else about event sources, so you’re on your own from here.</p>
+		<p class="ebzNative"/><div id="jp-post-flair" class="sharedaddy sd-like-enabled sd-sharing-enabled"><div class="sharedaddy sd-block sd-like jetpack-likes-widget-wrapper jetpack-likes-widget-unloaded" id="like-post-wrapper-11292855-2063-56d5a0176a91b" data-src="//widgets.wp.com/likes/#blog_id=11292855&amp;post_id=2063&amp;origin=mortoray.wordpress.com&amp;obj_id=11292855-2063-56d5a0176a91b" data-name="like-post-frame-11292855-2063-56d5a0176a91b"><h3 class="sd-title">Like this:</h3><p class="likes-widget-placeholder post-likes-widget-placeholder"><span class="button"><span>Like</span></span> <span class="loading">Loading...</span></p><span class="sd-text-color"/><a class="sd-link-color"/></div>
+<p id="jp-relatedposts" class="jp-relatedposts">
+	<h3 class="jp-relatedposts-headline"><em>Related</em></h3>
+</p></div>					</div>
+	</div></body></html>

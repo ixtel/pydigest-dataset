@@ -1,0 +1,143 @@
+<html><body><div><div class="post-text" itemprop="text">
+
+<p>I'm trying to achieve this; notifying the creator of a post when someone commented on that post. I was able to do similar thing successfully;notifying the commenter on a post when someone replied to that comment. So I used the same function I used to notify parent commenter. But this time it didn't work. Here's my code.</p>
+
+<p>In models.py, under class Comment</p>
+
+<pre><code>class Comment(models.Model):
+    user = models.ForeignKey(MyProfile)
+    parent = models.ForeignKey("self", null=True, blank=True)
+    post = models.ForeignKey(Post, null=True, blank=True, related_name="commented_post")
+    @property 
+    def get_origin(self):
+        return self.path
+
+    @property
+    def get_comment(self):
+        return self.text
+
+    @property
+    def is_child(self):
+        if self.parent is not None:
+            return True
+        else:
+            return False
+
+    def get_children(self):
+        if self.is_child:
+            return None
+        else:
+            return Comment.objects.filter(parent=self)
+
+    def get_affected_users(self):
+        """ 
+        it needs to be a parent and have children, 
+        the children, in effect, are the affected users.
+        """
+        comment_children = self.get_children()
+        if comment_children is not None:
+            users = []
+            for comment in comment_children:
+                if comment.user in users:
+                    pass
+                else:
+                    users.append(comment.user)
+            return users
+        return None
+
+
+
+class Post(models.Model):
+
+    title = models.CharField(max_length = 50)
+    moderator = models.ForeignKey(User)
+    views = models.IntegerField(default=0)
+</code></pre>
+
+<p>In views.py</p>
+
+<pre><code>def comment_create_view(request):
+
+    form = CommentForm(request.POST)
+    if form.is_valid():
+        comment_text = form.cleaned_data['comment']
+        if parent_comment is not None:
+            # parent comments exists
+            new_comment = Comment.objects.create_comment(
+                user=MyProfile.objects.get(user=request.user),
+                path=parent_comment.get_origin, 
+                text=comment_text,
+                post = post,
+                parent=parent_comment
+                )
+            affected_users = parent_comment.get_affected_users()
+            notify.send(
+                    MyProfile.objects.get(user=request.user), 
+                    action=new_comment, 
+                    target=parent_comment, 
+                    recipient=parent_comment.user,
+                    affected_users = affected_users,
+                    verb='replied to')
+        #the above code gives reply-comment notification makes possible, the below code is the one I'm struggling
+        else:
+            new_comment = Comment.objects.create_comment(
+                user=MyProfile.objects.get(user=request.user),
+                path=origin_path, 
+                text=comment_text,
+                post = post
+                )
+
+affected_users = [post.moderator]
+                notify.send(
+                        MyProfile.objects.get(user=request.user), 
+                        recipient = MyProfile.objects.get(user=request.user), 
+                        action=new_comment, 
+                        target = new_comment.post,
+                        affected_users = affected_users,
+                        verb='commented on')
+</code></pre>
+
+<p>lastly I have this function in models.py for notification</p>
+
+<pre><code>def new_notification(sender, **kwargs):
+    kwargs.pop('signal', None)
+    recipient = kwargs.pop("recipient")
+    verb = kwargs.pop("verb")
+    affected_users = kwargs.pop('affected_users')
+
+    if affected_users is not None:
+        for u in affected_users:
+            if u == sender:
+                pass
+            else:
+                new_note = Notification(
+                    recipient=recipient,
+                    verb = verb, # smart_text
+                    sender_content_type = ContentType.objects.get_for_model(sender),
+                    sender_object_id = sender.id,
+                    )
+                for option in ("target", "action"):
+                    try:
+                        obj = kwargs[option]
+                        if obj is not None:
+                            setattr(new_note, "%s_content_type" %option, ContentType.objects.get_for_model(obj))
+                            setattr(new_note, "%s_object_id" %option, obj.id)
+                    except:
+                        pass
+                new_note.save()
+    else:
+        new_note = Notification(
+            recipient=recipient,
+            verb = verb, # smart_text
+            sender_content_type = ContentType.objects.get_for_model(sender),
+            sender_object_id = sender.id,
+            )
+        for option in ("target", "action"):
+            obj = kwargs.pop(option, None)
+            if obj is not None:
+                setattr(new_note, "%s_content_type" %option, ContentType.objects.get_for_model(obj))
+                setattr(new_note, "%s_object_id" %option, obj.id)
+        new_note.save()
+</code></pre>
+    </div>
+    </div></body></html>

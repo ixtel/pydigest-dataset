@@ -1,0 +1,285 @@
+<html><body><div><div class="content html_format"><p>
+      Совсем недавно мы выпустили новую версию нашего анализатора PVS-Studio с поддержкой проверки C# проектов. Пока на время релиза дальнейшая разработка продукта была приостановлена, я занимался тестированием анализатора. В качестве проектов для своих экспериментов я взял IronPython и IronRuby. А раз эти проекты были проверены, я решил написать небольшую статью-отчёт.</p>
+
+<img src="https://habrastorage.org/getpro/habr/post_images/151/718/fc4/151718fc401e86e72f3fc8ce459e0e1d.png" align="left"/>
+
+<h2>IronPython и IronRuby</h2><p>
+IronPython и IronRuby представляют собой реализацию языков программирования Python и Ruby на платформе .NET. Исходный код этих проектов доступен на GitHub по этой </p><a href="https://github.com/IronLanguages/main">ссылке</a><p>. Также в комплекте идёт исходный код </p><a href="https://en.wikipedia.org/wiki/Dynamic_Language_Runtime">DLR</a><p>. Начиная с .NET Framework 4.0 DLR является его частью, и IronPython и IronRuby используют её. Тем не менее я всё равно проверил старую версию DLR, раз уж она там оказалась.
+</p><a name="habracut"/>
+<h2>О проверке проектов</h2><p>
+Итак, весь код состоит из трёх больших частей: DLR, IronPython и IronRuby и содержит 1630 *.cs файлов. Для проверки я использовал PVS-Studio 6.00, которую можно скачать с </p><a href="http://www.viva64.com/ru/pvs-studio/">нашего сайта</a><p>. Проверка решения заняла чуть больше минуты. В результате анализатор выдал 34 предупреждений первого, 15 предупреждений второго и 280 предупреждений третьего уровня.
+</p><p>
+На первом уровне из 34 предупреждений 19 оказались настоящими ошибками — довольно хороший результат, 6 мест выглядят подозрительно — на них стоит обратить внимание. Оставшиеся 9 сообщений являются ложными срабатываниями, половину из которых можно устранить правкой самого анализатора, что мы сделаем в ближайшее время.
+</p><p>
+На втором и третьем уровне ошибок и подозрительных мест нашлось значительно меньше.
+
+</p><h2>Найденные ошибки</h2><p>
+А теперь рассмотрим примеры реальных ошибок, найденных с помощью PVS-Studio:
+
+</p><b>Примеры 1 и 2. Невнимательность.</b> 
+<pre><code class="cpp">private bool Enter(RangeExpression/*!*/ node, bool isCondition) {
+    ....
+    if (!isCondition &amp;&amp; litBegin != null &amp;&amp; litEnd != null
+        &amp;&amp; litBegin.Value is int &amp;&amp; litBegin.Value is int) {
+        _result = MakeNode(NodeKind.lit, new Range(
+            (int)litBegin.Value, (int)litEnd.Value,
+            node.IsExclusive));
+    } else {
+    ....
+    }
+....
+}</code></pre><p>
+Предупреждение PVS-Studio: </p><a href="http://www.viva64.com/ru/d/0381/">V3001</a><p> There are identical sub-expressions 'litBegin.Value is int' to the left and to the right of the '&amp;&amp;' operator. IronRubyParseTreeOps.cs 277 
+</p><p>
+В условии дважды проверяется что litBegin.Value имеет тип int вместо того, чтобы также проверить litEnd.Value.
+</p><p>
+Аналогичные проверки одних и тех же выражений присутствуют ещё в двух местах, например, здесь:
+</p><pre><code class="cpp">private static PythonTuple ReduceProtocol2(
+    CodeContext/*!*/ context, object self) {
+    ....
+    if (self is PythonDictionary || self is PythonDictionary) {
+        dictIterator = PythonOps.Invoke(context, self,
+            "iteritems", ArrayUtils.EmptyObjects);
+    }
+    ....
+}</code></pre><p>
+Предупреждение PVS-Studio: </p><a href="http://www.viva64.com/ru/d/0381/">V3001</a><p> There are identical sub-expressions 'self is PythonDictionary' to the left and to the right of the '||' operator. IronPython ObjectOps.cs 452
+
+</p><b>Пример 3. Одинаковые выражения.</b> 
+<pre><code class="cpp">protected override MSAst.Expression VisitTry(
+    MSAst.TryExpression node) {
+    ....
+    if (newHandlers != null || newFinally != null) {
+        node = Ast.MakeTry(node.Type, node.Body,
+            newFinally != null ? newFinally : node.Finally,
+            node.Fault,
+            newHandlers != null ? newHandlers : newHandlers
+        );
+    }
+    return node;
+}</code></pre><p>
+Предупреждение PVS-Studio: </p><a href="http://www.viva64.com/ru/d/0383/">V3012</a><p> The '?:' operator, regardless of its conditional expression, always returns one and the same value: newHandlers. DebugInfoRewriter.cs 252
+</p><p>
+Здесь newHandlers используется в обеих ветках условного выражения. Предполагалось использовать node.Handlers в случае если newHandlers будет null.
+
+</p><b>Примеры 4 и 5. Невнимательность.</b> 
+<pre><code class="cpp">public static bool HasValue(RubyContext/*!*/ context,
+    object/*!*/ self, object value) {
+    var strValue = value as MutableString;
+    if (value == null) {
+        return false;
+    }
+    var clrStrValue = strValue.ConvertToString();
+    ....
+}</code></pre><p>
+Предупреждение PVS-Studio: </p><a href="http://www.viva64.com/ru/d/0388/">V3019</a><p> Possibly an incorrect variable is compared to null after type conversion using 'as' keyword. Check variables 'value', 'strValue'. EnvironmentSingletonOps.cs 189
+</p><p>
+Это довольно распространённая ошибка, когда из-за невнимательности после приведения типа с помощью оператора 'as' проверяют на null не результат приведения, а исходный объект, а потом используют непроверенную ссылку.
+</p><p>
+Вот ещё один похожий случай:
+</p><pre><code class="cpp">private static RubyRegex/*!*/ ConstructRubyRegexp(
+    RubyConstructor/*!*/ ctor, Node/*!*/ node) {
+    ScalarNode scalar = node as ScalarNode;
+    if (node == null) {
+        throw RubyExceptions.CreateTypeError(
+            "Can only create regex from scalar node");
+    }
+    Match match = _regexPattern.Match(scalar.Value);
+    ....
+}</code></pre><p>
+Предупреждение PVS-Studio: </p><a href="http://www.viva64.com/ru/d/0388/">V3019</a><p> Possibly an incorrect variable is compared to null after type conversion using 'as' keyword. Check variables 'node', 'scalar'. RubyConstructor.cs 230
+
+</p><b>Пример 6. Copy-Paste.</b> 
+<pre><code class="cpp">private void LoadNewObj(CodeContext/*!*/ context) {
+    PythonTuple args = PopStack() as PythonTuple;
+    if (args == null) {
+        throw PythonOps.TypeError("expected second argument, got {0}",
+            DynamicHelpers.GetPythonType(args));
+    }
+    PythonType cls = PopStack() as PythonType;
+    if (args == null) {
+        throw PythonOps.TypeError("expected first argument, got {0}",
+            DynamicHelpers.GetPythonType(args));
+    }
+    ....
+}</code></pre><p>
+Предупреждение PVS-Studio: </p><a href="http://www.viva64.com/ru/d/0390/">V3021</a><p> There are two 'if' statements with identical conditional expressions. The first 'if' statement contains method return. This means that the second 'if' statement is senseless. cPickle.cs 2194
+</p><p>
+В приведённом фрагменте кода два условия и вызовы функции GetPythonType() абсолютно одинаковые. Очевидно, что второе условие было получено копированием первого, но изменить имя переменной автор забыл. В проекте встречается ещё пара похожих ситуаций.
+
+</p><b>Пример 7. Одинаковые условия.</b> 
+<pre><code class="cpp">public static int Compare(SourceLocation left, SourceLocation right) {
+    if (left &lt; right) return -1;
+    if (right &gt; left) return 1;
+    return 0;
+}</code></pre><p>
+Предупреждение PVS-Studio: </p><a href="http://www.viva64.com/ru/d/0390/">V3021</a><p> There are two 'if' statements with identical conditional expressions. The first 'if' statement contains method return. This means that the second 'if' statement is senseless. SourceLocation.cs 156
+</p><p>
+Этот метод довольно простой, и кажется, что ошибиться здесь негде. Тем не менее во втором условии параметры left и right зачем-то поменяли местами, в результате чего оба условия проверяют одно и то же, что и обнаружил анализатор.
+</p><p>
+Корректный вариант кода:
+</p><pre><code class="cpp">public static int Compare(SourceLocation left, SourceLocation right) {
+    if (left &lt; right) return -1;
+    if (left &gt; right) return 1;
+    return 0;
+}</code></pre>
+<b>Пример 8. Избыточное условие.</b> 
+<pre><code class="cpp">private void WriteSingleQuoted(string text, bool split) {
+    ....
+    while (ending &lt;= text.Length) {
+        c = '\0';
+        if (ending &lt; text.Length) {
+            c = text[ending];
+        }
+        if (spaces) {
+            if (c == 0 || c != 32) {
+            ....
+}</code></pre><p>
+Предупреждение PVS-Studio: </p><a href="http://www.viva64.com/ru/d/0411/">V3023</a><p> Consider inspecting the 'c == 0 || c != 32' expression. The expression is excessive or contains a misprint. Emitter.cs 308
+</p><p>
+Сначала переменной 'c' присваивается значение по умолчанию — '\0'. Затем, если ещё не обработали всю строку, 'c' получает значение очередного символа. И в конце проверяется, осталось ли в переменной 'c' значение по умолчанию или туда считали что-то кроме пробела. На самом деле сравнение с нулём здесь лишнее, так как ноль и так отличен от 32 (код пробела). Этот код не приводит к ошибкам, но затрудняет понимание, поэтому сравнение с нулём можно выкинуть. Анализатор нашёл ещё несколько аналогичных лишних проверок в этом проекте.
+
+</p><b>Примеры 9 и 10. Некорректная строка форматирования.</b> 
+<p>
+Общая проблема при использовании функции String.Format заключается в том, что количество и номера параметров строки форматирования не проверяется компилятором на соответствие количеству параметров, переданных в String.Format. В результате может быть либо сформирована неправильная строка, либо будет выброшено исключение FormatException. Рассмотрим примеры.
+</p><pre><code class="cpp">public T Current {
+    get {
+        try {
+            return (T)enumerable.Current;
+        }
+        catch (InvalidCastException iex) {
+            throw new InvalidCastException(string.Format(
+"Error in IEnumeratorOfTWrapper.Current. Could not cast: {0} in {0}",
+typeof(T).ToString(), enumerable.Current.GetType().ToString()), iex);
+        }
+    }
+}</code></pre><p>
+Предупреждение PVS-Studio: </p><a href="http://www.viva64.com/ru/d/0392/">V3025</a><p> Incorrect format. A different number of format items is expected while calling 'Format' function. Expected: 1. Present: 2. ConversionWrappers.cs 235
+</p><p>
+В этом примере последний параметр не используется, а вместо этого два раза будет выведено значение typeof(T).ToString().
+</p><pre><code class="cpp">private static void DumpGenericParameters(
+    MetadataTableView genericParams,
+    MetadataRecord owner) {
+    foreach (GenericParamDef gp in genericParams) {
+        _output.WriteLine("  generic parameter #{0}: {1}",
+        gp.Index, gp.Name, gp.Attributes);
+    ....
+}</code></pre><p>
+Предупреждение PVS-Studio: </p><a href="http://www.viva64.com/ru/d/0392/">V3025</a><p> Incorrect format. A different number of format items is expected while calling 'WriteLine' function. Expected: 2. Present: 3. Program.cs 268
+</p><p>
+А в этом фрагменте кода в функцию WriteLine передаётся на один параметр больше, чем требует строка форматирования.
+
+</p><b>Пример 11. Проверка на null после доступа.</b> 
+<pre><code class="cpp">public static MutableString ChompInPlace(....) {
+    MutableString result = InternalChomp(self, separator);
+    if (result.Equals(self) || result == null) {
+        self.RequireNotFrozen();
+        return null;
+    }
+    ....
+}</code></pre><p>
+Предупреждение PVS-Studio: </p><a href="http://www.viva64.com/ru/d/0414/">V3027</a><p> The variable 'result' was utilized in the logical expression before it was verified against null in the same logical expression. MutableStringOps.cs 1097
+</p><p>
+В этом условии следует поменять местами проверку на null и вызов метода Equals. В таком виде как сейчас приложение может упасть с NullReferenceException.
+
+</p><b>Пример 12. Проблемы с синхронизацией.</b>
+<pre><code class="cpp">class DictThreadGlobalState {
+    public int DoneCount;
+    ....
+}
+
+private static void RunThreadTest(DictThreadGlobalState globalState) {
+    ....
+    globalState.DoneEvent.Reset();
+    globalState.Event.Set();
+    while (globalState.DoneCount != 0) {
+        // wait for threads to get back to finish
+    }
+    ....
+}</code></pre><p>
+Предупреждение PVS-Studio: </p><a href="http://www.viva64.com/ru/d/0419/">V3032</a><p> Waiting on this expression is unreliable, as compiler may optimize some of the variables. Use volatile variable(s) or synchronization primitives to avoid this. EngineTest.cs 2558
+</p><p>
+Этот код содержит ошибку, которая может проявляться не всегда, а в зависимости от среды выполнения, версии .NET Framework, количества процессоров в системе или ещё от каких-то деталей реализации. Такие ошибки бывает очень сложно отловить. Причина в том, что переменная DoneCount не объявлена как volatile, а раз так, то компилятор считает, что она используется только одним потоком, и её значение можно, например, закешировать и отдавать всё время из кеша, так как внутри цикла эта переменная не меняется. Но в нашем случае её значение изменяется в другом потоке, поэтому в таких случаях, когда переменная используется для синхронизации потоков, её необходимо объявлять, как volatile. Подробнее об этом можно прочитать в </p><a href="https://msdn.microsoft.com/en-us/library/x13ttww7.aspx">MSDN</a><p>.
+
+</p><b>Пример 13. Двойное присваивание</b>
+<pre><code class="cpp">private static Dictionary&lt;string, EncodingInfoWrapper&gt;
+    MakeCodecsDict() {
+    ....
+    switch (normalizedName) {
+        case "iso_8859_1":
+            d["8859"] = d["latin_1"] = d["latin1"] =
+            d["iso 8859_1"] = d["iso8859_1"] = d["cp819"] = d["819"] =
+            d["latin"] = d["latin1"] = d["l1"] = encs[i];
+            break;
+    ....
+}</code></pre><p>
+Предупреждение PVS-Studio: </p><a href="http://www.viva64.com/ru/d/0403/">V3005</a><p> The 'd[«latin1»]' variable is assigned to itself. StringOps.cs 1905
+</p><p>
+В этом коде дважды присваивается значение в переменную d[«latin1»]. Скорее всего, это просто лишний код, а не ошибка. Но возможно тут забыли про какую-то кодовую страницу. В любом случае стоит взглянуть.
+
+</p><b>Пример 14. Сравнение беззнаковой переменной с нулём</b>
+<pre><code class="cpp">public static int __hash__(UInt64 x) {
+    int total = unchecked((int) (((uint)x) + (uint)(x &gt;&gt; 32)));
+    if (x &lt; 0) {
+        return unchecked(-total);
+    }
+    return total;
+}</code></pre><p>
+Предупреждение PVS-Studio: </p><a href="http://www.viva64.com/ru/d/0391/">V3022</a><p> Expression 'x &lt; 0' is always false. Unsigned type value is always &gt;= 0. IntOps.Generated.cs 1967
+</p><p>
+Вероятно, с нулём надо было сравнить 'total', а не 'x', потому что странно выполнять какие-то действия с 'x' всегда, а потом проверять частный случай. Да и 'total' имеет знаковый тип, так что сравнение «total &lt; 0» выглядит логичней.
+
+</p><b>Пример 15. Одинаковые проверки.</b> 
+<pre><code class="cpp">public void ReflectTypes(Type[]/*!*/ allTypes) {
+    ....
+    def.Super = null;
+    if (cls != null &amp;&amp; def.Extends != typeof(BasicObject)
+        &amp;&amp; !def.Extends.IsInterface) {
+        if (cls != null &amp;&amp; cls.Inherits != null) {
+            def.Super = new TypeRef(cls.Inherits);
+    ....
+}</code></pre><p>
+Предупреждение PVS-Studio: </p><a href="http://www.viva64.com/ru/d/0415/">V3030</a><p> Recurring check. The 'cls != null' condition was already verified in line 373. LibraryDef.cs 374
+</p><p>
+Тут в обоих условиях переменная 'cls' проверяется на null. Скорее всего автор хотел проверить 'def' на null в первом условии, так как там он сразу обращается к его свойству Extends. Но это делать тоже было бы необязательно, потому что прямо перед условием в 'def.Super' записывается null, а это значит, что 'def' уже не null. В общем, это просто лишняя проверка.
+
+</p><b>Пример 16. Copy-paste.</b> 
+<p>
+Я дошёл до ошибок третьего уровня, которых всего 280 штук. Из них подавляющее большинство — это предупреждения о том, что тела двух функций совпадают, и предупреждения о сравнении чисел с плавающей точкой. Я не думал, что смогу найти здесь что-то серьёзное, поэтому начал бегло просматривать ошибки, и тем не менее нашёл.
+</p><pre><code class="cpp">public static bool IsPositiveOne(BigDecimal x) {
+    return IsOne(x) &amp;&amp; IsPositive(x);
+}
+public static bool IsNegativeOne(BigDecimal x) {
+    return IsOne(x) &amp;&amp; IsPositive(x);
+}</code></pre><p>
+Предупреждение PVS-Studio: </p><a href="http://www.viva64.com/ru/d/0389/">V3013</a><p> It is odd that the body of 'IsPositiveOne' function is fully equivalent to the body of 'IsNegativeOne' function (351, line 355). BigDecimal.cs 351
+</p><p>
+Это действительно реальная ошибка, которая является результатом копирования кода из одной функции в другую. Правильный вариант кода должен быть таким:
+</p><pre><code class="cpp">public static bool IsNegativeOne(BigDecimal x) {
+    return IsOne(x) &amp;&amp; IsNegative(x);
+}</code></pre>
+<b>Пример 17 Странная проверка на NaN.</b> 
+<pre><code class="cpp">public static bool Equals(float x, float y) {
+    if (x == y) {
+        return !Single.IsNaN(x);
+    }
+    return x == y;
+}</code></pre><p>
+Предупреждение PVS-Studio: </p><a href="http://www.viva64.com/ru/d/0412/">V3024</a><p> An odd precise comparison: x == y. Consider using a comparison with defined precision: Math.Abs(A — B) &lt; Epsilon. FloatOps.cs 1048
+</p><p>
+Я не понял в чём тут смысл специальной проверки на NaN. Если условие (x == y) выполняется, то это значит, что и 'x', и 'y' отличны от NaN, потому что NaN не равен никакому другому значению, в том числе и самому себе. То есть первый return всегда будет возвращать true. Похоже, что проверка на NaN просто лишняя.
+
+</p><h2>Заключение</h2><p>
+По результатам проверки проекта я остался доволен работой анализатора, так как, во-первых, он нашёл пару десятков реальных ошибок, после исправления которых код проекта станет лучше. А во-вторых, я выявил несколько ложных срабатываний, которые можно устранить, улучшив тем самым заодно и наш продукт. Поэтому рекомендую всем скачать демонстрационную версию PVS-Studio и проверить свой код.
+
+</p><a href="http://www.viva64.com/en/b/0367/"/><p>
+Если хотите поделиться этой статьей с англоязычной аудиторией, то прошу использовать ссылку на перевод: Ilya Ivanov. </p><a href="http://www.viva64.com/en/b/0367/">Analyzing IronPython and IronRuby with PVS-Studio</a><p>.
+
+</p>
+
+      
+      <p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

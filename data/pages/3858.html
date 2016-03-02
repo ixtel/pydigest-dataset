@@ -1,0 +1,67 @@
+<html><body><div><div class="entry-content">
+<p>So yesterday I started investigating a project called <a href="https://github.com/google/yapf/">yapf</a>. It’s a code formatter for Python based on the clang-format algorithm. I <em>love</em> code formatters, and am a big fan of clang-format, so I’m really excited about this project. This is not sarcasm.</p>
+<p>I started using it, and then <a href="https://github.com/google/yapf/issues?utf8=%E2%9C%93&amp;q=is%3Aissue+author%3Adrmaciver">I reported 25 bugs in it</a> in the course of a day (I actually filed 31 issues, but that includes 2 feature requests and 4 where I’d made a mistake by using the wrong version of yapf or an unsupported version of Python). I also filed a few bugs this morning from ongoing running of my fuzzing software. I’m <em>still </em>ridiculously excited about it, but I think I’ll give them a little while to iron the kinks out before I switch over from <a href="https://pypi.python.org/pypi/pyformat">pyformat</a>.</p>
+<p>This shouldn’t be taken as a serious indictment of yapf. It is buggy, but that’s because it’s an alpha release of something that is trying to solve a really hard problem. The majority of software which has to deal with something as complicated as a programming language is full of bugs (I’ve run into four bugs in pypy and 3 in cpython in the course of my work in <a href="http://hypothesis.readthedocs.org/">Hypothesis</a>), and the early releases like this are where you shake down the low hanging fruit. The authors have been great, and have already fixed a number of the bugs I’ve filed.</p>
+<p>But I’d like to talk a little bit about how I found so many bugs.</p>
+<p>The answer is if course, by using <a href="http://hypothesis.readthedocs.org/en/latest/">Hypothesis</a>!</p>
+<p>Well, not really. I actually used two things from Hypothesis to do this, but neither them involved running it. The first thing I used was the code base, the second thing I used was some of the general ideas about how to write fuzzers and minimizers that I’ve learned while writing it. This sort of thing isn’t at all hard to do, but it’s a lot more obvious that it’s not hard to do when you’ve got some experience with the general category of solution.</p>
+<p>I considered using Hypothesis proper, but it’s not actually currently very good for this sort of bug finding expedition where you want to keep going once you’ve found a bug. I have some plans for how to support that, but they’re way in the future.</p>
+<p>I’ll go through what I did instead in roughly chronological order.</p>
+<h4>Using Hypothesis</h4>
+<p>This is the first thing I tried, and what got me interested in doing this in the first place.</p>
+<p>Hypothesis is mostly auto-formatted, and is checked for pep-8 compliance. The entire code base is a fixed point of pyformat (in non-aggressive mode), and runs flake8 clean (with a few exceptions for files which are designed for python  2/3 compatibility and testing some introspection on terrible source code).</p>
+<p>I wanted to investigate whether I could replace pyformat with yapf in this pipeline, so I just swapped it out. flake8 promptly screamed at me about a thousand pep8 violation errors yapf had produced on the previously clean code.</p>
+<p>So I did what any good open source citizen would do and patiently went through the list of errors reported by the pep8 checker and manually minimized a source code example for each violation. This gave me about a dozen bugs, which I duly reported.</p>
+<h4>Using Django and Pyformat</h4>
+<p>I figured, if I’d found a bunch of bugs running yapf on a small (a bit under 10kloc) project like Hypothesis, I’d probably find some interesting things running it on a much larger one. What’s a large project? I know! Django!</p>
+<p>Here is the methodology I used:</p>
+<ol>
+<li>Run pyformat -ia on the whole django source tree. Go do something useful for the roughly half an hour this took to run.</li>
+<li>Commit the result locally so I don’t have to do that again oh god</li>
+<li>Run the pep8 checker on the entire source tree</li>
+<li>Go make a cup of tea</li>
+<li>Note any errors that are still reported by pep8. These are errors we’re going to suppress later.</li>
+<li>Run yapf on the entire source tree.</li>
+<li>Run pep8 again, suppressing any errors we found in step 5</li>
+<li>Delight in the smorgasborg of test cases with which we have been presented</li>
+</ol>
+<p>Basically the invariant I am testing for here is that yapf should not introduce any new pep8 errors in source it operates on: It’s fine if it can’t fix a pep8 error (I’d <em>like</em> it to be able to fix all pep8 errors, but it’s not necessarily a bug if it doesn’t), but if it introduces new ones it’s not doing its job correctly.</p>
+<p>So I went through all the error categories for each output produced and hand-minimized an example out of each one. This produced a bunch of interesting new errors. I also had to delete a few files and minimize examples out of them to debug some yapf crashes.</p>
+<h4>Writing a fuzzer</h4>
+<p>At this point I was having a lot of fun, but I was getting a <em>bit</em> bored of doing this by hand. Moreover, I literally work on a tool for generating and minimizing examples that break invariants as my day job. Doing all of this by hand was basically letting the side down.</p>
+<p>As previously mentioned, Hypothesis isn’t <em>that</em> well suited to this problem, so I wrote a fuzzer by hand. It’s not hard to develop one that works quite well for a given problem very quickly.</p>
+<p>I had no interest in attempting to generate random valid python source, but fortunately as demonstrated earlier there’s <em>more</em> than enough interesting existing python source code in the wild to trigger bugs. So the design of the fuzzer is to “generate” random python simply by taking from a collection of source files you give it and seeing what happens on them.</p>
+<p>The invariant is the same as before, but more fine grained: For each file we run pep8 on the file, then we run yapf, then we check if there are any new pep8 errors that were not present in the original file. Additionally, if yapf crashes that’s interesting too.</p>
+<p>There’s then the world’s shonkiest source code minimizer. How it works is it first proceeds entirely string-wise, and then it runs ast.parse on the resulting strings and throws them away if they don’t parse correctly.</p>
+<p>It first minimizes line-wise and then once it can no longer find any line-wise simplifications that work it minimizes character-wise. It stops when it’s found an example under some user definable maximum (I mostly used 140 characters. Examples should fit in a tweet!).</p>
+<p>Line-wise minimization:</p>
+<ol>
+<li>Try all strings that consist of some leading segment of the lines in the file, <a title="Simplify starts from the wrong end" href="http://www.drmaciver.com/2015/03/simplify-starts-from-the-wrong-end/">starting from the smallest</a></li>
+<li>Try all strings that consist of some trailing segment of the lines in the file, starting from the smallest.</li>
+<li>Try deleting interior blocks of lines, starting from blocks equal to about half the number of lines in the file and shrinking downwards</li>
+</ol>
+<p>Once we can no longer shrink the file this way, we proceed character-wise, doing basically the same thing as step 3 only with blocks of characters instead of lines.</p>
+<p>Empirically what I found was that we run out of line based simplications when the source is down to around the 500-1000 character mark, then the character based minimization was enough to take it the rest of the way to tweet sized. For large files this was pretty slow, but only on the order of minutes at most so it wasn’t a major problem.</p>
+<p>I then put this all together into an algorithm which I’ve not seen elsewhere but that’s probably more a function of my lack of familiarity with the literature than it is a sign of its novelty.</p>
+<p>Basically the idea is this: For each pep8 error, we have three states it can be in:</p>
+<ol>
+<li>known and minimized, meaning we have a very small example of this error</li>
+<li>known but not minimized, meaning we have any example at all of this error</li>
+<li>unknown</li>
+</ol>
+<p>Whenever we consider a file and find a pep8 error produced by yapf that was previously unknown, we change its state to “known but not minimized” and save it as an example of a file exhibiting that error.</p>
+<p>Whenever we consider a file and find a pep8 error produced by yapf that was previously known but not minimized, we check if the file is smaller than our best example of that error. If it is, we replace the example with the current file being considered.</p>
+<p>Now, the loop is as follows: In a random order, consider each file we have been provided with.</p>
+<p>After considering each file, check if we have any errors in the “known but not minimized” state.</p>
+<p>If we do, we proceed to minimize them.</p>
+<p>This works as follows: We take our current best example. If this is already smaller than the required size, we mark the error as known and minimized. If not, we consider all source code shrinks of it. The first one of these we find that also exhibits the error, we replace the best example with that and start again. If no valid shrinks exhibit the error we mark the example as known and minimized. In theory this can result in an example larger than the desired maximum size, but I’ve never actually seen that happen.</p>
+<p>An important note! While we are looking for errors in sub-examples, these examples may be other errors: They may just be smaller examples of known but not minimized errors (this is very common because large source files are more likely to exhibit multiple errors) or they may be entirely new errors (this <em>usually</em> doesn’t happen, but can happen as an artifact of the fact that the minimizer produces some really weird but technically valid code. I’ve only actually seen it happen once). The main benefit of this is performance – if we’ve spent ages trying to minimize some huge source file we might as well reap the benefits when we encounter the next error.</p>
+<p>An additional detail: If we crash yapf while minimizing to produce a PEP8 error, we mark this example as not exhibiting that error, but we try to reduce it to a minimal example that produces a crash and note that. Unfortunately I don’t have any good deduplication for crashes like I do for pep8 where there’s a discrete set of errors and every different one can be considered differently interesting, so if this happens I have to check the error manually and try to figure out what’s going on. I also have it set up to skip minimizing crashes where the program took more than 2 seconds to run, as these tend to be pathological memory usage issues (I have everything set up to run with a ulimit of 2GB after one too many runaway processes in my life crashing my laptop). I’ve reported one of these and that’s enough for now.</p>
+<p>One final detail and then I’m done: A trick I figured out early on which has been <em>super</em> useful for debugging issues is that every valid source file I ever consider gets saved into a directory called trashcan (a better name would have been recyclingbin). It’s saved with a hash of contents as a name so it’s automatically deduped. This was <em>very</em> useful in replaying halfway through a hung minimization among other things. It’s also an interesting source of weird python code. The trashcan is about 150MB on my system right now, but it’s so heavily redundant that a tar.bz2 of it is just over 2MB.</p>
+<p>This is more or less it. About half of the bugs I’ve reported have been from fuzzer output I think (I haven’t actually checked, but that’s about the right fraction). Most of them have been from this version – I had a bit of an experiment running yapf pyformat interactions but they weren’t very interesting.</p>
+<h3>What’s next?</h3>
+<p>I think I’m mostly done to be honest. I’ve given the people responsible for yapf more than enough issues to work through, and I should probably give them a chance to catch up. Also I have to actually get back to working on Hypothesis. I’ve got the 1.0 release to handle today (there’s not much to handle. I need to tag a release, update the readme and send some emails), and there’s a whole bunch of post 1.0 work to do.</p>
+<p>One thing I probably will try as a follow up to this when I next have a free/bored moment is that I think it would be interesting to come up with a set of minimal pep8 violations: Basically run this entire fuzzer stack without yapf in the middle and just minimize examples subject to the constraint they generate a particular error. The result would be an interesting data set for testing various python tools on, and also it would probably be fun to read through. But maybe I have an odd idea of fun.</p>
+</div> 
+ 
+</div></body></html>

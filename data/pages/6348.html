@@ -1,0 +1,117 @@
+<html><body><div><div class="post-content">
+        
+
+        
+
+        
+        <h2>The Need</h2>
+<p><a href="http://locust.io/">locust.io</a> is a modern python tool for load testing. I have couple of small services working on development server and running on <a href="http://nanomsg.org">nanomsg</a>, although nanomsg is still in beta phase I was tempted to move them to production environment (basically because most of them did one thing and did it well). But before deployment I wanted to test my architecture and I needed benchmarks for that.</p>
+
+<p>It turns out that locust, which by default plays nicely with http based services, provides also a neat way to hook custom clients to its core features. So its fairly easy to test xml-rpc, zeromq, rabbitmq or nanomsg based apps.</p>
+
+<p>Code at the bottom is pretty straightforward - it's a simple nanomsg client that serves as an example, to which we have to hook locust events in order to collect locust metrics. 20-30 lines of simple magic and we're done!</p>
+
+<p>We can now run:</p>
+
+<figure class="figure-code code"><figcaption><span>
+</span></figcaption>
+</figure><p>and enjoy :-)</p>
+
+<p><img class="center" src="http://user-image.logdown.io/user/13708/blog/12924/post/292677/pwLrl0oeTFOAyoSdBrl3_zdjecie.png" alt="zdjecie.png"/></p>
+<h2>The Code</h2>
+<figure class="figure-code code"><figcaption><span>
+</span></figcaption><div class="highlight"><pre>
+<span class="kn">import</span> <span class="nn">json</span>
+<span class="kn">import</span> <span class="nn">time</span>
+<span class="kn">import</span> <span class="nn">nanomsg</span>
+
+<span class="kn">from</span> <span class="nn">locust</span> <span class="kn">import</span> <span class="n">Locust</span><span class="p">,</span> <span class="n">events</span><span class="p">,</span> <span class="n">task</span><span class="p">,</span> <span class="n">TaskSet</span>
+
+
+<span class="k">class</span> <span class="nc">SteroidSocket</span><span class="p">(</span><span class="n">nanomsg</span><span class="o">.</span><span class="n">Socket</span><span class="p">):</span>
+
+    <span class="k">def</span> <span class="nf">send_json</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">msg</span><span class="p">,</span> <span class="n">flags</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="n">msg</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">msg</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s">'utf8'</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="n">msg</span><span class="p">,</span> <span class="n">flags</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">recv_json</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">buf</span><span class="o">=</span><span class="bp">None</span><span class="p">,</span> <span class="n">flags</span><span class="o">=</span><span class="mi">0</span><span class="p">):</span>
+        <span class="n">msg</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="n">buf</span><span class="p">,</span> <span class="n">flags</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">msg</span><span class="p">)</span>
+
+
+<span class="k">class</span> <span class="nc">NanomsgClient</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
+    <span class="n">socket_type</span> <span class="o">=</span> <span class="n">nanomsg</span><span class="o">.</span><span class="n">REQ</span>
+    <span class="n">default_send_timeout</span> <span class="o">=</span> <span class="mi">100</span>
+
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">address</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">address</span> <span class="o">=</span> <span class="n">address</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">setup</span><span class="p">()</span>
+
+    <span class="k">def</span> <span class="nf">get_socket</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">SteroidSocket</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">socket_type</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">setup</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">socket</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">get_socket</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">socket</span><span class="o">.</span><span class="n">connect</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">address</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">socket</span><span class="o">.</span><span class="n">_set_send_timeout</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">default_send_timeout</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">get</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">msg</span><span class="p">):</span>
+        <span class="n">start_time</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">()</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">socket</span><span class="o">.</span><span class="n">send_json</span><span class="p">(</span><span class="n">msg</span><span class="p">)</span>
+            <span class="n">result</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">socket</span><span class="o">.</span><span class="n">recv_json</span><span class="p">()</span>
+            <span class="k">print</span> <span class="n">result</span>
+        <span class="k">except</span> <span class="n">nanomsg</span><span class="o">.</span><span class="n">NanoMsgAPIError</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+            <span class="n">total_time</span> <span class="o">=</span> <span class="nb">int</span><span class="p">((</span><span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">()</span> <span class="o">-</span> <span class="n">start_time</span><span class="p">)</span> <span class="o">*</span> <span class="mi">1000</span><span class="p">)</span>
+            <span class="n">events</span><span class="o">.</span><span class="n">request_failure</span><span class="o">.</span><span class="n">fire</span><span class="p">(</span>
+                <span class="n">request_type</span><span class="o">=</span><span class="s">"nanomsg"</span><span class="p">,</span>
+                <span class="n">name</span><span class="o">=</span><span class="n">msg</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'executable'</span><span class="p">,</span> <span class="s">''</span><span class="p">),</span>
+                <span class="n">response_time</span><span class="o">=</span><span class="n">total_time</span><span class="p">,</span>
+                <span class="n">exception</span><span class="o">=</span><span class="n">e</span>
+            <span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">total_time</span> <span class="o">=</span> <span class="nb">int</span><span class="p">((</span><span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">()</span> <span class="o">-</span> <span class="n">start_time</span><span class="p">)</span> <span class="o">*</span> <span class="mi">1000</span><span class="p">)</span>
+            <span class="n">events</span><span class="o">.</span><span class="n">request_success</span><span class="o">.</span><span class="n">fire</span><span class="p">(</span>
+                <span class="n">request_type</span><span class="o">=</span><span class="s">"nanomsg"</span><span class="p">,</span>
+                <span class="n">name</span><span class="o">=</span><span class="n">msg</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'executable'</span><span class="p">,</span> <span class="s">''</span><span class="p">),</span>
+                <span class="n">response_time</span><span class="o">=</span><span class="n">total_time</span><span class="p">,</span>
+                <span class="n">response_length</span><span class="o">=</span><span class="mi">0</span>
+            <span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">close</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">socket</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+
+
+<span class="k">class</span> <span class="nc">NanomsgLocust</span><span class="p">(</span><span class="n">Locust</span><span class="p">):</span>
+
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">(</span><span class="n">NanomsgLocust</span><span class="p">,</span> <span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="n">__init__</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">client</span> <span class="o">=</span> <span class="n">NanomsgClient</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">address</span><span class="p">)</span>
+
+
+<span class="k">class</span> <span class="nc">NanomsgUser</span><span class="p">(</span><span class="n">NanomsgLocust</span><span class="p">):</span>
+    <span class="n">address</span> <span class="o">=</span> <span class="s">"tcp://127.0.0.1:5001"</span>
+    <span class="n">min_wait</span> <span class="o">=</span> <span class="mi">100</span>
+    <span class="n">max_wait</span> <span class="o">=</span> <span class="mi">1000</span>
+
+    <span class="k">class</span> <span class="nc">task_set</span><span class="p">(</span><span class="n">TaskSet</span><span class="p">):</span>
+
+        <span class="nd">@task</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+        <span class="k">def</span> <span class="nf">ping</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">client</span><span class="o">.</span><span class="n">get</span><span class="p">({</span><span class="s">'executable'</span><span class="p">:</span> <span class="s">'ping'</span><span class="p">})</span>
+
+        <span class="nd">@task</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+        <span class="k">def</span> <span class="nf">pong</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">client</span><span class="o">.</span><span class="n">get</span><span class="p">({</span><span class="s">'executable'</span><span class="p">:</span> <span class="s">'pong'</span><span class="p">})</span>
+            
+</pre></div>
+</figure><h2>The Conclustion</h2>
+<p>Whenever in need to test custom architecture, find single points of failure or simply experiment with your stack - use locust.io to put your code under pressure :-)</p>
+        
+      </div>
+
+      
+
+      
+         
+        </div></body></html>

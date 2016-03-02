@@ -1,0 +1,71 @@
+<html><body><div><div class="blog_post_body">
+        <div class="all_external_links">
+          <p>For managing database schemas, as great and well-loved as <a href="https://south.aeracode.org">South</a> was, Django's new <a href="https://docs.djangoproject.com/en/dev/topics/migrations/">migrations framework</a> is nicer, particularly thanks to  better support for multi-developer, multi-branch projects like YJ.</p>
+
+<p>However, the greater attention now paid to a model's changes has a potential gotcha, especially in a multi-dev environment: even changing a <code>help_text</code> attribute on a field is now considered migration-worthy, because Django wants to keep as accurate a snapshot as possible of the model's fields. This means that it's actually easier to end up with subtle model changes that you forget to capture in  a migration, particularly if you're more used to South's 'lower-resolution' view of model changes.</p>
+
+<p>So, what's the problem here? A developer generating a new migration as part of their work may find it actually includes <em>more</em> than their intended changes, because someone gently amended the model previously but <em>didn't</em> create a migration. This can also lead to Django complaining about a mismatch between models and migrations when running <code>manage.py migrate</code> when deploying, etc. </p>
+
+<p>To help avoid such annoyances, we've added a check to the YJ test suite. Here's more or less our test, based heavily on the code Django runs to spot out-of-sync models. Feel free to add it to your own project.</p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">django.apps</span> <span class="kn">import</span> <span class="n">apps</span>
+<span class="kn">from</span> <span class="nn">django.db</span> <span class="kn">import</span> <span class="n">connections</span><span class="p">,</span> <span class="n">DEFAULT_DB_ALIAS</span>
+<span class="kn">from</span> <span class="nn">django.db.migrations.autodetector</span> <span class="kn">import</span> <span class="n">MigrationAutodetector</span>
+<span class="kn">from</span> <span class="nn">django.db.migrations.executor</span> <span class="kn">import</span> <span class="n">MigrationExecutor</span>
+<span class="kn">from</span> <span class="nn">django.db.migrations.state</span> <span class="kn">import</span> <span class="n">ProjectState</span>
+<span class="kn">from</span> <span class="nn">django.test</span> <span class="kn">import</span> <span class="n">TestCase</span>
+
+
+<span class="k">class</span> <span class="nc">MigrationHealthCheck</span><span class="p">(</span><span class="n">TestCase</span><span class="p">):</span>
+    <span class="sd">"""</span>
+<span class="sd">    Try to pre-empt migration woes.</span>
+<span class="sd">    """</span>
+
+    <span class="k">def</span> <span class="nf">migration_progress_callback</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="c"># This is a no-op to keep the MigrationExecutor's</span>
+        <span class="c"># constructor happy</span>
+        <span class="k">pass</span>
+
+    <span class="k">def</span> <span class="nf">test_for_uncreated_migrations</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+
+        <span class="n">connection</span> <span class="o">=</span> <span class="n">connections</span><span class="p">[</span><span class="n">DEFAULT_DB_ALIAS</span><span class="p">]</span>
+
+        <span class="c"># Work out which apps have migrations and which do not</span>
+        <span class="n">executor</span> <span class="o">=</span> <span class="n">MigrationExecutor</span><span class="p">(</span>
+            <span class="n">connection</span><span class="p">,</span> 
+            <span class="bp">self</span><span class="o">.</span><span class="n">migration_progress_callback</span>
+        <span class="p">)</span>
+
+        <span class="n">autodetector</span> <span class="o">=</span> <span class="n">MigrationAutodetector</span><span class="p">(</span>
+            <span class="n">executor</span><span class="o">.</span><span class="n">loader</span><span class="o">.</span><span class="n">project_state</span><span class="p">(),</span>
+            <span class="n">ProjectState</span><span class="o">.</span><span class="n">from_apps</span><span class="p">(</span><span class="n">apps</span><span class="p">),</span>
+        <span class="p">)</span>
+        <span class="n">changes</span> <span class="o">=</span> <span class="n">autodetector</span><span class="o">.</span><span class="n">changes</span><span class="p">(</span><span class="n">graph</span><span class="o">=</span><span class="n">executor</span><span class="o">.</span><span class="n">loader</span><span class="o">.</span><span class="n">graph</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">changes</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">fail</span><span class="p">(</span>
+                <span class="s">"Your models have changes that are not yet reflected "</span>
+                <span class="s">"in a migration. You should add them now. "</span>
+                <span class="s">"Relevant app(s): </span><span class="si">%s</span><span class="s">"</span> <span class="o">%</span> <span class="n">changes</span><span class="o">.</span><span class="n">keys</span><span class="p">()</span>
+            <span class="p">)</span>
+</pre></div>
+        </div>
+
+        <p/>
+
+        
+
+        <div class="article_bio">
+    <span>Steve Jalim</span><p>Tech Lead, Django Dev</p>
+
+  
+  
+</div>
+
+
+        
+
+        
+
+        
+      </div>
+
+        </div></body></html>

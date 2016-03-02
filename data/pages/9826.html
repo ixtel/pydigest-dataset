@@ -1,0 +1,1147 @@
+<html><body><div><div class="entry-content">
+<footer class="post-info">
+        <span>Mon 25 January 2016</span>
+
+</footer>      <p>This blog post takes a look at the solution to a cool problem that has 
+been going around the #kivy irc recently: How to render an infinitely wrapping
+tilemap where going to one edge brings us back around to the other.</p>
+<h1>The Approach</h1>
+<p>In my opinion, the most straightforward way to do this is to actually just
+draw the world physically over and over. This will require coordinate
+conversions between tile space, world space, and actual physical location
+on screen, but it gives us the benefit of being able to build our game without
+other areas caring about the tiling whatsoever. For instance, our physics
+world will no longer have to know about the wrap at all since we will just
+draw a copy of the world at the bounds. </p>
+<p>Visually, we would take a map that looks like:</p>
+<p><img alt="Unwrapped Map" src="http://chaosbuffalogames.com/images/tilemap.png" title="Unwrapped Map"/></p>
+<p>Placed on the slice of an infite grid with tile (0, 0) being the one labeled '1':</p>
+<p><img alt="On Grid" src="http://chaosbuffalogames.com/images/prewrap.png" title="On Grid"/></p>
+<p>When a row or column that is larger than the existing map comes into view, we
+simply redraw the tile that should be there at that new location in grid space.
+So that tile 4, 0 is the same as tile 0, 0 in our example image.</p>
+<p><img alt="Expanding" src="http://chaosbuffalogames.com/images/1moreline.png" title="Expanding"/></p>
+<p>Thus we would actually end up rendering copies of the map over and over, looking
+something like:</p>
+<p><img alt="Wrapping" src="http://chaosbuffalogames.com/images/wrapping.png" title="Wrapping"/></p>
+<p>This approach will work until the offset of the camera becomes really 
+large or really small, at which point the floating point calculations might
+get a little crazy. It would take a really long time to even scroll out that
+far though. If this really becomes an issue for your game design, you can
+periodically 'reset' everything back around the origin.</p>
+<p>The main advantage of this method is for the purpose of physics simulation,
+working with our camera, and other types of calculation that typically assume
+a continous grid. Our game will exist in one continous coordinate system,
+however the world will appear as if it is repeating to the player.</p>
+<h1>Setting Up Our Game</h1>
+<p>We are going to dive right into setting up a KivEnt app to solve this problem,
+if you want a quick refresher on how this works check out the
+<a href="https://github.com/kivy/kivent/wiki/Getting-Started-1:-Setting-Up-an-App">Getting Started 1: Setting Up an App</a>.</p>
+<p>We are going to build a very simple KivEnt demo of this functionality, using
+4 GameSystems. The <a href="http://kivent.org/docs/gamesystems.html#kivent_core.systems.renderers.Renderer">Renderer</a>,
+the <a href="http://kivent.org/docs/gamesystems.html#kivent_core.systems.gameview.GameView">GameView</a>,
+the <a href="http://kivent.org/docs/gamesystems.html#kivent_core.systems.position_systems.PositionSystem2D">PositionSystem2D</a>, and one GameSystem of our own design, the TileSystem.</p>
+<p>Our tilemap will be made up of 2 types of entities:</p>
+<ol>
+<li>
+<p>A PositionComponent2D, RenderComponent entity that is the actual sprite
+drawn to the screen for each tile.</p>
+</li>
+<li>
+<p>A entity with a single component- that of the TileSystem we are going to
+build. This system will represent the tiles as they exist in world space, and
+manage drawing the appropriate tile at the appropriate place to handle the
+wrapping.</p>
+</li>
+</ol>
+<p>So let's set up our GameWorld in the kv file, adding the 4 systems:</p>
+<table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre> 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41</pre></div></td><td class="code"><div class="highlight"><pre><span class="c">#:kivy 1.9.0</span>
+<span class="c">#:import get_asset_path __main__.get_asset_path</span>
+
+<span class="n">TestGame</span><span class="p">:</span>
+
+<span class="o">&lt;</span><span class="n">TestGame</span><span class="o">&gt;</span><span class="p">:</span>
+    <span class="n">gameworld</span><span class="p">:</span> <span class="n">gameworld</span>
+    <span class="n">GameWorld</span><span class="p">:</span>
+        <span class="nb">id</span><span class="p">:</span> <span class="n">gameworld</span>
+        <span class="n">gamescreenmanager</span><span class="p">:</span> <span class="n">gamescreenmanager</span>
+        <span class="n">size_of_gameworld</span><span class="p">:</span> <span class="mi">100</span><span class="o">*</span><span class="mi">1024</span>
+        <span class="n">system_count</span><span class="p">:</span> <span class="mi">3</span>
+        <span class="n">zones</span><span class="p">:</span> <span class="p">{</span><span class="s">'general'</span><span class="p">:</span> <span class="mi">10000</span><span class="p">}</span>
+        <span class="n">PositionSystem2D</span><span class="p">:</span>
+            <span class="n">system_id</span><span class="p">:</span> <span class="s">'position'</span>
+            <span class="n">gameworld</span><span class="p">:</span> <span class="n">gameworld</span>
+            <span class="n">zones</span><span class="p">:</span> <span class="p">[</span><span class="s">'general'</span><span class="p">]</span>
+        <span class="n">Renderer</span><span class="p">:</span>
+            <span class="nb">id</span><span class="p">:</span> <span class="n">renderer</span>
+            <span class="n">gameworld</span><span class="p">:</span> <span class="n">gameworld</span>
+            <span class="n">system_id</span><span class="p">:</span> <span class="s">'renderer'</span>
+            <span class="n">zones</span><span class="p">:</span> <span class="p">[</span><span class="s">'general'</span><span class="p">]</span>
+            <span class="n">frame_count</span><span class="p">:</span> <span class="mi">2</span>
+            <span class="n">gameview</span><span class="p">:</span> <span class="s">'camera1'</span>
+            <span class="n">updateable</span><span class="p">:</span> <span class="bp">True</span>
+            <span class="n">shader_source</span><span class="p">:</span> <span class="n">get_asset_path</span><span class="p">(</span><span class="s">'positionshader.glsl'</span><span class="p">,</span> <span class="s">'assets/glsl'</span><span class="p">)</span>
+        <span class="n">GameView</span><span class="p">:</span>
+            <span class="n">system_id</span><span class="p">:</span> <span class="s">'camera1'</span>
+            <span class="n">gameworld</span><span class="p">:</span> <span class="n">gameworld</span>
+            <span class="n">size</span><span class="p">:</span> <span class="n">root</span><span class="o">.</span><span class="n">size</span>
+            <span class="n">pos</span><span class="p">:</span> <span class="n">root</span><span class="o">.</span><span class="n">pos</span>
+            <span class="n">do_scroll_lock</span><span class="p">:</span> <span class="bp">False</span>
+            <span class="nb">id</span><span class="p">:</span> <span class="n">camera1</span>
+        <span class="n">TileSystem</span><span class="p">:</span>
+            <span class="n">system_id</span><span class="p">:</span> <span class="s">'tiles'</span>
+            <span class="nb">id</span><span class="p">:</span> <span class="n">tiles</span>
+            <span class="n">gameworld</span><span class="p">:</span> <span class="n">gameworld</span>
+            <span class="n">camera_pos</span><span class="p">:</span> <span class="n">camera1</span><span class="o">.</span><span class="n">camera_pos</span>
+            <span class="n">camera_size</span><span class="p">:</span> <span class="n">camera1</span><span class="o">.</span><span class="n">size</span>
+    <span class="n">GameScreenManager</span><span class="p">:</span>
+        <span class="nb">id</span><span class="p">:</span> <span class="n">gamescreenmanager</span>
+</pre></div>
+</td></tr></table>
+
+<p>We set system_count to 3 because only 3 of the GameSystems actually track
+components, GameView does not attach components to entities, instead
+operating on other GameSystems. Make sure to assign the system_id of your
+GameView to the Renderer's 'gameview' attribute so that our render takes place
+in camera space.</p>
+<p>Finally, we are going to bind TileSystem to the size and pos of the camera so 
+that it knows what bounds to be drawing the tiles in.</p>
+<h1>The TileSystem</h1>
+<p>This GameSystem is going to be responsible for converting between to and from
+tile world space and on screen position, as well as actually managing the
+creation of the sprite entities representing our tiles on screen.</p>
+<p>First let's talk attributes:</p>
+<table class="highlighttable"><tr><td class="linenos"/><td class="code"><div class="highlight"><pre><span class="k">class</span> <span class="nc">TileSystem</span><span class="p">(</span><span class="n">GameSystem</span><span class="p">):</span>
+    <span class="n">tile_width</span> <span class="o">=</span> <span class="n">NumericProperty</span><span class="p">(</span><span class="mf">64.</span><span class="p">)</span>
+    <span class="n">tile_height</span> <span class="o">=</span> <span class="n">NumericProperty</span><span class="p">(</span><span class="mf">64.</span><span class="p">)</span>
+    <span class="n">tiles_in_x</span> <span class="o">=</span> <span class="n">NumericProperty</span><span class="p">(</span><span class="mi">100</span><span class="p">)</span>
+    <span class="n">tiles_in_y</span> <span class="o">=</span> <span class="n">NumericProperty</span><span class="p">(</span><span class="mi">100</span><span class="p">)</span>
+    <span class="n">camera_pos</span> <span class="o">=</span> <span class="n">ListProperty</span><span class="p">(</span><span class="bp">None</span><span class="p">,</span> <span class="n">allownone</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+    <span class="n">camera_size</span> <span class="o">=</span> <span class="n">ListProperty</span><span class="p">(</span><span class="bp">None</span><span class="p">,</span> <span class="n">allownone</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+</pre></div>
+</td></tr></table>
+
+<p>We need to set the size of the tile, in width and height, and the size of our
+map in tiles. We will also need to create properties to bind to the camera's
+pos and size so we can determine which tiles are on screen. Now let's make sure
+that we properly respond to events on these properties. First to handle the
+tile count for the map:</p>
+<table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre> 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14</pre></div></td><td class="code"><div class="highlight"><pre>    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">(</span><span class="n">TileSystem</span><span class="p">,</span> <span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="n">__init__</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">calc_tiles_trigger</span> <span class="o">=</span> <span class="n">Clock</span><span class="o">.</span><span class="n">create_trigger</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">calc_tiles</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">calc_tiles_trigger</span><span class="p">()</span>
+
+    <span class="k">def</span> <span class="nf">calc_tiles</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">dt</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">tiles</span> <span class="o">=</span> <span class="p">[[</span><span class="bp">None</span> <span class="k">for</span> <span class="n">y</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">tiles_in_y</span><span class="p">)]</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span>
+                     <span class="bp">self</span><span class="o">.</span><span class="n">tiles_in_x</span><span class="p">)]</span>
+
+    <span class="k">def</span> <span class="nf">on_tiles_in_x</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">instance</span><span class="p">,</span> <span class="n">value</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">calc_tiles_trigger</span><span class="p">()</span>
+
+    <span class="k">def</span> <span class="nf">on_tiles_in_y</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">instance</span><span class="p">,</span> <span class="n">value</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">calc_tiles_trigger</span><span class="p">()</span>
+</pre></div>
+</td></tr></table>
+
+<p>We initialize an array of arrays tiles_in_x by tiles_in_y of size and make sure
+that we create a new one whenever either changes. We create a Clock trigger
+to ensure that the calc_tiles function is only called once a frame, no matter
+how often tiles_in_x and tiles_in_y change. That way if we are changing both
+we only trigger 1 update instead of calculating new_x, old_y and then new_x, 
+new_y. </p>
+<p>Secondly, for the camera updates, we do almost the same thing:</p>
+<table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre> 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14</pre></div></td><td class="code"><div class="highlight"><pre>    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">(</span><span class="n">TileSystem</span><span class="p">,</span> <span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="n">__init__</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">calc_tiles_trigger</span> <span class="o">=</span> <span class="n">Clock</span><span class="o">.</span><span class="n">create_trigger</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">calc_tiles</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">tile_trigger</span> <span class="o">=</span> <span class="n">Clock</span><span class="o">.</span><span class="n">create_trigger</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">handle_tile_drawing</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">calc_tiles_trigger</span><span class="p">()</span>
+
+    <span class="k">def</span> <span class="nf">on_camera_pos</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">instance</span><span class="p">,</span> <span class="n">value</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">tile_trigger</span><span class="p">()</span>
+
+    <span class="k">def</span> <span class="nf">on_camera_size</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">instance</span><span class="p">,</span> <span class="n">value</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">tile_trigger</span><span class="p">()</span>
+
+    <span class="k">def</span> <span class="nf">handle_tile_drawing</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">dt</span><span class="p">):</span>
+        <span class="k">pass</span>
+</pre></div>
+</td></tr></table>
+
+<p>We create a new function that will do the heavy lifting of determing which
+tiles are coming onto the screen and need to be drawn, and which tiles are
+leaving the screen and need to be removed. We'll cover writing this function
+in detail later. For now let's move on to creating the entities for the
+TileSystem (upon which handle_tile_drawing will operate).</p>
+<table class="highlighttable"><tr><td class="linenos"/><td class="code"><div class="highlight"><pre>    <span class="k">def</span> <span class="nf">init_component</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">component_index</span><span class="p">,</span> <span class="n">entity_id</span><span class="p">,</span> <span class="n">zone</span><span class="p">,</span> <span class="n">args</span><span class="p">):</span>
+        <span class="n">component</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">components</span><span class="p">[</span><span class="n">component_index</span><span class="p">]</span>
+        <span class="n">component</span><span class="o">.</span><span class="n">entity_id</span> <span class="o">=</span> <span class="n">entity_id</span>
+        <span class="n">component</span><span class="o">.</span><span class="n">texture</span> <span class="o">=</span> <span class="n">args</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'texture'</span><span class="p">)</span>
+        <span class="n">component</span><span class="o">.</span><span class="n">tile_pos</span> <span class="o">=</span> <span class="n">tx</span><span class="p">,</span> <span class="n">ty</span> <span class="o">=</span> <span class="n">args</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'tile_pos'</span><span class="p">)</span>
+        <span class="n">component</span><span class="o">.</span><span class="n">current_entity</span> <span class="o">=</span> <span class="bp">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">tiles</span><span class="p">[</span><span class="n">tx</span><span class="p">][</span><span class="n">ty</span><span class="p">]</span> <span class="o">=</span> <span class="n">component_index</span>
+</pre></div>
+</td></tr></table>
+
+<p>We will override the default logic to do the following:</p>
+<ol>
+<li>
+<p>Store the position in tile coordinates (the 0...tile_count integers) that
+represent which tile this is in our world.</p>
+</li>
+<li>
+<p>Store the texture to draw for this tile, for now we have 4 lovely choices:</p>
+</li>
+<li>
+<p>Set the current_entity attribute to None, we will use this attribute to hold
+the entity_id of the entity that is actually rendering this tile.</p>
+</li>
+<li>
+<p>Finally, set this entity to be the tile in the tiles list of lists.</p>
+</li>
+</ol>
+<h1>Coordinate Conversions</h1>
+<p>We now need to build up functions to convert to and from the various coordinate
+systems we have going on. We have three major coordinate systems occuring.</p>
+<div class="highlight"><pre>Tile Space: 
+This is an integer domain that is 0 to tiles_in_x, 0 to tiles_in_y.
+
+World Space: 
+This is a floating point domain that is 0. to tile_width*tiles_in_x, 0. to 
+tile_height*tiles_in_y.
+
+Camera Space:
+This is the camera coordinate space which is effectively -infinity to infinity
+in either direction, floating point.
+</pre></div>
+
+
+<p>When we draw a tile to our world, we draw it in camera space. However, our
+list of lists representing the tile world begins in tile space. This section
+will detail the conversions necessary to go between these spaces.</p>
+<p>First to go from camera space to world space:</p>
+<table class="highlighttable"><tr><td class="linenos"/><td class="code"><div class="highlight"><pre>    <span class="k">def</span> <span class="nf">get_world_pos</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">pos</span><span class="p">):</span>
+        <span class="n">tile_max_x</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tiles_in_x</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">tile_width</span>
+        <span class="n">tile_max_y</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tiles_in_y</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">tile_height</span>
+        <span class="k">return</span> <span class="p">(</span><span class="n">pos</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">%</span> <span class="n">tile_max_x</span><span class="p">,</span> <span class="n">pos</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">%</span> <span class="n">tile_max_y</span><span class="p">)</span>
+</pre></div>
+</td></tr></table>
+
+<p>We simply calculate the size of the world and take the mod of the actual
+camera position by the size of the world. This will return a floating point
+between 0 and tile_max_x and 0 and tile_max_y.</p>
+<p>Secondly, to go from tile space to world space:</p>
+<table class="highlighttable"><tr><td class="linenos"/><td class="code"><div class="highlight"><pre>    <span class="k">def</span> <span class="nf">get_world_pos_from_tile_pos</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">tile_pos</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">(</span><span class="n">tile_pos</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">tile_width</span><span class="p">,</span> 
+                <span class="n">tile_pos</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">tile_height</span><span class="p">)</span>
+</pre></div>
+</td></tr></table>
+
+<p>This is probably the easiest conversion, the location of a tile in world space
+is simply its tile position mulitplied by the width and height of the tiles. To
+do the reverse and get tile space from world space:</p>
+<table class="highlighttable"><tr><td class="linenos"/><td class="code"><div class="highlight"><pre>    <span class="k">def</span> <span class="nf">get_tile_at_world_pos</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">world_pos</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">world_pos</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">//</span> <span class="bp">self</span><span class="o">.</span><span class="n">tile_width</span><span class="p">),</span>
+                <span class="nb">int</span><span class="p">(</span><span class="n">world_pos</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">//</span> <span class="bp">self</span><span class="o">.</span><span class="n">tile_height</span><span class="p">))</span>
+</pre></div>
+</td></tr></table>
+
+<p>Since tile_width and tile_height are most likely floating point numbers we need
+to cast back to an int before returning.</p>
+<p>Finally, we need to be able to calculate where a tile is at on the screen
+given its tile position. </p>
+<table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre> 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29</pre></div></td><td class="code"><div class="highlight"><pre>    <span class="k">def</span> <span class="nf">get_screen_pos_from_tile_pos</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">tile_pos</span><span class="p">):</span>
+        <span class="c">#First we grab the inverse of the position of the camera. </span>
+        <span class="n">cx</span><span class="p">,</span> <span class="n">cy</span> <span class="o">=</span> <span class="o">-</span><span class="bp">self</span><span class="o">.</span><span class="n">camera_pos</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="o">-</span><span class="bp">self</span><span class="o">.</span><span class="n">camera_pos</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>
+        <span class="c">#Calculate the full size of our space.</span>
+        <span class="n">tile_max_x</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tiles_in_x</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">tile_width</span>
+        <span class="n">tile_max_y</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tiles_in_y</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">tile_height</span>
+        <span class="c">#Get the tile located at the camera's position.</span>
+        <span class="n">tcx</span><span class="p">,</span> <span class="n">tcy</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">get_tile_at_world_pos</span><span class="p">(</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">get_world_pos</span><span class="p">((</span><span class="n">cx</span><span class="p">,</span> <span class="n">cy</span><span class="p">)))</span>
+        <span class="c">#Get the position in the world of the tile located at the</span>
+        <span class="c">#camera's position.</span>
+        <span class="n">wx</span><span class="p">,</span> <span class="n">wy</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">get_world_pos_from_tile_pos</span><span class="p">(</span><span class="n">tile_pos</span><span class="p">)</span>
+        <span class="n">origin_x</span><span class="p">,</span> <span class="n">origin_y</span> <span class="o">=</span> <span class="bp">None</span><span class="p">,</span> <span class="bp">None</span>
+        <span class="c">#This section calculates the location of the origin in camera</span>
+        <span class="c">#space for the chunk that the tile is occuring in.</span>
+        <span class="c">#If the tile position is less than the cameras tile it must appear</span>
+        <span class="c">#on the left side of the screen and thus the next 'chunk' of the</span>
+        <span class="c">#repeating map. Else it occurs in the same 'chunk' as the camera.</span>
+        <span class="k">if</span> <span class="n">tile_pos</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">&lt;</span> <span class="n">tcx</span><span class="p">:</span>
+            <span class="n">origin_x</span> <span class="o">=</span> <span class="p">(</span><span class="n">cx</span> <span class="o">//</span> <span class="n">tile_max_x</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">*</span> <span class="n">tile_max_x</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">origin_x</span> <span class="o">=</span> <span class="p">(</span><span class="n">cx</span> <span class="o">//</span> <span class="n">tile_max_x</span><span class="p">)</span> <span class="o">*</span> <span class="n">tile_max_x</span>
+        <span class="k">if</span> <span class="n">tile_pos</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">&lt;</span> <span class="n">tcy</span><span class="p">:</span>
+            <span class="n">origin_y</span> <span class="o">=</span> <span class="p">(</span><span class="n">cy</span> <span class="o">//</span> <span class="n">tile_max_y</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">*</span> <span class="n">tile_max_y</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">origin_y</span> <span class="o">=</span> <span class="p">(</span><span class="n">cy</span> <span class="o">//</span> <span class="n">tile_max_y</span><span class="p">)</span> <span class="o">*</span> <span class="n">tile_max_y</span>
+        <span class="c">#Now offset the location of the tile's chunk origin by the location</span>
+        <span class="c">#of the tile.</span>
+        <span class="k">return</span> <span class="n">origin_x</span> <span class="o">+</span> <span class="n">wx</span><span class="p">,</span> <span class="n">origin_y</span> <span class="o">+</span> <span class="n">wy</span>
+</pre></div>
+</td></tr></table>
+
+<p>Now that we have all the necessary conversions, we can calculate which
+tiles are actually in view of the camera at any given moment. We do this by
+finding out how many tiles fit inside the cameras dimensions and which tile
+is at the position of the camera (the GameView.camera_pos is the bottom left
+corner of the camera). We will return a list of the tile entities that are on
+the screen:</p>
+<table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre> 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38</pre></div></td><td class="code"><div class="highlight"><pre>    <span class="k">def</span> <span class="nf">calculate_tiles_in_view</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="c">#Get the inverse of the camera position again.</span>
+        <span class="n">cx</span><span class="p">,</span> <span class="n">cy</span> <span class="o">=</span> <span class="o">-</span><span class="bp">self</span><span class="o">.</span><span class="n">camera_pos</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="o">-</span><span class="bp">self</span><span class="o">.</span><span class="n">camera_pos</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>
+        <span class="c">#Get the camera size.</span>
+        <span class="n">cw</span><span class="p">,</span> <span class="n">ch</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">camera_size</span>
+        <span class="c">#Get the width and height of the tiles.</span>
+        <span class="n">tile_width</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tile_width</span>
+        <span class="n">tile_height</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tile_height</span>
+        <span class="c">#Get the tile count.</span>
+        <span class="n">tiles_in_x</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tiles_in_x</span>
+        <span class="n">tiles_in_y</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tiles_in_y</span>
+        <span class="c">#Calculate the position in the world of the camera.</span>
+        <span class="n">world_pos</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">get_world_pos</span><span class="p">((</span><span class="n">cx</span><span class="p">,</span> <span class="n">cy</span><span class="p">))</span>
+        <span class="c">#Calculate how many tiles fit in the cameras view, adding 2 for</span>
+        <span class="c">#a padding of 1 tile on either side.</span>
+        <span class="n">x_count</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">cw</span> <span class="o">//</span> <span class="n">tile_width</span><span class="p">)</span> <span class="o">+</span> <span class="mi">2</span>
+        <span class="n">y_count</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">ch</span> <span class="o">//</span> <span class="n">tile_height</span><span class="p">)</span> <span class="o">+</span> <span class="mi">2</span>
+        <span class="c">#Calculate the tile at the location of the camera.</span>
+        <span class="n">starting_x</span><span class="p">,</span> <span class="n">starting_y</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">get_tile_at_world_pos</span><span class="p">(</span><span class="n">world_pos</span><span class="p">)</span>
+        <span class="c">#Calculate how many tiles we will visit.</span>
+        <span class="n">end_x</span> <span class="o">=</span> <span class="n">starting_x</span> <span class="o">+</span> <span class="n">x_count</span>
+        <span class="n">end_y</span> <span class="o">=</span> <span class="n">starting_y</span> <span class="o">+</span> <span class="n">y_count</span>
+        <span class="c">#Create our return list</span>
+        <span class="n">tiles_in_view</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="n">tiles_a</span> <span class="o">=</span> <span class="n">tiles_in_view</span><span class="o">.</span><span class="n">append</span>
+        <span class="n">tiles</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tiles</span>
+        <span class="c">#For every tile from starting to end.</span>
+        <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">starting_x</span><span class="p">,</span> <span class="n">end_x</span><span class="p">):</span>
+            <span class="c">#Calculate the actual tile coordinate, as we may have wrapped.</span>
+            <span class="n">actual_x</span> <span class="o">=</span> <span class="n">x</span> <span class="o">%</span> <span class="n">tiles_in_x</span>
+            <span class="k">for</span> <span class="n">y</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">starting_y</span><span class="p">,</span> <span class="n">end_y</span><span class="p">):</span>
+                <span class="n">actual_y</span> <span class="o">=</span> <span class="n">y</span> <span class="o">%</span> <span class="n">tiles_in_y</span>
+                <span class="c">#Find out what tile is there.</span>
+                <span class="n">tile</span> <span class="o">=</span> <span class="n">tiles</span><span class="p">[</span><span class="n">actual_x</span><span class="p">][</span><span class="n">actual_y</span><span class="p">]</span>
+                <span class="c">#if the tile exists at this location, add it to return list</span>
+                <span class="k">if</span> <span class="n">tile</span> <span class="ow">is</span> <span class="ow">not</span> <span class="bp">None</span><span class="p">:</span>
+                    <span class="n">tiles_a</span><span class="p">(</span><span class="n">tile</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">tiles_in_view</span>
+</pre></div>
+</td></tr></table>
+
+<p>Now we have all the pieces to create our handle_tile_drawing function from
+earlier. Let's add one more line to our init function:</p>
+<table class="highlighttable"><tr><td class="linenos"/><td class="code"><div class="highlight"><pre>    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">(</span><span class="n">TileSystem</span><span class="p">,</span> <span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="n">__init__</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">tiles_on_screen_last_frame</span> <span class="o">=</span> <span class="nb">set</span><span class="p">()</span>
+</pre></div>
+</td></tr></table>
+
+<p>We will use tiles_on_screen_last_frame to track which entities we have already
+added from the screen. Now to complete the job we just need to get the
+tiles on screen right now, and perform set addition to determine which tiles
+have been added to the screen and which have been removed.</p>
+<table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre> 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40</pre></div></td><td class="code"><div class="highlight"><pre>    <span class="k">def</span> <span class="nf">handle_tile_drawing</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">dt</span><span class="p">):</span>
+        <span class="c">#First, check to make sure we have a valid binding from our camera.</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">camera_pos</span> <span class="ow">is</span> <span class="ow">not</span> <span class="bp">None</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">camera_size</span> <span class="ow">is</span> <span class="ow">not</span> <span class="bp">None</span><span class="p">:</span>
+            <span class="c">#Get the tiles on screen last frame.</span>
+            <span class="n">last_frame</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tiles_on_screen_last_frame</span>
+            <span class="c">#Get the components for the TileSystem.</span>
+            <span class="n">components</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">components</span>
+            <span class="c">#Bring our init and remove functions into the namespace.</span>
+            <span class="n">init_entity</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">gameworld</span><span class="o">.</span><span class="n">init_entity</span>
+            <span class="n">remove_entity</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">gameworld</span><span class="o">.</span><span class="n">remove_entity</span>
+            <span class="c">#Use our function from above to get the tiles on screen.</span>
+            <span class="n">tiles_in_view</span> <span class="o">=</span> <span class="nb">set</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">calculate_tiles_in_view</span><span class="p">())</span>
+            <span class="c">#Function to convert from tile pos to screen pos</span>
+            <span class="n">screen_pos_from_tile_pos</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">get_screen_pos_from_tile_pos</span>
+            <span class="c">#Find the tiles that weren't on screen last frame.</span>
+            <span class="n">new</span> <span class="o">=</span> <span class="n">tiles_in_view</span> <span class="o">-</span> <span class="n">last_frame</span>
+            <span class="c">#Find the tiles that aren't on screen anymore.</span>
+            <span class="n">removed</span> <span class="o">=</span> <span class="n">last_frame</span> <span class="o">-</span> <span class="n">tiles_in_view</span>
+            <span class="c">#Update the on screen last frame set.</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">tiles_on_screen_last_frame</span> <span class="o">=</span> <span class="n">tiles_in_view</span>
+            <span class="c">#For tiles that have been removed from screen, find their</span>
+            <span class="c">#component get the entity that represents the tile and remove</span>
+            <span class="c">#it. Set it back to None.</span>
+            <span class="k">for</span> <span class="n">component_index</span> <span class="ow">in</span> <span class="n">removed</span><span class="p">:</span>
+                <span class="n">tile_comp</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">components</span><span class="p">[</span><span class="n">component_index</span><span class="p">]</span>
+                <span class="n">remove_entity</span><span class="p">(</span><span class="n">tile_comp</span><span class="o">.</span><span class="n">current_entity</span><span class="p">)</span>
+                <span class="n">tile_comp</span><span class="o">.</span><span class="n">current_entity</span> <span class="o">=</span> <span class="bp">None</span>
+            <span class="c">#For tiles that are added, create a new entity and store the id</span>
+            <span class="c">#to the entity under current_entity for the tile component.</span>
+            <span class="k">for</span> <span class="n">component_index</span> <span class="ow">in</span> <span class="n">new</span><span class="p">:</span>
+                <span class="n">tile_comp</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">components</span><span class="p">[</span><span class="n">component_index</span><span class="p">]</span>
+                <span class="n">screen_pos</span> <span class="o">=</span> <span class="n">screen_pos_from_tile_pos</span><span class="p">(</span>
+                        <span class="n">tile_comp</span><span class="o">.</span><span class="n">tile_pos</span><span class="p">)</span>
+                <span class="n">create_dict</span> <span class="o">=</span> <span class="p">{</span>
+                    <span class="s">'position'</span><span class="p">:</span> <span class="n">screen_pos</span><span class="p">,</span>
+                    <span class="s">'renderer'</span><span class="p">:</span> <span class="p">{</span><span class="s">'texture'</span><span class="p">:</span> <span class="n">tile_comp</span><span class="o">.</span><span class="n">texture</span><span class="p">,</span> 
+                                 <span class="s">'model_key'</span><span class="p">:</span> <span class="n">tile_comp</span><span class="o">.</span><span class="n">texture</span><span class="p">},</span>
+                    <span class="p">}</span>
+                <span class="n">ent</span> <span class="o">=</span> <span class="n">init_entity</span><span class="p">(</span><span class="n">create_dict</span><span class="p">,</span> <span class="p">[</span><span class="s">'position'</span><span class="p">,</span> <span class="s">'renderer'</span><span class="p">])</span>
+                <span class="n">tile_comp</span><span class="o">.</span><span class="n">current_entity</span> <span class="o">=</span> <span class="n">ent</span>
+</pre></div>
+</td></tr></table>
+
+<p>There we go, we now have a fully operational wrapping tile map display system
+in the TileMap GameSystem. Keep in mind this approach won't work properly if
+the total size of the tile map is smaller than the size of the camera's viewing
+space. In this case we may end up with one tile on the screen twice, in which
+case we would need to expand current_entity to be able to store multiple tiles
+and add complexity to our remove case.</p>
+<h1>Loading a Tile Map</h1>
+<p>The only step left is to actually load some tiles into our TileSystem and check
+out the results. We are going to use 4 tiles:</p>
+<p><img alt="Tile 1" src="http://chaosbuffalogames.com/images/blue-tile.png" title="Tile 1"/>
+<img alt="Tile 2" src="http://chaosbuffalogames.com/images/green-tile.png" title="Tile 2"/>
+<img alt="Tile 3" src="http://chaosbuffalogames.com/images/orange-tile.png" title="Tile 3"/>
+<img alt="Tile 4" src="http://chaosbuffalogames.com/images/purple-tile.png" title="Tile 4"/></p>
+<p>First, let's load in each tile texture:</p>
+<table class="highlighttable"><tr><td class="linenos"/><td class="code"><div class="highlight"><pre>    <span class="k">def</span> <span class="nf">load_textures</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">texture_manager</span><span class="o">.</span><span class="n">load_image</span><span class="p">(</span><span class="n">get_asset_path</span><span class="p">(</span><span class="s">'orange-tile.png'</span><span class="p">,</span> <span class="s">'assets'</span><span class="p">))</span>
+        <span class="n">texture_manager</span><span class="o">.</span><span class="n">load_image</span><span class="p">(</span><span class="n">get_asset_path</span><span class="p">(</span><span class="s">'purple-tile.png'</span><span class="p">,</span> <span class="s">'assets'</span><span class="p">))</span>
+        <span class="n">texture_manager</span><span class="o">.</span><span class="n">load_image</span><span class="p">(</span><span class="n">get_asset_path</span><span class="p">(</span><span class="s">'green-tile.png'</span><span class="p">,</span> <span class="s">'assets'</span><span class="p">))</span>
+        <span class="n">texture_manager</span><span class="o">.</span><span class="n">load_image</span><span class="p">(</span><span class="n">get_asset_path</span><span class="p">(</span><span class="s">'blue-tile.png'</span><span class="p">,</span> <span class="s">'assets'</span><span class="p">))</span>
+</pre></div>
+</td></tr></table>
+
+<p>Next, let's load a model for each texture. Each texture is 64. x 64. and we
+will be using the Renderer's 'vertex_format_4f'. We will load each
+tile with the same name as the texture for that tile for simplicity.</p>
+<table class="highlighttable"><tr><td class="linenos"/><td class="code"><div class="highlight"><pre><span class="k">def</span> <span class="nf">load_models</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+    <span class="n">model_manager</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">gameworld</span><span class="o">.</span><span class="n">model_manager</span>
+    <span class="n">model_manager</span><span class="o">.</span><span class="n">load_textured_rectangle</span><span class="p">(</span><span class="s">'vertex_format_4f'</span><span class="p">,</span> <span class="mf">64.</span><span class="p">,</span> <span class="mf">64.</span><span class="p">,</span> 
+                                          <span class="s">'orange-tile'</span><span class="p">,</span> <span class="s">'orange-tile'</span><span class="p">)</span>
+    <span class="n">model_manager</span><span class="o">.</span><span class="n">load_textured_rectangle</span><span class="p">(</span><span class="s">'vertex_format_4f'</span><span class="p">,</span> <span class="mf">64.</span><span class="p">,</span> <span class="mf">64.</span><span class="p">,</span> 
+                                          <span class="s">'purple-tile'</span><span class="p">,</span> <span class="s">'purple-tile'</span><span class="p">)</span>
+    <span class="n">model_manager</span><span class="o">.</span><span class="n">load_textured_rectangle</span><span class="p">(</span><span class="s">'vertex_format_4f'</span><span class="p">,</span> <span class="mf">64.</span><span class="p">,</span> <span class="mf">64.</span><span class="p">,</span> 
+                                          <span class="s">'green-tile'</span><span class="p">,</span> <span class="s">'green-tile'</span><span class="p">)</span>
+    <span class="n">model_manager</span><span class="o">.</span><span class="n">load_textured_rectangle</span><span class="p">(</span><span class="s">'vertex_format_4f'</span><span class="p">,</span> <span class="mf">64.</span><span class="p">,</span> <span class="mf">64.</span><span class="p">,</span> 
+                                          <span class="s">'blue-tile'</span><span class="p">,</span> <span class="s">'blue-tile'</span><span class="p">)</span>
+</pre></div>
+</td></tr></table>
+
+<p>The final step is to actually load in some entities with TileSystem components
+to represent our map:</p>
+<table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre> 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14</pre></div></td><td class="code"><div class="highlight"><pre>    <span class="k">def</span> <span class="nf">setup_tiles</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">init_entity</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">gameworld</span><span class="o">.</span><span class="n">init_entity</span>
+        <span class="n">tile_system</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">ids</span><span class="o">.</span><span class="n">tiles</span>
+        <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">tile_system</span><span class="o">.</span><span class="n">tiles_in_x</span><span class="p">):</span>
+            <span class="k">for</span> <span class="n">y</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">tile_system</span><span class="o">.</span><span class="n">tiles_in_y</span><span class="p">):</span>
+                <span class="c">#randomly choose a texture for our tile.</span>
+                <span class="n">model_key</span> <span class="o">=</span> <span class="n">choice</span><span class="p">([</span><span class="s">'orange-tile'</span><span class="p">,</span> <span class="s">'green-tile'</span><span class="p">,</span> <span class="s">'purple-tile'</span><span class="p">,</span>
+                                    <span class="s">'blue-tile'</span><span class="p">])</span>
+                <span class="n">create_dict</span> <span class="o">=</span> <span class="p">{</span>
+                    <span class="s">'tiles'</span><span class="p">:</span> <span class="p">{</span><span class="s">'texture'</span><span class="p">:</span> <span class="n">model_key</span><span class="p">,</span> <span class="s">'tile_pos'</span><span class="p">:</span> <span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">)},</span>
+                <span class="p">}</span>
+                <span class="n">ent</span> <span class="o">=</span> <span class="n">init_entity</span><span class="p">(</span><span class="n">create_dict</span><span class="p">,</span> <span class="p">[</span><span class="s">'tiles'</span><span class="p">])</span>
+        <span class="c">#Trigger the first loading of the tile map.</span>
+        <span class="n">tile_system</span><span class="o">.</span><span class="n">tile_trigger</span><span class="p">()</span>
+</pre></div>
+</td></tr></table>
+
+<p>There we go, put everything together and call all the loading functions in our
+init_gameworld callback:</p>
+<table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre> 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13</pre></div></td><td class="code"><div class="highlight"><pre><span class="k">class</span> <span class="nc">TestGame</span><span class="p">(</span><span class="n">Widget</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">(</span><span class="n">TestGame</span><span class="p">,</span> <span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="n">__init__</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">gameworld</span><span class="o">.</span><span class="n">init_gameworld</span><span class="p">(</span>
+            <span class="p">[</span><span class="s">'renderer'</span><span class="p">,</span> <span class="s">'position'</span><span class="p">,</span> <span class="s">'camera1'</span><span class="p">,</span> <span class="s">'tiles'</span><span class="p">],</span>
+            <span class="n">callback</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">init_game</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">init_game</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">setup_states</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">load_textures</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">load_models</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">set_state</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">setup_tiles</span><span class="p">()</span>
+</pre></div>
+</td></tr></table>
+
+<p>You should get something that looks like:</p>
+<iframe src="https://www.youtube.com/embed/k69pJHNQVgI" frameborder="0" allowfullscreen="">VIDEO</iframe>
+
+<h1>Full Code</h1>
+<p>Python File:</p>
+<table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre>  1
+  2
+  3
+  4
+  5
+  6
+  7
+  8
+  9
+ 10
+ 11
+ 12
+ 13
+ 14
+ 15
+ 16
+ 17
+ 18
+ 19
+ 20
+ 21
+ 22
+ 23
+ 24
+ 25
+ 26
+ 27
+ 28
+ 29
+ 30
+ 31
+ 32
+ 33
+ 34
+ 35
+ 36
+ 37
+ 38
+ 39
+ 40
+ 41
+ 42
+ 43
+ 44
+ 45
+ 46
+ 47
+ 48
+ 49
+ 50
+ 51
+ 52
+ 53
+ 54
+ 55
+ 56
+ 57
+ 58
+ 59
+ 60
+ 61
+ 62
+ 63
+ 64
+ 65
+ 66
+ 67
+ 68
+ 69
+ 70
+ 71
+ 72
+ 73
+ 74
+ 75
+ 76
+ 77
+ 78
+ 79
+ 80
+ 81
+ 82
+ 83
+ 84
+ 85
+ 86
+ 87
+ 88
+ 89
+ 90
+ 91
+ 92
+ 93
+ 94
+ 95
+ 96
+ 97
+ 98
+ 99
+100
+101
+102
+103
+104
+105
+106
+107
+108
+109
+110
+111
+112
+113
+114
+115
+116
+117
+118
+119
+120
+121
+122
+123
+124
+125
+126
+127
+128
+129
+130
+131
+132
+133
+134
+135
+136
+137
+138
+139
+140
+141
+142
+143
+144
+145
+146
+147
+148
+149
+150
+151
+152
+153
+154
+155
+156
+157
+158
+159
+160
+161
+162
+163
+164
+165
+166
+167
+168
+169
+170
+171
+172
+173
+174
+175
+176
+177
+178
+179
+180
+181
+182
+183
+184
+185
+186
+187
+188
+189
+190
+191
+192
+193
+194
+195
+196
+197
+198
+199</pre></div></td><td class="code"><div class="highlight"><pre><span class="kn">from</span> <span class="nn">kivy.app</span> <span class="kn">import</span> <span class="n">App</span>
+<span class="kn">from</span> <span class="nn">kivy.uix.widget</span> <span class="kn">import</span> <span class="n">Widget</span>
+<span class="kn">from</span> <span class="nn">kivy.clock</span> <span class="kn">import</span> <span class="n">Clock</span>
+<span class="kn">from</span> <span class="nn">random</span> <span class="kn">import</span> <span class="n">choice</span>
+<span class="kn">import</span> <span class="nn">kivent_core</span>
+<span class="kn">from</span> <span class="nn">kivent_core.gameworld</span> <span class="kn">import</span> <span class="n">GameWorld</span>
+<span class="kn">from</span> <span class="nn">kivent_core.managers.resource_managers</span> <span class="kn">import</span> <span class="n">texture_manager</span>
+<span class="kn">from</span> <span class="nn">kivy.properties</span> <span class="kn">import</span> <span class="n">StringProperty</span><span class="p">,</span> <span class="n">NumericProperty</span><span class="p">,</span> <span class="n">ListProperty</span>
+<span class="kn">from</span> <span class="nn">os.path</span> <span class="kn">import</span> <span class="n">dirname</span><span class="p">,</span> <span class="n">join</span><span class="p">,</span> <span class="n">abspath</span>
+<span class="kn">from</span> <span class="nn">kivent_core.systems.gamesystem</span> <span class="kn">import</span> <span class="n">GameSystem</span>
+<span class="kn">from</span> <span class="nn">kivy.factory</span> <span class="kn">import</span> <span class="n">Factory</span>
+
+<span class="k">def</span> <span class="nf">get_asset_path</span><span class="p">(</span><span class="n">asset</span><span class="p">,</span> <span class="n">asset_loc</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">join</span><span class="p">(</span><span class="n">dirname</span><span class="p">(</span><span class="n">dirname</span><span class="p">(</span><span class="n">abspath</span><span class="p">(</span><span class="n">__file__</span><span class="p">))),</span> <span class="n">asset_loc</span><span class="p">,</span> <span class="n">asset</span><span class="p">)</span>
+
+<span class="k">class</span> <span class="nc">TileSystem</span><span class="p">(</span><span class="n">GameSystem</span><span class="p">):</span>
+    <span class="n">tile_width</span> <span class="o">=</span> <span class="n">NumericProperty</span><span class="p">(</span><span class="mf">64.</span><span class="p">)</span>
+    <span class="n">tile_height</span> <span class="o">=</span> <span class="n">NumericProperty</span><span class="p">(</span><span class="mf">64.</span><span class="p">)</span>
+    <span class="n">tiles_in_x</span> <span class="o">=</span> <span class="n">NumericProperty</span><span class="p">(</span><span class="mi">100</span><span class="p">)</span>
+    <span class="n">tiles_in_y</span> <span class="o">=</span> <span class="n">NumericProperty</span><span class="p">(</span><span class="mi">100</span><span class="p">)</span>
+    <span class="n">camera_pos</span> <span class="o">=</span> <span class="n">ListProperty</span><span class="p">(</span><span class="bp">None</span><span class="p">,</span> <span class="n">allownone</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+    <span class="n">camera_size</span> <span class="o">=</span> <span class="n">ListProperty</span><span class="p">(</span><span class="bp">None</span><span class="p">,</span> <span class="n">allownone</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">(</span><span class="n">TileSystem</span><span class="p">,</span> <span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="n">__init__</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">tiles_on_screen_last_frame</span> <span class="o">=</span> <span class="nb">set</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">tile_trigger</span> <span class="o">=</span> <span class="n">Clock</span><span class="o">.</span><span class="n">create_trigger</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">handle_tile_drawing</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">calc_tiles_trigger</span> <span class="o">=</span> <span class="n">Clock</span><span class="o">.</span><span class="n">create_trigger</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">calc_tiles</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">calc_tiles_trigger</span><span class="p">()</span>
+
+    <span class="k">def</span> <span class="nf">calc_tiles</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">dt</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">tiles</span> <span class="o">=</span> <span class="p">[[</span><span class="bp">None</span> <span class="k">for</span> <span class="n">y</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">tiles_in_y</span><span class="p">)]</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span>
+                     <span class="bp">self</span><span class="o">.</span><span class="n">tiles_in_x</span><span class="p">)]</span>
+
+    <span class="k">def</span> <span class="nf">on_tiles_in_x</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">instance</span><span class="p">,</span> <span class="n">value</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">calc_tiles_trigger</span><span class="p">()</span>
+
+    <span class="k">def</span> <span class="nf">on_tiles_in_y</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">instance</span><span class="p">,</span> <span class="n">value</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">calc_tiles_trigger</span><span class="p">()</span>
+
+    <span class="k">def</span> <span class="nf">on_camera_pos</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">instance</span><span class="p">,</span> <span class="n">value</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">tile_trigger</span><span class="p">()</span>
+
+    <span class="k">def</span> <span class="nf">handle_tile_drawing</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">dt</span><span class="p">):</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">camera_pos</span> <span class="ow">is</span> <span class="ow">not</span> <span class="bp">None</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">camera_size</span> <span class="ow">is</span> <span class="ow">not</span> <span class="bp">None</span><span class="p">:</span>
+            <span class="n">last_frame</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tiles_on_screen_last_frame</span>
+            <span class="n">components</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">components</span>
+            <span class="n">init_entity</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">gameworld</span><span class="o">.</span><span class="n">init_entity</span>
+            <span class="n">remove_entity</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">gameworld</span><span class="o">.</span><span class="n">remove_entity</span>
+            <span class="n">tiles_in_view</span> <span class="o">=</span> <span class="nb">set</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">calculate_tiles_in_view</span><span class="p">())</span>
+            <span class="n">screen_pos_from_tile_pos</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">get_screen_pos_from_tile_pos</span>
+            <span class="n">new</span> <span class="o">=</span> <span class="n">tiles_in_view</span> <span class="o">-</span> <span class="n">last_frame</span>
+            <span class="n">removed</span> <span class="o">=</span> <span class="n">last_frame</span> <span class="o">-</span> <span class="n">tiles_in_view</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">tiles_on_screen_last_frame</span> <span class="o">=</span> <span class="n">tiles_in_view</span>
+            <span class="k">for</span> <span class="n">component_index</span> <span class="ow">in</span> <span class="n">removed</span><span class="p">:</span>
+                <span class="n">tile_comp</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">components</span><span class="p">[</span><span class="n">component_index</span><span class="p">]</span>
+                <span class="n">remove_entity</span><span class="p">(</span><span class="n">tile_comp</span><span class="o">.</span><span class="n">current_entity</span><span class="p">)</span>
+                <span class="n">tile_comp</span><span class="o">.</span><span class="n">current_entity</span> <span class="o">=</span> <span class="bp">None</span>
+            <span class="k">for</span> <span class="n">component_index</span> <span class="ow">in</span> <span class="n">new</span><span class="p">:</span>
+                <span class="n">tile_comp</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">components</span><span class="p">[</span><span class="n">component_index</span><span class="p">]</span>
+                <span class="n">screen_pos</span> <span class="o">=</span> <span class="n">screen_pos_from_tile_pos</span><span class="p">(</span>
+                        <span class="n">tile_comp</span><span class="o">.</span><span class="n">tile_pos</span><span class="p">)</span>
+                <span class="n">create_dict</span> <span class="o">=</span> <span class="p">{</span>
+                    <span class="s">'position'</span><span class="p">:</span> <span class="n">screen_pos</span><span class="p">,</span>
+                    <span class="s">'renderer'</span><span class="p">:</span> <span class="p">{</span><span class="s">'texture'</span><span class="p">:</span> <span class="n">tile_comp</span><span class="o">.</span><span class="n">texture</span><span class="p">,</span> 
+                                 <span class="s">'model_key'</span><span class="p">:</span> <span class="n">tile_comp</span><span class="o">.</span><span class="n">texture</span><span class="p">},</span>
+                    <span class="p">}</span>
+                <span class="n">ent</span> <span class="o">=</span> <span class="n">init_entity</span><span class="p">(</span><span class="n">create_dict</span><span class="p">,</span> <span class="p">[</span><span class="s">'position'</span><span class="p">,</span> <span class="s">'renderer'</span><span class="p">])</span>
+                <span class="n">tile_comp</span><span class="o">.</span><span class="n">current_entity</span> <span class="o">=</span> <span class="n">ent</span>
+
+    <span class="k">def</span> <span class="nf">on_camera_size</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">instance</span><span class="p">,</span> <span class="n">value</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">tile_trigger</span><span class="p">()</span>
+
+    <span class="k">def</span> <span class="nf">get_world_pos</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">pos</span><span class="p">):</span>
+        <span class="n">tile_max_x</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tiles_in_x</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">tile_width</span>
+        <span class="n">tile_max_y</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tiles_in_y</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">tile_height</span>
+        <span class="k">return</span> <span class="p">(</span><span class="n">pos</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">%</span> <span class="n">tile_max_x</span><span class="p">,</span> <span class="n">pos</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">%</span> <span class="n">tile_max_y</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">get_screen_pos_from_tile_pos</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">tile_pos</span><span class="p">):</span>
+        <span class="n">cx</span><span class="p">,</span> <span class="n">cy</span> <span class="o">=</span> <span class="o">-</span><span class="bp">self</span><span class="o">.</span><span class="n">camera_pos</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="o">-</span><span class="bp">self</span><span class="o">.</span><span class="n">camera_pos</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>
+        <span class="n">tile_max_x</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tiles_in_x</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">tile_width</span>
+        <span class="n">tile_max_y</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tiles_in_y</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">tile_height</span>
+        <span class="n">tcx</span><span class="p">,</span> <span class="n">tcy</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">get_tile_at_world_pos</span><span class="p">(</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">get_world_pos</span><span class="p">((</span><span class="n">cx</span><span class="p">,</span> <span class="n">cy</span><span class="p">)))</span>
+        <span class="n">wx</span><span class="p">,</span> <span class="n">wy</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">get_world_pos_from_tile_pos</span><span class="p">(</span><span class="n">tile_pos</span><span class="p">)</span>
+        <span class="n">origin_x</span><span class="p">,</span> <span class="n">origin_y</span> <span class="o">=</span> <span class="bp">None</span><span class="p">,</span> <span class="bp">None</span>
+        <span class="k">if</span> <span class="n">tile_pos</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">&lt;</span> <span class="n">tcx</span><span class="p">:</span>
+            <span class="n">origin_x</span> <span class="o">=</span> <span class="p">(</span><span class="n">cx</span> <span class="o">//</span> <span class="n">tile_max_x</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">*</span> <span class="n">tile_max_x</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">origin_x</span> <span class="o">=</span> <span class="p">(</span><span class="n">cx</span> <span class="o">//</span> <span class="n">tile_max_x</span><span class="p">)</span> <span class="o">*</span> <span class="n">tile_max_x</span>
+        <span class="k">if</span> <span class="n">tile_pos</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">&lt;</span> <span class="n">tcy</span><span class="p">:</span>
+            <span class="n">origin_y</span> <span class="o">=</span> <span class="p">(</span><span class="n">cy</span> <span class="o">//</span> <span class="n">tile_max_y</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">*</span> <span class="n">tile_max_y</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">origin_y</span> <span class="o">=</span> <span class="p">(</span><span class="n">cy</span> <span class="o">//</span> <span class="n">tile_max_y</span><span class="p">)</span> <span class="o">*</span> <span class="n">tile_max_y</span>
+        <span class="k">return</span> <span class="n">origin_x</span> <span class="o">+</span> <span class="n">wx</span><span class="p">,</span> <span class="n">origin_y</span> <span class="o">+</span> <span class="n">wy</span>
+
+    <span class="k">def</span> <span class="nf">get_world_pos_from_tile_pos</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">tile_pos</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">(</span><span class="n">tile_pos</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">tile_width</span><span class="p">,</span> 
+                <span class="n">tile_pos</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">tile_height</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">get_tile_at_world_pos</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">world_pos</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">world_pos</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">//</span> <span class="bp">self</span><span class="o">.</span><span class="n">tile_width</span><span class="p">),</span>
+                <span class="nb">int</span><span class="p">(</span><span class="n">world_pos</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">//</span> <span class="bp">self</span><span class="o">.</span><span class="n">tile_height</span><span class="p">))</span>
+
+    <span class="k">def</span> <span class="nf">calculate_tiles_in_view</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">cx</span><span class="p">,</span> <span class="n">cy</span> <span class="o">=</span> <span class="o">-</span><span class="bp">self</span><span class="o">.</span><span class="n">camera_pos</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="o">-</span><span class="bp">self</span><span class="o">.</span><span class="n">camera_pos</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>
+        <span class="n">cw</span><span class="p">,</span> <span class="n">ch</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">camera_size</span>
+        <span class="n">tile_width</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tile_width</span>
+        <span class="n">tile_height</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tile_height</span>
+        <span class="n">tiles_in_x</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tiles_in_x</span>
+        <span class="n">tiles_in_y</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tiles_in_y</span>
+        <span class="n">world_pos</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">get_world_pos</span><span class="p">((</span><span class="n">cx</span><span class="p">,</span> <span class="n">cy</span><span class="p">))</span>
+        <span class="n">x_count</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">cw</span> <span class="o">//</span> <span class="n">tile_width</span><span class="p">)</span> <span class="o">+</span> <span class="mi">2</span>
+        <span class="n">y_count</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">ch</span> <span class="o">//</span> <span class="n">tile_height</span><span class="p">)</span> <span class="o">+</span> <span class="mi">2</span>
+        <span class="n">starting_x</span><span class="p">,</span> <span class="n">starting_y</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">get_tile_at_world_pos</span><span class="p">(</span><span class="n">world_pos</span><span class="p">)</span>
+        <span class="n">end_x</span> <span class="o">=</span> <span class="n">starting_x</span> <span class="o">+</span> <span class="n">x_count</span>
+        <span class="n">end_y</span> <span class="o">=</span> <span class="n">starting_y</span> <span class="o">+</span> <span class="n">y_count</span>
+        <span class="n">tiles_in_view</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="n">tiles_a</span> <span class="o">=</span> <span class="n">tiles_in_view</span><span class="o">.</span><span class="n">append</span>
+        <span class="n">tiles</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tiles</span>
+        <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">starting_x</span><span class="p">,</span> <span class="n">end_x</span><span class="p">):</span>
+            <span class="n">actual_x</span> <span class="o">=</span> <span class="n">x</span> <span class="o">%</span> <span class="n">tiles_in_x</span>
+            <span class="k">for</span> <span class="n">y</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">starting_y</span><span class="p">,</span> <span class="n">end_y</span><span class="p">):</span>
+                <span class="n">actual_y</span> <span class="o">=</span> <span class="n">y</span> <span class="o">%</span> <span class="n">tiles_in_y</span>
+                <span class="n">tile</span> <span class="o">=</span> <span class="n">tiles</span><span class="p">[</span><span class="n">actual_x</span><span class="p">][</span><span class="n">actual_y</span><span class="p">]</span>
+                <span class="k">if</span> <span class="n">tile</span> <span class="ow">is</span> <span class="ow">not</span> <span class="bp">None</span><span class="p">:</span>
+                    <span class="n">tiles_a</span><span class="p">(</span><span class="n">tile</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">tiles_in_view</span>
+
+    <span class="k">def</span> <span class="nf">init_component</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">component_index</span><span class="p">,</span> <span class="n">entity_id</span><span class="p">,</span> <span class="n">zone</span><span class="p">,</span> <span class="n">args</span><span class="p">):</span>
+        <span class="n">component</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">components</span><span class="p">[</span><span class="n">component_index</span><span class="p">]</span>
+        <span class="n">component</span><span class="o">.</span><span class="n">entity_id</span> <span class="o">=</span> <span class="n">entity_id</span>
+        <span class="n">component</span><span class="o">.</span><span class="n">texture</span> <span class="o">=</span> <span class="n">args</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'texture'</span><span class="p">)</span>
+        <span class="n">component</span><span class="o">.</span><span class="n">tile_pos</span> <span class="o">=</span> <span class="n">tx</span><span class="p">,</span> <span class="n">ty</span> <span class="o">=</span> <span class="n">args</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'tile_pos'</span><span class="p">)</span>
+        <span class="n">component</span><span class="o">.</span><span class="n">current_entity</span> <span class="o">=</span> <span class="bp">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">tiles</span><span class="p">[</span><span class="n">tx</span><span class="p">][</span><span class="n">ty</span><span class="p">]</span> <span class="o">=</span> <span class="n">component_index</span>
+
+
+<span class="n">Factory</span><span class="o">.</span><span class="n">register</span><span class="p">(</span><span class="s">'TileSystem'</span><span class="p">,</span> <span class="n">cls</span><span class="o">=</span><span class="n">TileSystem</span><span class="p">)</span>
+
+
+<span class="k">class</span> <span class="nc">TestGame</span><span class="p">(</span><span class="n">Widget</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">(</span><span class="n">TestGame</span><span class="p">,</span> <span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="n">__init__</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">gameworld</span><span class="o">.</span><span class="n">init_gameworld</span><span class="p">(</span>
+            <span class="p">[</span><span class="s">'renderer'</span><span class="p">,</span> <span class="s">'position'</span><span class="p">,</span> <span class="s">'camera1'</span><span class="p">,</span> <span class="s">'tiles'</span><span class="p">],</span>
+            <span class="n">callback</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">init_game</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">init_game</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">setup_states</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">load_textures</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">load_models</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">set_state</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">setup_tiles</span><span class="p">()</span>
+
+    <span class="k">def</span> <span class="nf">load_textures</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">texture_manager</span><span class="o">.</span><span class="n">load_image</span><span class="p">(</span><span class="n">get_asset_path</span><span class="p">(</span><span class="s">'orange-tile.png'</span><span class="p">,</span> <span class="s">'assets'</span><span class="p">))</span>
+        <span class="n">texture_manager</span><span class="o">.</span><span class="n">load_image</span><span class="p">(</span><span class="n">get_asset_path</span><span class="p">(</span><span class="s">'purple-tile.png'</span><span class="p">,</span> <span class="s">'assets'</span><span class="p">))</span>
+        <span class="n">texture_manager</span><span class="o">.</span><span class="n">load_image</span><span class="p">(</span><span class="n">get_asset_path</span><span class="p">(</span><span class="s">'green-tile.png'</span><span class="p">,</span> <span class="s">'assets'</span><span class="p">))</span>
+        <span class="n">texture_manager</span><span class="o">.</span><span class="n">load_image</span><span class="p">(</span><span class="n">get_asset_path</span><span class="p">(</span><span class="s">'blue-tile.png'</span><span class="p">,</span> <span class="s">'assets'</span><span class="p">))</span>
+
+    <span class="k">def</span> <span class="nf">load_models</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">model_manager</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">gameworld</span><span class="o">.</span><span class="n">model_manager</span>
+        <span class="n">model_manager</span><span class="o">.</span><span class="n">load_textured_rectangle</span><span class="p">(</span><span class="s">'vertex_format_4f'</span><span class="p">,</span> <span class="mf">64.</span><span class="p">,</span> <span class="mf">64.</span><span class="p">,</span> 
+                                              <span class="s">'orange-tile'</span><span class="p">,</span> <span class="s">'orange-tile'</span><span class="p">)</span>
+        <span class="n">model_manager</span><span class="o">.</span><span class="n">load_textured_rectangle</span><span class="p">(</span><span class="s">'vertex_format_4f'</span><span class="p">,</span> <span class="mf">64.</span><span class="p">,</span> <span class="mf">64.</span><span class="p">,</span> 
+                                              <span class="s">'purple-tile'</span><span class="p">,</span> <span class="s">'purple-tile'</span><span class="p">)</span>
+        <span class="n">model_manager</span><span class="o">.</span><span class="n">load_textured_rectangle</span><span class="p">(</span><span class="s">'vertex_format_4f'</span><span class="p">,</span> <span class="mf">64.</span><span class="p">,</span> <span class="mf">64.</span><span class="p">,</span> 
+                                              <span class="s">'green-tile'</span><span class="p">,</span> <span class="s">'green-tile'</span><span class="p">)</span>
+        <span class="n">model_manager</span><span class="o">.</span><span class="n">load_textured_rectangle</span><span class="p">(</span><span class="s">'vertex_format_4f'</span><span class="p">,</span> <span class="mf">64.</span><span class="p">,</span> <span class="mf">64.</span><span class="p">,</span> 
+                                              <span class="s">'blue-tile'</span><span class="p">,</span> <span class="s">'blue-tile'</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">setup_tiles</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">init_entity</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">gameworld</span><span class="o">.</span><span class="n">init_entity</span>
+        <span class="n">tile_system</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">ids</span><span class="o">.</span><span class="n">tiles</span>
+        <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">tile_system</span><span class="o">.</span><span class="n">tiles_in_x</span><span class="p">):</span>
+            <span class="k">for</span> <span class="n">y</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">tile_system</span><span class="o">.</span><span class="n">tiles_in_y</span><span class="p">):</span>
+                <span class="n">model_key</span> <span class="o">=</span> <span class="n">choice</span><span class="p">([</span><span class="s">'orange-tile'</span><span class="p">,</span> <span class="s">'green-tile'</span><span class="p">,</span> <span class="s">'purple-tile'</span><span class="p">,</span>
+                                    <span class="s">'blue-tile'</span><span class="p">])</span>
+                <span class="n">create_dict</span> <span class="o">=</span> <span class="p">{</span>
+                    <span class="s">'tiles'</span><span class="p">:</span> <span class="p">{</span><span class="s">'texture'</span><span class="p">:</span> <span class="n">model_key</span><span class="p">,</span> <span class="s">'tile_pos'</span><span class="p">:</span> <span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">)},</span>
+                <span class="p">}</span>
+                <span class="n">ent</span> <span class="o">=</span> <span class="n">init_entity</span><span class="p">(</span><span class="n">create_dict</span><span class="p">,</span> <span class="p">[</span><span class="s">'tiles'</span><span class="p">])</span>
+        <span class="n">tile_system</span><span class="o">.</span><span class="n">tile_trigger</span><span class="p">()</span>
+
+    <span class="k">def</span> <span class="nf">setup_states</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">gameworld</span><span class="o">.</span><span class="n">add_state</span><span class="p">(</span><span class="n">state_name</span><span class="o">=</span><span class="s">'main'</span><span class="p">,</span> <span class="n">systems_added</span><span class="o">=</span><span class="p">[</span><span class="s">'renderer'</span><span class="p">],</span>
+                                 <span class="n">systems_unpaused</span><span class="o">=</span><span class="p">[</span><span class="s">'renderer'</span><span class="p">])</span>
+
+    <span class="k">def</span> <span class="nf">set_state</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">gameworld</span><span class="o">.</span><span class="n">state</span> <span class="o">=</span> <span class="s">'main'</span>
+
+
+<span class="k">class</span> <span class="nc">YourAppNameApp</span><span class="p">(</span><span class="n">App</span><span class="p">):</span>
+    <span class="k">pass</span>
+
+
+<span class="k">if</span> <span class="n">__name__</span> <span class="o">==</span> <span class="s">'__main__'</span><span class="p">:</span>
+    <span class="n">YourAppNameApp</span><span class="p">()</span><span class="o">.</span><span class="n">run</span><span class="p">()</span>
+</pre></div>
+</td></tr></table>
+
+<p>kv file:</p>
+<table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre> 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41</pre></div></td><td class="code"><div class="highlight"><pre><span class="c">#:kivy 1.9.0</span>
+<span class="c">#:import get_asset_path __main__.get_asset_path</span>
+
+<span class="n">TestGame</span><span class="p">:</span>
+
+<span class="o">&lt;</span><span class="n">TestGame</span><span class="o">&gt;</span><span class="p">:</span>
+    <span class="n">gameworld</span><span class="p">:</span> <span class="n">gameworld</span>
+    <span class="n">GameWorld</span><span class="p">:</span>
+        <span class="nb">id</span><span class="p">:</span> <span class="n">gameworld</span>
+        <span class="n">gamescreenmanager</span><span class="p">:</span> <span class="n">gamescreenmanager</span>
+        <span class="n">size_of_gameworld</span><span class="p">:</span> <span class="mi">100</span><span class="o">*</span><span class="mi">1024</span>
+        <span class="n">system_count</span><span class="p">:</span> <span class="mi">3</span>
+        <span class="n">zones</span><span class="p">:</span> <span class="p">{</span><span class="s">'general'</span><span class="p">:</span> <span class="mi">10000</span><span class="p">}</span>
+        <span class="n">PositionSystem2D</span><span class="p">:</span>
+            <span class="n">system_id</span><span class="p">:</span> <span class="s">'position'</span>
+            <span class="n">gameworld</span><span class="p">:</span> <span class="n">gameworld</span>
+            <span class="n">zones</span><span class="p">:</span> <span class="p">[</span><span class="s">'general'</span><span class="p">]</span>
+        <span class="n">Renderer</span><span class="p">:</span>
+            <span class="nb">id</span><span class="p">:</span> <span class="n">renderer</span>
+            <span class="n">gameworld</span><span class="p">:</span> <span class="n">gameworld</span>
+            <span class="n">system_id</span><span class="p">:</span> <span class="s">'renderer'</span>
+            <span class="n">zones</span><span class="p">:</span> <span class="p">[</span><span class="s">'general'</span><span class="p">]</span>
+            <span class="n">frame_count</span><span class="p">:</span> <span class="mi">2</span>
+            <span class="n">gameview</span><span class="p">:</span> <span class="s">'camera1'</span>
+            <span class="n">updateable</span><span class="p">:</span> <span class="bp">True</span>
+            <span class="n">shader_source</span><span class="p">:</span> <span class="n">get_asset_path</span><span class="p">(</span><span class="s">'positionshader.glsl'</span><span class="p">,</span> <span class="s">'assets/glsl'</span><span class="p">)</span>
+        <span class="n">GameView</span><span class="p">:</span>
+            <span class="n">system_id</span><span class="p">:</span> <span class="s">'camera1'</span>
+            <span class="n">gameworld</span><span class="p">:</span> <span class="n">gameworld</span>
+            <span class="n">size</span><span class="p">:</span> <span class="n">root</span><span class="o">.</span><span class="n">size</span>
+            <span class="n">pos</span><span class="p">:</span> <span class="n">root</span><span class="o">.</span><span class="n">pos</span>
+            <span class="n">do_scroll_lock</span><span class="p">:</span> <span class="bp">False</span>
+            <span class="nb">id</span><span class="p">:</span> <span class="n">camera1</span>
+        <span class="n">TileSystem</span><span class="p">:</span>
+            <span class="n">system_id</span><span class="p">:</span> <span class="s">'tiles'</span>
+            <span class="nb">id</span><span class="p">:</span> <span class="n">tiles</span>
+            <span class="n">gameworld</span><span class="p">:</span> <span class="n">gameworld</span>
+            <span class="n">camera_pos</span><span class="p">:</span> <span class="n">camera1</span><span class="o">.</span><span class="n">camera_pos</span>
+            <span class="n">camera_size</span><span class="p">:</span> <span class="n">camera1</span><span class="o">.</span><span class="n">size</span>
+    <span class="n">GameScreenManager</span><span class="p">:</span>
+        <span class="nb">id</span><span class="p">:</span> <span class="n">gamescreenmanager</span>
+</pre></div>
+</td></tr></table>
+    </div>
+
+  </div></body></html>

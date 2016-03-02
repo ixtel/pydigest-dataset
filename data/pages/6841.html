@@ -1,0 +1,389 @@
+<html><body><div><div class="ArticleText">
+<p class="FeatureByline">
+           By <b>Jake Edge</b><br/>September 16, 2015
+           </p>
+<p>
+There are various types of random number generators (RNGs) that target
+different use cases, but a programming language can only have one default.
+For high-security random numbers (e.g. cryptographic keys and the like), it
+is a grievous error to use the wrong kind of RNG, while other use cases are
+typically more forgiving.  The Python community is in the middle of a
+debate about how it should be handling random numbers within the language's
+standard library.
+</p>
+
+<h4>The <tt>random</tt> module</h4>
+
+<p>
+On the python-ideas mailing list, Guido van Rossum <a href="/Articles/657344/">kicked off</a> the discussion by noting that he
+had been contacted by OpenBSD founder Theo de Raadt about the
+<tt>random.random()</tt> RNG that ships with Python.  That RNG is based on
+the <a href="https://en.wikipedia.org/wiki/Mersenne_Twister">Mersenne
+Twister</a> (MT) algorithm, which is a pseudo-RNG (PRNG) with an enormously long
+period. 
+The PRNG can either be seeded by the user (with a call to
+<tt>random.seed()</tt>) or, by default, it is seeded with 2500 bytes of entropy from
+the <tt>os.urandom()</tt> pool (the strong, non-blocking random pool supplied by the
+operating system).  From a given seed, the same sequence of random
+numbers will be generated, which makes it deterministic.
+
+</p><p>
+Using MT-derived random numbers for cryptographic or other security
+purposes is 
+definitely not recommended by security experts.
+Given enough output from the RNG, the seed can be recovered, which means
+that all further random numbers can be perfectly predicted—generally with
+disastrous results.  But for many uses, such as games, testing, or
+simulations, the 
+<tt>random</tt> module provides a simple-to-use way to get perfectly
+adequate random 
+numbers.
+The Python <a href="https://docs.python.org/3/library/random.html">documentation</a> for the
+module clearly indicates that it should not be used for security purposes
+and suggests either 
+<tt>os.urandom()</tt> or the <tt>random.SystemRandom</tt> class.
+</p>
+
+<p>
+But Van Rossum noted that "<span>as the meme goes -- nobody reads the
+docs</span>", so De Raadt's concern is that people will simply reach for
+the default provided by the language—no matter what they are using the
+random numbers for.  According to Van Rossum, De Raadt is advocating the
+<a href="http://www.openbsd.org/cgi-bin/man.cgi/OpenBSD-current/man3/arc4random.3"><tt>arc4random()</tt></a>
+RNG that OpenBSD uses (and, in fact, has <a href="/Articles/625506/">switched
+to by default</a>).  Some of that advocacy can be seen in a <a href="/Articles/657347/">forwarded email message</a> that Van Rossum
+posted.  Though De Raadt was invited to participate in the thread,
+"<span>he's too 
+busy</span>" to do so, which left Van Rossum in a bit of a quandary:
+</p><p class="BigQuote">
+ The two core Python
+experts on the random module have given me opinions suggesting that there's
+not much wrong with MT, so here I am. Who is right? What should we do? Is
+there anything we need to do?
+</p>
+
+
+<p>
+That set off quite a discussion, which now spans four threads in python-ideas.
+
+</p><p>
+Donald Stufft <a href="/Articles/657348/">responded</a> that 
+he sees a problem with the current approach, but that he doesn't have any
+"<span>great 
+solution</span>" for it:
+</p><p class="BigQuote">
+The problem boils down to, are people going to [accidentally] use the default
+random module when they really should use os.urandom or random.SystemRandom. It
+is my opinion (and I believe Theo's) that they are going to use the MT backed
+random functions in random.py when they shouldn't be.
+</p>
+
+
+<p>
+But, as Paul Moore and others <a href="/Articles/657349/">pointed out</a>, those
+with non-security needs for random numbers should be able to expect to
+access them easily from the standard library.  He often uses the
+<tt>random</tt> module for games of various sorts, as well as for things
+like <a href="https://en.wikipedia.org/wiki/Monte_Carlo_method">Monte Carlo
+simulations</a> where millions of results are used.  While the
+reproducibility feature is not particularly important to him, he would
+expect that a simple 
+API would provide it.  People doing crypto or other security programming
+ought to 
+be looking for an RNG beyond the default:
+</p><p class="BigQuote">
+Anyone doing crypto who doesn't fully appreciate that it's a
+specialist subject and that they should be looking for a dedicated RNG
+suitable for crypto, is probably going to make a lot of *other*
+mistakes as well. Leading them away from this one probably isn't going
+to be enough to make their code something I'd want to use...
+</p>
+
+
+<p>
+Steven D'Aprano <a href="/Articles/657350/">concurred</a>:
+</p><p class="BigQuote">
+Anyone writing crypto code 
+without reading the docs and understanding what they are doing are 
+surely making more mistakes than just using the wrong PRNG. There may be 
+a good argument for adding arc4random support to the stdlib, but making 
+it the default (with the disadvantages discussed, breaking backwards 
+compatibility, surprising non-crypto users, etc.) won't fix the broken 
+crypto code. It will just give people a false sense of security and 
+encourage them to ignore the docs and write broken crypto code.
+</p>
+
+
+<p>
+Part of the problem, of course, is that there is a large body of existing
+code that expects the <tt>random</tt> module to behave in a certain way.  Some of it
+requires the reproducibility feature and isn't being used for security
+purposes. Changing the default would break those programs a few years down
+the road (if the change follows the normal Python deprecation schedule).  As Stephen
+J. Turnbull <a href="/Articles/657351/">put it</a>:
+</p><p class="BigQuote">
+But the people who are "just getting work done" in new programs *won't
+notice*.  I don't think that they care what's under the hood of
+random.random, as long as (1) the API stays the same, and (2) the
+documentation clearly indicates where to find PRNGs that support
+determinism, jumpahead, replicability, and all those other good
+things, for the needs they doesn't have now but know they probably
+will have some day.  The rub is, as usual, existing applications that
+would have to be changed for no reason that is relevant to them.
+</p>
+
+
+<h4>Stufft's proposal</h4>
+
+<p>
+That first thread got rather long, so Stufft <a href="/Articles/657352/">attempted</a> something of a reboot in a message
+that was rather long itself.  He had talked to
+De Raadt to try to better understand his concerns, which Stufft said were
+not being reflected in the earlier thread.  He broke down the users of random
+numbers into three groups: those who need deterministic output (and
+reproducibility), those who need cryptographic-strength random numbers (and
+don't want determinism), and those who aren't sure if their use case is
+security-sensitive or not.  The last group generally doesn't need
+deterministic output, but currently that's what they get by default.  It is
+Stufft's belief (that is shared with De Raadt, he said) that the members of
+that group would be better served with a crypto-strength RNG.
+</p>
+
+<p>
+Those in group #3 might be told to use <tt>os.urandom()</tt> (or the
+<tt>random.SystemRandom</tt> class that is based on it), but they may end
+up using the standard <tt>random</tt> functions due to either the
+performance of the stronger alternative or bad advice (if, indeed, their
+need is security-sensitive).  In fact, Stufft said, the performance of
+<tt>os.urandom()</tt> is one of the main reasons <i>not</i> to make it the
+default:
+</p><p class="BigQuote">
+The fact that speed is the primary reason not to give people in #3 a
+cryptographically secure source of random by default is where we come back to
+the meat of Theo's suggestion. His claim is that invoking os.urandom through
+any of the interfaces imposes a performance penalty because it has to round
+trip through the kernel crypto sub system for every request. His suggestion is
+essentially that we provide an interface to a modern, good, userland 
+cryptographically secure source of random that is running within the same
+process as Python itself. One such example of this is the arc4random function
+(which doesn't actually provide ARC4 on OpenBSD, it provides ChaCha, it's not
+tied to one specific algorithm) which comes from libc on many platforms.
+According to Theo, modern userland CSPRNGs [cryptographically secure
+PRNGs] can create random bytes faster than
+memcpy which eliminates the argument of speed for why a CSPRNG shouldn't be
+the "default" source of randomness.
+</p>
+
+
+<p>
+Stufft looked at StackOverflow and other sites with Python code to see what
+kinds of advice there was about RNG choices.  His post had several snippets
+of code that used the module-level <tt>random</tt> functions in dubious
+ways. 
+
+</p><p>
+That led him to propose that Python change its random-number handling in
+several ways.  It would provide a means to access a fast user-space RNG like
+<tt>arc4random()</tt> and add a new class
+(<tt>random.SomeKindOfRandom</tt>) that uses it.  The proposal would also
+move the MT-based RNG to a 
+<tt>random.DeterministicRandom</tt> class and deprecate the module-level
+functions in the <tt>random</tt> module.  That would mean that users would
+(eventually) have to choose the kind of randomness they wanted before they
+would be able to get random numbers. They would call
+functions like:
+</p><pre>
+    random.SomeKindOfRandom().random()
+    random.DeterministicRandom().random()
+</pre>
+<tt>SystemRandom</tt><p> would still be available for those who wanted that
+RNG mechanism.
+Obviously, </p><tt>SomeKindOfRandom</tt><p> would need a better name, though there
+are objections to the whole idea of doing user-space RNG.
+Stufft pointed out that security expert Thomas Ptacek is </p><a href="http://sockpuppet.org/blog/2014/02/25/safely-generate-random-numbers/">not
+in favor</a><p> of user-space RNGs like </p><tt>arc4random()</tt><p>.
+
+
+</p><p>
+As might be guessed, Stufft's suggestions were not met with universal acclaim.
+There were concerns about backward compatibility and for how today's code
+could be switched, with minimal changes, to run (correctly) in this new
+world.
+
+</p><p>
+But Nick 
+Coghlan <a href="/Articles/657361/">strongly objected</a> to the idea of
+deprecating all of the module-level functions.  As he pointed out, nearly
+all of the module-level functions could provide any kind of random numbers,
+though they need to have good performance.
+Making someone choose what type they want, before they can
+even get 
+a random number is "<span>a *huge* regression in Python's usability for
+educational use cases</span>".   He said that a common "hello world" kind
+of program for using random numbers in Python is to roll a six-side die:
+</p><p class="BigQuote">
+<code>
+    &gt;&gt;&gt; from random import randint<br/>
+    &gt;&gt;&gt; randint(1, 6)<br/>
+    6
+</code>
+</p>
+<p>
+He continued:
+</p><p class="BigQuote">
+Shuffling decks of cards, flipping coins, these are all things used to
+introduce learners to modelling random events in the real world in
+software, and we absolutely do *not* want to invalidate the extensive
+body of educational material that assumes the current module level API
+for the random module.
+</p>
+
+
+<p>
+He noted that there are calls at the module-level that imply the need for a
+deterministic RNG (like <tt>seed()</tt> and others that are stateful) and which <i>can</i> be deprecated
+to help those who really need them to move to an alternative API.
+Essentially, he is asking that those who don't care about the RNG wars
+(and those new to Python in particular) be
+left out—they can still call the functions they call today.
+</p>
+
+<p>
+Breaking compatibility "<span>in the name of the public good</span>" is
+the <a href="/Articles/657437/">wrong approach</a>, Antoine Pitrou said.
+He and others are tired of seeing security trump all other considerations
+whenever a topic like this is raised.  Since a change like Stufft has
+suggested can't fix the problem of bad advice on the internet, compromising
+on a change that maintains compatibility is preferable.
+</p><div class="BigQuote"><p>
+Some people have to support code in 4 different Python versions and
+further gratuitous breakage in the stdlib doesn't help. Yes, they can
+change their code. Yes, they can use the "six" module, the "future" module
+or whatever new bandaid exists on PyPI. Still they must change their code
+in a way or another because it was deemed "necessary" to break compatibility
+to solve a concern that doesn't seem grounded in any reasonable analysis.
+</p><p>
+Python 3 was there to break compatibility. Not Python 3.4. Not Python 3.5.
+Not Python 3.6.
+</p><p>
+(in case you're wondering, trying to make all published code on the Internet
+secure by appropriately changing the interpreter's "behaviour" to match
+erroneous expectations - even *documented* as erroneous - is *not* reasonable
+- no matter how hard you try, there will always be occurrences of broken code
+that people copy and paste around)
+</p></div>
+
+<h4>Coghlan's proposals</h4>
+
+<p>
+Coghlan <a href="/Articles/657363/">started</a> another thread 
+as something of a "pre-PEP" on enhancing the random module.  It would
+create three types of RNGs in Python: seedable, seedless, and system.  The
+seedless version would be the default and guidance would be provided that
+those who need deterministic random numbers should use the seeded version,
+while those with strong security needs should use the system RNG.
+</p>
+
+<p>
+Coghlan's proposal lays out plans for Python 3.6, which is likely destined
+for late 2016 (or early 2017), and for 3.7, which is probably due sometime in
+2018—a change of this nature for Python can take a while, for sure.  Essentially,
+his idea is to deprecate the stateful methods and module-level functions
+(<tt>seed()</tt>, <tt>getstate()</tt>, and <tt>setstate()</tt>), except for
+the <tt>SeedableRandom</tt> class.  Those functions would warn the user,
+but not actually cause an error—except if the default type has been changed.
+</p>
+
+<p>
+The most controversial part of Coghlan's proposal would provide a
+<tt>random.set_default_instance()</tt> function to specify which of the
+three types would be used by the module-level functions.  Both <a href="/Articles/657364/">Stufft</a> and <a href="/Articles/657365/">D'Aprano</a> are concerned that would allow any
+module to affect all of the random numbers generated from that point on,
+potentially nullifying the choice another module has made.
+</p>
+
+<p>
+Beyond that, though, Moore would like to <a href="/Articles/657366/">see</a> some kind of cost/benefit analysis.  He is
+trying to remain open-minded, but is concerned about the disruption for
+users, particularly those who don't have any security requirements for
+their use of random numbers.  While he recognizes that it is somewhat
+emotionally stated, the benefits to him seem to be: "<span>Users of code
+written based on bad advice will be protected from 
+the consequences (as long as the code runs on a sufficiently new
+version of Python)</span>". 
+</p>
+
+<p>
+Based on some of that feedback, Coghlan went ahead and drafted <a href="https://www.python.org/dev/peps/pep-0504/">PEP 504</a> that
+simplifies earlier proposals.  It dispenses with the user-space CSPRNG
+(e.g. <tt>arc4random()</tt> or something similar) and changes the default
+to the system RNG (i.e. <tt>random.urandom()</tt>).  If a program uses
+<tt>random.seed()</tt> or the other stateful calls
+(i.e. <tt>getstate()</tt> or
+<tt>setstate()</tt>), the <tt>random</tt> module will switch to the
+existing MT-based deterministic PRNG.  
+
+</p><p>
+He proposes that this be done for 3.6, with a
+silent-by-default deprecation warning for the fallback to MT.  In 3.7 it
+would instead be a visible-by-default runtime warning.  
+In his <a href="/Articles/657444/">announcement</a> of the PEP, he said: "<span>That approach would provide a definite security improvement over the
+status quo, while restricting the compatibility break to a performance
+regression in applications that use the module level API without
+calling seed(), getstate() or setstate().</span>"
+
+</p><h4>Van Rossum's reaction</h4>
+
+<p>
+But it turns out that Van Rossum <a href="/Articles/657447/">is not
+particularly happy</a> with that PEP as the end result of the discussion.
+He stopped following the "<span>mega-threads</span>", but doesn't see much
+value in changing things:
+</p><div class="BigQuote"><p>
+I don’t want to change this API and I don’t want to introduce deprecation
+warnings – the API is fine, and the warnings will be as ineffective as the
+warnings in the documentation.
+</p><p>
+I am fine with adding more secure ways of generating random numbers. But we
+already have random.SystemRandom(), so there doesn’t seem to be a hurry?
+</p></div>
+
+<p>
+Though Stufft <a href="/Articles/657450/">reiterated</a> his belief that
+the existing module "<span>guides you towards using an 
+insecure source of random numbers rather than a secure one</span>",
+Van Rossum was <a href="/Articles/657451/">not impressed</a> with that
+argument:
+</p><p class="BigQuote">
+That feels condescending, as does the assumption that (almost) every naive
+use of randomness is somehow a security vulnerability. The concept of
+secure vs. insecure sources of randomness isn't *that* hard to grasp.
+</p>
+
+<p>
+The discussion is continuing at the time of this writing, but there is a
+sense that adding access to a fast user-space PRNG, perhaps based
+on <a href="https://en.wikipedia.org/wiki/Salsa20#ChaCha_variant">ChaCha20</a>
+(like <tt>arc4random()</tt>), may be in the offing.  A change in the
+default would leave some
+users and programs behind eventually, but it would seem that most believe users who
+require deterministic  
+random numbers make up a small minority.  Van Rossum, though, seems
+unconvinced that there is much urgency for a solution. He <a href="/Articles/657474/">suggested</a> adding
+the new method for 3.6, but waiting "<span>a few releases</span>" to decide
+if any change to the default was warranted. "<span>Security isn't served
+well by panicky over-reaction</span>", he said.
+
+</p><p>
+There is plenty of time left
+in the 3.6 development schedule, so perhaps other proposals and
+ideas will 
+eventually win the day.  But with Van Rossum firmly opposed to the changes
+that have been proposed so far, a big change seems unlikely for 3.6.  Only
+time will tell.
+</p><hr align="left"/><p>
+           (</p><a href="https://lwn.net/login?target=/Articles/657269/">Log in</a><p> to post comments)
+           </p><p>
+           
+</p></div> 
+</div></body></html>

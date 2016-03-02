@@ -1,0 +1,227 @@
+<html><body><div><div class="entry-content">
+		<p>Last weekend I was inspired by a great blog post from Matthew Earl, where he showed <a href="http://matthewearl.github.io/2015/07/28/switching-eds-with-python/">how to do face swapping in Python</a>. It immediately got me intrigued, and I ended up quickly using it to make this video:<br/>
+</p><center>
+<p><iframe src="https://www.youtube.com/embed/-nFq19tfraU?feature=oembed" frameborder="0" allowfullscreen="">VIDEO</iframe></p>
+<p/></center><p>
+Adopting his code to make it automatically output video was a trivial change, and hardly worthy of a blog post, but I think it’s worthwhile to take a step back, and go through the thought process for someone who’d like to do the same thing, but might not know where to start with something like this.
+</p><p>So here it is, the mostly newbie guide to automatically swapping faces in video.</p>
+<p>If you look and read Matthew’s blog post, you’ll see his code takes in two images, a source face, and a secondary face to be merged with. It outputs a third image, called output.jpg, that contains the magically shifted and merged image.</p>
+<p>Now, where do we begin?</p>
+<p>A lot of people ask me about adopting code, or what processes look like, so I figured I’d walk through the mostly hidden creative process of adapting someone else’s code. In this case, the very first problem is getting the libraries installed, before you can get the code to run.</p>
+<p>I work mostly in Mac OS X, so all instructions that follow will assume that you’re running the same.</p>
+<p/><center><strong>Getting dlib and its Python Bindings Installed</strong></center>
+<p>First things first, we need to download and build the library that Matthew’s code runs on. In this case, it’s dlib, and I’m going to assume you already have python installed.</p>
+
+<div class="wp_syntax"><table><tr><td class="code"><pre class="bash"><span>wget</span> http:<span>//</span>dlib.net<span>/</span>files<span>/</span>dlib-<span>18.16</span>.tar.bz2   <span># Download dlib from the site</span>
+<span>bunzip2</span> dlib-<span>18.16</span>.tar.bz2                      <span># Bunzip into directory</span>
+<span>cd</span> dlib-<span>18.16</span><span>/</span>examples
+<span>mkdir</span> build                                     <span># Create cmake build directory</span>
+<span>cd</span> build
+cmake ..
+cmake <span>--build</span> . <span>--config</span> Release                <span># Make the release build</span>
+<span>cd</span> ..<span>/</span>python_examples
+<span>make</span>                                            <span># Make the Python library</span></pre></td></tr></table></div>
+
+<p>At the end of this, you should now have a file called dlib.so in your python_examples directory. Copy this into your PYTHONPATH. </p>
+<p>If you don’t know what your PYTHONPATH is set to:</p>
+
+<div class="wp_syntax"><table><tr><td class="code"><pre class="bash">$ <span>echo</span> <span>$PYTHONPATH</span>
+<span>/</span>Users<span>/</span>kirkkaiser<span>/</span>caffe<span>/</span>python:<span>/</span>Users<span>/</span>kirkkaiser<span>/</span>pythonlibs:</pre></td></tr></table></div>
+
+<p>You will certainly have a different output from me. In my case, I’ve set both in my .bashrc file. This is just a text file in my home folder. If I open it up and look at it, this is what’s in it:</p>
+
+<div class="wp_syntax"><table><tr><td class="code"><pre class="bash"><span>export</span> <span>PYTHONPATH</span>=<span>/</span>Users<span>/</span>kirkkaiser<span>/</span>caffe<span>/</span>python:<span>/</span>Users<span>/</span>kirkkaiser<span>/</span>pythonlibs:<span>$PYTHONPATH</span></pre></td></tr></table></div>
+
+<p>This tells Python where to look for libraries, in addition to the system directories. In my case, I copied over dlib.so to my pythonlibs directory. Once you’ve created (or modified) this file, be sure to run it using the following:</p>
+
+
+
+<p/><center><strong>Getting the Code Running</strong></center>
+<p>Finally, we can check out the code from Github. In my case, I did the following:</p>
+
+<div class="wp_syntax"><table><tr><td class="code"><pre class="bash"><span>git clone</span> https:<span>//</span>github.com<span>/</span>matthewearl<span>/</span>faceswap
+<span>cd</span> faceswap
+emacs faceswap.py</pre></td></tr></table></div>
+
+<p>It’s always a good idea to view source code before you run it, to at least try and understand what’s going on before running something. I want to say I did this too, but I’m not sure that I can. In the very first comments of Matthew’s code, he lets it be known that we’re going to need to get a file that is a shape predictor in order to get his code to work:</p>
+
+<div class="wp_syntax"><table><tr><td class="code"><pre class="bash"><span>wget</span> http:<span>//</span>sourceforge.net<span>/</span>projects<span>/</span>dclib<span>/</span>files<span>/</span>dlib<span>/</span>v18.10<span>/</span>shape_predictor_68_face_landmarks.dat.bz2
+<span>bunzip2</span> shape_predictor_68_face_landmarks.dat.bz2</pre></td></tr></table></div>
+
+<p>Finally, we need two images with faces in them. One thing you’ll learn quickly when dealing with facial recognition systems is that they never seem to work with what you first try. In my case, I needed to go through a few images before I found two that worked.</p>
+<p/><center><strong>Understanding What’s Happening</strong></center>
+<p>Once you’ve gotten a piece of code running, it’s now a great time to take a step back, and see how it’s running.</p>
+<p>In the case of our faceswap code, it mostly happens at the bottom our file, here:</p>
+
+<div class="wp_syntax"><table><tr><td class="code"><pre class="python"><span># loads and reads the images, and looks for a single face, throws an</span>
+<span># error if there's more than one or none. </span>
+<span># it returns the loaded image, and a set of landmarks of the one face it's found</span>
+ 
+im1<span>,</span> landmarks1 <span>=</span> read_im_and_landmarks<span>(</span><span>sys</span>.<span>argv</span><span>[</span><span>1</span><span>]</span><span>)</span>     <span># sys.argv[1] is first image filename</span>
+im2<span>,</span> landmarks2 <span>=</span> read_im_and_landmarks<span>(</span><span>sys</span>.<span>argv</span><span>[</span><span>2</span><span>]</span><span>)</span>     <span># sys.argv[2] is second image filename</span>
+ 
+ 
+<span># builds the transformation matrix to make sure both heads align once copied</span>
+M <span>=</span> transformation_from_points<span>(</span>landmarks1<span>[</span>ALIGN_POINTS<span>]</span><span>,</span>
+			       landmarks2<span>[</span>ALIGN_POINTS<span>]</span><span>)</span>
+ 
+<span># build the mask of the second image</span>
+mask <span>=</span> get_face_mask<span>(</span>im2<span>,</span> landmarks2<span>)</span>
+<span># build the mask of the first image to be copied</span>
+warped_mask <span>=</span> warp_im<span>(</span>mask<span>,</span> M<span>,</span> im1.<span>shape</span><span>)</span>
+combined_mask <span>=</span> numpy.<span>max</span><span>(</span><span>[</span>get_face_mask<span>(</span>im1<span>,</span> landmarks1<span>)</span><span>,</span> warped_mask<span>]</span><span>,</span>
+                          axis<span>=</span><span>0</span><span>)</span>
+<span># and make the mask of the second image to allow the first over top</span>
+warped_im2 <span>=</span> warp_im<span>(</span>im2<span>,</span> M<span>,</span> im1.<span>shape</span><span>)</span>
+warped_corrected_im2 <span>=</span> correct_colours<span>(</span>im1<span>,</span> warped_im2<span>,</span> landmarks1<span>)</span>
+ 
+<span># blend the two images</span>
+output_im <span>=</span> im1 * <span>(</span><span>1.0</span> - combined_mask<span>)</span> + warped_corrected_im2 * combined_mask
+ 
+<span># save it out</span>
+cv2.<span>imwrite</span><span>(</span><span>'output.jpg'</span><span>,</span> output_im<span>)</span></pre></td></tr></table></div>
+
+<p>That’s a lot happening, but it doesn’t seem too confusing. Basically, we build two masks, and then combine the images with two masks.</p>
+<p/><center><strong>Getting Started with Detecting And Swapping Two Faces in One Image</strong></center>
+<p>First off, can we successfully detect two faces in a single image? In my case, I found a photo with two faces in it, both of which seemed perfect for facial recognition (ie, straight on, both people looking directly at camera).</p>
+<p>Running this image through the existing code will obviously run into an error. As the code exists at Github from the post, it expects only 1 face per image. So let’s take another look at the function that reads and returns landmarks:</p>
+
+<div class="wp_syntax"><table><tr><td class="code"><pre class="python"> 
+<span># this is the function to get our landmarks</span>
+<span>def</span> get_landmarks<span>(</span>im<span>)</span>:
+    rects <span>=</span> detector<span>(</span>im<span>,</span> <span>1</span><span>)</span>
+ 
+    <span>if</span> <span>len</span><span>(</span>rects<span>)</span> <span>&gt;</span> <span>1</span>: <span># if there's more than one face detected</span>
+        <span>raise</span> TooManyFaces <span># freak out</span>
+    <span>if</span> <span>len</span><span>(</span>rects<span>)</span> <span>==</span> <span>0</span>:
+        <span>raise</span> NoFaces
+ 
+    <span>return</span> numpy.<span>matrix</span><span>(</span><span>[</span><span>[</span>p.<span>x</span><span>,</span> p.<span>y</span><span>]</span> <span>for</span> p <span>in</span> predictor<span>(</span>im<span>,</span> rects<span>[</span><span>0</span><span>]</span><span>)</span>.<span>parts</span><span>(</span><span>)</span><span>]</span><span>)</span> <span># return the matrix of x y coordinates of landmarks </span>
+ 
+<span>def</span> read_im_and_landmarks<span>(</span>fname<span>)</span>:
+    im <span>=</span> cv2.<span>imread</span><span>(</span>fname<span>,</span> cv2.<span>IMREAD_COLOR</span><span>)</span>  <span># load the image </span>
+    im <span>=</span> cv2.<span>resize</span><span>(</span>im<span>,</span> <span>(</span>im.<span>shape</span><span>[</span><span>1</span><span>]</span> * SCALE_FACTOR<span>,</span> <span># resize, scale factor is set to 1 by default, so nothing happens</span>
+                         im.<span>shape</span><span>[</span><span>0</span><span>]</span> * SCALE_FACTOR<span>)</span><span>)</span>
+    s <span>=</span> get_landmarks<span>(</span>im<span>)</span> <span># return landmarks from above</span>
+ 
+    <span>return</span> im<span>,</span> s</pre></td></tr></table></div>
+
+<p>Now, to begin, we don’t really need the read_im_and_landmarks function anymore. We’re just loading up one image, so we might as well get rid of it. The same goes for the get_landmarks function, because that only calls our detector.</p>
+<p>Instead of the calls to these functions, let’s just load the image passed to the command line:</p>
+
+<div class="wp_syntax"><table><tr><td class="code"><pre class="python">im <span>=</span> cv2.<span>imread</span><span>(</span><span>sys</span>.<span>argv</span><span>[</span><span>1</span><span>]</span><span>,</span> cv2.<span>IMREAD_COLOR</span><span>)</span>
+im <span>=</span> cv2.<span>resize</span><span>(</span>im<span>,</span> <span>(</span>im.<span>shape</span><span>[</span><span>1</span><span>]</span> * SCALE_FACTOR<span>,</span>
+                     im.<span>shape</span><span>[</span><span>0</span><span>]</span> * SCALE_FACTOR<span>)</span><span>)</span>
+rects <span>=</span> detector<span>(</span>im<span>,</span> <span>1</span><span>)</span>
+<span>if</span> <span>len</span><span>(</span>rects<span>)</span> <span>&lt;</span> <span>2</span>:
+  <span>print</span> <span>'Error, less than two faces detected'</span>
+<span>print</span> <span>len</span><span>(</span>rects<span>)</span></pre></td></tr></table></div>
+
+<p>If you run the above, and you get 2, then it’s successful. Now, let’s get our faces to swap with each other in the most generic way possible:</p>
+
+<div class="wp_syntax"><table><tr><td class="code"><pre class="python">im1<span>,</span> landmarks1 <span>=</span> <span>(</span>im<span>,</span> numpy.<span>matrix</span><span>(</span><span>[</span><span>[</span>p.<span>x</span><span>,</span> p.<span>y</span><span>]</span> <span>for</span> p <span>in</span> predictor<span>(</span>im<span>,</span> rects<span>[</span><span>0</span><span>]</span><span>)</span>.<span>parts</span><span>(</span><span>)</span><span>]</span><span>)</span><span>)</span> <span># first detected face</span>
+im2<span>,</span> landmarks2 <span>=</span> <span>(</span>im<span>,</span> numpy.<span>matrix</span><span>(</span><span>[</span><span>[</span>p.<span>x</span><span>,</span> p.<span>y</span><span>]</span> <span>for</span> p <span>in</span> predictor<span>(</span>im<span>,</span> rects<span>[</span><span>1</span><span>]</span><span>)</span>.<span>parts</span><span>(</span><span>)</span><span>]</span><span>)</span><span>)</span> <span># second detected face</span>
+ 
+M <span>=</span> transformation_from_points<span>(</span>landmarks1<span>[</span>ALIGN_POINTS<span>]</span><span>,</span> <span># First transformation</span>
+                               landmarks2<span>[</span>ALIGN_POINTS<span>]</span><span>)</span>
+ 
+M1 <span>=</span> transformation_from_points<span>(</span>landmarks2<span>[</span>ALIGN_POINTS<span>]</span><span>,</span> <span># Second transformation</span>
+                               landmarks1<span>[</span>ALIGN_POINTS<span>]</span><span>)</span>
+ 
+mask <span>=</span> get_face_mask<span>(</span>im2<span>,</span> landmarks2<span>)</span> <span># First mask</span>
+mask1 <span>=</span> get_face_mask<span>(</span>im1<span>,</span> landmarks1<span>)</span> <span># Second mask</span>
+ 
+warped_mask <span>=</span> warp_im<span>(</span>mask<span>,</span> M<span>,</span> im1.<span>shape</span><span>)</span> <span># First warp</span>
+warped_mask1 <span>=</span> warp_im<span>(</span>mask1<span>,</span> M1<span>,</span> im2.<span>shape</span><span>)</span> <span># Second warp</span>
+ 
+combined_mask <span>=</span> numpy.<span>max</span><span>(</span><span>[</span>get_face_mask<span>(</span>im1<span>,</span> landmarks1<span>)</span><span>,</span> warped_mask<span>]</span><span>,</span>
+                          axis<span>=</span><span>0</span><span>)</span>
+combined_mask1 <span>=</span> numpy.<span>max</span><span>(</span><span>[</span>get_face_mask<span>(</span>im2<span>,</span> landmarks2<span>)</span><span>,</span> warped_mask1<span>]</span><span>,</span>
+                          axis<span>=</span><span>0</span><span>)</span>
+ 
+warped_corrected_im2 <span>=</span> correct_colours<span>(</span>im1<span>,</span> warped_im2<span>,</span> landmarks1<span>)</span>
+warped_corrected_im3 <span>=</span> correct_colours<span>(</span>im2<span>,</span> warped_im3<span>,</span> landmarks2<span>)</span>
+ 
+output_im <span>=</span> im1 * <span>(</span><span>1.0</span> - combined_mask<span>)</span> + warped_corrected_im2 * combined_mask <span># apply first mask</span>
+output_im <span>=</span> output_im * <span>(</span><span>1.0</span> - combined_mask1<span>)</span> + warped_corrected_im3 * combined_mask1 <span># apply second face mask</span>
+ 
+cv2.<span>imwrite</span><span>(</span><span>'output.jpg'</span><span>,</span> output_im<span>)</span></pre></td></tr></table></div>
+
+<p>This is super inefficient, but it doesn’t really matter. It’s creating four layers to move our two faces, and combining all of them. But it works. And we’ve successfully got faces being swapped in one image.</p>
+<p/><center><strong>Adapting Our Script to Video</strong></center>
+<p>There are two great command line tools for working with video. The first is youtube-dl, and the second is ffmpeg. To install either of them, install homebrew, and then on the command line:</p>
+
+<div class="wp_syntax"><table><tr><td class="code"><pre class="bash">brew <span>install</span> <span>ffmpeg</span>
+brew <span>install</span> youtube-dl</pre></td></tr></table></div>
+
+<p>FFmpeg lets us break videos down into images, rescale them, modify them, and then put them back together. Youtube-dl lets us use the entire internet’s worth of videos to download and remix. In my case, I already had a video I’d shot, but if you don’t, pick one from Youtube, and use youtube-dl to download an mp4 of it.</p>
+
+<div class="wp_syntax"><table><tr><td class="code"><pre class="bash">youtube-dl https:<span>//</span>www.youtube.com<span>/</span><span>watch</span>?<span>v</span>=dQw4w9WgXcQ</pre></td></tr></table></div>
+
+<p>Now, I have a mostly standardized way I like to work with video. In general, I’ll extract all frames of a video using ffmpeg, create an output directory, and run a glob of every image in the directory, and process it to an output directory.</p>
+<p>From the command line, let’s extract our video image frames and then create our output directory:</p>
+
+<div class="wp_syntax"><table><tr><td class="code"><pre class="bash"><span>ffmpeg</span> <span>-i</span> yourmovie.mp4 output<span>%</span>05d.jpg
+<span>mkdir</span> output</pre></td></tr></table></div>
+
+<p>Alright. Our working directory should now be filled with images, each frame of our video now converted to images. Let’s now process all of those images one by on in Python using glob.</p>
+
+<div class="wp_syntax"><table><tr><td class="code"><pre class="python"><span>import</span> <span>glob</span>
+ 
+<span>for</span> filename <span>in</span> <span>glob</span>.<span>glob</span><span>(</span><span>'*.jpg'</span><span>)</span>:
+    im <span>=</span> cv2.<span>imread</span><span>(</span>filename<span>,</span> cv2.<span>IMREAD_COLOR</span><span>)</span>                 <span># open the current frame</span>
+    im <span>=</span> cv2.<span>resize</span><span>(</span>im<span>,</span> <span>(</span>im.<span>shape</span><span>[</span><span>1</span><span>]</span> * SCALE_FACTOR<span>,</span>
+                         im.<span>shape</span><span>[</span><span>0</span><span>]</span> * SCALE_FACTOR<span>)</span><span>)</span>
+    rects <span>=</span> detector<span>(</span>im<span>,</span> <span>1</span><span>)</span>
+    <span>if</span> <span>len</span><span>(</span>rects<span>)</span> <span>&lt;</span> <span>2</span>:
+        <span>print</span> filename + <span>" is missing two faces. skipping."</span>    <span># copy and skip a frame if it's missing two faces</span>
+        <span>shutil</span>.<span>copyfile</span><span>(</span>filename<span>,</span> <span>'output/'</span> + filename<span>)</span>
+        <span>continue</span>
+    <span>if</span> rects<span>[</span><span>0</span><span>]</span>.<span>left</span><span>(</span><span>)</span> <span>&lt;</span> rects<span>[</span><span>1</span><span>]</span>.<span>left</span><span>(</span><span>)</span>:                     <span># here's a tricky bit. make sure and keep the faces in the same place</span>
+        im1<span>,</span> landmarks1 <span>=</span> <span>(</span>im<span>,</span> numpy.<span>matrix</span><span>(</span><span>[</span><span>[</span>p.<span>x</span><span>,</span> p.<span>y</span><span>]</span> <span>for</span> p <span>in</span> predictor<span>(</span>im<span>,</span> rects<span>[</span><span>0</span><span>]</span><span>)</span>.<span>parts</span><span>(</span><span>)</span><span>]</span><span>)</span><span>)</span>
+        im2<span>,</span> landmarks2 <span>=</span> <span>(</span>im<span>,</span> numpy.<span>matrix</span><span>(</span><span>[</span><span>[</span>p.<span>x</span><span>,</span> p.<span>y</span><span>]</span> <span>for</span> p <span>in</span> predictor<span>(</span>im<span>,</span> rects<span>[</span><span>1</span><span>]</span><span>)</span>.<span>parts</span><span>(</span><span>)</span><span>]</span><span>)</span><span>)</span>
+    <span>else</span>:
+        im1<span>,</span> landmarks1 <span>=</span> <span>(</span>im<span>,</span> numpy.<span>matrix</span><span>(</span><span>[</span><span>[</span>p.<span>x</span><span>,</span> p.<span>y</span><span>]</span> <span>for</span> p <span>in</span> predictor<span>(</span>im<span>,</span> rects<span>[</span><span>1</span><span>]</span><span>)</span>.<span>parts</span><span>(</span><span>)</span><span>]</span><span>)</span><span>)</span>
+        im2<span>,</span> landmarks2 <span>=</span> <span>(</span>im<span>,</span> numpy.<span>matrix</span><span>(</span><span>[</span><span>[</span>p.<span>x</span><span>,</span> p.<span>y</span><span>]</span> <span>for</span> p <span>in</span> predictor<span>(</span>im<span>,</span> rects<span>[</span><span>0</span><span>]</span><span>)</span>.<span>parts</span><span>(</span><span>)</span><span>]</span><span>)</span><span>)</span>
+ 
+    M <span>=</span> transformation_from_points<span>(</span>landmarks1<span>[</span>ALIGN_POINTS<span>]</span><span>,</span>
+                               landmarks2<span>[</span>ALIGN_POINTS<span>]</span><span>)</span>
+ 
+    M1 <span>=</span> transformation_from_points<span>(</span>landmarks2<span>[</span>ALIGN_POINTS<span>]</span><span>,</span>
+                               landmarks1<span>[</span>ALIGN_POINTS<span>]</span><span>)</span>
+ 
+    mask <span>=</span> get_face_mask<span>(</span>im2<span>,</span> landmarks2<span>)</span>
+    mask1 <span>=</span> get_face_mask<span>(</span>im1<span>,</span> landmarks1<span>)</span>
+ 
+    warped_mask <span>=</span> warp_im<span>(</span>mask<span>,</span> M<span>,</span> im1.<span>shape</span><span>)</span>
+    warped_mask1 <span>=</span> warp_im<span>(</span>mask1<span>,</span> M1<span>,</span> im2.<span>shape</span><span>)</span>
+ 
+    combined_mask <span>=</span> numpy.<span>max</span><span>(</span><span>[</span>get_face_mask<span>(</span>im1<span>,</span> landmarks1<span>)</span><span>,</span> warped_mask<span>]</span><span>,</span>
+                          axis<span>=</span><span>0</span><span>)</span>
+    combined_mask1 <span>=</span> numpy.<span>max</span><span>(</span><span>[</span>get_face_mask<span>(</span>im2<span>,</span> landmarks2<span>)</span><span>,</span> warped_mask1<span>]</span><span>,</span>
+                          axis<span>=</span><span>0</span><span>)</span>
+ 
+    warped_im2 <span>=</span> warp_im<span>(</span>im2<span>,</span> M<span>,</span> im1.<span>shape</span><span>)</span>
+    warped_im3 <span>=</span> warp_im<span>(</span>im1<span>,</span> M1<span>,</span> im2.<span>shape</span><span>)</span>
+ 
+    warped_corrected_im2 <span>=</span> correct_colours<span>(</span>im1<span>,</span> warped_im2<span>,</span> landmarks1<span>)</span>
+    warped_corrected_im3 <span>=</span> correct_colours<span>(</span>im2<span>,</span> warped_im3<span>,</span> landmarks2<span>)</span>
+ 
+    output_im <span>=</span> im1 * <span>(</span><span>1.0</span> - combined_mask<span>)</span> + warped_corrected_im2 * combined_mask
+    output_im <span>=</span> output_im * <span>(</span><span>1.0</span> - combined_mask1<span>)</span> + warped_corrected_im3 * combined_mask1
+ 
+    cv2.<span>imwrite</span><span>(</span><span>'output/'</span> + filename<span>,</span> output_im<span>)</span> <span># write same filename to output directory</span>
+    <span>print</span> filename + <span>" finished, adding."</span></pre></td></tr></table></div>
+
+<p>Finally, we can cd into our output directory, and get back out our finished video:</p>
+
+<div class="wp_syntax"><table><tr><td class="code"><pre class="bash"><span>cd</span> output
+<span>ffmpeg</span> <span>-i</span> output<span>%</span>05d.jpg out.mp4
+open out.mp4</pre></td></tr></table></div>
+
+<p/><center><strong>Get The Code</strong></center>
+<p>As always, the code is at <a href="https://github.com/burningion/faceswap">Github</a>.
+</p>
+			</div>
+
+	</div></body></html>

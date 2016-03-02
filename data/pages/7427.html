@@ -1,0 +1,520 @@
+<html><body><div><div class="content html_format">
+      <b>Приветствую всех хаброжителей!</b>
+<p>
+Конечно, зализанная тема про рассылку смс сообщений, но как говориться: «много — не мало». Как-то так получилось, что именно она меня постоянно преследует: то одни, то другие добрые люди попросят принять участие (советом, например) в реализации бюджетной рассылки сообщений. И поэтому чтобы не пропадать накопленному добру, оставлю здесь, а вдруг кому-то пригодится…
+</p><habracut/><p>
+Итак-с… Опускаем все варианты реализации на базе обычного компа и оси семейства NT. А перейдем сразу к «автономным» системам. 
+</p><p>
+Чем может похвастаться arduino в этом направлении? Отвечу сразу, ОНО работает, но есть нюансы, о которых напишу ниже. Вообщем, имеем китайский вариант arduino 2560 (было перепробовано практически вся линейка) и два дополнительных модуля — сеть W5100 (наиболее стабильный вариант) и GSM SIM 900. Выглядит это все дело как-то так.
+
+</p><img src="https://habrastorage.org/getpro/habr/post_images/2c8/ead/201/2c8ead2011b102984e5b8d84ba22f682.png" alt="image"/>
+<p>
+Задача была следующая:</p><p>
+ — устройство должно уметь общаться по http</p><p>
+ — отправлять сообщение</p><p>
+ — выдавать результат в формате json
+</p><p>
+Гугл делится всей необходимой информацией, и на выходе получаем следующий код:
+
+</p><div class="spoiler"><b class="spoiler_title">Скетч</b><div class="spoiler_text"><a name="habracut"/><pre><code>#include &lt;SPI.h&gt;
+#include &lt;Ethernet.h&gt;
+
+#include &lt;String.h&gt;
+
+#include "SIM900.h"
+#include &lt;SoftwareSerial.h&gt;
+#include "sms.h"
+
+#include &lt;LiquidCrystal_I2C.h&gt;
+#include &lt;Wire.h&gt;
+
+byte mac[] = { 0x90, 0xA2, 0x00, 0x00, 0x00, 0x01 };    
+IPAddress ip(192,168,34,139);                              
+
+EthernetServer server(80);
+
+char char_in = 0;    
+String HTTP_req;    
+
+SMSGSM sms;
+
+boolean started=false;
+bool power = false;
+
+LiquidCrystal_I2C lcd(0x27, 2, 1, 0, 4, 5, 6, 7, 3, POSITIVE);
+
+void setup() {
+
+  Serial.begin(9600);       
+  
+  lcd.begin(16,2);
+  lcd.setCursor(0,0);
+  lcd.print("INIT GSM...");
+  lcd.setCursor(0,1);
+  lcd.print("WAIT!!!");
+  
+  //powerUp();
+  gsm.forceON();
+  
+  if (gsm.begin(4800)) {
+    Serial.println("\nstatus=READY");
+    lcd.clear();
+    lcd.setCursor(0,0);
+    lcd.print("READY");    
+    started=true;  
+  }
+  else {
+    Serial.println("\nstatus=IDLE");
+    lcd.clear();
+    lcd.setCursor(0,0);
+    lcd.print("IDLE");
+  }
+  
+  Ethernet.begin(mac, ip); 
+  server.begin();         
+  
+}
+
+void software_reset() {
+  asm volatile ("  jmp 0");  
+} 
+
+void loop() {
+  EthernetClient client = server.available();
+
+  if (client) {
+    while (client.connected()) {
+      if (client.available()) {
+        char_in = client.read();  //
+        HTTP_req += char_in;      
+
+        if (char_in == '\n') {  
+          
+          Serial.println(HTTP_req);
+          
+          if(HTTP_req.indexOf("GET /res") &gt;= 0) {
+            reset_processing(&amp;HTTP_req, &amp;client);
+            break;
+          }
+
+          if(HTTP_req.indexOf("GET /sms") &gt;= 0) {
+            sms_processing(&amp;HTTP_req, &amp;client);
+            break;
+          }    
+
+          if(HTTP_req.indexOf("GET /test") &gt;= 0) {
+            test_processing(&amp;HTTP_req, &amp;client);
+            break;
+          }   
+          else {
+            client_header(&amp;client);  
+            break;
+          }     
+        }
+      }
+    }
+    HTTP_req = "";    
+    client.stop();
+  } 
+  
+  if(power) {
+    delay(1000);
+    software_reset();
+  }
+}
+
+char* string2char(String command) {
+  if(command.length()!=0){
+    char *p = const_cast&lt;char*&gt;(command.c_str());
+    return p;
+  }
+}
+
+void parse_data(String *data) {
+  data-&gt;replace("GET /sms/","");
+  data-&gt;replace("GET /test/", "");
+
+  int lastPost = data-&gt;indexOf("\r");
+  *data = data-&gt;substring(0, lastPost);
+  data-&gt;replace(" HTTP/1.1", "");
+  data-&gt;replace(" HTTP/1.0", "");
+  data-&gt;trim();
+}
+
+// explode
+ String request_value(String *data, char separator, int index) {
+  int found = 0;
+  int strIndex[] = {0, -1};
+  int maxIndex = data-&gt;length()-1;
+
+  for(int i=0; i&lt;=maxIndex &amp;&amp; found&lt;=index; i++) {
+    if(data-&gt;charAt(i)==separator || i==maxIndex) {
+      found++;
+      strIndex[0] = strIndex[1]+1;
+      strIndex[1] = (i == maxIndex) ? i+1 : i;
+    }
+  }
+  return found&gt;index ? data-&gt;substring(strIndex[0], strIndex[1]) : "";
+}
+
+bool gsm_status() {
+  bool result = false;
+  switch(gsm.CheckRegistration()) {
+    case 1:
+      result = true;
+      break;
+    default:
+      break;
+  }
+  return result;
+}
+
+bool gsm_send(char *number_str, char *message_str) {
+  bool result = false;
+  switch(sms.SendSMS(number_str, message_str)) {
+    case 1:
+      result = true;
+      break;
+    default:
+      break;
+  } 
+  return result; 
+}
+
+void reset_processing(String *data, EthernetClient *cl) {
+  client_header(cl);    
+  cl-&gt;println("\{\"error\": 0, \"message\": \"restarting...\"\}");  
+
+  power = true;   
+}
+
+void test_processing(String *data, EthernetClient *cl) {
+  parse_data(data);
+  
+  if(started) {
+    client_header(cl);
+    cl-&gt;println("\{\"id\":" + request_value(data, '/',0) + ",\"error\":0" + ",\"message\":\"test success\"\}");   
+  }
+}
+
+void sms_processing(String *data, EthernetClient *cl) {
+  parse_data(data);
+
+  if(started) {
+    if (gsm_send(string2char(request_value(data, '/', 1)), string2char(request_value(data, '/', 2)))) {
+      client_header(cl);
+      cl-&gt;println("\{\"id\":" + request_value(data, '/',0) + ",\"error\":0" + ",\"message\":\"success\"\}");
+    }
+    else {
+      if(!gsm_status()) {
+        client_header(cl);
+        cl-&gt;println("\{\"id\":" + request_value(data, '/',0) + ",\"error\":2" + ",\"message\":\"gsm not registered\"\}");   
+        power = true;
+      }
+      else {
+        client_header(cl);
+        cl-&gt;println("\{\"id\":" + request_value(data, '/',0) + ",\"error\":1" + ",\"message\":\"fail\"\}");     
+      }
+    }
+  }
+}
+
+void client_header(EthernetClient *cl) {
+  cl-&gt;println("HTTP/1.1 200 OK");
+  cl-&gt;println("Content-Type: text/plain");
+  cl-&gt;println("Connection: close");  
+  cl-&gt;println();
+}
+</code></pre>
+</div></div>
+<p>
+Заливаем, упаковываем в коробочку. Вроде бы выглядит красиво, отдаем добрым людям.
+
+</p><img src="https://habrastorage.org/getpro/habr/post_images/db4/c7b/f30/db4c7bf3018aa18445f5d8f46f7b8885.png" alt="image"/>
+<p>
+Что получилось в коде:</p><p>
+ — подняли простенький http</p><p>
+ — обрабатываем простые GET</p><p>
+ — отправляем полученные данные через SERIAL на SIM 900</p><p>
+ — отвечаем с помощью «JSON»
+</p><p>
+И вот тут есть один большой нюанс, перед умными людьми стоит задача реализовать какой-нибудь сервис, чтобы научиться отправлять через это устройство сразу пачку сообщений, но это уже не мои проблемы. В производстве устройство себя повело удовлетворительно. 
+</p><p>
+Наращиваем мощности… Задача полностью аналогичная: повторение — мать учения. Умные люди уже создали классный сервис для работы с предыдущим устройством: очередь, история и прочие полезности. 
+</p><p>
+Итак, на руках имеем raspberry pi, такой же модуль SIM 900 (был взят только ради экспериментов, потому что линукс прекрасно работает с 3g-модемами через USB) и сам 3g-modem huawei e-линейки
+
+</p><img src="https://habrastorage.org/getpro/habr/post_images/abe/439/99d/abe43999db553041d1ada411cc3edf09.jpg" alt="image"/>
+<p>
+Снова задаем гуглу нужные вопросы, читаем результаты, определяемся с языком реализации — python — быстро, просто, надежно…
+
+</p><div class="spoiler"><b class="spoiler_title">скрипт</b><div class="spoiler_text"><pre><code class="python">import serial, time
+from flask import Flask
+import RPi.GPIO as GPIO
+
+app = Flask(__name__)
+
+
+def sim900_on():
+    gsm = serial.Serial('/dev/ttyAMA0', 115200, timeout=1)
+    gsm.write('ATZ\r')
+    time.sleep(0.05)
+
+    abort_after = 5
+    start = time.time()
+    output = ""
+
+    while True:
+        output = output + gsm.readline()
+        if 'OK' in output:
+            gsm.close()
+            return True
+        delta = time.time() - start
+        if delta &gt;= abort_after:
+            gsm.close()
+            break
+
+
+    #GPIO.setwarnings(False)
+    GPIO.setmode(GPIO.BOARD)                
+    GPIO.setup(11, GPIO.OUT)                
+    GPIO.output(11, True)                 
+    time.sleep(1.2)
+    GPIO.output(11, False) 
+    return False
+
+
+def gsm_send(id, port, phone, msg):
+
+    delay = False
+    if 'AMA' in port:
+        delay = True
+
+
+    msg = msg.replace('\\n', '\n')
+    msg = msg.replace('\s', ' ')
+
+    gsm = serial.Serial('/dev/tty%s' % port, 115200, timeout=1)
+    gsm.write('ATZ\r')
+
+    if delay:
+        time.sleep(0.05)
+
+    gsm.write('AT+CMGF=1\r\n')
+
+    if delay:
+        time.sleep(0.05)
+
+    gsm.write('AT+CMGS="%s"\r\n' % phone)
+
+    if delay:
+        time.sleep(0.05)
+
+    gsm.write(msg + '\r\n')
+
+    if delay:
+        time.sleep(0.05)
+
+    gsm.write(chr(26))
+
+    if delay:
+        time.sleep(0.05)
+
+    abort_after = 15
+    start = time.time()
+    output = ""
+
+    while True:
+
+        output = output + gsm.readline()
+        #print output
+        if '+CMGS:' in output:
+            print output
+            gsm.close()
+            return '{"id":%s,"error":0,"message":"success", "raw":"%s"}' % (id, output)
+        if 'ERROR' in output:
+            print output
+            gsm.close()
+            return '{"id":%s,"error":0,"message":"fail", "raw":"%s"}' % (id, output)
+
+        delta = time.time() - start
+        if delta &gt;= abort_after:
+            gsm.close()
+            return '{"id":%s,"error":1,"message":"timeout", "raw":"%s"}' % (id, output)
+
+@app.route('/sms/&lt;id&gt;/&lt;port&gt;/&lt;phone&gt;/&lt;msg&gt;',methods=['GET'])
+def get_data(id, port, phone, msg):
+    return gsm_send(id, port, phone, msg)
+
+@app.route('/',methods=['GET'])
+def index():
+    return "Hello World"
+
+if __name__ == "__main__":
+    sim900_on()
+    app.run(host="0.0.0.0", port=8080, threaded=True)</code></pre>
+</div></div>
+<p>
+Скармливаем питону, запускаем с помощью «start-stop-daemon», придаем дружелюбный вид, отдаем добрым людям…
+
+</p><img src="https://habrastorage.org/getpro/habr/post_images/8d5/45b/678/8d545b678a834c8d7b672338ef4b501c.png" alt="image"/>
+<p>
+Получилось практически один в один, только за счет шины USB систему можно расширять. В производстве претензий вообще не оказалось — все были ОЧЕНЬ довольны. 
+</p><p>
+Устройство получилось настолько удачным, что появилось желание использовать это дело в «личных» интересах, а именно внедрить в систему мониторинга данный аппарат. Но надо было избавиться от главного нюанса — отсутствие очереди сообщений. Принцип реализации я взял у одного известного вендора (он предлагал программно-аппаратный комлекс, часть которого поднимала smtp-сервер для обработки уведомлений и отправки ее на gsm-устройство). Такая схема встраивается в любую систему мониторинга.
+</p><p>
+Итак, нужные знания уже давно получены, приступаем к реализации.
+
+</p><div class="spoiler"><b class="spoiler_title">SMTP-демон</b><div class="spoiler_text"><pre><code class="python">#!/usr/bin/env python2.7
+# -*- coding: utf-8 -*-
+
+import smtpd
+import asyncore
+import email
+import MySQLdb
+import subprocess
+
+def InsertNewMessage(phone, msg):
+    conn = MySQLdb.connect(host="localhost", # your host, usually localhost
+                     user="sms", # your username
+                      passwd="sms", # your password
+                      db="sms") # name of the data base
+    c = conn.cursor()
+    c.execute('insert into message_queue (phone, message) values ("%s", "%s")' % (phone, msg))
+    conn.commit()
+    conn.close()
+
+class CustomSMTPServer(smtpd.SMTPServer):
+
+    def process_message(self, peer, mailfrom, rcpttos, data):
+
+        msg = email.message_from_string(data)
+        phone = rcpttos[0].split('@',1)[0]
+        addr = mailfrom
+
+        for part in msg.walk():
+            if part.get_content_type() == "text/plain": # ignore attachments/html
+                body = part.get_payload(decode=True)
+
+
+        InsertNewMessage(phone, str(body))
+
+subprocess.Popen("/home/pi/daemons/sms/pygsmd.py", shell=True)
+
+server = CustomSMTPServer(('0.0.0.0', 25), None)
+
+asyncore.loop()</code></pre>
+</div></div>
+<p>
+Демонизация происходит, как я уже писал выше, с помощью «start-stop-daemon», а сам smtp скрипт запускает подпроцесс для работы с базой сообщений.
+
+</p><div class="spoiler"><b class="spoiler_title">gsm скрипт</b><div class="spoiler_text"><pre><code class="python">#!/usr/bin/env python2.7
+# -*- coding: utf-8 -*-
+
+import serial
+import time
+import MySQLdb
+import commands
+
+
+def gsm_send(port, phone, msg):
+
+    print 'Sending message: %s to: %s' % (msg, phone)
+    gsm = serial.Serial('/dev/tty%s' % port,
+                        460800,
+                        timeout=5,
+                        xonxoff = False,
+                        rtscts = False,
+                        bytesize = serial.EIGHTBITS,
+                        parity = serial.PARITY_NONE,
+                        stopbits = serial.STOPBITS_ONE )
+    gsm.write('ATZ\r\n')
+    time.sleep(0.05)
+    gsm.write('AT+CMGF=1\r\n')
+    time.sleep(0.05)
+    gsm.write('''AT+CMGS="''' + phone + '''"\r''')
+    time.sleep(0.05)
+    gsm.write(msg + '\r\n')
+    time.sleep(0.05)
+    gsm.write(chr(26))
+    time.sleep(0.05)
+
+    abort_after = 15
+    start = time.time()
+    output = ""
+
+
+    while True:
+
+        output = output + gsm.readline()
+        #print output
+        if '+CMGS:' in output:
+            #print output
+            gsm.close()
+            return 0
+        if 'ERROR' in output:
+            #print output
+            gsm.close()
+            return 1
+
+        delta = time.time() - start
+        if delta &gt;= abort_after:
+            gsm.close()
+            return 1
+
+def msg_delete(list):
+    conn = MySQLdb.connect(host="localhost",
+                     user="sms",
+                      passwd="sms",
+                      db="sms")
+    c = conn.cursor()
+    c.execute("delete from  message_queue where id in %s;" % list)
+    conn.commit()
+    conn.close()
+
+def msg_hadle():
+    list = tuple()
+    conn = MySQLdb.connect(host="localhost",
+                     user="sms",
+                      passwd="sms",
+                      db="sms")
+    c = conn.cursor()
+    c.execute("select * from message_queue")
+
+    numrows = int(c.rowcount)
+    if numrows &gt; 0:
+        for row in c.fetchall():
+            result = gsm_send('USB0', ('+' +  row[1]),  row[2])
+            if result == 0:
+                list +=(str(row[0]),)
+
+    conn.close()
+
+    if len(list) == 1:
+        qlist = str(list).replace(',','')
+
+    if len(list) &gt; 1:
+        qlist = str(list)
+
+    if len(list) &gt; 0:
+        msg_delete(qlist)
+
+    del list
+
+while True:
+    try:
+        msg_hadle()
+    except:
+        print "mysql error"
+
+    time.sleep(10)</code></pre>
+</div></div>
+<p>
+В связке с моей системой мониторинга устройство ведет себя адекватно, хотя работает не так давно. Надеюсь, материал будет полезен кому-нибудь.
+
+      
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

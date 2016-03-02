@@ -1,0 +1,107 @@
+<html><body><div><div class="content html_format"><p>
+      PyCharm — самая удобная, на мой взгляд, IDE для Python'a от авторов великолепного PhpStorm. В отличие от средства разработки на PHP, имеет бесплатную версию с несколько урезанным функционалом, в частности без шикарного модуля для запуска и отладки скриптов на удаленном сервере. Тем не менее, стандартных возможностей хватает и для создания настольных windows-приложений, и для скриптинга, и для серверного кода. </p>
+<p>
+Критичной эта особенность стала в тот момент, когда мне захотелось писать скрипты на ПК и получать результат их выполнения на Raspberry Pi без копирования и запуска вручную. Дальше мой рецепт для Windows 8.1 (только запуск).</p><a name="habracut"/>
+<p>
+Да, пойдем по сложному пути и используем в качестве рабочего места машину с запущенным Windows. Провернуть подобное на Linux было бы проще, но я решил заодно посмотреть возможности нового для меня Windows PowerShell вместо bash'a. Удивительно, но он справился. Так же можно использовать cmd.exe и bat-файлы.
+</p><p>
+Итак, железо — Raspberry Pi любой модели с raspbian на борту, доступом к локальной сети и работающим ssh. ПК с окнами подключен в эту же сеть, на нем уже установлены PyCharm и Python (на момент написания, актуальная версия в репозиториях Raspbian — 3.2, лучше установить такую же). 
+
+</p><h3>Коммуникации</h3><p>
+ОС от Microsoft не имеет штатных ssh-клиентов, так что ставим на нее что-то удобное вроде Xshell: </p><a href="http://www.netsarang.com/download/down_xsh.html">www.netsarang.com/download/down_xsh.html</a><p>. Также мне понадобились утилиты для командной строки от putty: pscp и plink: </p><a href="http://www.chiark.greenend.org.uk/~sgtatham/putty/download.html">www.chiark.greenend.org.uk/~sgtatham/putty/download.html</a><p>. Кстати, сама pytty тоже достаточно удобна.
+
+</p><h3>Python на плате</h3><p>
+Я буду выполнять скрипты от имени root. Нельзя так делать.</p><p>
+Включаем клиент (Xshell), подключаемся к raspberry, ставим
+</p><pre><code class="bash">apt-get install python3
+</code></pre>
+<h3>«Поддельный» интерпретатор</h3><p>
+Для начала создадим фейковый интерпретатор. Запускаем Windows PowerShell от имени администратора, создаем папочку.
+
+</p><pre><code class="bash">cd \
+mkdir PythonWrapper
+cd PythonWrapper
+</code></pre><p>
+Чтобы не потерять и не мусорить в PATH, закидываем сюда же pscp и plink:
+
+</p><pre><code class="bash">cp ~\Downloads\plink.exe .
+cp ~\Downloads\pscp.exe .
+</code></pre><p>
+PyCharm принимает в качестве исполняющегося файла интерпретатора только файлы с именем python.exe, так что сделаем такую нехорошую вещь:
+
+</p><pre><code class="bash">PS C:\PythonWrapper&gt; cmd.exe /c mklink python.exe C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+символическая ссылка создана для python.exe &lt;&lt;===&gt;&gt; C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+</code></pre><p>
+Вероятно, придется отключить проверки подписи скриптов:
+
+</p><pre><code class="bash">Set-ExecutionPolicy Unrestricted
+</code></pre><p>
+Создаем файл скрипта для загрузки проекта на сервер, например такой (пусть зовется deploy.ps1):
+
+</p><pre><code class="bash">C:\PythonWrapper\plink -ssh root@192.168.1.230 -pw passw0rd 'rm -rf '$args[1]';mkdir -p '$args[1]
+$dpath = 'root@192.168.1.230:~/' + $args[1] + '/'
+C:\PythonWrapper\pscp -r -scp -pw passw0rd $args[0] $dpath
+</code></pre><p>
+Где 192.168.1.230 — адрес удаленного сервера, root и passw0rd — логин и пароль. На один раз хватит и хардкода.</p><p>
+Эта версия принимает адрес до локальной папки и имя папки, которую требуется создать на сервере, и просто копирует все содержимое из первой во вторую. Для проектов больше сотни килобайт стоит оптимизировать это место.
+</p><p>
+Создаем файл передачи и запуска кода на сервере (пусть python.ps1). В простейшем случае такой:
+
+</p><pre><code class="bash">cat $args[0] | C:\PythonWrapper\plink -ssh root@192.168.1.230 -pw passw0rd 'cd testProject/testProject;python3 -'
+</code></pre><p>
+Где testProject — название будущего проекта.
+
+</p><h3>Настройка IDE</h3><p>
+Сделаем так, чтоб вместо интерпретатора пайтона запускался интерпретатор оболочки.</p><p>
+Создав проект, заходим в настройки File-&gt;Settings или Ctrl-Alt-S. В вкладке проекта — Project Interpreter. Нажимаем Add Local:
+
+</p><img src="https://habrastorage.org/files/f6b/a93/57d/f6ba9357d05d4004b99bf7b7eefe64d4.png"/>
+<p>
+Добавляем:
+
+</p><img src="https://habrastorage.org/files/ba4/799/f0d/ba4799f0d8b34ac6852973fbbeff1cde.png"/>
+<p>
+IDE ругается, но добавляет в список. Нажмем «More..» и переименуем в wrapper:
+
+</p><img src="https://habrastorage.org/files/279/d5a/e89/279d5ae892ed47e38e5e485eefb183e8.png"/>
+<p>
+Лучше вернуть Project Interpreter обратно на версию 3.2 (у меня стоит 3.4), иначе отвалятся подсказки и автодополнение.
+</p><p>
+Здесь всё, откроем конфигурации запуска Run-&gt;Edit Configurations. И добавим два конфига:
+</p><p>
+ — Обычный для локальной отладки:
+
+</p><img src="https://habrastorage.org/files/c3d/5da/bb9/c3d5dabb9af64563919f2a585ebfa3c8.png"/>
+<p>
+ — И нашего монстра для удаленного запуска:
+
+</p><img src="https://habrastorage.org/files/c3c/3a1/6b3/c3c3a16b334d44c2bab79941260deb6f.png"/>
+<p>
+Где выбираем в качестве интерпретатора наш wrapper и задаем постоянный параметр — путь до файла python.ps1. Таким образом на самом деле будет вызван powershell, который выполнит переданный ему скрипт python.ps1 с передачей всех последующих параметров.
+</p><p>
+Сейчас уже можно написать Hello World и выполнить на целевой машине, но в таком виде мы сможем тестировать только проекты из одного файла. Для выгрузки на сервер всего проекта добавим здесь же внешний инструмент.
+
+</p><img src="https://habrastorage.org/files/0bb/1dd/a72/0bb1dda72fd34661a17c597a4c10c2b5.png"/>
+<p>
+Все. Теперь при выбранной конфигурации remote после нажатия кнопки Run проект зальется на удаленный сервер, где будет запущен скрипт main.py, stdout которого будет выводиться обратно в консоль pycharm.
+
+</p><h3>Улучшение</h3><p>
+Для некоторой гибкости и удобства настройки можно добавить генерацию скрипта python.ps1 с использованием имени проекта, а данные об удаленном хосте перенести в одно место
+
+</p><i>deploy.ps1</i>
+<pre><code class="bash">$dhost = '192.168.1.230'
+$password = 'passw0rd'
+$login = 'root'
+"cat `$args[0] | C:\PythonWrapper\plink -ssh $($login)@$($dhost) -pw $($password) 'cd {0}/{0};python3 -'" -f $args[1]&gt; .\python.ps1
+$duser = $login + '@' + $dhost
+.\plink -ssh $duser -pw $password 'rm -rf '$args[1]';mkdir -p '$args[1]
+$dpath = $duser + ':~/' + $args[1] + '/'
+.\pscp -r -scp -pw $password $args[0] $dpath
+</code></pre>
+<p>
+Теперь для настройки под новый сервер надо будет поменять только три строки, а при создании нового проекта — добавить в него конфигурацию remote.
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

@@ -1,0 +1,144 @@
+<html><body><div><div id="article_text">
+    <p>The code used in this blog post can be found on <a class="reference external" href="https://github.com/marklit/recommend">GitHub</a>.</p>
+<p><a class="reference external" href="https://spark.apache.org/">Apache Spark</a> is a data processing framework that supports building projects in Python and comes with MLlib, distributed machine learning framework. I was excited at the possibilities this software offered when I first read a guide to creating a <a class="reference external" href="http://ampcamp.berkeley.edu/big-data-mini-course/movie-recommendation-with-mllib.html">movie recommendation engine</a>. I was able to find some <a class="reference external" href="https://gist.github.com/yoshi0309/33bd912d91c0bb5cdf30">code snippets</a> and <a class="reference external" href="https://gist.github.com/rezsa/359714b3c9e0f554f878">helpful gists</a> but I couldn't find an end-to-end tutorial for a recommendation engine using Spark that was written in Python so I set about building the engine and below I've documented my steps in creating it.</p>
+<div class="section" id="getting-an-environment-setup">
+<h2>Getting an environment setup</h2>
+<p>First setup a fresh Ubuntu 14.04.2 machine and install Java, Scala, Git, Unzip and some Python dependencies:</p>
+<div class="highlight"><pre><span class="nv">$ </span>sudo add-apt-repository ppa:webupd8team/java
+<span class="nv">$ </span>sudo apt-get update
+<span class="nv">$ </span>sudo apt-get install -yq oracle-java7-installer scala git <span class="se">\</span>
+                           python-virtualenv python-dev unzip
+</pre></div>
+<p>Spark then needs to be downloaded and built using the <tt class="docutils literal">sbt</tt> build tool:</p>
+<div class="highlight"><pre><span class="nv">$ </span>curl -O http://apache.cs.utah.edu/spark/spark-1.3.0/spark-1.3.0.tgz
+<span class="nv">$ </span>tar xvf spark-1.3.0.tgz
+<span class="nv">$ </span><span class="nb">cd </span>spark-1.3.0/
+<span class="nv">$ </span>build/sbt assembly
+</pre></div>
+<p>I've included the code for this tutorial in a repo so clone it and install the requirements:</p>
+<div class="highlight"><pre><span class="nv">$ </span>virtualenv spark_venv
+<span class="nv">$ </span><span class="nb">source </span>spark_venv/bin/activate
+<span class="nv">$ </span>git clone https://github.com/marklit/recommend.git
+<span class="nv">$ </span><span class="nb">cd </span>recommend
+<span class="nv">$ </span>pip install -r requirements.txt
+</pre></div>
+<p>User-submitted film ratings data supplied by <a class="reference external" href="https://movielens.org/">MovieLens</a> will be used to train our <a class="reference external" href="http://ampcamp.berkeley.edu/big-data-mini-course/movie-recommendation-with-mllib.html#collaborative-filtering">collaborative filtering</a> model.</p>
+<div class="highlight"><pre><span class="nv">$ </span>curl -O http://files.grouplens.org/papers/ml-1m.zip
+<span class="nv">$ </span>unzip -j ml-1m.zip <span class="s2">"*.dat"</span>
+</pre></div>
+<p>Note: the ratings themselves seem to be only on films released before the turn of the century.</p>
+</div>
+<div class="section" id="anatomy-of-the-recommendation-engine">
+<h2>Anatomy of the recommendation engine</h2>
+<p>There are two main parts of the engine, the first is the model trainer and the second is the recommendation generation.</p>
+<p>When communicating with Spark <tt class="docutils literal">pyspark</tt> is used and requires a context to be kept during communications and for it to be closed when you no longer need it. For this reason I put together a context manager:</p>
+<div class="highlight"><pre><span class="nd">@contextlib.contextmanager</span>
+<span class="k">def</span> <span class="nf">spark_manager</span><span class="p">():</span>
+    <span class="n">conf</span> <span class="o">=</span> <span class="n">SparkConf</span><span class="p">()</span><span class="o">.</span><span class="n">setMaster</span><span class="p">(</span><span class="n">SPARK_MASTER</span><span class="p">)</span> \
+                      <span class="o">.</span><span class="n">setAppName</span><span class="p">(</span><span class="n">SPARK_APP_NAME</span><span class="p">)</span> \
+                      <span class="o">.</span><span class="n">set</span><span class="p">(</span><span class="s">"spark.executor.memory"</span><span class="p">,</span> <span class="n">SPARK_EXECUTOR_MEMORY</span><span class="p">)</span>
+    <span class="n">spark_context</span> <span class="o">=</span> <span class="n">SparkContext</span><span class="p">(</span><span class="n">conf</span><span class="o">=</span><span class="n">conf</span><span class="p">)</span>
+
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">yield</span> <span class="n">spark_context</span>
+    <span class="k">finally</span><span class="p">:</span>
+        <span class="n">spark_context</span><span class="o">.</span><span class="n">stop</span><span class="p">()</span>
+</pre></div>
+<p>Now Spark-related parts of the code can be wrapped in a <tt class="docutils literal">with</tt> statement simplifying the context management process.</p>
+<p>The film ratings file is loaded into a Resilient Distributed Dataset (RDD) where it's elements can be operated on in a fault-tolerant fashion.</p>
+<div class="highlight"><pre><span class="k">with</span> <span class="n">spark_manager</span><span class="p">()</span> <span class="k">as</span> <span class="n">context</span><span class="p">:</span>
+    <span class="n">ratings</span> <span class="o">=</span> <span class="n">context</span><span class="o">.</span><span class="n">textFile</span><span class="p">(</span><span class="n">training_data_file</span><span class="p">)</span> \
+                     <span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="k">lambda</span> <span class="n">x</span><span class="p">:</span> <span class="n">x</span> <span class="ow">and</span> <span class="nb">len</span><span class="p">(</span><span class="n">x</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s">'::'</span><span class="p">))</span> <span class="o">==</span> <span class="mi">4</span><span class="p">)</span> \
+                     <span class="o">.</span><span class="n">map</span><span class="p">(</span><span class="n">parse_rating</span><span class="p">)</span>
+</pre></div>
+<p>The <tt class="docutils literal">parse_rating</tt> method will create a column with a value between 0 and 9 which is a modulus of each rating's time stamp. This value will be used to break the rows up into three sets: a training set, a validation set and a test set.</p>
+<div class="highlight"><pre><span class="n">training</span> <span class="o">=</span> <span class="n">ratings</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="k">lambda</span> <span class="n">x</span><span class="p">:</span> <span class="n">x</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">&lt;</span> <span class="mi">6</span><span class="p">)</span> \
+                  <span class="o">.</span><span class="n">values</span><span class="p">()</span> \
+                  <span class="o">.</span><span class="n">repartition</span><span class="p">(</span><span class="n">numPartitions</span><span class="p">)</span> \
+                  <span class="o">.</span><span class="n">cache</span><span class="p">()</span>
+
+<span class="n">validation</span> <span class="o">=</span> <span class="n">ratings</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="k">lambda</span> <span class="n">x</span><span class="p">:</span> <span class="n">x</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">&gt;=</span> <span class="mi">6</span> <span class="ow">and</span> <span class="n">x</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">&lt;</span> <span class="mi">8</span><span class="p">)</span> \
+                    <span class="o">.</span><span class="n">values</span><span class="p">()</span> \
+                    <span class="o">.</span><span class="n">repartition</span><span class="p">(</span><span class="n">numPartitions</span><span class="p">)</span> \
+                    <span class="o">.</span><span class="n">cache</span><span class="p">()</span>
+
+<span class="n">test</span> <span class="o">=</span> <span class="n">ratings</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="k">lambda</span> <span class="n">x</span><span class="p">:</span> <span class="n">x</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">&gt;=</span> <span class="mi">8</span><span class="p">)</span> \
+              <span class="o">.</span><span class="n">values</span><span class="p">()</span> \
+              <span class="o">.</span><span class="n">cache</span><span class="p">()</span>
+</pre></div>
+<p>The recommendation engine uses <tt class="docutils literal">pyspark.mllib.recommendation.ALS</tt> to train it's model with the training data. Various combinations of ranks, lambdas and iterations are run to see which has the lowest RMSE (Root Mean Squared Error) against the validation model. The model with the lowest RMSE is evaluated against the test set of data.</p>
+<div class="highlight"><pre><span class="k">for</span> <span class="n">rank</span><span class="p">,</span> <span class="n">lmbda</span><span class="p">,</span> <span class="n">numIter</span> <span class="ow">in</span> <span class="n">itertools</span><span class="o">.</span><span class="n">product</span><span class="p">(</span><span class="n">ranks</span><span class="p">,</span>
+                                              <span class="n">lambdas</span><span class="p">,</span>
+                                              <span class="n">iterations</span><span class="p">):</span>
+    <span class="n">model</span> <span class="o">=</span> <span class="n">ALS</span><span class="o">.</span><span class="n">train</span><span class="p">(</span><span class="n">ratings</span><span class="o">=</span><span class="n">training</span><span class="p">,</span>
+                      <span class="n">rank</span><span class="o">=</span><span class="n">rank</span><span class="p">,</span>
+                      <span class="n">iterations</span><span class="o">=</span><span class="n">numIter</span><span class="p">,</span>
+                      <span class="n">lambda_</span><span class="o">=</span><span class="n">lmbda</span><span class="p">)</span>
+
+    <span class="n">validationRmse</span> <span class="o">=</span> <span class="n">compute_rmse</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">validation</span><span class="p">,</span> <span class="n">numValidation</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">validationRmse</span> <span class="o">&lt;</span> <span class="n">bestValidationRmse</span><span class="p">:</span>
+        <span class="n">bestModel</span><span class="p">,</span> <span class="n">bestValidationRmse</span> <span class="o">=</span> <span class="n">model</span><span class="p">,</span> <span class="n">validationRmse</span>
+        <span class="n">bestRank</span><span class="p">,</span> <span class="n">bestLambda</span><span class="p">,</span> <span class="n">bestNumIter</span> <span class="o">=</span> <span class="n">rank</span><span class="p">,</span> <span class="n">lmbda</span><span class="p">,</span> <span class="n">numIter</span>
+
+<span class="n">testRmse</span> <span class="o">=</span> <span class="n">compute_rmse</span><span class="p">(</span><span class="n">bestModel</span><span class="p">,</span> <span class="n">test</span><span class="p">,</span> <span class="n">numTest</span><span class="p">)</span>
+</pre></div>
+<p>Note: <tt class="docutils literal">lambda</tt> is a keyword in Python so it's misspelt to avoid conflicts.</p>
+<p>The best resulting combination of rank, lambda and iteration count are reported back. Here is an example of trying a few different combinations of ranks, lambdas and iteration counts:</p>
+<div class="highlight"><pre><span class="nv">$ </span>../bin/spark-submit recommend.py train ratings.dat <span class="se">\</span>
+    --ranks<span class="o">=</span>8,9,10 --lambdas<span class="o">=</span>0.31,0.32,0.33 --iterations<span class="o">=</span>3
+</pre></div>
+<div class="highlight"><pre>The best model was trained with:
+    Rank:                     10
+    Lambda:             0.320000
+    Iterations:                3
+    RMSE on test set:   0.931992
+</pre></div>
+</div>
+<div class="section" id="getting-recommendations">
+<h2>Getting Recommendations</h2>
+<p>The recommendation engine needs to know your opinion on films which have been rated by a lot of other users. The <tt class="docutils literal">metrics</tt> command shows which films have the largest number of user ratings:</p>
+<div class="highlight"><pre><span class="nv">$ </span>../bin/spark-submit recommend.py metrics ratings.dat movies.dat
+</pre></div>
+<div class="highlight"><pre>10 most rated films:
+     3,428 #2858 American Beauty (1999)
+     2,991 #260 Star Wars: Episode IV - A New Hope (1977)
+     2,990 #1196 Star Wars: Episode V - The Empire Strikes Back (1980)
+     2,883 #1210 Star Wars: Episode VI - Return of the Jedi (1983)
+     2,672 #480 Jurassic Park (1993)
+     2,653 #2028 Saving Private Ryan (1998)
+     2,649 #589 Terminator 2: Judgment Day (1991)
+     2,590 #2571 Matrix, The (1999)
+     2,583 #1270 Back to the Future (1985)
+     2,578 #593 Silence of the Lambs, The (1991)
+</pre></div>
+<p>I've picked 5 films which have a lot of ratings and added a parameter to the <tt class="docutils literal">recommend</tt> command which let you rate each of them. 1 is a poor film, 5 is the best and 0 if you haven't seen it. The films are American Beauty (1999), Jurassic Park (1993), Terminator 2: Judgement Day (1991), The Matrix (1999) and Back to the Future (1985). The following parameter rates them 5, 3, 5, 5 and 4 accordingly:</p>
+<div class="highlight"><pre>--ratings<span class="o">=</span>5.0,3.0,5.0,5.0,4.0
+</pre></div>
+<p>So with the ratings, rank, lambda and iterations picked you can now see which films are recommended viewing.</p>
+<div class="highlight"><pre><span class="nv">$ </span>../bin/spark-submit recommend.py recommend ratings.dat movies.dat <span class="se">\</span>
+    --ratings<span class="o">=</span>5.0,3.0,5.0,5.0,4.0 <span class="se">\</span>
+    --rank<span class="o">=</span><span class="m">10</span> --lambda<span class="o">=</span>0.32 --iteration<span class="o">=</span>3
+</pre></div>
+<div class="highlight"><pre>His Girl Friday (1940)
+New Jersey Drive (1995)
+Breakfast at Tiffany's (1961)
+Halloween 5: The Revenge of Michael Myers (1989)
+Just the Ticket (1999)
+I'll Be Home For Christmas (1998)
+Goya in Bordeaux (Goya en Bodeos) (1999)
+For the Moment (1994)
+Thomas and the Magic Railroad (2000)
+Message in a Bottle (1999)
+</pre></div>
+</div>
+
+  </div>
+
+   <div id="support_text"><p>
+    Thank you for taking the time to read this post. If you're considering using </p><a href="https://www.digitalocean.com/?refcode=074ce6598105">Digital Ocean</a><p>, the hosting provider this blog is hosted on, please consider using </p><a href="https://www.digitalocean.com/?refcode=074ce6598105">this link to sign up</a><p>.
+  </p></div>
+
+
+  
+</div></body></html>

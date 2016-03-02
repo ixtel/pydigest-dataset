@@ -1,0 +1,59 @@
+<html><body><div><div class="post-body entry-content" id="post-body-8204516816101193863" itemprop="description articleBody">
+<i>This article shows how URL handers, defined by urllib2, can be employed in practice in order to circumvent troubles we usually find when we write robots for collecting information from the Internet.</i>
+<p>
+First things first (and usually a source of confusion): There are two sister libraries in Python which address retrieval of information from URLs; they are: </p><i>urllib</i><p> and </p><i>urllib2</i><p>. Conceptually, </p><i>urllib2</i><p> works as a derived class of </p><i>urllib</i><p>. Just conceptually, because the actual implementation does not employ classes as a conventional object oriented paradigm would dictate.
+</p><p>
+If you are seeking detailed documentation about these libraries, I'm afraid to inform that your only choice is spending a couple of hours studying the source code of </p><a href="https://bitbucket.org/mirror/cpython/src/6017d19669c3f34d9366ce60b8eb8b64054134ae/Lib/urllib.py?at=2.7">urllib.py</a><p> and </p><a href="https://bitbucket.org/mirror/cpython/src/6017d19669c3f34d9366ce60b8eb8b64054134ae/Lib/urllib2.py?at=2.7">urllib2.py</a><p>.
+
+</p><h4>
+Setting an User Agent</h4>
+<p>
+OK. Now that you have the full documentation at hand, we can start. The first thing our robot needs to do is hiding its presence from the server side. One simple measure is employing an innocent user agent. We need to define a class derived from </p><i>urllib2.BaseHandler</i><p> which is responsible for setting the user agent before a request is sent to the server side. This is shown below:
+</p><span><br/></span>
+<span>import urllib2<br/><br/>class UserAgentProcessor(urllib2.BaseHandler):<br/>    """A handler to add a custom UA string to urllib2 requests<br/>    """<br/>    def __init__(self, uastring):<br/>        self.handler_order = 100<br/>        self.ua = uastring<br/><br/>    def http_request(self, request):<br/>        request.add_header("User-Agent", self.ua)<br/>        return request<br/><br/>    https_request = http_request</span>
+<p>
+(credits: This code was shamelessly copied from </p><a href="http://techknack.net/python-urllib2-handlers/">this article</a><p> by Andrew Rowls)
+
+</p><h4>
+Handling HTTP ERROR 404 (Not Found)</h4>
+<p>
+There are other things we need to do, such as throttling our requests, otherwise the server side will easily guess that there's a robot on our side sending dozens of requests per second. But throttling is a subject that I'm not going to cover here. You can later create your throttling handler, after you get better acquainted with some techniques covered in this article.
+</p><p>
+Some webservers are really busy, which may cause failures to our requests. Other webservers deliberatly reject requests given certain circumstances, for example: the server side may detect that we are sending dozens of requests per second and may decide to punish us for 10 minutes. Again we are back to the subject of throttling, which we are not going to cover here. But let's address this sort of issue partially, which may be of practical use in a majority of situations.
+</p><p>
+Let's say the webserver responds HTTP ERROR 404 (Not Found) eventually (or even regularly), even when the resource is existing in reality. We just need to be a little skeptic and send another request after waiting a couple of seconds. Eventually we need to be far more skeptic (or a little stubborn, if you will) and send several additional requests, before we become sure enough that the resource is actually and truly non-existent.
+</p><p>
+What we need to do is basically stamp requests so that we will have means to determine whether a request needs to be sent again to the server side, eventually waiting some time before that. Also, requests to different webservers may require different parameters for number of retries and for the delay to be employed. See below how we implemented this things: 
+
+</p><span/>
+<span>import urllib2</span>
+<span><br/></span>
+<span>class HTTPNotFoundHandler(urllib2.BaseHandler):<br/>    """A handler which retries access to resources when 404 (NotFound) is received<br/>    """<br/><br/>    handler_order = 600 # before HTTPDigestAuthHandler and ProxyDigestAuthHandler<br/><br/>    def __init__(self, retries=5, delay=2):<br/>        self.retries = int(retries)<br/>        self.delay   = float(delay)<br/>        assert(self.retries &gt;= 1)<br/>        assert(self.delay &gt;= 0.0)<br/><br/>    def http_request(self, req):<br/>        if hasattr(req, 'headers') and 'Error_404' in req.headers:<br/>            Error_404 = req.headers['Error_404']<br/>            assert(int(Error_404['retries']) &gt;= 1)<br/>            assert(float(Error_404['delay']) &gt;= 0.0)<br/>        return req<br/><br/>    def http_error_404(self, req, fp, code, msg, headers):<br/>        if hasattr(req, 'headers') and 'Error_404' in req.headers:<br/>            Error_404 = req.headers['Error_404']<br/>        else:<br/>            Error_404 = dict()<br/>            Error_404['delay']   = self.delay<br/>            Error_404['retries'] = self.retries<br/><br/>        count   = Error_404['count'] if 'count' in Error_404 else 1<br/>        retries = Error_404['retries']<br/>        delay   = Error_404['delay']<br/>        if count == retries:<br/>            raise urllib2.HTTPError(req.get_full_url(),<br/>                                    code,<br/>                                    msg,<br/>                                    headers,<br/>                                    fp)<br/>        else:<br/>            # Don't close the fp until we are sure that</span>
+<span>            # we won't use it with HTTPError.<br/>            fp.read()<br/>            fp.close()<br/>            # sleep a little while<br/>            from time import sleep<br/>            sleep(delay)<br/>            # send another request<br/>            Error_404['count'] = count + 1<br/>            req.add_header('Error_404', Error_404)<br/>            return self.parent.open(req)<br/><br/>    https_error_404 = http_error_404</span>
+<p>
+Now, let's add two utility functions:
+
+</p><span>def install_opener(opener=None):<br/>    import urllib2<br/>    if opener is None:<br/>        urllib2.install_opener(build_opener())<br/>    else:<br/>        urllib2.install_opener(opener)<br/>    return urllib2<br/><br/>def build_opener(</span>
+<span>                  user_agent='Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:24.0) Gecko/20100101 Firefox/24.0',<br/>                  http_404_retries=3,<br/>                  http_404_delay=2.0):<br/>    return urllib2.build_opener(<br/>        UserAgentProcessor(user_agent),<br/>        HTTPNotFoundHandler(http_404_retries, http_404_delay) )</span>
+<p>
+Just put all the code you see in this up to this point into a file, say: </p><i>api.py</i><p>.
+
+</p><h4>
+Test cases</h4>
+<p>
+Now, let's  create some test cases for it, using pytest. First thing consists on creating the </p><i>conftest.py</i><p> file, like shown below:
+</p><span><br/></span>
+<span>from __future__ import print_function<br/><br/>from pytest import fixture<br/><br/>@fixture<br/>def <span><i>opener</i></span>():<br/>    from mypackage.api import api<br/>    return api.build_opener()<br/><br/>@fixture<br/>def <span><i>urllib2</i></span>(opener):<br/>    from mypackage.api import api<br/>    return api.install_opener(opener)</span>
+<p>
+If you are not acquainted to </p><i>pytest</i><p>, a very brief explanation of the code above is that we are defining functions </p><i>opener</i><p> and </p><i>urllib2</i><p> which we will later employ as parameters to other functions. In a nutshell, </p><i>pytest</i><p> replaces the parameter by a call to the special functions (marked by @fixture) we have defined.
+</p><p>
+Now, let's create a file for test cases called </p><i>test_urllib.py</i><p>, like shown below:
+
+</p><span>import pytest<br/><br/>class TestOpeners(object):<br/><br/>    def xtest_build_opener(self, <span><i>opener</i></span>):<br/>        pass<br/><br/>    def xtest_existing(self, <span><i>urllib2</i></span>):<br/>        url = 'http://google.com'<br/>        f = urllib2.urlopen(url)<br/>        assert(f.code == 200)<br/><br/>    def xtest_existing_but_faulty(self, <span><i>urllib2</i></span>):<br/>        url = 'http://biz.yahoo.com/p/'<br/>        f = urllib2.urlopen(url)<br/>        assert(f.code == 200)<br/><br/>    def xtest_non_existing(self, <span><i>urllib2</i></span>):<br/>        from urllib2 import HTTPError<br/>        url = 'http://google.com/this_url_does_not_exist'<br/>        with pytest.raises(HTTPError):<br/>            f = urllib2.urlopen(url)<br/><br/>    def test_non_existing_with_header(self, <span><i>urllib2</i></span>):<br/>        from urllib2 import HTTPError<br/>        url = 'http://google.com/this_url_does_not_exist'<br/>        req = urllib2.Request(url, headers = {<br/>            'Error_404'  : { 'retries': 5,<br/>                             'delay'  : 2.0 }})<br/>        with pytest.raises(HTTPError):<br/>            f = urllib2.urlopen(req)<br/><br/>    def test_wrong_header_retries_1(self, <span><i>urllib2</i></span>):<br/>        from urllib2 import HTTPError<br/>        url = 'http://google.com'<br/>        req = urllib2.Request(url, headers = {<br/>            'Error_404' : { 'retries': 'rubbish',<br/>                            'delay'  : 2.0 }})<br/>        with pytest.raises(ValueError):<br/>            f = urllib2.urlopen(req)<br/><br/>    def test_wrong_header_retries_2(self, <span><i>urllib2</i></span>):<br/>        from urllib2 import HTTPError<br/>        url = 'http://google.com/this_url_does_not_exist'<br/>        req = urllib2.Request(url, headers = {<br/>            'Error_404' : { 'retries': 0,<br/>                            'delay'  : 2.0 }})<br/>        with pytest.raises(AssertionError):<br/>            f = urllib2.urlopen(req)</span>
+
+<h4>
+Conclusion</h4><p>
+You can have better and more robust control of requests without even touching your application code by installing a </p><i>custom opener</i><p> to urllib2.
+</p><p/>
+</div>
+</div></body></html>

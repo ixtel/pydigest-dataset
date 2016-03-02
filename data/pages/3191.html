@@ -1,0 +1,134 @@
+<html><body><div><div class="entry-content"><p>Writing usable, functioning code can be hard enough.  Now imagine writing code
+that you need to make extensible enough that other developers can extend without
+simply copy-n-pasting your source code and making their own modifications.  That
+can be rough.  There are some patterns that you occasionally find in frameworks
+like <a href="#TODO">Django</a>, however, that I haven’t seen documented.  This morning, I
+<a href="https://github.com/mitsuhiko/werkzeug/pull/675">contributed a bugfix</a> to <a href="http://werkzeug.pocoo.org/">werkzeug</a> based on a pattern I’ve seen before.
+I’m calling it the <em>kwargs helper method</em>.</p>
+
+<h2>Motivation</h2>
+
+<p>You have a method that returns an object or the result of a function, both of
+which are variable.  Through other parts of your code, other developers can
+change what your function will return.  Examples of this include Django’s
+<a href="https://docs.djangoproject.com/en/1.7/ref/class-based-views/mixins-multiple-object/#django.views.generic.list.MultipleObjectMixin.get_queryset"><code>ListView.get_queryset</code></a>, and Werkzeug’s <a href="http://werkzeug.pocoo.org/docs/0.10/routing/#werkzeug.routing.Rule.empty"><code>Rule.empty</code></a> (as of v0.10).</p>
+
+<p>You need to allow other developers to control what gets passed into the objects
+and functions as they’re called.  Without such a mechanism, developers are
+forced to override the entire method and in the worse case re-implement part of
+your code.  I want you to stop that.</p>
+
+<h2>Example of Problem Code</h2>
+
+<p>Here’s a contrived example of the code in question.</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="k">class</span> <span class="nc">Sheep</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
+</span><span class="line">    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="err">“</span><span class="n">Dolly</span><span class="err">”</span><span class="p">):</span>
+</span><span class="line">        <span class="bp">self</span><span class="o">.</span><span class="n">name</span> <span class="o">=</span> <span class="n">name</span>
+</span><span class="line">
+</span><span class="line">    <span class="k">def</span> <span class="nf">clone</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+</span><span class="line">        <span class="k">return</span> <span class="nb">type</span><span class="p">(</span><span class="bp">self</span><span class="p">)(</span><span class="n">name</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">name</span><span class="p">)</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Note the <code>type(self)</code> call here.  That returns <code>Sheep</code> in this example, but
+returns whatever type the subclass is.  So when we create a <code>BionicSheep</code>  like
+the one below, we have a problem:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="k">class</span> <span class="nc">BionicSheep</span><span class="p">(</span><span class="n">Sheep</span><span class="p">):</span>
+</span><span class="line">    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">turbo_legs</span><span class="o">=</span><span class="bp">None</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+</span><span class="line">        <span class="bp">self</span><span class="o">.</span><span class="n">turbo_legs</span> <span class="o">=</span> <span class="n">turbo_legs</span>
+</span><span class="line">        <span class="nb">super</span><span class="p">(</span><span class="n">BionicSheep</span><span class="p">,</span> <span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="n">__init__</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+</span><span class="line">
+</span><span class="line">    <span class="c"># what do do about cloning?</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>At this point, <code>BionicSheep</code> is broken if you try to clone it.  The <code>clone</code>
+method won’t pass in the <code>turbo_legs</code> value.  You now have two options:
+copy-n-paste the whole <code>clone</code> method to remove <code>Sheep.clone</code> from the equation
+entirely or call <code>super</code> to get the result of <code>Sheep.clone</code>, then add your own
+values and duplicate the assignment in <code>__init__</code>.  The latter option isn’t
+horrible in this case, but if <code>__init__</code> provided different functionality based
+on that kwarg you would be forced to copy-n-paste <code>clone</code> and provide your own
+duplicate implementation.</p>
+
+<h2>Implementation</h2>
+
+<p>The solution is to provide a helper method that provides the kwargs outside of
+the actual function.  I’m calling this pattern the <em>kwargs helper method</em>.  This
+provides a granular hook for other developers to change the arguments that are
+provided without having to override the main method and possibly duplicate code.</p>
+
+<p>You need to modify the <code>Sheep.clone</code> method to work like this to use this
+pattern:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="k">class</span> <span class="nc">Sheep</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
+</span><span class="line">    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="err">“</span><span class="n">Dolly</span><span class="err">”</span><span class="p">):</span>
+</span><span class="line">        <span class="bp">self</span><span class="o">.</span><span class="n">name</span> <span class="o">=</span> <span class="n">name</span>
+</span><span class="line">
+</span><span class="line">    <span class="k">def</span> <span class="nf">clone</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+</span><span class="line">        <span class="k">return</span> <span class="nb">type</span><span class="p">(</span><span class="bp">self</span><span class="p">)(</span><span class="o">**</span><span class="bp">self</span><span class="o">.</span><span class="n">get_clone_kwargs</span><span class="p">())</span>
+</span><span class="line">
+</span><span class="line">    <span class="k">def</span> <span class="nf">get_clone_kwargs</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+</span><span class="line">        <span class="k">return</span> <span class="p">{</span><span class="err">“</span><span class="n">name</span><span class="err">”</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">name</span><span class="p">}</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Now you have a nice hook for providing your own custom kwargs in subclasses and
+nobody has to touch <code>clone</code>.  Here’s an implementation of <code>BionicSheep</code> that
+works with the new code:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="k">class</span> <span class="nc">BionicSheep</span><span class="p">(</span><span class="n">Sheep</span><span class="p">):</span>
+</span><span class="line">    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">turbo_legs</span><span class="o">=</span><span class="bp">None</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+</span><span class="line">        <span class="bp">self</span><span class="o">.</span><span class="n">turbo_legs</span> <span class="o">=</span> <span class="n">turbo_legs</span>
+</span><span class="line">        <span class="nb">super</span><span class="p">(</span><span class="n">BionicSheep</span><span class="p">,</span> <span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="n">__init__</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+</span><span class="line">
+</span><span class="line">    <span class="k">def</span> <span class="nf">get_clone_kwargs</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+</span><span class="line">        <span class="n">kwargs</span> <span class="o">=</span> <span class="nb">super</span><span class="p">(</span><span class="n">BionicSheep</span><span class="p">,</span> <span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="n">get_clone_kwargs</span><span class="p">()</span>
+</span><span class="line">        <span class="n">kwargs</span><span class="p">[</span><span class="err">‘</span><span class="n">turbo_legs</span><span class="err">’</span><span class="p">]</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">turbo_legs</span>
+</span><span class="line">        <span class="k">return</span> <span class="n">kwargs</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<h2>Conclusion</h2>
+
+<p>I started by saying that writing functioning code is hard.  Making sure your
+code is extensible for every other developer to use is ten times harder.  Think
+not only about <em>what</em> each line of code in your codebase does, but also <em>how</em>
+it’s used and extended.  I promise, some developer somewhere is going to want to
+change just about every line of your code.  Be nice and make it easy on them.</p>
+</div>
+
+
+</div></body></html>

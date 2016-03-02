@@ -1,0 +1,128 @@
+<html><body><div><div id="contentdiv" class="text" itemprop="articleBody">
+						
+
+
+
+<h2>Introduction</h2>
+
+<p>This article is about my first experience with <a href="http://aws.amazon.com/cloudsearch/">cloudsearch</a> in <a href="https://www.djangoproject.com/">django</a>, it impressed me so much to write an article to share with others. People who are not aware of cloudsearch, its a search service in AWS cloud, you need to upload your data in defined format and your search system is ready with a superfast speed. I will be taking django as a reference here and I am assuming you guys know django.(Don't worry if you don't know django basically this article is more about cloudsearch)</p>
+
+<h2>Why I moved to cloudsearch?</h2>
+
+<p>Search system is an important and critical part of a website. Your search system should be fast, accurate and should be able to provide the more precise results. </p>
+
+<p>We were having a django website in which we implemented search system using <a href="http://haystacksearch.org/">Haystack</a> as search interface and <a href="https://pypi.python.org/pypi/Whoosh/">Whoosh</a> as search backend. It was fine initially when data was less but as we started growing and we got huge data to make searchable like profiles, jobs posted, news shared etc. We got around <code>100,000</code> searchable objects and thats the point where we started getting complaints from users that they are not getting results faster as they were used to, moreover results were not precise. This makes us to sit together and rethink about our search architecture(At this point we had only one logic handling all kind of searches). We decided to refactor search system and provide separate logics that will handle specific kind of search. But our bad luck, haystack version we were using was not providing this option with whoosh backend. That forced us to use different search backend and we give a try to <a href="http://www.elasticsearch.org/">elasticsearch</a>. Hmmm, this was good and was ok for all our needs. But we were already on mission to improve search system so we were not satisfied at this point too. Main bottleneck came in Ajax search where we need to show relevant results within a second. Then CLOUDSEARCH came into picture.</p>
+
+<p>We decided to implement a test search page with minimal functioanlities with all data on cloudsearch before starting to implement it on site with no other functionality or scripts on the page to get the accurate benchmarking and results were awesome. We were getting results within a second.</p>
+
+<h2>How we proceed?</h2>
+
+<p>First I would like to tell you the flow we used in implementing search system</p>
+
+<pre lang="C++">User Request --&gt; Web Server --&gt; Cloudsearch --&gt; WebServer --&gt; User Response</pre>
+
+<p>So we followed following steps in implementing search system but before that you need to have following things ready:</p>
+
+<p>1. AWS account with your access id and secret key.</p>
+
+<p>2. <a href="http://docs.aws.amazon.com/cloudsearch/latest/developerguide/creating-domains.html">A search domain in cloudsearch.</a></p>
+
+<p>3. <a href="http://docs.aws.amazon.com/cli/latest/userguide/cli-chap-getting-started.html">aws-cli(optional) configured.</a></p>
+
+<p>4. <a href="http://docs.aws.amazon.com/cloudsearch/latest/developerguide/configuring-index-fields.html">Add index fields in search domain via cloudsearch interface.</a><br/>
+ </p>
+
+<p>After these 4 steps you will be having your search-service-endpoint and document-service-endpoint which will be very useful in interacting with cloudsearch.</p>
+
+<p>Now let suppose you have a following django model which you want to make searchable:</p>
+
+<pre lang="C++"><span class="code-keyword">class</span> foo(models.Model):
+    search_field_1 = models.CharField(max_length=<span class="code-digit">255</span>)
+    search_field_2 = models.CharField(max_length=<span class="code-digit">255</span>)
+</pre>
+
+<p>One Extra step if already have data which you want to include in cloudsearch(like our case) Then you may need to upload data to cloudsearch. There are several options to upload data to cloudsearch, you can opt for xml, json, or via dynamodb etc. But we chose json as our javascript can also easily understand this.</p>
+
+<p>Cloudsearch calls every object as a document and you can do batch upload if your AWS account support bigger upload limits. For every document, cloudsearch expects a unique id, its type(add- if you adding a new document or delete- if you are deleting an existing document) and your search data.</p>
+
+<p>So a sample document will look like this:</p>
+
+<pre lang="C++">[
+ {<span class="code-string">"</span><span class="code-string">type"</span>: <span class="code-string">"</span><span class="code-string">add"</span>,
+  <span class="code-string">"</span><span class="code-string">id"</span>:   <span class="code-string">"</span><span class="code-string">obj-1"</span>,
+  <span class="code-string">"</span><span class="code-string">fields"</span>: {
+    <span class="code-string">"</span><span class="code-string">search_field_1"</span>: <span class="code-string">"</span><span class="code-string">I am child"</span>,
+    <span class="code-string">"</span><span class="code-string">search_field_2"</span>: <span class="code-string">"</span><span class="code-string">I am daddy"</span>
+  }
+ },
+ {<span class="code-string">"</span><span class="code-string">type"</span>: <span class="code-string">"</span><span class="code-string">delete"</span>,
+  <span class="code-string">"</span><span class="code-string">id"</span>:   <span class="code-string">"</span><span class="code-string">obj-2"</span>
+ }
+]</pre>
+
+<p>You can upload multiple documents in a batch as long as it is under your account upload limit. You can upload directly via cloudsearch interface or aws-cli(I will suggest to upload using aws-cli if you have huge data, automation) . For data which will be added in future you can write django signals which will create document on new objects or object deletion and upload to cloudsearch.</p>
+
+<pre lang="C++">aws cloudsearchdomain --endpoint-url DOCUMENT_SERVICE_ENDPOINT upload-documents --content-type application/json --documents FILE_PATH
+{
+    <span class="code-string">"</span><span class="code-string">status"</span>: <span class="code-string">"</span><span class="code-string">success"</span>, 
+    <span class="code-string">"</span><span class="code-string">adds"</span>: COUNT_OF_DOCUMENT_UPLOADED, 
+    <span class="code-string">"</span><span class="code-string">deletes"</span>: <span class="code-digit">0</span>
+}</pre>
+
+<p>Once you are done with uploading data, your data is indexed and ready to be searched. You can make a sample search request with following command:</p>
+
+<pre lang="C++">aws cloudsearchdomain --endpoint-url SEARCH_SERVICE_ENDPOINT search --search-query child
+{
+    <span class="code-string">"</span><span class="code-string">status"</span>: {
+        <span class="code-string">"</span><span class="code-string">rid"</span>: <span class="code-string">"</span><span class="code-string">/rnE+e4oCAqfEEs="</span>, 
+        <span class="code-string">"</span><span class="code-string">time-ms"</span>: <span class="code-digit">6</span>
+    }, 
+    <span class="code-string">"</span><span class="code-string">hits"</span>: {
+        <span class="code-string">"</span><span class="code-string">found"</span>: <span class="code-digit">1</span>, 
+        <span class="code-string">"</span><span class="code-string">hit"</span>: [
+            {
+                <span class="code-string">"</span><span class="code-string">id"</span>: <span class="code-string">"</span><span class="code-string">obj-1"</span>
+            }
+        ], 
+        <span class="code-string">"</span><span class="code-string">start"</span>: <span class="code-digit">0</span>
+    }
+}</pre>
+
+<p>So this was our search system implementation but there is more, you may want to add <a href="http://docs.aws.amazon.com/cloudsearch/latest/developerguide/getting-suggestions.html">suggesters</a>(typeahead when user starts typing what if those are more precise and users gets his phrase in suggesters) There is option in cloudsearch to configure suggesters. We can provide a field to this suggester to suggest. Lets say we give "search_field_1" to our suggester "Suggester_1". Then you can get the suggestions by checking this link:</p>
+
+<pre lang="C++">http:<span class="code-comment">//</span><span class="code-comment">SEARCH_SERVICE_ENDPOINT/API_VERSION/suggest/?q=QUERY&amp;suggester=Suggester_1</span></pre>
+
+<p>Now there is one workaround if you have multiple type of objects but you want to go for only 1 search domain. Then you can add multiple index fields just add an extra index field which will be available in all type of documents and will be generic in nature. Then you can pass along this generic field while querying to cloudsearch like following:</p>
+
+<pre lang="C++">aws cloudsearchdomain --endpoint-url SEARCH_SERVICE_ENDPOINT search --search-query (<span class="code-keyword">and</span> search_field_1:<span class="code-string">'</span><span class="code-string">child'</span> generic_field:<span class="code-string">'</span><span class="code-string">OBJ_TYPE'</span>)
+{
+    <span class="code-string">"</span><span class="code-string">status"</span>: {
+        <span class="code-string">"</span><span class="code-string">rid"</span>: <span class="code-string">"</span><span class="code-string">/rnE+e4oCAqfEEs="</span>, 
+        <span class="code-string">"</span><span class="code-string">time-ms"</span>: <span class="code-digit">6</span>
+    }, 
+    <span class="code-string">"</span><span class="code-string">hits"</span>: {
+        <span class="code-string">"</span><span class="code-string">found"</span>: <span class="code-digit">1</span>, 
+        <span class="code-string">"</span><span class="code-string">hit"</span>: [
+            {
+                <span class="code-string">"</span><span class="code-string">id"</span>: <span class="code-string">"</span><span class="code-string">obj-1"</span>
+            }
+        ], 
+        <span class="code-string">"</span><span class="code-string">start"</span>: <span class="code-digit">0</span>
+    }
+}</pre>
+
+<p>So this was all I did to implement cloudsearch in my django application. Please add your comments below if we can improve more in our architecture. I would be very happy to answer any query regarding this.</p>
+
+<p>Please feel free to contact me at skype : <code>mfsi_nitishk</code> or mail me at <code>nitish@mindfiresolutions.com</code></p>
+
+<p>Thanks again for your valuable time to go through this.</p>
+
+<p> </p>
+
+<p>References: <a href="http://aws.amazon.com/documentation/cloudsearch/">http://aws.amazon.com/documentation/cloudsearch/</a></p>
+
+
+						</div>
+						
+
+						</div></body></html>

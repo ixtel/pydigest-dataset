@@ -1,0 +1,285 @@
+<html><body><div><div class="content html_format">
+      <img src="https://habrastorage.org/getpro/habr/post_images/c57/019/3eb/c570193eb860565bceae9bba5bb04da5.png" alt="image"/>
+<p>
+В </p><a href="http://habrahabr.ru/post/246625/">предыдущей статье</a><p> были рассмотрены основы работы с OpenGL в Python. Для вывода графики использовались встроенные функции модуля glut и фиксированный конвейер OpenGL без шейдеров. По просьбе пользователей habrahabr.ru, на базе предыдущего урока был создан шаблон PyOpenGL приложения, использующего шейдеры и буферные объекты.</p><p>
+Роскошной графики, как и в предыдущей статье, ожидать не стоит. Цель данной статьи — продемонстрировать возможность работы с шейдерами и буферными объектами с использованием модуля PyOpenGL.
+</p><a name="habracut"/><p>
+Итак, для работы нам понадобятся:
+</p><ul>
+<li>Интерпретатор языка Python (<a href="https://www.python.org/downloads/">ссылка</a>).</li>
+<li>Среда разработки PyCharm (<a href="https://www.jetbrains.com/pycharm/">ссылка</a>) (или любая другая на ваш вкус, подойдет даже блокнот).</li>
+<li>Библиотека PyOpenGL (<a href="https://pypi.python.org/pypi/PyOpenGL">ссылка</a>).</li>
+</ul><p>
+В среде разработке создадим и сохраним новый файл с кодом Python. </p><p>
+Для работы с 3D графикой (в частности, OpenGL) необходимо импортировать несколько модулей:
+</p><pre><code class="python">from OpenGL.GL import *
+from OpenGL.GLUT import *
+</code></pre><p>
+Модуль glut будет использован для создания окна и обработки нажатия клавиш. Дополнительно импортируем функцию random из одноименного модуля (пригодится для изменения цвета полигона):
+</p><pre><code class="python">from random import random
+</code></pre>
+<h4>Подготовка.</h4><p>
+Инициализируем режим отображения с использованием двойной буферизации и цветов в формате RGB (двойная буферизация позволяет избежать мерцания во время перерисовки экрана):
+</p><pre><code class="python">glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB)
+</code></pre><p>
+Зададим начальный размер окна (ширина, высота):
+</p><pre><code class="python">glutInitWindowSize(300, 300)
+</code></pre><p>
+Укажем начальное положение окна относительно левого верхнего угла экрана:
+</p><pre><code class="python">glutInitWindowPosition(50, 50)
+</code></pre><p>
+Выполним инициализацию OpenGl:
+</p><pre><code class="python">glutInit(sys.argv)
+</code></pre><p>
+Создадим окно с заголовком «Shaders!»:
+</p><pre><code class="python">glutCreateWindow(b"Shaders!")
+</code></pre><p>
+Определим процедуру, отвечающую за вывод графики на экран:
+</p><pre><code class="python">glutDisplayFunc(draw)
+</code></pre><p>
+Определим процедуру, выполняющуюся при «простое» программы:
+</p><pre><code class="python">glutIdleFunc(draw)
+</code></pre><p>
+Определяем процедуру, отвечающую за обработку специальных клавиш:
+</p><pre><code class="python">glutSpecialFunc(specialkeys)
+</code></pre><p>
+Задаем серый цвет для очистки экрана:
+</p><pre><code class="python">glClearColor(0.2, 0.2, 0.2, 1)
+</code></pre><p>
+До этого момента код был практически не отличим от использованного в предыдущей статье, но теперь все сильно меняется, в дело вступают шейдеры!</p><p>
+Для удобства создаем процедуру, подготавливающую шейдер к использованию:
+</p><pre><code class="python"># Процедура подготовки шейдера (тип шейдера, текст шейдера)
+def create_shader(shader_type, source):
+    # Создаем пустой объект шейдера
+    shader = glCreateShader(shader_type)
+    # Привязываем текст шейдера к пустому объекту шейдера
+    glShaderSource(shader, source)
+    # Компилируем шейдер
+    glCompileShader(shader)
+    # Возвращаем созданный шейдер
+    return shader
+</code></pre><p>
+С использованием процедуры create_shader создадим вершинный шейдер:
+</p><pre><code class="python"># Положение вершин не меняется
+# Цвет вершины - такой же как и в массиве цветов
+vertex = create_shader(GL_VERTEX_SHADER, """
+varying vec4 vertex_color;
+            void main(){
+                gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;
+                vertex_color = gl_Color;
+            }""")
+</code></pre><p>
+Таким же образом создадим фрагментный шейдер:
+</p><pre><code class="python"># Определяет цвет каждого фрагмента как "смешанный" цвет его вершин
+fragment = create_shader(GL_FRAGMENT_SHADER, """
+varying vec4 vertex_color;
+            void main() {
+                gl_FragColor = vertex_color;
+}""")
+</code></pre><p>
+Создаем пустой объект шейдерной программы:
+</p><pre><code class="python">program = glCreateProgram()
+</code></pre><p>
+Приcоединяем вершинный и фрагментный шейдеры к программе:
+</p><pre><code class="python">glAttachShader(program, vertex)
+glAttachShader(program, fragment)
+</code></pre><p>
+«Собираем» шейдерную программу:
+</p><pre><code class="python">glLinkProgram(program)
+</code></pre><p>
+Сообщаем OpenGL о необходимости использовать данную шейдерную программу при выводе объектов на экран:
+</p><pre><code class="python">glUseProgram(program)
+</code></pre><p>
+Теперь нам нужно определится что и каким цветом выводить на экран. Для этого создадим два массива. Первый массив — с координатами вершин (три вершины по три координаты):
+</p><pre><code class="python">pointdata = [[0, 0.5, 0], [-0.5, -0.5, 0], [0.5, -0.5, 0]]
+</code></pre><p>
+Второй массив — с цветами для каждой вершины (по одному цвету для каждой):
+</p><pre><code class="python">pointcolor = [[1, 1, 0], [0, 1, 1], [1, 0, 1]]
+</code></pre><p>
+Эти два массива можно объединить в один, но для наглядности и удобства восприятия они разнесены. На этом подготовительные мероприятия завершены и можно запустить основной цикл программы:
+</p><pre><code class="python">glutMainLoop()
+</code></pre><p>
+Далее рассмотрим процедуры, отвечающие за обработку нажатий клавиш и, собственно, вывод объектов на экран.
+
+</p><h4>Обработчик нажатий клавиш.</h4><p>
+За обработку нажатий клавиш в нашей программе отвечает процедура specialkeys. В коде specialkeys в зависимости от того, какая стрелка на клавиатуре была нажата, мы, с использованием процедуры glRotatef, осуществляем поворот по осям x или y, по часовой стрелке или в обратном направлении, на 5 градусов. При нажатии клавиши END заполняем массив pointcolor случайными числами в диапазоне 0 до 1, тем самым меняя цвет отображаемого полигона. Код процедуры specialkeys:
+</p><pre><code class="python"># Процедура обработки специальных клавиш
+def specialkeys(key, x, y):
+    # Сообщаем о необходимости использовать глобального массива pointcolor
+    global pointcolor
+    # Обработчики специальных клавиш
+    if key == GLUT_KEY_UP:          # Клавиша вверх
+        glRotatef(5, 1, 0, 0)       # Вращаем на 5 градусов по оси X
+    if key == GLUT_KEY_DOWN:        # Клавиша вниз
+        glRotatef(-5, 1, 0, 0)      # Вращаем на -5 градусов по оси X
+    if key == GLUT_KEY_LEFT:        # Клавиша влево
+        glRotatef(5, 0, 1, 0)       # Вращаем на 5 градусов по оси Y
+    if key == GLUT_KEY_RIGHT:       # Клавиша вправо
+        glRotatef(-5, 0, 1, 0)      # Вращаем на -5 градусов по оси Y
+    if key == GLUT_KEY_END:         # Клавиша END
+        # Заполняем массив pointcolor случайными числами в диапазоне 0-1
+        pointcolor = [[random(), random(), random()], [random(), random(), random()], [random(), random(), random()]]
+</code></pre>
+<h4>Процедура перерисовки.</h4><p>
+За перерисовку в нашей программе отвечает процедура draw. Первым делом очищаем экран и заполняем его серым цветом:
+</p><pre><code class="python">glClear(GL_COLOR_BUFFER_BIT)
+</code></pre><p>
+Включаем использование массивов вершин и цветов:
+</p><pre><code class="python">glEnableClientState(GL_VERTEX_ARRAY)
+glEnableClientState(GL_COLOR_ARRAY)
+</code></pre><p>
+Далее укажем OpenGL где взять массив вершин, для этого используем процедуру glVertexPointer:
+</p><pre><code class="python">glVertexPointer(3, GL_FLOAT, 0, pointdata)
+</code></pre><p>
+Первый параметр данной процедуры определяет сколько используется координат для одной вершины, второй параметр определяет тип данных для каждой координаты, третий параметр определяет смещение между вершинами в массиве. Если вершины идут одна за другой, то смещение 0. Четвертый параметр указывает на первую координату первой вершины в массиве.</p><p>
+Аналогично укажем OpenGL где взять массив цветов:
+</p><pre><code class="python">glColorPointer(3, GL_FLOAT, 0, pointcolor)
+</code></pre><p>
+Все необходимые данные указаны, осталось только все нарисовать. С использованием процедуры glDrawArrays мы можем вывести все содержимое массивов на экран за один проход:
+</p><pre><code class="python">glDrawArrays(GL_TRIANGLES, 0, 3)
+</code></pre><p>
+Первый параметр данной процедуры определяет то, какой тип примитивов будет использоваться при выводе объектов на экран (треугольники, точки, линии и др.), второй параметр должен указывать на начальный индекс в указанных массивах, третьим параметром мы указываем количество рисуемых примитивов (в нашем случае это 3 вершины — 9 координат).</p><p>
+Отключаем использование массивов вершин и цветов и выводим все нарисованное в памяти на экран:
+</p><pre><code class="python">glDisableClientState(GL_VERTEX_ARRAY) 
+glDisableClientState(GL_COLOR_ARRAY) 
+glutSwapBuffers()
+</code></pre><p>
+В результате в окне программы мы наблюдаем треугольник с плавными переходами цветов. Треугольник можно вращать с использованием клавиш «стрелок». При нажатии кнопки END происходит смена цвета треугольника на случайный.
+
+</p><div class="spoiler"><b class="spoiler_title">Весь код программы:</b><div class="spoiler_text"><pre><code class="python"># -*- coding: utf-8 -*-
+# Импортируем все необходимые библиотеки:
+from OpenGL.GL import *
+from OpenGL.GLUT import *
+#import sys
+# Из модуля random импортируем одноименную функцию random
+from random import random
+# объявляем массив pointcolor глобальным (будет доступен во всей программе)
+global pointcolor
+
+
+# Процедура обработки специальных клавиш
+def specialkeys(key, x, y):
+    # Сообщаем о необходимости использовать глобального массива pointcolor
+    global pointcolor
+    # Обработчики специальных клавиш
+    if key == GLUT_KEY_UP:          # Клавиша вверх
+        glRotatef(5, 1, 0, 0)       # Вращаем на 5 градусов по оси X
+    if key == GLUT_KEY_DOWN:        # Клавиша вниз
+        glRotatef(-5, 1, 0, 0)      # Вращаем на -5 градусов по оси X
+    if key == GLUT_KEY_LEFT:        # Клавиша влево
+        glRotatef(5, 0, 1, 0)       # Вращаем на 5 градусов по оси Y
+    if key == GLUT_KEY_RIGHT:       # Клавиша вправо
+        glRotatef(-5, 0, 1, 0)      # Вращаем на -5 градусов по оси Y
+    if key == GLUT_KEY_END:         # Клавиша END
+        # Заполняем массив pointcolor случайными числами в диапазоне 0-1
+        pointcolor = [[random(), random(), random()], [random(), random(), random()], [random(), random(), random()]]
+
+
+# Процедура подготовки шейдера (тип шейдера, текст шейдера)
+def create_shader(shader_type, source):
+    # Создаем пустой объект шейдера
+    shader = glCreateShader(shader_type)
+    # Привязываем текст шейдера к пустому объекту шейдера
+    glShaderSource(shader, source)
+    # Компилируем шейдер
+    glCompileShader(shader)
+    # Возвращаем созданный шейдер
+    return shader
+
+
+# Процедура перерисовки
+def draw():
+    glClear(GL_COLOR_BUFFER_BIT)                    # Очищаем экран и заливаем серым цветом
+    glEnableClientState(GL_VERTEX_ARRAY)            # Включаем использование массива вершин
+    glEnableClientState(GL_COLOR_ARRAY)             # Включаем использование массива цветов
+    # Указываем, где взять массив верши:
+    # Первый параметр - сколько используется координат на одну вершину
+    # Второй параметр - определяем тип данных для каждой координаты вершины
+    # Третий парметр - определяет смещение между вершинами в массиве
+    # Если вершины идут одна за другой, то смещение 0
+    # Четвертый параметр - указатель на первую координату первой вершины в массиве
+    glVertexPointer(3, GL_FLOAT, 0, pointdata)
+    # Указываем, где взять массив цветов:
+    # Параметры аналогичны, но указывается массив цветов
+    glColorPointer(3, GL_FLOAT, 0, pointcolor)
+    # Рисуем данные массивов за один проход:
+    # Первый параметр - какой тип примитивов использовать (треугольники, точки, линии и др.)
+    # Второй параметр - начальный индекс в указанных массивах
+    # Третий параметр - количество рисуемых объектов (в нашем случае это 3 вершины - 9 координат)
+    glDrawArrays(GL_TRIANGLES, 0, 3)
+    glDisableClientState(GL_VERTEX_ARRAY)           # Отключаем использование массива вершин
+    glDisableClientState(GL_COLOR_ARRAY)            # Отключаем использование массива цветов
+    glutSwapBuffers()                               # Выводим все нарисованное в памяти на экран
+
+
+# Здесь начинется выполнение программы
+# Использовать двойную буферезацию и цвета в формате RGB (Красный Синий Зеленый)
+glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB)
+# Указываем начальный размер окна (ширина, высота)
+glutInitWindowSize(300, 300)
+# Указываем начальное
+# положение окна относительно левого верхнего угла экрана
+glutInitWindowPosition(50, 50)
+# Инициализация OpenGl
+glutInit(sys.argv)
+# Создаем окно с заголовком "Shaders!"
+glutCreateWindow(b"Shaders!")
+# Определяем процедуру, отвечающую за перерисовку
+glutDisplayFunc(draw)
+# Определяем процедуру, выполняющуюся при "простое" программы
+glutIdleFunc(draw)
+# Определяем процедуру, отвечающую за обработку клавиш
+glutSpecialFunc(specialkeys)
+# Задаем серый цвет для очистки экрана
+glClearColor(0.2, 0.2, 0.2, 1)
+# Создаем вершинный шейдер:
+# Положение вершин не меняется
+# Цвет вершины - такой же как и в массиве цветов
+vertex = create_shader(GL_VERTEX_SHADER, """
+varying vec4 vertex_color;
+            void main(){
+                gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;
+                vertex_color = gl_Color;
+            }""")
+# Создаем фрагментный шейдер:
+# Определяет цвет каждого фрагмента как "смешанный" цвет его вершин
+fragment = create_shader(GL_FRAGMENT_SHADER, """
+varying vec4 vertex_color;
+            void main() {
+                gl_FragColor = vertex_color;
+}""")
+# Создаем пустой объект шейдерной программы
+program = glCreateProgram()
+# Приcоединяем вершинный шейдер к программе
+glAttachShader(program, vertex)
+# Присоединяем фрагментный шейдер к программе
+glAttachShader(program, fragment)
+# "Собираем" шейдерную программу
+glLinkProgram(program)
+# Сообщаем OpenGL о необходимости использовать данную шейдерну программу при отрисовке объектов
+glUseProgram(program)
+# Определяем массив вершин (три вершины по три координаты)
+pointdata = [[0, 0.5, 0], [-0.5, -0.5, 0], [0.5, -0.5, 0]]
+# Определяем массив цветов (по одному цвету для каждой вершины)
+pointcolor = [[1, 1, 0], [0, 1, 1], [1, 0, 1]]
+# Запускаем основной цикл
+glutMainLoop()
+</code></pre>
+</div></div>
+<div class="spoiler"><b class="spoiler_title">Результат выполнения программы (картинки):</b></div><p>
+и немного видео:
+</p><iframe src="https://www.youtube.com/embed/wFrnGVPJO18?feature=oembed" frameborder="0" allowfullscreen="">VIDEO</iframe>
+
+      	<div class="polling">
+		
+
+	
+
+    <p class="for_users_only_msg">Только зарегистрированные пользователи могут участвовать в опросе. <a href="https://habrahabr.ru/auth/login/">Войдите</a>, пожалуйста.</p>
+	</div>
+
+      <p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

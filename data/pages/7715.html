@@ -1,0 +1,102 @@
+<html><body><div><div id="content">
+  
+
+
+<h1>A real Python “wat”</h1>
+
+<p class="meta">Published <a href="/weblog/2015/nov/15/">November 15, 2015</a>. Filed under:
+  
+<a href="/weblog/categories/django/">Django</a>, <a href="/weblog/categories/pedantics/">Pedantics</a>, <a href="/weblog/categories/python/">Python</a>.
+  
+</p><p>A few weeks ago I <a href="/weblog/2015/oct/13/wats-doc/">went through and explained</a> the various items in <a href="https://github.com/cosmologicon/pywat">a list of “Python wats”</a> — behaviors of Python which seemingly made no sense. Calling them “wats” is a bit of a stretch in most cases, though, because most of them were simply consequences of fairly reasonable design decisions in how Python or its standard libraries work, but presented in ways which obscured what was actually going on.</p>
+<p>Lest I be accused of defending Python too much there, I’d like to point out an absolutely genuine “wat” moment in Python that I helped someone with recently.</p>
+<p>On reddit, someone was asking about Django’s <code>length</code> template filter, and specifically its behavior with an undefined variable. The bit of template in question was something like:</p>
+<div class="codehilite"><pre><span class="cp">{%</span> <span class="k">if</span> <span class="nv">some_var</span><span class="o">|</span><span class="nf">length</span> <span class="o">&gt;</span> <span class="m">1</span> <span class="cp">%}</span><span class="x"/>
+<span class="x">    It's more than 1</span>
+<span class="cp">{%</span> <span class="k">else</span> <span class="cp">%}</span><span class="x"/>
+<span class="x">    It's not more than 1</span>
+<span class="cp">{%</span> <span class="k">endif</span> <span class="cp">%}</span><span class="x"/>
+</pre></div>
+
+
+<p>When <code>some_var</code> was undefined in the template, the <code>if</code> condition was evaluating <code>True</code>. Huh?</p>
+<h2>Version requirements</h2>
+<p>If you want to puzzle this out yourself, then before reading on I’ll mention that I had difficulty reproducing this behavior. I was using Django 1.8 and Python 3.4, and consistently was getting the <code>if</code> evaluating to <code>False</code> as expected.</p>
+<p>So in order to figure this out, it’s important to know you’ll only see this behavior on a Django version earlier than 1.8, and only when running on Python 2. Using <em>either</em> of Django 1.8 or Python 3 will remove the “wat”.</p>
+<h2>Aside on undefined variables</h2>
+<p>And to avoid spoilers from seeing the answer further down the page, here I’ll talk a bit about why it’s not just automatically an error, since after all <code>some_var</code> is undefined. Shouldn’t this raise a <code>TypeError</code> or some other kind of exception?</p>
+<p>The answer to <em>that</em> is Django’s template language is a little bit forgiving of some types of errors. The philosophy here is that we shouldn’t necessarily take down your entire site with a hard <span class="caps">HTTP</span> 500 error any time you have a typo in a template variable name, or forgot to provide a variable you were expecting to be able to access, so Django’s template language will silence errors related to accessing/manipulating undefined variables. In older versions of Django, the setting <code>TEMPLATE_STRING_IF_INVALID</code> controlled what Django would output in that case, and it defaulted to the empty string.</p>
+<p>In current (1.8) Django, the behavior is a little bit more complex:</p>
+<ul>
+<li>Template engines support the configuration parameter <code>string_if_invalid</code>. It still defaults to the empty string.</li>
+<li><code>string_if_invalid</code> can contain the <code>%s</code> formatting marker, and if so it will tell Django to interpolate in the name of the invalid variable (useful for debugging).</li>
+<li>When you attempt to apply a filter to an invalid variable, the filter will only be applied if <code>string_if_invalid</code> is the empty string. Otherwise, the filter is not applied.</li>
+<li>Except in the case of the <code>if</code>, <code>for</code> and <code>regroup</code> template tags, which always apply filters to their variable argument. An unfiltered invalid variable is treated as <code>None</code> for purposes of those tags.</li>
+</ul>
+<p>One other Django 1.8 change: previously, if the <code>length</code> filter was applied to an invalid variable (which, as noted above, only happens if it’s used in certain tags), it returned an empty string, consistent with the <code>TEMPLATE_STRING_IF_INVALID</code> behavior. Starting in Django 1.8, if <code>length</code> gets applied to an invalid variable, it returns <code>0</code>.</p>
+<p>This is verging on “wat” territory all by itself (though, again, tracing back to a reasonable-seeming design decision in terms of when and how templates should raise exceptions), but isn’t the direct cause of the weird behavior shown above. For that, we need to go look at Python.</p>
+<h2>Going deeper</h2>
+<p>Now that we understand a bit about how Django handles invalid variables, we can start to pick apart what’s happening. When the Django template engine gets this:</p>
+<div class="codehilite"><pre><span class="cp">{%</span> <span class="k">if</span> <span class="nv">some_var</span><span class="o">|</span><span class="nf">length</span> <span class="o">&gt;</span> <span class="m">1</span> <span class="cp">%}</span><span class="x"/>
+</pre></div>
+
+
+<p>then, in Django versions prior to 1.8, it will get translated (through the invalid-variable behavior) into the following Python:</p>
+
+
+
+<p>And here the behavior is different depending on Python version. Here’s the Python 3 behavior:</p>
+<div class="codehilite"><pre><span class="go">$ python</span>
+<span class="go">Python 3.5.0 (default, Sep 26 2015, 18:41:42)</span>
+<span class="go">[GCC 4.2.1 Compatible Apple LLVM 6.1.0 (clang-602.0.53)] on darwin</span>
+<span class="go">Type "help", "copyright", "credits" or "license" for more information.</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="s">''</span> <span class="o">&gt;</span> <span class="mi">1</span>
+<span class="gt">Traceback (most recent call last):</span>
+  File <span class="nb">"&lt;stdin&gt;"</span>, line <span class="m">1</span>, in <span class="n">&lt;module&gt;</span>
+<span class="gr">TypeError</span>: <span class="n">unorderable types: str() &gt; int()</span>
+</pre></div>
+
+
+<p>That’s what we’d expect and hope should happen: strings and integers aren’t and should not be orderable with respect to each other. But in Python 2:</p>
+<div class="codehilite"><pre><span class="go">$ python</span>
+<span class="go">Python 2.7.10 (default, Jun  6 2015, 18:12:33)</span>
+<span class="go">[GCC 4.2.1 Compatible Apple LLVM 6.1.0 (clang-602.0.49)] on darwin</span>
+<span class="go">Type "help", "copyright", "credits" or "license" for more information.</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="s">''</span> <span class="o">&gt;</span> <span class="mi">1</span>
+<span class="go">True</span>
+</pre></div>
+
+
+<p><span class="caps">WAT</span>.</p>
+<p>Just in case someone still wants to figure this out on their own, here are some hints as to what’s going on:</p>
+<div class="codehilite"><pre><span class="gp">&gt;&gt;&gt; </span><span class="s">''</span> <span class="o">&gt;</span> <span class="p">()</span>
+<span class="go">False</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="p">()</span> <span class="o">&gt;</span> <span class="p">[]</span>
+<span class="go">True</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span> <span class="nn">sys</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="p">()</span> <span class="o">&gt;</span> <span class="n">sys</span><span class="o">.</span><span class="n">maxint</span>
+<span class="go">True</span>
+</pre></div>
+
+
+<p>Ah, a tuple than which no greater integer can be conceived. That makes perfect sense, right?</p>
+<h2>The answer</h2>
+<p>All right, enough dancing around the problem. To see why Python is doing this, we have to read a note in <a href="https://docs.python.org/2/library/stdtypes.html#comparisons">the Python 2 comparison documentation</a>:</p>
+<blockquote>
+<p><strong>CPython implementation detail:</strong> Objects of different types except numbers are ordered by their type names; objects of the same types that don’t support proper comparison are ordered by their address.</p>
+</blockquote>
+<p>Comparing two numbers of different types (say, an <code>int</code> and a <code>float</code>) is exempt from this because Python knows how to order them (except for complex numbers, which raise a <code>TypeError</code> on ordered comparison). But otherwise Python is falling back to the names of the types. So why is <code>'' &gt; 1</code>? Because <code>"str" &gt; "int"</code>. Similarly, all tuples are “greater” than all integers because <code>"tuple" &gt; "int"</code>.</p>
+<p>To which the only appropriate response is…</p>
+<p>
+  <img src="http://media.b-list.org/files/wat.jpg" alt="Giant rubber ducky, captioned WAT"/>
+</p>
+
+<h2>But not anymore</h2>
+<p>Thankfully, Python 3 fixed this — as we saw above, Python 3 simply raises <code>TypeError</code> and tells you the types of the operands are not orderable relative to each other. It also got rid of the ordering by address, apparently, as that entire note is gone in the Python 3 documentation. And of course we saw how Django’s behavior with invalid variables has changed, and especially how the <code>length</code> filter has changed so that if, by some chance, it gets applied to an invalid variable it’ll sensibly return <code>0</code>, which fixes this behavior and probably also some other “wat” moments on Python 2.</p>
+<p>But should you want an example of a Python “wat” that <em>isn’t</em> so easy to puzzle out and doesn’t come down to unexpected consequences of otherwise-reasonable design, well, this certainly is one. I like to pride myself on knowing the reasons behind weird things in Python, but I am utterly at a loss as to why CPython 2 had this ordering behavior, and honestly I’m not sure I <em>want</em> to know; such things may be best left decently in the past, where they can cause no madness from gazing upon their faces.</p>
+
+
+  </div>
+  
+
+  </div></body></html>

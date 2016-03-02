@@ -1,0 +1,149 @@
+<html><body><div><div class="content html_format">
+      <img src="https://habrastorage.org/getpro/habr/post_images/ab8/18d/dd9/ab818ddd96b7b751cabf23b1b267409d.jpg" align="left"/><p>Улучшаем наш </p><a href="http://habrahabr.ru/post/230607/">распределённый хостинг картинок</a><p>. В этой части мы поговорим о конфигурировании приложения и подключим защиту от csrf. Затем, на примере создания миниатюр картинок, научимся работать с блокирующими задачами, запускать корутины параллельно и обрабатывать возникающие в них исключения.</p><a name="habracut"/>
+
+<h3>Конфигурирование приложения</h3><p>
+  Конфигурационные параметры конструктор Application принимает keyword-аргументами. Мы уже сталкивались с этим, передавая </p><code>debug=True</code><p> вторым параметром в конструктор Application. Однако хардкодить такие настройки не стоит, иначе как запустить скрипт на продакшне, где этот параметр очевидно должен быть </p><code>False</code><p>? Стандартный для django и других питон-фреймворков приём — хранить общую конфигурацию в файле </p><code>settings.py</code><p>, в конце которого импортировать </p><code>settings_local.py</code><p>, перезаписывая специфичные для данного окружения настройки. Конечно, вы вполне можете использовать этот трюк, однако в </p><a href="http://tornado.readthedocs.org/">tornado</a><p> есть возможность изменять конкретные настройки с помощью параметров командной строки. Давайте посмотрим как это реализуется: 
+
+  </p><pre><code class="python">from tornado.options import define, options 
+ 
+define('port', default=8000, help='run on the given port', type=int) 
+define('db_uri', default='localhost', help='mongodb uri') 
+define('db_name', default='habr_tornado', help='name of database') 
+define('debug', default=True, help='debug mode', type=bool) 
+ 
+options.parse_command_line() 
+db = motor.MotorClient(options.db_uri)[options.db_name] 
+ 
+</code></pre><p>
+ C помощью </p><code>define</code><p> мы определяем параметры в синтаксисе </p><a href="https://docs.python.org/3.5/library/optparse.html">optparse</a><p>. А затем в нужном месте получаем их с помощью options. Вызывая </p><code>options.parse_command_line()</code><p> мы перезаписываем дефолтные значения параметров данными из командной строки. То есть на продакшне нам теперь достаточно запустить приложение с параметром </p><code>--debug=False</code><p>. А запуск с параметром </p><code>--help</code><p> покажет нам все возможные параметры: 
+
+  </p><pre><code class="python">$python3 app.py --help 
+Usage: app.py [OPTIONS] 
+ 
+Options: 
+ 
+  --db_name                        name of database (default habr_tornado) 
+  --db_uri                         mongodb uri (default localhost) 
+  --debug                          debug mode (default True) 
+  --help                           show this help information 
+  --port                           run on the given port (default 8000) 
+ 
+/home/imbolc/.pyenv/versions/3.4.0/lib/python3.4/site-packages/tornado/log.py options: 
+ 
+  --log_file_max_size              max size of log files before rollover 
+                                   (default 100000000) 
+  --log_file_num_backups           number of log files to keep (default 10) 
+  --log_file_prefix=PATH           Path prefix for log files. Note that if you 
+                                   are running multiple tornado processes, 
+                                   log_file_prefix must be different for each 
+                                   of them (e.g. include the port number) 
+  --log_to_stderr                  Send log output to stderr (colorized if 
+                                   possible). By default use stderr if 
+                                   --log_file_prefix is not set and no other 
+                                   logging is configured. 
+  --logging=debug|info|warning|error|none 
+                                   Set the Python log level. If 'none', tornado 
+                                   won't touch the logging configuration. 
+                                   (default info) 
+</code></pre><p>
+ Как видите торнадо автоматически добавил параметры логирования. 
+
+  </p><h3>CSRF</h3><p>
+  Теперь добавим к настройкам приложения </p><code>xsrf_cookies=True</code><p>. Попробовав загрузить новую картинку, мы увидим ошибку: </p><code>HTTP 403: Forbidden ('\_xsrf' argument missing from POST)</code><p>. Это сработала защита от </p><a href="http://en.wikipedia.org/wiki/Cross-site_request_forgery">csrf</a><p>. Для восстановления работы приложения, достаточно в форму загрузки добавить </p><code>{% module xsrf_form_html() %}</code><p>, в хтмл-коде страницы это превратится во что-то типа: </p><code>&lt;input type="hidden" name="_xsrf" value="2|a52d8046|a83cbd25c8b7c06e2c3ac476338982d8|1406302123"/&gt;</code><p>. 
+
+  </p><h3>Миниатюры изображений</h3><p>
+  При отображении миниатюр в списке последних картинок мы для простоты использовали полные изображения. Настало время поправить этот момент. Нам понадобится </p><a href="https://pillow.readthedocs.org/en/latest/">pillow</a><p> (это современный форк PIL — известной библиотеки для работы с изображениями): 
+
+  </p><pre><code>pip3 install pillow 
+</code></pre><p>
+ Однако, торнадо однопоточен и такая ресурсоёмкая операция как обработка изображений, сведёт на нет все наши пляски с асинхронностью. Самое простое решение — вынести эту задачу в отдельный тред: 
+
+  </p><pre><code class="python">import os 
+import io 
+from concurrent.futures import ThreadPoolExecutor 
+from PIL import Image 
+ 
+class UploadHandler(web.RequestHandler): 
+    executor = ThreadPoolExecutor(max_workers=os.cpu_count()) 
+ 
+    @gen.coroutine 
+    def post(self): 
+        file = self.request.files['file'][0] 
+        try: 
+            thumbnail = yield self.make_thumbnail(file.body) 
+        except OSError: 
+            raise web.HTTPError(400, 'Cannot identify image file') 
+        orig_id, thumb_id = yield [ 
+            gridfs.put(file.body, content_type=file.content_type), 
+            gridfs.put(thumbnail, content_type='image/png')] 
+        yield db.imgs.save({'orig': orig_id, 'thumb': thumb_id}) 
+        self.redirect('') 
+ 
+    @run_on_executor 
+    def make_thumbnail(self, content): 
+        im = Image.open(io.BytesIO(content)) 
+        im.convert('RGB') 
+        im.thumbnail((128, 128), Image.ANTIALIAS) 
+        with io.BytesIO() as output: 
+            im.save(output, 'PNG') 
+            return output.getvalue() 
+</code></pre><p>
+ Сначала мы создаём пулл воркеров с ограничением их количества количеством ядер cpu (это оптимально для процессоро-ёмких задач типа обработки изображений). И если одновременно будет загружено больше изображений остальные будут ждать своей очереди. Затем мы асинхронно создаём миниатюру, вызывая наш метод </p><code>make_thumbnail</code><p>, обёрнутый декоратором </p><a href="http://tornado.readthedocs.org/en/stable/concurrent.html#tornado.concurrent.run_on_executor">run_on_executor</a><p>, что вызовет выполнение задачи в одном из тредов executor-а. 
+</p><p>
+   Обратите внимание, как красиво мы перехватываем исключение </p><code>OSError</code><p> которое бросает pillow если не может распознать формат изображения. Нам не требуется явно передавать ошибку в ответе как это делается в случае колбэчной асинхронности (например в node.js). Просто, работаем с исключениями в синхронном стиле. 
+</p><p>
+   Далее мы сохраняем оригинальное изображение и миниатюру в </p><a href="http://docs.mongodb.org/manual/core/gridfs/">gridfs</a><p>. Обратите внимание, что вместо последовательного вызова: 
+
+  </p><pre><code class="python">orig_id = yield gridfs.put(file.body, content_type=file.content_type) 
+thumb_id = yield gridfs.put(thumbnail, content_type='image/png') 
+</code></pre><p>
+ Мы используем параллельный </p><code>orig_id, thumb_id = yield [ ... ]</code><p>. То есть файлы сохраняются одновременно. Такой параллельный вызов корутин имеет смысл при любых не зависящих друг от друга операциях. Например, мы могли бы объединить создание миниатюры с сохранением оригинала, но совместить создание и сохранение миниатюры не удастся так как вторая операция зависит от результатов первой. 
+</p><p>
+   В завершение мы сохраняем информацию об изображении в коллекцию </p><code>imgs</code><p>. Эта коллекция нужна, чтобы связать миниатюру и оригинал изображения. Так же в дальнейшем там можно хранить любую информацию об изображении: автора, права доступа и т.п. С появлением этой коллекции соответственно изменятся и методы отображения списка и отдельного изображения: 
+
+  </p><pre><code class="python">class UploadHandler(web.RequestHandler): 
+    ... 
+ 
+    @gen.coroutine 
+    def get(self): 
+        imgs = yield db.imgs.find().sort('_id', -1).to_list(20) 
+        self.render('upload.html', imgs=imgs) 
+ 
+ 
+class ShowImageHandler(web.RequestHandler): 
+    @gen.coroutine 
+    def get(self, img_id, size): 
+        try: 
+            img_id = bson.objectid.ObjectId(img_id) 
+        except bson.errors.InvalidId: 
+            raise web.HTTPError(404, 'Bad ObjectId') 
+        img = yield db.imgs.find_one(img_id) 
+        if not img: 
+            raise web.HTTPError(404, 'Image not found') 
+        gridout = yield gridfs.get(img[size]) 
+        self.set_header('Content-Type', gridout.content_type) 
+        self.set_header('Content-Length', gridout.length) 
+        yield gridout.stream_to_handler(self) 
+</code></pre><p>
+ Как видите, </p><code>ShowImageHandler.get</code><p> получает теперь дополнительный параметр </p><code>size</code><p>  — уточняющий хотим ли мы получить миниатюру изображения или оригинал. Соответственно изменилась и регулярка url: 
+
+  </p><pre><code class="python">web.url(r'/imgs/([\w\d]+)/(orig|thumb)', ShowImageHandler, 
+        name='show_image'), 
+</code></pre><p>
+ И восстановление этих url в шаблоне: 
+
+  </p><pre><code class="html">{% for img in imgs %} 
+    &lt;a href="{{ reverse_url('show_image', img['_id'], 'orig') }}"&gt; 
+        &lt;img src="{{ reverse_url('show_image', img['_id'], 'thumb') }}"&gt; 
+    &lt;/a&gt; 
+{% end %} 
+</code></pre>
+<h3>Заключение</h3><p>
+  На сегодня всё, код этой и </p><a href="http://habrahabr.ru/post/230607/">предыдущей</a><p> части доступен на </p><a href="https://github.com/imbolc/habr-modern-tornado">github</a><p>.
+
+      
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

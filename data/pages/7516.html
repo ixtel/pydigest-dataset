@@ -1,0 +1,131 @@
+<html><body><div><div class="post_body"><p>The Flask response class, appropriately called <code>Response</code>, is rarely used directly by Flask applications. Instead, Flask uses it under the covers as a container for the response data returned by application route functions, plus some additional information needed to create an HTTP response.</p>
+<p>What's not widely known, is that Flask gives applications the option to replace the stock response class with a custom one, opening the door to some neat tricks. In this article I'm going to show you how to take advantage of this technique to simplify your application code.</p>
+<h2>How Do Flask Responses Work?</h2>
+<p>Most applications do not use the <code>Response</code> class from Flask directly, but that does not mean it does not get used. In fact, Flask creates response objects for every request. So how does this work?</p>
+<p>The response cycle begins when the function invoked by Flask to handle a request returns. In a web application, routes typically end with a call to the <code>render_template</code> function, which causes the referenced template file to be rendered and returned as a string:</p>
+<pre><code>@app.route('/index')
+def index():
+    # ...
+    return render_template('index.html')
+</code></pre>
+<p>But as you probably know, a Flask route handler function can optionally return two additional values, which set a response status code and custom HTTP headers:</p>
+<pre><code>@app.route('/data')
+def index():
+    # ...
+    return render_template('data.json'), 201, {'Content-Type': 'application/json'}
+</code></pre>
+<p>In this example, the status code is set to 201 to override the Flask 200 default, the standard code for a successfully handled request. The example also sets the <code>Content-Type</code> header to indicate that the response contains JSON data, because if you don't specifically set a content type, Flask sets it to HTML.</p>
+<p>The above examples show the three basic components of a response, which are the data or body, the status code, and the headers. Flask's application instance has a <code>make_response()</code> function, which takes the return value from the route function (which can be a single value or a tuple with one, two or three values) and populates a <code>Response</code> object with them.</p>
+<p>You can actually see how this process works in a Python console session. First create a virtual environment and install Flask in it, then start a Python session and type the following:</p>
+<pre><code>&gt;&gt;&gt; from flask import Flask
+&gt;&gt;&gt; app = Flask(__name__)
+&gt;&gt;&gt; app.make_response('Hello, World')
+&lt;Response 12 bytes [200 OK]&gt;
+&gt;&gt;&gt; app.make_response(('Hello, World', 201))
+&lt;Response 12 bytes [201 CREATED]&gt;
+</code></pre>
+<p>Here I created a scratch Flask application instance, and then invoked the <code>make_response()</code> method to create some <code>Response</code> objects. In the first one I sent a string as argument, so the response is populated with defaults for status code and headers. In the second example I sent a tuple with two values, to force a non-default status code. Note the double parentheses in this second call, which wrap the string and the status code in a tuple. This is required because <code>make_response()</code> takes a single argument.</p>
+<p>Once Flask has a <code>Response</code> object that represents the route function's response, it does a few things with it. Among them, it passes it to any defined <code>after_request</code> handlers, which gives the application a chance to insert or modify headers, change the body or the status code, or even replace the response with a completely new one if it so desires. In the end, Flask takes the final response object, renders it as HTTP, and sends it to the client.</p>
+<h2>The Flask Response Class</h2>
+<p>Let's look at the most interesting aspects of the response class. The following class definition shows what in my opinion are the salient attributes and methods of this class:</p>
+<pre><code>class Response:
+    charset = 'utf-8'
+    default_status = 200
+    default_mimetype = 'text/html'
+
+    def __init__(self, response=None, status=None, headers=None,
+                 mimetype=None, content_type=None, direct_passthrough=False):
+        pass
+
+    @classmethod
+    def force_type(cls, response, environ=None):
+        pass
+</code></pre>
+<p>Note that if you go to the Flask source code you will not find the definitions above. Flask's <code>Response</code> class is actually a very tiny shell that derives from Werkzeug's class of the same name. In turn, Werzeug's <code>Response</code> class inherits from the <code>BaseResponse</code> class, in which the above elements are defined.</p>
+<p>The three class attributes <code>charset</code>, <code>default_status</code> and <code>default_mimetype</code> define some defaults. If any of these defaults do not work for your application, then you can subclass the <code>Response</code> class and define your own, instead of having to set your custom values in every response. For example, if your application is an API that returns XML from all routes, you can change <code>default_mimetype</code> to <code>application/xml</code> in your custom response and then Flask will return XML responses by default, as you will see later.</p>
+<p>I will not go into great detail describing the <code>__init__</code> constructor (you can read about that in the <a href="http://werkzeug.pocoo.org/docs/0.10/wrappers/#werkzeug.wrappers.BaseResponse">Werkzeug documentation</a>), but note that the three important elements of the Flask responses, which are the response body, the status code and the headers, are given as arguments. In a subclass, the constructor could change the rules that determine how responses are created.</p>
+<p>The <code>force_type()</code> class method is the only non-trivial, yet very important, element of the response class. There are situations where Werkzeug or Flask need to create their own response objects, such as when an application error occurs and an error response needs to be given to the client. In this case the response object does not come from the application, it is the framework that creates it. In an application that uses a custom response class, Flask and Werkzeug can't possibly know the details of that custom class, so they create their responses using the standard response class. The <code>force_type()</code> method in a response class is supposed to take an instance of a different response class, and convert it to its own format.</p>
+<p>I'm pretty sure you are confused by the description of <code>force_type()</code>. The bottom line is that whenever Flask comes across a response object that is not of the expected class, this method is used to convert it. The third use case that I'm going to show below takes advantage of this to allow Flask route functions to return objects such as dictionaries, lists or actually any custom object as a response to a request.</p>
+<p>Well, that's enough theory. In the following section I'm going to show you how to put all these Response tricks into practice. Ready to get your hands dirty?</p>
+<h2>Using a Custom Response Class</h2>
+<p>By now I'm sure you agree that there are some interesting use cases that can benefit from using a custom response class. Before I show you some actual examples, let me tell you how simple it is to configure a Flask application to use a custom response class. Take a look at the following example:</p>
+<pre><code>from flask import Flask, Response
+
+class MyResponse(Response):
+    pass
+
+app = Flask(__name__)
+app.response_class = MyResponse
+
+# ...
+</code></pre>
+<p>Here I have defined my custom response class with name <code>MyResponse</code>. Typically a custom response class adds or changes the behavior of the default response class, so it is common to create these custom classes as subclasses of Flask's <code>Response</code> class. To tell Flask to use my custom response class, all I need to do is set my class in <code>app.response_class</code>.</p>
+<p>The <code>response_class</code> attribute of class <code>Flask</code> is a class attribute, so as a variant of the above example, you can create a subclass of <code>Flask</code> that has your response class set in it:</p>
+<pre><code>from flask import Flask, Response
+
+class MyResponse(Response):
+    pass
+
+class MyFlask(Flask)
+    response_class = MyResponse
+
+app = MyFlask(__name__)
+
+# ...
+</code></pre>
+<h3>Example #1: Changing Response Defaults</h3>
+<p>The first example is extremely simple. Let's say your application returns XML in most or all endpoints. For such an application it would make sense to make <code>application/xml</code> the default content type. This is easily achieved with a two-line response class:</p>
+<pre><code>class MyResponse(Response):
+    default_mimetype = 'application/xml'
+</code></pre>
+<p>Easy, right? If you set this class as the default response for the application, then you can write functions that return XML without worrying about setting the content type. For example:</p>
+<pre><code>@app.route('/data')
+def get_data():
+    return '''&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+&lt;person&gt;
+    &lt;name&gt;John Smith&lt;/name&gt;
+&lt;/person&gt;
+'''
+</code></pre>
+<p>Using the default response, this route would receive the <code>text/html</code> content type, as that is the default. The custom response saves you from adding the additional header to all return statements in XML routes. And if you have some routes that need a different content type, you can still override the default, like you do with the regular response class:</p>
+<pre><code>@app.route('/')
+def index():
+    return '&lt;h1&gt;Hello, World!&lt;/h1&gt;', {'Content-Type': 'text/html'}
+</code></pre>
+<h3>Example #2: Determining Content Type Automatically</h3>
+<p>The next example is a little bit more involved. Let's say that this application has HTML and XML routes in equal amounts, so the first example does not really make sense, since regardless of which default you pick you would still have about half of the routes with an overriden content type.</p>
+<p>A better solution would be to create a response class that can determine the correct content type by looking at the response text. The following class does that job:</p>
+<pre><code>class MyResponse(Response):
+    def __init__(self, response, **kwargs):
+        if 'mimetype' not in kwargs and 'contenttype' not in kwargs:
+            if response.startswith('&lt;?xml'):
+                kwargs['mimetype'] = 'application/xml'
+        return super(MyResponse, self).__init__(response, **kwargs)
+</code></pre>
+<p>In this example I first make sure the response does not specify an explicit content type. I then check if the text of the response begins with <code>&lt;?xml</code>, indicating the data is formatted as an XML document. If both conditions are true, I insert the XML content type in the arguments I sent to the parent's class constructor.</p>
+<p>With this response class, any properly formatted XML document will automatically receive the XML content type, while other responses will continue to receive the default content type. And in all cases I'm still free to explicitly provide the content type when necessary.</p>
+<h3>Example #3: Automatic JSON Responses</h3>
+<p>The final example deals with a common nuisance in Flask based APIs. It is very common for APIs to return JSON payloads, which requires you to use the <code>jsonify()</code> function to convert a Python dictionary to its JSON representation, and also to set the JSON content type in the response. Here is an example route that does this:</p>
+<pre><code>@app.route('/data')
+def get_data():
+    return jsonify({'foo': 'bar'})
+</code></pre>
+<p>Unfortunately every route that returns JSON needs to do this, so for a large API you end up repeating the <code>jsonify()</code> call a lot. From a code readability point of view, wouldn't it be nice if you could do this instead?</p>
+<pre><code>@app.route('/data')
+def get_data():
+    return {'foo': 'bar'}
+</code></pre>
+<p>Here is a custom response class that supports the above syntax, without affecting how other routes that do not return JSON work in any way:</p>
+<pre><code>class MyResponse(Response):
+    @classmethod
+    def force_type(cls, rv, environ=None):
+        if isinstance(rv, dict):
+            rv = jsonify(rv)
+        return super(MyResponse, cls).force_type(rv, environ)
+</code></pre>
+<p>This example requires a bit of explanation. Flask recognizes just a handful of types as valid things that can be returned from a route handler function as a response body. Basically you can return any of the string and binary related types (<code>str</code>, <code>unicode</code>, <code>bytes</code>, <code>bytearray</code>), or if you prefer, you can return an already built response object. If you return any of the string or bytes types, Flask is going to realize that these are types that the response class knows how to handle, so it will pass what you return directly into the constructor of the response class.</p>
+<p>But what happens when you return something unsupported, such as the dictionary of the example above? If the type of the returned response is not one of the expected ones, then Flask is going to assume that it is an unknown response object, so it will not try to create a response object passing it as an argument. Instead, it will use the <code>force_type()</code> class method on the response class to force a conversion from the unknown type. In this example the response subclass overrides this method and applies a conversion when a dictionary is given as a response. The conversion is done with a call <code>jsonify()</code>, before letting the base class take over as if nothing happened.</p>
+<p>It's a neat trick, right? Consider that this does not affect the normal functioning of other responses. For any routes that return the normal response types the subclass does not do anything, all calls are passed transparently to the parent class.</p>
+<h2>Conclusion</h2>
+<p>I hope this article sheds some light on how responses work in Flask. If you know of other tricks you can do with Flask responses I would love to hear them!</p></div>
+</div></body></html>

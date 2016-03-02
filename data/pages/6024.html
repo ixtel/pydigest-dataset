@@ -1,0 +1,368 @@
+<html><body><div><div class="starter-template">
+          <div class="post-title">
+  
+    
+  
+  
+  
+  <h1>Creating a Pluto flyby using unaligned New Horizons images</h1>
+  
+  
+</div>
+
+<p><img src="/assets/pluto-flyby/anim2.gif" alt="Header" class="img-responsive"/></p>
+
+<p><sup><a href="#image_credits">Image credit</a></sup></p>
+
+<h2 id="introduction">Introduction</h2>
+
+<p>Last month, a few days before NASA’s <a href="https://en.wikipedia.org/&#10;wiki/New_Horizons">New Horizons</a> probe made its historic flyby of Pluto, I <a href="https://www.reddit.com/r/space/&#10;comments/3csabx/i_aligned_and_combined_the_new_horizons_lorri/">posted a GIF of
+it doing so to Reddit</a>.</p>
+
+<p>To produce this GIF, I wrote a Python script to process unaligned JPEG images
+directly from the <a href="http://pluto.jhuapl.edu/soc/Pluto-Encounter/index.php">New Horizons jhuapl.edu LORRI
+page</a>. The script
+translates and rotates input images such that background stars in the image
+line up, which are then composed into a GIF. The result is a timelapse of New
+Horizon’s view, as if the camera were pointing in the same direction for the
+duration.</p>
+
+<p>Back when I made the original post the code was very much a prototype due to me
+rushing to get the image out before the point of closest approach. I’ve since
+cleaned up the code, and <a href="https://github.com/matthewearl/lorri-align">put it on
+GitHub</a>. In this post I’ll describe
+how it works.</p>
+
+<p>The process breaks down into these steps:</p>
+
+<ul>
+  <li>Extracting star coordinates from the input images.</li>
+  <li>Aligning images. This involves determining a transformation that will map
+the position of stars in the first image to the corresponding positions in
+all other images.</li>
+  <li>Outputting images. This involves transforming all images into the reference
+frame of the first image, and writing the resulting image to disk. Input
+images that were taken at approximately the same time are combined into the
+same output image.</li>
+</ul>
+
+<p>I won’t cover how to obtain the input images from the JHUAPL website as this is
+not very interesting (although it is included in <a href="https://&#10;github.com/matthewearl/lorri-align">the source code</a>). Note for this project only the
+short-exposure 100-150 msec images are used.</p>
+
+<h2 id="extracting-star-coordinates">Extracting star coordinates</h2>
+
+<p>Looking at one of the input images we wish to compose, it doesn’t appear at
+first as if there are any background stars at all:</p>
+
+<p><img src="/assets/pluto-flyby/input.jpg" alt="Input" class="img-responsive"/></p>
+
+<p><sup><a href="#image_credits">Image credit</a></sup></p>
+
+<p>However, stretch the brightness 16 times and a few become visible:</p>
+
+<p><img src="/assets/pluto-flyby/input-bright.jpg" alt="Input Bright" class="img-responsive"/></p>
+
+<p><sup><a href="#image_credits">Image credit</a></sup></p>
+
+<p>Given such an input image we wish to obtain the <code>x</code>, <code>y</code> coordinates of each
+star. To do so we first
+<a href="https://en.wikipedia.org/wiki/Thresholding_(image_processing)">threshold</a> the
+input image:</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">THRESHOLD_FRACTION</span> <span class="o">=</span> <span class="mf">0.025</span>
+<span class="n">THRESHOLD_BIAS</span> <span class="o">=</span> <span class="mi">2</span>
+<span class="k">def</span> <span class="nf">extract</span><span class="p">(</span><span class="n">im</span><span class="p">):</span>
+    <span class="n">hist</span> <span class="o">=</span> <span class="n">numpy</span><span class="o">.</span><span class="n">histogram</span><span class="p">(</span><span class="n">im</span><span class="p">,</span> <span class="n">bins</span><span class="o">=</span><span class="nb">range</span><span class="p">(</span><span class="mi">256</span><span class="p">))[</span><span class="mi">0</span><span class="p">]</span>
+    <span class="k">for</span> <span class="n">thr</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">256</span><span class="p">):</span>
+        <span class="k">if</span> <span class="nb">sum</span><span class="p">(</span><span class="n">hist</span><span class="p">[</span><span class="n">thr</span> <span class="o">+</span> <span class="mi">1</span><span class="p">:])</span> <span class="o">&lt;</span> <span class="p">(</span><span class="n">im</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">*</span> <span class="n">im</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">*</span>
+                                  <span class="n">THRESHOLD_FRACTION</span><span class="p">):</span>
+            <span class="k">break</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">ExtractFailed</span><span class="p">(</span><span class="s">"Image too bright"</span><span class="p">)</span>
+    <span class="n">thr</span> <span class="o">+=</span> <span class="n">THRESHOLD_BIAS</span>
+    <span class="n">_</span><span class="p">,</span> <span class="n">thresh_im</span> <span class="o">=</span> <span class="n">cv2</span><span class="o">.</span><span class="n">threshold</span><span class="p">(</span><span class="n">im</span><span class="p">,</span> <span class="n">thr</span><span class="p">,</span> <span class="mi">255</span><span class="p">,</span> <span class="n">cv2</span><span class="o">.</span><span class="n">THRESH_BINARY</span><span class="p">)</span></code></pre></div>
+
+<p>This code picks the smallest thresholding constanting <code>thr</code> such that less than
+2.5% of the thresholded image is white, then adds 2 to it. The resulting image
+is:</p>
+
+<p><img src="/assets/pluto-flyby/thresholded.png" alt="Thresholded" class="img-responsive"/></p>
+
+<p><sup><a href="#image_credits">Image credit</a></sup></p>
+
+<p>The idea is to make a mask such that contiguous white regions in the
+thresholded image correspond with stars in the original image. The value of
+<code>THRESHOLD_FRACTION</code> was chosen on the basis that 97% or more of an image is
+just background blackness, which is strictly darker the stars we wish to
+detect, so thresholding on this will remove almost all of the background
+pixels. Due to sensor noise there are still some background pixels which get
+through at this level. <code>THRESHOLD_BIAS</code> is chosen to account for this.</p>
+
+<p>The above isn’t perfect: Some stars can have multiple contiguous regions
+associated with them or, as is the case above, Pluto or its moon Charon can
+generate multiple regions around its fringe. Having a significant number of
+false positives may cause problems for the next step, so let’s account for this
+by <a href="https://en.wikipedia.org/wiki/Dilation_(morphology)">dilating</a> the mask by
+a small amount, thereby joining up nearby regions:</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">DILATION_SIZE</span> <span class="o">=</span> <span class="mi">9</span>
+    <span class="o">...</span>
+    <span class="n">thresh_im</span> <span class="o">=</span> <span class="n">cv2</span><span class="o">.</span><span class="n">dilate</span><span class="p">(</span><span class="n">thresh_im</span><span class="p">,</span> <span class="n">numpy</span><span class="o">.</span><span class="n">ones</span><span class="p">((</span><span class="n">DILATION_SIZE</span><span class="p">,</span>
+                                                  <span class="n">DILATION_SIZE</span><span class="p">)))</span></code></pre></div>
+
+<p>This gives the following:</p>
+
+<p><img src="/assets/pluto-flyby/dilated.png" alt="Dilated" class="img-responsive"/></p>
+
+<p><sup><a href="#image_credits">Image credit</a></sup></p>
+
+<p>At this point we assume each contiguous region is a star. This obviously isn’t
+true for the regions associated with Pluto and Charon, but the next step should
+handle the small number of false positives adequately.</p>
+
+<p>So how do we go from our mask to a list of star coordinates? We start by using
+<code>cv2.findContours</code> to extract contiguous regions:</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">contours</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">cv2</span><span class="o">.</span><span class="n">findContours</span><span class="p">(</span><span class="n">thresh_im</span><span class="p">,</span> <span class="n">mode</span><span class="o">=</span><span class="n">cv2</span><span class="o">.</span><span class="n">RETR_EXTERNAL</span><span class="p">,</span>
+                                   <span class="n">method</span><span class="o">=</span><span class="n">cv2</span><span class="o">.</span><span class="n">CHAIN_APPROX_NONE</span><span class="p">)</span>
+    <span class="n">contours</span> <span class="o">=</span> <span class="p">[</span><span class="n">c</span> <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="n">contours</span> <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">c</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">1</span><span class="p">]</span>
+    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">contours</span><span class="p">)</span> <span class="o">&gt;</span> <span class="n">MAX_STARS</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">ExtractFailed</span><span class="p">(</span><span class="s">"Too many stars ({})"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">contours</span><span class="p">)))</span>
+    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">contours</span><span class="p">)</span> <span class="o">&lt;</span> <span class="n">MIN_STARS</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="n">ExtractFailed</span><span class="p">(</span><span class="s">"Not enough stars ({})"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">contours</span><span class="p">)))</span></code></pre></div>
+
+<p>And then mask the original image by each contiguous region, using <code>cv2.moments</code>
+to determine the centre-of-mass of the star, in terms of pixel coordinates:</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="k">for</span> <span class="n">idx</span><span class="p">,</span> <span class="n">contour</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">contours</span><span class="p">):</span>
+        <span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="n">w</span><span class="p">,</span> <span class="n">h</span> <span class="o">=</span> <span class="n">cv2</span><span class="o">.</span><span class="n">boundingRect</span><span class="p">(</span><span class="n">contour</span><span class="p">)</span>
+        <span class="n">sub_im_mask</span> <span class="o">=</span> <span class="n">numpy</span><span class="o">.</span><span class="n">zeros</span><span class="p">((</span><span class="n">h</span><span class="p">,</span> <span class="n">w</span><span class="p">),</span> <span class="n">dtype</span><span class="o">=</span><span class="n">numpy</span><span class="o">.</span><span class="n">uint8</span><span class="p">)</span>
+        <span class="n">cv2</span><span class="o">.</span><span class="n">drawContours</span><span class="p">(</span><span class="n">sub_im_mask</span><span class="p">,</span>
+                         <span class="n">contours</span><span class="p">,</span>
+                         <span class="n">idx</span><span class="p">,</span>
+                         <span class="n">color</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span>
+                         <span class="n">thickness</span><span class="o">=-</span><span class="mi">1</span><span class="p">,</span>
+                         <span class="n">offset</span><span class="o">=</span><span class="p">(</span><span class="o">-</span><span class="n">x</span><span class="p">,</span> <span class="o">-</span><span class="n">y</span><span class="p">))</span>
+        <span class="n">sub_im</span> <span class="o">=</span> <span class="n">im</span><span class="p">[</span><span class="n">y</span><span class="p">:</span><span class="n">y</span> <span class="o">+</span> <span class="n">h</span><span class="p">,</span> <span class="n">x</span><span class="p">:</span><span class="n">x</span> <span class="o">+</span> <span class="n">w</span><span class="p">]</span> <span class="o">*</span> <span class="n">sub_im_mask</span>
+        <span class="n">m</span> <span class="o">=</span> <span class="n">cv2</span><span class="o">.</span><span class="n">moments</span><span class="p">(</span><span class="n">sub_im</span><span class="p">)</span>
+
+        <span class="k">yield</span> <span class="n">Star</span><span class="p">(</span><span class="n">x</span><span class="o">=</span><span class="p">(</span><span class="n">x</span> <span class="o">+</span> <span class="n">m</span><span class="p">[</span><span class="s">'m10'</span><span class="p">]</span> <span class="o">/</span> <span class="n">m</span><span class="p">[</span><span class="s">'m00'</span><span class="p">]),</span> <span class="n">y</span><span class="o">=</span><span class="p">(</span><span class="n">y</span> <span class="o">+</span> <span class="n">m</span><span class="p">[</span><span class="s">'m01'</span><span class="p">]</span> <span class="o">/</span> <span class="n">m</span><span class="p">[</span><span class="s">'m00'</span><span class="p">]))</span></code></pre></div>
+
+<p>Here’s the result, plotted over the stretched input image:</p>
+
+<p><img src="/assets/pluto-flyby/stars.png" alt="Stars" class="img-responsive"/></p>
+
+<p><sup><a href="#image_credits">Image credit</a></sup></p>
+
+<p>There are other approaches to star extraction in particular I’ve previously
+had success with Lang et al.’s method described in section 2.1 of the paper
+<a href="http://arxiv.org/abs/0910.2233">Astrometry.net: Blind astrometric calibration of arbitrary astronomical
+images</a>, however it wasn’t effective in this
+case possibly due to the highly quantized nature of the brightness-stretched
+images. External tools are available too, such as
+<a href="http://www.astromatic.net/software/sextractor">SExtractor</a> which I didn’t try
+but may be worth considering if you’re looking to do star extraction yourself.</p>
+
+<h2 id="aligning-images">Aligning images</h2>
+
+<p>In this step, for each input image we seek to find an affine transformation
+(rotation and translation only) which maps points on the first image to
+corresponding points on the image in question. Given a function <code>register_pair</code>
+which takes stars from two images and returns a transformation to map the first
+image on to the second it is easy enough to write an algorithm that behaves
+well:</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">REGISTRATION_RETRIES</span> <span class="o">=</span> <span class="mi">3</span>
+
+<span class="k">def</span> <span class="nf">register_many</span><span class="p">(</span><span class="n">stars_seq</span><span class="p">):</span>
+    <span class="n">stars_it</span> <span class="o">=</span> <span class="nb">iter</span><span class="p">(</span><span class="n">stars_seq</span><span class="p">)</span>
+
+    <span class="c"># First image is defined to have the identity transformation.</span>
+    <span class="n">registered</span> <span class="o">=</span> <span class="p">[(</span><span class="nb">next</span><span class="p">(</span><span class="n">stars_it</span><span class="p">),</span> <span class="n">numpy</span><span class="o">.</span><span class="n">matrix</span><span class="p">(</span><span class="n">numpy</span><span class="o">.</span><span class="n">identity</span><span class="p">(</span><span class="mi">3</span><span class="p">)))]</span>
+    <span class="k">yield</span> <span class="n">RegistrationResult</span><span class="p">(</span><span class="n">exception</span><span class="o">=</span><span class="bp">None</span><span class="p">,</span> <span class="n">transform</span><span class="o">=</span><span class="n">registered</span><span class="p">[</span><span class="mi">0</span><span class="p">][</span><span class="mi">1</span><span class="p">])</span>
+
+    <span class="c"># Attempt to find transformations for the remaining images.</span>
+    <span class="k">for</span> <span class="n">stars2</span> <span class="ow">in</span> <span class="n">stars_it</span><span class="p">:</span>
+        <span class="k">for</span> <span class="n">stars1</span><span class="p">,</span> <span class="n">M1</span> <span class="ow">in</span> <span class="p">[</span><span class="n">registered</span><span class="p">[</span><span class="mi">0</span><span class="p">]]</span> <span class="o">+</span> <span class="n">registered</span><span class="p">[</span><span class="o">-</span><span class="n">REGISTRATION_RETRIES</span><span class="p">:]:</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="n">M2</span> <span class="o">=</span> <span class="n">register_pair</span><span class="p">(</span><span class="n">stars1</span><span class="p">,</span> <span class="n">stars2</span><span class="p">)</span>
+            <span class="k">except</span> <span class="n">RegistrationFailed</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+                <span class="k">yield</span> <span class="n">RegistrationResult</span><span class="p">(</span><span class="n">exception</span><span class="o">=</span><span class="n">e</span><span class="p">,</span> <span class="n">transform</span><span class="o">=</span><span class="bp">None</span><span class="p">)</span>
+            <span class="k">yield</span> <span class="n">RegistrationResult</span><span class="p">(</span><span class="n">exception</span><span class="o">=</span><span class="bp">None</span><span class="p">,</span> <span class="n">transform</span><span class="o">=</span><span class="p">(</span><span class="n">M1</span> <span class="o">*</span> <span class="n">M2</span><span class="p">))</span>
+        <span class="n">registered</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">stars2</span><span class="p">,</span> <span class="p">(</span><span class="n">M1</span> <span class="o">*</span> <span class="n">M2</span><span class="p">)))</span></code></pre></div>
+
+<p>What this does is to attempt to align each image directly with the first image.
+If this succeeds the transformation is simply the one returned by
+<code>register_pair</code>. Otherwise, the image is aligned with the third to last
+successfully registered image, then the second to last, and so on. If one of
+these succeeds the desired transformation is just the previously registered
+image’s transformation composed with that of transformation just returned by
+<code>register_pair</code>.</p>
+
+<p>This technique works quite well: The majority of images line up with the first
+image directly, but if they don’t (typically because they have a small set of
+detected stars that intersect with the first image) then they are lined up with
+the images that they are most similar to. Preferring to pair with the first
+image is desirable as it prevents alignment errors accumulating.</p>
+
+<h2 id="aligning-pairs-of-images">Aligning pairs of images</h2>
+
+<p>This is all well and good, but how does <code>register_pair()</code> work? Well, it starts
+by randomly selecting 2 pairs of stars, the first of each pair being from the
+first image, and the second of each pair being from the second image:</p>
+
+<p><img src="/assets/pluto-flyby/pair-align-1.png" alt="Pair align 1" class="img-responsive"/></p>
+
+<p>This is a hypothetical correspondence between the two images: The first star
+chosen in the first image should correspond with the first star chosen in the
+second image, and the second star in the first image should correspond with the
+second star in the second image. Given we’re only permitting rotation and
+translation and not scaling, we can immediately reject the hypothesis if the
+distance between the two stars is different for the two images (up to a
+predetermined margin of error), as is the case above.</p>
+
+<p>The procedure is restarted until a hypothetical correspondence is found with
+(approximately) equal distances between the two stars in either image:</p>
+
+<p><img src="/assets/pluto-flyby/pair-align-2.png" alt="Pair align 2" class="img-responsive"/></p>
+
+<p><sup><a href="#image_credits">Image credit</a></sup></p>
+
+<p><em>Note that the blue lines are the same length. For remaining images in this
+section lines of the same colour will be of the same length</em></p>
+
+<p>We have a reasonable hypothesis at this point, but it could just be that the
+two stars are coincidentally the same distance apart in each image, and are in
+fact images of completely different stars. We attempt to strengthen the
+hypothesis by performing an exhaustive search on remaining pairs of stars (one
+from each image), and seeing how many pairs fit the hypothesis.</p>
+
+<p>A pair is said to fit the hypothesis if in either image, the star described by
+the new pair has the same distance to the stars in the hypothesis. For example:</p>
+
+<p><img src="/assets/pluto-flyby/pair-align-3.png" alt="Pair align 3" class="img-responsive"/></p>
+
+<p><sup><a href="#image_credits">Image credit</a></sup></p>
+
+<p>The new star (yellow) has the same distance to the first star (denoted by a
+blue line) in either image. Similarly it has the same distance to the second
+star (denoted by a green line) in either image.</p>
+
+<p>As pairs are found they are added to the hypothetical correspondence. As such,
+the 4th star must have the same distance to the first 3 stars in either image:</p>
+
+<p><img src="/assets/pluto-flyby/pair-align-4.png" alt="Pair align 4" class="img-responsive"/></p>
+
+<p><sup><a href="#image_credits">Image credit</a></sup></p>
+
+<p>…and the 5th star must have the same distance to the first 4 stars in either
+image:</p>
+
+<p><img src="/assets/pluto-flyby/pair-align-5.png" alt="Pair align 5" class="img-responsive"/></p>
+
+<p><sup><a href="#image_credits">Image credit</a></sup></p>
+
+<p>If at the end of this procedure there are at least 4 stars in the hypothetical
+correspondence the hypothesis is accepted. A <a href="https://en.wikipedia.org/wiki/Procrustes_analysis">Procrustes
+Analysis</a> is performed on
+the correspondences which calculates a best-fit translation/rotation so that
+the stars in the first image line up with the corresponding stars in the second
+image.</p>
+
+<p>If there are fewer than 4 stars, the procedure is restarted. If after 100,000
+restarts no registration has been found the registration is failed.</p>
+
+<p>Here’s the code for the above:</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="k">def</span> <span class="nf">_find_correspondences</span><span class="p">(</span><span class="n">stars1</span><span class="p">,</span> <span class="n">stars2</span><span class="p">):</span>
+    <span class="n">stars1</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">stars1</span><span class="p">)</span>
+    <span class="n">stars2</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">stars2</span><span class="p">)</span>
+
+    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">MAX_ITERS</span><span class="p">):</span>
+        <span class="n">model</span> <span class="o">=</span> <span class="n">_pick_random_model</span><span class="p">(</span><span class="n">stars1</span><span class="p">,</span> <span class="n">stars2</span><span class="p">)</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">_fits_model</span><span class="p">(</span><span class="n">model</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="n">model</span><span class="p">[:</span><span class="mi">1</span><span class="p">]):</span>
+            <span class="k">continue</span>
+
+        <span class="k">for</span> <span class="n">s1</span> <span class="ow">in</span> <span class="n">stars1</span><span class="p">:</span>
+            <span class="k">if</span> <span class="n">s1</span> <span class="ow">in</span> <span class="p">(</span><span class="n">pair</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="k">for</span> <span class="n">pair</span> <span class="ow">in</span> <span class="n">model</span><span class="p">):</span>
+                <span class="k">continue</span>
+            <span class="k">for</span> <span class="n">s2</span> <span class="ow">in</span> <span class="n">stars2</span><span class="p">:</span>
+                <span class="k">if</span> <span class="n">s2</span> <span class="ow">in</span> <span class="p">(</span><span class="n">pair</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="k">for</span> <span class="n">pair</span> <span class="ow">in</span> <span class="n">model</span><span class="p">):</span>
+                    <span class="k">continue</span>
+                <span class="k">if</span> <span class="n">_fits_model</span><span class="p">((</span><span class="n">s1</span><span class="p">,</span> <span class="n">s2</span><span class="p">),</span> <span class="n">model</span><span class="p">):</span>
+                    <span class="n">model</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">s1</span><span class="p">,</span> <span class="n">s2</span><span class="p">))</span>
+
+        <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">model</span><span class="p">)</span> <span class="o">&gt;=</span> <span class="n">NUM_STARS_TO_PAIR</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">model</span>
+
+    <span class="k">raise</span> <span class="n">RegistrationFailed</span>
+
+<span class="k">def</span> <span class="nf">_transformation_from_correspondences</span><span class="p">(</span><span class="n">correspondences</span><span class="p">):</span>
+    <span class="c"># Use a Procrustes analysis to compute a matrix M from correspondences.</span>
+    <span class="c"># Omitted for brevity. See reg.py in the repository for the full version.</span>
+
+<span class="k">def</span> <span class="nf">register_pair</span><span class="p">(</span><span class="n">stars1</span><span class="p">,</span> <span class="n">stars2</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">_transformation_from_correspondences</span><span class="p">(</span>
+                                         <span class="n">_find_correspondences</span><span class="p">(</span><span class="n">stars1</span><span class="p">,</span> <span class="n">stars2</span><span class="p">))</span></code></pre></div>
+
+<p>The above algorithm is an example of the <a href="https://en.wikipedia.org/wiki/RANSAC">RANSAC
+method</a>. In this case the model is just
+the set of correspondences found so far. We could equally have calculated an
+explicit transform after finding the initial 2 pairs, and used this to test for
+inliers, however this approach would be senstive to the initial pair being
+close together. In that case the transform would not provide an accurate
+rotation parameter, which might lead to a correct hypothesis being rejected.</p>
+
+<h2 id="stacking">Stacking</h2>
+
+<p>The stacking phase isn’t particularly complex. It proceeds as follows:</p>
+
+<ol>
+  <li>Find a bounding rectangle for all the images. This is done by translating
+all image corners into the reference frame of the first image, then finding
+the element-wise minimum and maximum. This gives the top-left and
+bottom-right corner of the bounding box, respectively.</li>
+  <li>An output image (consisting of zeros, ie. black) is then created with the
+same dimensions as the bounding rectangle. Images are drawn onto this blank
+canvas, using <code>cv2.warpAffine</code> to rotate and translate the images by the
+transformation found during the alignment step.</li>
+  <li>If an image is about to be processed which was taken more than 4 hours after
+the previous image, the current output image is written to disk, and a fresh
+image created. This avoids images taken at (approximately) the same time
+from taking up lots of frames in the animation.</li>
+</ol>
+
+<p>The result is then composed into a GIF using ImageMagick.</p>
+
+<h2 id="credits">Credits</h2>
+
+<p><a id="image_credits"/>
+LORRI images courtesy of NASA/Johns Hopkins University Applied Physics
+Laboratory/Southwest Research Institute.</p>
+
+
+          <hr/>
+          
+          
+          
+
+          
+            <nav>
+              
+            </nav>
+          
+          
+
+
+
+
+
+
+
+
+
+
+
+      </div>
+    </div></body></html>

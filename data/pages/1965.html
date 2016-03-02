@@ -1,0 +1,168 @@
+<html><body><div><article class="post-content">
+    <h1>What is mock</h1>
+
+<p>Python <code>mock</code> module allows you to replace parts of your system under test with mock objects
+and make assertions about how they have been used.</p>
+
+<p>Mock is available in the standard library in python3 as part of <code>unittest</code> module.
+You can read it's documentation <a href="https://docs.python.org/3/library/unittest.mock.html">here</a>.
+In python 2, <code>mock</code> is available to install with <a href="https://pip.pypa.io/en/latest/">pip</a>.</p>
+
+<h1>Use cases</h1>
+
+<p>What do we use mocks for? Mock are mostly used in unit tests.
+We try to make tests as short and focused on what we test as possible.</p>
+
+<h2>Mock call to external service</h2>
+
+<p>As I stated in the first paragraph, mock is mainly used for testing. Recently
+I was implementing a social signup and I didn't want to call
+facebook every time, but I wanted to test if the signup works as it's
+supposed to.</p>
+
+<p>Calling an external service such as facebook is really expensive,
+because http requests take time (hundreds of milliseconds at least) 
+and requires
+thinking about lots of complex things - such as if your access token is
+still valid. And we usually don't want to think about it during testing,
+because we want to test this one specific detail of our code.</p>
+
+<p>Below is a short gist of this usage of mock:</p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">get_json_mock = mock.Mock(return_value={'name': 'John',
+                                        'email': 'john@doe.com'})
+
+class SocialAuthViewTest(APITestCase):
+    backend = "facebook"
+
+    def setUp(self):
+        test_token = 'token test_facebook'
+        self.url = reverse('authenticate_social', args=(self.backend,))
+        self.client.defaults['HTTP_X_AUTHORIZATION'] = test_token
+
+    @mock.patch('social.backends.base.BaseAuth.get_json', get_json_mock)
+    def test_returns_200_when_user_found(self):
+        response = self.client.post(self.url)
+        self.assertEqual(response.status_code, 200)
+</code></pre></div>
+<p>If we know which function is called and what it should return, we can
+patch it using <code>@mock.patch</code> decorator and
+previously created <code>Mock</code> object with <code>return_value</code> set to what we want
+to get as result of function call.</p>
+
+<h2>Locally turn off logging</h2>
+
+<p>Let's imagine that we've already implemented most of
+our social login functionality and now we want to test if
+our API properly reacts to bad logging in attacks.</p>
+
+<p>We don't want user to see ugly <code>500</code> - internal server error HTTP error code,
+but <code>401</code> unauthorized HTTP error code.</p>
+
+<p>When we get information from an external service that credentials were invalid
+we should log the accident. In tests our logger prints to standard out.
+But do we want an ugly
+traceback in our tests output? I would rather see something like this:</p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">....................................
+----------------------------------------------------------------------
+Ran 17 tests in 1.610s
+
+OK
+</code></pre></div>
+<p>Short and clean. But how should I keep loggers quiet?</p>
+
+<p>I quickly searched the web to find good solutions to this problem.
+Stack overflow provides 
+<a href="http://stackoverflow.com/questions/5255657/how-can-i-disable-logging-while-running-unit-tests-in-python-django">some answers</a>
+but they weren't satisfactory to me, because most of them included
+changing logging too much, by changing it's level globally in tests.</p>
+
+<p>I wanted a more fine grained approach and I used <code>mock</code> library for it.</p>
+
+<p>First I had to find the the file logging the exception and understand
+how it's done.</p>
+
+<p>Here is a file <code>users/views.py</code></p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">logger = logging.getLogger(__name__)
+
+def sign_in_or_signup(register, access_token):
+    try:
+        return request.backend.do_auth(access_token)
+    except requests.HTTPError:
+        logger.exception('Invalid login')
+</code></pre></div>
+<p>It's a pretty standard django way to use logging. We create logger instance
+for the module and use it to print out messages to standard out or
+send details of errors to some external service such as <a href="https://getsentry.com/welcome/">sentry</a>.</p>
+
+<p>If we only could mock this logger to swallow exceptions...</p>
+
+<p><code>users/tests/test_social_signup.py</code></p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">    @mock.patch('users.views.logger', mock.Mock())
+    def test_user_authenticates_wrong_access_token(self):
+        self.client.defaults['HTTP_X_AUTHORIZATION'] = 'token iamjustwrong'
+        response = self.client.post(self.url)
+        self.assertEquals(response.status_code, 401)
+</code></pre></div>
+<p>VoilĂ , done! It's even easier than the previous example.</p>
+
+<h2>Testing a behavior flow</h2>
+
+<p>Another interesting usage of mock can be while testing
+<code>check and retry if wrong</code> pattern.</p>
+
+<p>My coworker was testing this kind of behavior and used
+code similar to the one below:</p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">def generate_value_mock(*args, **kwargs):
+    iterator = getattr(generate_value_mock, 'iterator', 0)
+    setattr(generate_value_mock, 'iterator', iterator + 1)
+
+    if iterator &lt; 2:
+        return 'a'
+    return 'b'
+</code></pre></div>
+<p>Nice piece of advanced python, right? Actually it demands
+thinking, it's complex. Maybe it even should be tested to
+be sure that it's behavior is correct. One of the testing rules is that
+we don't test tests, so they should be as simple as possible.</p>
+
+<p>Guess what, we can use <code>mock</code> library to simplify this piece of
+code. Below is the gist from <a href="http://blog.atte.ro/2013/11/10/ipython-now-your-tools.html">IPython</a>
+representing how it works:</p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">m = mock.Mock()
+In [17]: m.test.side_effect = ['a', 'a', 'b']
+
+In [18]: m.test()
+Out[18]: 'a'
+
+In [19]: m.test()
+Out[19]: 'a'
+
+In [20]: m.test()
+Out[20]: 'b'
+</code></pre></div>
+<p>We can set <code>side_effect</code> on Mock object. Depending on what type of object
+we pass to it, we can get different behaviors when calling mock object.</p>
+
+<blockquote>
+<p>Useful for raising exceptions or dynamically changing return values. The function is called with the same arguments as the mock, and unless it returns DEFAULT, the return value of this function is used as the return value.
+Alternatively <code>side_effect</code> can be an exception class or instance. In this case the exception will be raised when the mock is called.
+If <code>side_effect</code> is an iterable then each call to the mock will return the next value from the iterable.
+A <code>side_effect</code> can be cleared by setting it to None.</p>
+</blockquote>
+
+<p>You can read more about this particular property
+<a href="https://docs.python.org/3/library/unittest.mock.html#unittest.mock.Mock.side_effect">here</a>.</p>
+
+<h1>It's only a tip of the iceberg...</h1>
+
+<p>If you haven't heard about <code>mock</code> before, you might find this examples impressive,
+however they don't show even 10% of real capabilities of python <code>mock</code> library.</p>
+
+<p>I recommending you reading it's <a href="https://docs.python.org/3/library/unittest.mock.html">detailed documentation</a>
+or if you prefer more hands on approach, you can check out
+<a href="http://www.toptal.com/python/an-introduction-to-mocking-in-python">mock tutorial form Toptal</a>.</p>
+
+<p>Anyway, happy mocking!</p>
+
+  </article>
+</div></body></html>

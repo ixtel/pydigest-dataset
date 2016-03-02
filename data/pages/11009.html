@@ -1,0 +1,135 @@
+<html><body><div><div class="content html_format"><p>
+      В нашем Django-приложении необходимо было разработать отчет (расчет) бонусов.</p><p>
+Отчет должен иметь вложенную структуру с подведением итогов по пользователям, подразделениям и по всей компании. Схематично его логику можно представить:
+
+</p><pre><code class="python">print total
+for department in departments:
+    print department.total
+    for user in department.users:
+        print user.total
+        for row in user.rows:
+            print row.data</code></pre><a name="habracut"/><p>
+У этого отчета было два осложняющих момента:
+
+</p><ol>
+<li>В роли "row" могли выступать разные модели (и располагаться вперемежку), что не позволяет использовать итераторы по QuerySet'ам.</li>
+<li>Время построение отчета. Сбор данных занимает существенное время (несколько секунд). Данные в отчете могут меняться. Говоря на чистоту, это не статический отчет, а инструмент для контроля и корректировки начисленных бонусов в виде отчета. Но данные меняются не очень часто, скажем на каждые 100 просмотров придется одно изменение, после которого нужно перестроить отчет. Т.е. данные можно кэшировать.</li>
+</ol><p>
+Структура из вложенных словарей отлично решает обе задачи: в них можно сложить все требуемые скаляры (числа, строки, даты), сериализовать и сложить в кэш.
+</p><p>
+Структура данных для отчета приобрела вид (упрощена):
+
+</p><pre><code>{
+    'total': {
+        'income': 1234,
+        'bonus': 123,
+        'expense': 1234,
+        'penalty': 123
+    },
+    'departments': {
+        '{dept_id}': {
+            'department': {
+                'title': 'Mega Department'
+            }
+            'total': {
+                'income': 1234,
+                'bonus': 123,
+                'expense': 1234,
+                'penalty': 123
+            },
+            'users': {
+                '{user_id}': {
+                    'user': {
+                        'name': 'John Smith'
+                    },
+                    'total': {
+                        'income': 1234,
+                        'bonus': 123,
+                        'expense': 1234,
+                        'penalty': 123
+                    },
+                    'rows': {
+                        '{sale_id}': {        //  Одна модель
+                            'type': 'sale'
+                            'base_income': 1234,
+                            'bonus': 123,
+                            'comment': 'some description'
+                        },
+                        '{expense_id}': {     //  Другая модель !!!
+                            'type': 'expense'
+                            'expense': 1234,
+                            'penalty': 123,
+                            'comment': 'some description'
+                        },
+                        ...
+                    }
+                },
+                ...
+            }
+        },
+        ...
+    }
+}</code></pre><p>
+И вот тут-то я столкнулся с проблемой, что заполнение такой структуры из словарей не столь удобно, как мне того хотелось. Проверка словарей на наличие ключей или использование setdefatult(key, {}) превращает код в нечитабельную кашу.
+</p><p>
+Эта структура чем-то напоминает XML. И мне бы хотелось использовать что-то подобное тому, как строятся XPath-выражения для адресации узлов XML-дерева:
+
+</p><pre><code>/departments/{dept_id}/users/{user_id}/rows/{row_id}/base_income</code></pre><p>
+или на языке Python что-то вида:
+
+</p><pre><code class="python">data.departments.{dept_id}.users.{user_id}.rows.{row_id}.base_income</code></pre><p>
+Учтывая, что {dept_id} и прочие другие {id} — целые числа, то я разрешил себе использование квадратных скобок: [].
+
+</p><pre><code class="python">data.departments[{dept_id}].users[{user_id}].rows[{row_id}].base_income</code></pre><p>
+Собственно мне нужен был такой класс, который бы вел себя в основном, как словарь, но при этом:
+
+</p><ol>
+<li>доступ к атрибутам можно было делать без квадратных скобочек</li>
+<li>автоматически создавались отсутствующие аттрибуты</li>
+</ol><p>
+Так появился </p><a href="https://github.com/KokocGroup/elastic-dict">ElasticDict</a>
+
+<h3>В итоге</h3><p>
+Код по подготовке данных выглядит приблизительно так:
+
+</p><pre><code class="python">data = ElasticDict()
+for sale in Sale.objects.filter(...).prefetch_related(...):
+    data.departments[sale.user.department.pk].users[sale.user.pk].rows[sale.pk] = {'base_income': sale.amount, 'bonus': sale.calc_bonus()}
+
+# или в другой форме, кому как больше нравится
+for expense in Expense.objects.filter(...).prefetch_related(...):
+    data.departments[sale.user.department.pk].users[sale.user.pk].rows[expense.pk].base_expense = expense.amount
+    data.departments[sale.user.department.pk].users[sale.user.pk].rows[expense.pk].penalty = expense.calc_penalty()</code></pre><p>
+Код в шаблоне так:
+
+</p><pre><code class="django">{{ data.total }}
+{% for dept_id, department in data.departments.items %}
+    {{ department.total }}
+    {% for user_id, user in department.users.items %}
+        {{ user.total }}
+        {% for row_id, row in user.rows.items %}:
+            {{ row.data }}
+        {% endfor %}
+    {% endfor %}
+{% endfor %}</code></pre>
+<h3>Заключение</h3><p>
+Надо отметить, что ElasticDict() это подкласс обычного dict()'а, т.е. в нем доступно все то, что и в обычном словаре. В тот момент, когда потребуется "зафиксировать" структуру (снова захотим получать KeyError'ы при обращении к несуществующим ключам), экземпляр ElasticDict можно экспортировать в обчный dict(). Делается рекурсивный обход ElasticDict(), где все экземпляры этого класа заменяются на обычные словари. Есть и обратное преобразование — на вход подаем словарь, на выходе получаем ElasticDict также с рекурсивным обходом.
+</p><p>
+Замечания/предложения приветствуются!
+
+</p><strong>UPDATE</strong><p> из англоговорящей тусовки подсказали, что уже есть аналог </p><a href="https://github.com/mewwts/addict">addict</a><p>. Думаю, тем, кто проголосовал "мне надо" следует переключиться на него, как на более стабильный (проверенный).
+
+
+      	</p><div class="polling">
+		
+
+	
+
+    <p class="for_users_only_msg">Только зарегистрированные пользователи могут участвовать в опросе. <a href="https://habrahabr.ru/auth/login/">Войдите</a>, пожалуйста.</p>
+	</div>
+
+      <p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

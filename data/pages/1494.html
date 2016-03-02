@@ -1,0 +1,204 @@
+<html><body><div><div class="content">
+        <p>For the tl;dr: <a href="https://github.com/paultag/dockerfdw">Docker FDW</a> is a thing.
+Star it, hack it, try it out. File bugs, be happy. If you want to see what it's
+like to read, there's some example SQL down below.</p>
+<aside class="left">
+    This post was edited on Sep 21st to add information about the
+    <code>DELETE</code> and <code>INSERT</code> operators
+</aside>
+
+<p>The question is first, what the heck is a PostgreSQL Foreign Data Wrapper?
+PostgreSQL Foreign Data Wrappers are plugins that allow C libraries
+to provide an adaptor for PostgreSQL to talk to an external database.</p>
+<p>Some folks have used this to wrap stuff like
+<a href="https://github.com/citusdata/mongo_fdw">MongoDB</a>, which I always found
+to be hilarous (and an epic hack).</p>
+<h1>Enter Multicorn</h1>
+<p>During my time at <a href="http://pygotham.org/">PyGotham</a>, I saw a talk from 
+<a href="https://twitter.com/weschow">Wes Chow</a> about something called
+<a href="http://multicorn.org/">Multicorn</a>. He was showing off some really neat
+plugins, such as the git revision history of CPython, and parsed logfiles
+from some stuff over at Chartbeat. This basically blew my mind.</p>
+<aside class="right">
+    If you're interested in some of these, there are a bunch in the
+    Multicorn VCS repo, such as the
+    <a href="https://github.com/Kozea/Multicorn/blob/master/python/multicorn/gitfdw.py">gitfdw</a>
+    example.
+</aside>
+
+<p>All throughout the talk I was coming up with all sorts of things that I wanted
+to do -- this whole library is basically exactly what I've been dreaming
+about for years. I've always wanted to provide a SQL-like interface
+into querying API data, joining data cross-API using common crosswalks,
+such as using <a href="http://capitolwords.org/">Capitol Words</a> to query for
+Legislators, and use the
+<a href="http://bioguide.congress.gov/biosearch/biosearch.asp">bioguide ids</a>
+to <code>JOIN</code> against the <a href="https://sunlightlabs.github.io/congress/">congress api</a>
+to get their Twitter account names.</p>
+<p>My first shot was to Multicorn the new
+<a href="http://opencivicdata.org/">Open Civic Data</a> API I was working on, chuckled
+and put it aside as a really awesome hack.</p>
+<h1>Enter Docker</h1>
+<p>It wasn't until <a href="https://github.com/tianon">tianon</a> connected the dots for me
+and suggested a <a href="http://docker.io/">Docker</a> FDW did I get really excited.
+Cue a few hours of hacking, and I'm proud to say -- here's
+<a href="https://github.com/paultag/dockerfdw">Docker FDW</a>.</p>
+<p>This lets us ask all sorts of really interesting questions out of the API,
+and might even help folks writing webapps avoid adding too much Docker-aware
+logic. Abstractions can be fun!</p>
+<h1>Setting it up</h1>
+<aside class="left">
+    The only stumbling block you might find (at least on Debian and Ubuntu) is
+    that you'll need a Multicorn `.deb`. It's currently undergoing an
+    official Debianization from the Postgres team, but in the meantime I put
+    the source and binary up on my
+    <a href="https://people.debian.org/~paultag/tmp/">people.debian.org</a>.
+    Feel free to use that while the Debian PostgreSQL team prepares the upload
+    to unstable.
+</aside>
+
+<p>I'm going to assume you have a working Multicorn, PostgreSQL and Docker setup
+(including adding the <code>postgres</code> user to the <code>docker</code> group)</p>
+<p>So, now let's pop open a <code>psql</code> session. Create a database (I called mine
+<code>dockerfdw</code>, but it can be anything), and let's create some tables.</p>
+<p>Before we create the tables, we need to let PostgreSQL know where our
+objects are. This takes a name for the <code>server</code>, and the <code>Python</code> importable
+path to our FDW.</p>
+<div class="highlight"><pre><span class="k">CREATE</span> <span class="n">SERVER</span> <span class="n">docker_containers</span> <span class="k">FOREIGN</span> <span class="k">DATA</span> <span class="n">WRAPPER</span> <span class="n">multicorn</span> <span class="k">options</span> <span class="p">(</span>
+    <span class="n">wrapper</span> <span class="s1">'dockerfdw.wrappers.containers.ContainerFdw'</span><span class="p">);</span>
+
+<span class="k">CREATE</span> <span class="n">SERVER</span> <span class="n">docker_image</span> <span class="k">FOREIGN</span> <span class="k">DATA</span> <span class="n">WRAPPER</span> <span class="n">multicorn</span> <span class="k">options</span> <span class="p">(</span>
+    <span class="n">wrapper</span> <span class="s1">'dockerfdw.wrappers.images.ImageFdw'</span><span class="p">);</span>
+</pre></div>
+
+
+<p>Now that we have the server in place, we can tell PostgreSQL to create a table
+backed by the FDW by creating a foreign table. I won't go too much into the
+syntax here, but you might also note that we pass in some options - these are
+passed to the constructor of the FDW, letting us set stuff like the Docker
+host.</p>
+<div class="highlight"><pre><span class="k">CREATE</span> <span class="k">foreign</span> <span class="k">table</span> <span class="n">docker_containers</span> <span class="p">(</span>
+    <span class="ss">"id"</span>          <span class="nb">TEXT</span><span class="p">,</span>
+    <span class="ss">"image"</span>       <span class="nb">TEXT</span><span class="p">,</span>
+    <span class="ss">"name"</span>        <span class="nb">TEXT</span><span class="p">,</span>
+    <span class="ss">"names"</span>       <span class="nb">TEXT</span><span class="p">[],</span>
+    <span class="ss">"privileged"</span>  <span class="nb">BOOLEAN</span><span class="p">,</span>
+    <span class="ss">"ip"</span>          <span class="nb">TEXT</span><span class="p">,</span>
+    <span class="ss">"bridge"</span>      <span class="nb">TEXT</span><span class="p">,</span>
+    <span class="ss">"running"</span>     <span class="nb">BOOLEAN</span><span class="p">,</span>
+    <span class="ss">"pid"</span>         <span class="nb">INT</span><span class="p">,</span>
+    <span class="ss">"exit_code"</span>   <span class="nb">INT</span><span class="p">,</span>
+    <span class="ss">"command"</span>     <span class="nb">TEXT</span><span class="p">[]</span>
+<span class="p">)</span> <span class="n">server</span> <span class="n">docker_containers</span> <span class="k">options</span> <span class="p">(</span>
+    <span class="k">host</span> <span class="s1">'unix:///run/docker.sock'</span>
+<span class="p">);</span>
+
+
+<span class="k">CREATE</span> <span class="k">foreign</span> <span class="k">table</span> <span class="n">docker_images</span> <span class="p">(</span>
+    <span class="ss">"id"</span>              <span class="nb">TEXT</span><span class="p">,</span>
+    <span class="ss">"architecture"</span>    <span class="nb">TEXT</span><span class="p">,</span>
+    <span class="ss">"author"</span>          <span class="nb">TEXT</span><span class="p">,</span>
+    <span class="ss">"comment"</span>         <span class="nb">TEXT</span><span class="p">,</span>
+    <span class="ss">"parent"</span>          <span class="nb">TEXT</span><span class="p">,</span>
+    <span class="ss">"tags"</span>            <span class="nb">TEXT</span><span class="p">[]</span>
+<span class="p">)</span> <span class="n">server</span> <span class="n">docker_image</span> <span class="k">options</span> <span class="p">(</span>
+    <span class="k">host</span> <span class="s1">'unix:///run/docker.sock'</span>
+<span class="p">);</span>
+</pre></div>
+
+
+<p>And, now that we have tables in place, we can try to learn something about the
+Docker containers. Let's start with something fun - a join from containers
+to images, showing all image tag names, the container names and the ip of the
+container (if it has one!).</p>
+<div class="highlight"><pre><span class="k">SELECT</span> <span class="n">docker_containers</span><span class="p">.</span><span class="n">ip</span><span class="p">,</span> <span class="n">docker_containers</span><span class="p">.</span><span class="k">names</span><span class="p">,</span> <span class="n">docker_images</span><span class="p">.</span><span class="n">tags</span>
+  <span class="k">FROM</span> <span class="n">docker_containers</span>
+  <span class="k">RIGHT</span> <span class="k">JOIN</span> <span class="n">docker_images</span>
+  <span class="k">ON</span> <span class="n">docker_containers</span><span class="p">.</span><span class="n">image</span><span class="o">=</span><span class="n">docker_images</span><span class="p">.</span><span class="n">id</span><span class="p">;</span>
+</pre></div>
+
+
+<div class="highlight"><pre>     ip      |            names            |                  tags                   
+-------------+-----------------------------+-----------------------------------------
+             |                             | {ruby:latest}
+             <span class="o">|</span>                             | {paultag/vcs-mirror:latest}
+             <span class="o">|</span> {/de-openstates-to-ocd}     | {sunlightlabs/scrapers-us-state:latest}
+             <span class="o">|</span> {/ny-openstates-to-ocd}     | {sunlightlabs/scrapers-us-state:latest}
+             <span class="o">|</span> {/ar-openstates-to-ocd}     | {sunlightlabs/scrapers-us-state:latest}
+ 172.17.0.47 | {/ms-openstates-to-ocd}     | {sunlightlabs/scrapers-us-state:latest}
+ 172.17.0.46 | {/nc-openstates-to-ocd}     | {sunlightlabs/scrapers-us-state:latest}
+             <span class="o">|</span> {/ia-openstates-to-ocd}     | {sunlightlabs/scrapers-us-state:latest}
+             <span class="o">|</span> {/az-openstates-to-ocd}     | {sunlightlabs/scrapers-us-state:latest}
+             <span class="o">|</span> {/oh-openstates-to-ocd}     | {sunlightlabs/scrapers-us-state:latest}
+             <span class="o">|</span> {/va-openstates-to-ocd}     | {sunlightlabs/scrapers-us-state:latest}
+ 172.17.0.41 | {/wa-openstates-to-ocd}     | {sunlightlabs/scrapers-us-state:latest}
+             <span class="o">|</span> {/jovial_poincare}          | {&lt;none&gt;:<span class="nt">&lt;none&gt;</span>}
+             <span class="o">|</span> {/jolly_goldstine}          | {&lt;none&gt;:<span class="nt">&lt;none&gt;</span>}
+             <span class="o">|</span> {/cranky_torvalds}          | {&lt;none&gt;:<span class="nt">&lt;none&gt;</span>}
+             <span class="o">|</span> {/backstabbing_wilson}      | {&lt;none&gt;:<span class="nt">&lt;none&gt;</span>}
+             <span class="o">|</span> {/desperate_hoover}         | {&lt;none&gt;:<span class="nt">&lt;none&gt;</span>}
+             <span class="o">|</span> {/backstabbing_ardinghelli} | {&lt;none&gt;:<span class="nt">&lt;none&gt;</span>}
+             <span class="o">|</span> {/cocky_feynman}            | {&lt;none&gt;:<span class="nt">&lt;none&gt;</span>}
+             <span class="o">|</span>                             | {paultag/postgres:latest}
+             <span class="o">|</span>                             | {debian:testing}
+             <span class="o">|</span>                             | {paultag/crank:latest}
+             <span class="o">|</span>                             | {&lt;none&gt;:<span class="nt">&lt;none&gt;</span>}
+             <span class="o">|</span>                             | {&lt;none&gt;:<span class="nt">&lt;none&gt;</span>}
+             <span class="o">|</span> {/stupefied_fermat}         | {hackerschool/doorbot:latest}
+             <span class="o">|</span> {/focused_euclid}           | {debian:unstable}
+             <span class="o">|</span> {/focused_babbage}          | {debian:unstable}
+             <span class="o">|</span> {/clever_torvalds}          | {debian:unstable}
+             <span class="o">|</span> {/stoic_tesla}              | {debian:unstable}
+             <span class="o">|</span> {/evil_torvalds}            | {debian:unstable}
+             <span class="o">|</span> {/foo}                      | {debian:unstable}
+(31 rows)
+</pre></div>
+
+
+<p>OK, let's see if we can bring this to the next level now. I finally got around
+to implementing <code>INSERT</code> and <code>DELETE</code> operations, which turned out to be
+pretty simple to do. Check this out:</p>
+<div class="highlight"><pre><span class="k">DELETE</span> <span class="k">FROM</span> <span class="n">docker_containers</span><span class="p">;</span>
+</pre></div>
+
+
+
+
+
+<p>This will do a <code>stop</code> + <code>kill</code> after a 10 second hang behind the scenes. It's
+actually a lot of fun to spawn up a container and terminate it from
+<code>PostgreSQL</code>.</p>
+<div class="highlight"><pre><span class="k">INSERT</span> <span class="k">INTO</span> <span class="n">docker_containers</span> <span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="n">image</span><span class="p">)</span> <span class="k">VALUES</span> <span class="p">(</span><span class="s1">'hello'</span><span class="p">,</span> <span class="s1">'debian:unstable'</span><span class="p">)</span> <span class="n">RETURNING</span> <span class="n">id</span><span class="p">;</span>
+</pre></div>
+
+
+<div class="highlight"><pre>                                id                                
+------------------------------------------------------------------
+ 0a903dcf5ae10ee1923064e25ab0f46e0debd513f54860beb44b2a187643ff05
+
+INSERT 0 1
+(1 row)
+</pre></div>
+
+
+<p>Spawning containers works too - this is still very immature and not super
+practical, but I figure while I'm showing off, I might as well go all the way.</p>
+<div class="highlight"><pre><span class="k">SELECT</span> <span class="n">ip</span> <span class="k">FROM</span> <span class="n">docker_containers</span> <span class="k">WHERE</span> <span class="n">id</span><span class="o">=</span><span class="s1">'0a903dcf5ae10ee1923064e25ab0f46e0debd513f54860beb44b2a187643ff05'</span><span class="p">;</span>
+</pre></div>
+
+
+<div class="highlight"><pre>     ip      
+-------------
+ 172.17.0.12
+(1 row)
+</pre></div>
+
+
+<p>Success! This is just a taste of what's to come, so please feel free to hack on
+<a href="https://github.com/paultag/dockerfdw">Docker FDW</a>,
+tweet me <a href="http://twitter.com/paultag">@paultag</a>, file bugs / feature requests.
+It's currently a bit of a hack, and it's something that I think has
+long-term potential after some work goes into making sure that this is a rock
+solid interface to the Docker API.</p>
+    </div>
+    </div></body></html>

@@ -1,0 +1,631 @@
+<html><body><div><div dir="ltr" trbidi="on"><p>
+At PyCon, </p><a href="https://twitter.com/zzzeek">Mike Bayer</a><p>, the author of SQLAlchemy, gave a three hour tutorial on it. Here's the </p><a href="http://pyvideo.org/video/2670/introduction-to-sqlalchemy-0">video</a><p>. What follows are my notes.
+</p><p>
+He used something called sliderepl. sliderepl is a nice ASCII tool that's a mix of slides and a REPL. You can flip through his source code / slides in the terminal. It's actually pretty neat.
+</p><p>
+At the lowest level, SQLAlchemy sends strings to the database and interprets the responses.
+</p><p>
+It took him 10 years to write it. He started the project in 2005. He's finally going to hit 1.0.
+</p><p>
+SQLAlchemy forces you to be aware of transactions.
+</p><p>
+Isolation models have to do with how ongoing transactions see ongoing work amongst each other.
+</p><p>
+Goals:
+</p><p>
+    Provide helpers, etc.
+</p><p>
+    Provides a fully featured facade over the Python DBAPI.
+</p><p>
+    Provide an industrial strength, but optional, ORM.
+</p><p>
+    Act as a base for inhouse tools.
+</p><p>
+Philosophies:
+</p><p>
+    Make the usage of different DBs and adaptors as consistent as possible.
+</p><p>
+    But still expose unique features in each backend.
+</p><p>
+    It's not realistic for an ORM to perfectly match any DB. He mentioned</p><p>
+    leaky abstractions.
+</p><p>
+    Don't hide the DB. You must continue to think in SQL.
+</p><p>
+    Provide automation and DRY.
+</p><p>
+    Allow expression using declarative patterns.
+</p><p>
+Here's the stack:
+</p><p>
+    SQLAlchemy ORM</p><p>
+    SQLAlchemy Core:</p><p>
+        Schema/Types.</p><p>
+        SQL expression language.</p><p>
+        Engine:</p><p>
+            Connection pooling.</p><p>
+            Dialects.</p><p>
+    DBAPI</p><p>
+        There are different libraries for different DBs.</p><p>
+    Database
+</p><p>
+Reddit and Dropbox use SQLAlchemy Core without the ORM.
+</p><p>
+An "Engine" is a registry which provides connectivity to a particular DB server.
+</p><p>
+A "Dialect" interprets generic SQL and database commands in terms of a specific DBAPI and DB backend.
+</p><p>
+A "Connection Pool" holds a collection of DB connections in memory for fast reuse. It also handles reconnecting if the connection drops.
+</p><p>
+The "SQL Expression Language" allows SQL to be written using Python expressions.
+</p><p>
+"Schema/Types" uses Python objects to represent tables, columns, and datatypes.
+</p><p>
+The ORM:
+</p><p>
+    Allows construction of Python objects which can be mapped to relational DB</p><p>
+    tables.
+</p><p>
+    Transparently persists objects into their corresponding DB tables using</p><p>
+    the "unit of work" pattern.
+</p><p>
+    Provides a query system which loads objects and attributes using SQL</p><p>
+    generated from mappings.
+</p><p>
+    Builds on top of the Core.
+</p><p>
+    Presents a slightly more object centric perspective as opposed to a schema</p><p>
+    centric perspective.
+</p><p>
+SQLAlchemy is like an onion:
+</p><p>
+    ORM:</p><p>
+        SQL Expressions:</p><p>
+            Table Metadata, Reflection, DDL:</p><p>
+                Engine, Connection, Transactions
+</p><h4>
+Level 1: Engine, Connection, Transactions</h4><p>
+The DBAPI is the Python Database API. It's the defacto system for providing Python DB interfaces.
+</p><p>
+Most DBs have more than one DBAPI implementation.
+</p><p>
+MySQL has more than 10, and SQLAlchemy has to support about 6 of them.
+</p><p>
+They vary wildly.
+</p><p>
+He showed an example of using the DBAPI directly.
+</p><p>
+His favorite DBAPI implementation is psycopg2 (for PostgreSQL).
+</p><p>
+The DBAPI assumes that a transaction is always in progress. There is no begin() method, only commit() and rollback().
+</p><p>
+The DBAPI encourages bound parameters, via the execute() and executemany() methods, but it has six different formats.
+</p><p>
+All DBAPIs have inconsistencies regarding lots of things.
+</p><p>
+The DBAPI has its own exception hierarchy.
+</p><p>
+The first layer in SQLAlchemy is known as the "Engine", which is the object that maintains the classical DBAPI interaction.
+</p><p>
+SQLAlchemy has a lazy initialization pattern. It does a lot of lazy stuff.
+</p><p>
+An engine is a "factory" for connections.
+
+</p><span>    from sqllite import create_engine</span>
+<span><br/></span>
+<span>    engine = create_engine("sqlite:///some.db")</span>
+<span>    result = engine.execute("somequery ...=:empid", empid=...)</span>
+<span>    row = result.fetchone()</span>
+<p>
+At this level of the API, the syntax for quoting variables (:empid) is whatever the DBAPI expects.
+</p><p>
+row is a tuple as well as a dict.
+</p><p>
+You can loop over the result:
+
+    </p><span>for row in result:</span>
+<p>
+The actual cursor is result.cursor.
+</p><p>
+Under the covers, result.cursor.description has the names of the fields.
+</p><p>
+There's also result.fetchall().
+</p><p>
+You can control the scope of the connection using connect():
+
+</p><span>    conn = engine.connect()</span>
+<span>    result = conn.execute(query)</span>
+<span>    result.fetchall()</span>
+<span>    conn.close()</span>
+<p>
+Transactions:
+
+</p><span>    trans = conn.begin()</span>
+<span>    trans.commit()</span>
+<span>    conn.close()</span>
+<p>
+If you don't use a transaction explicitly, it'll use autocommit. Everything will be wrapped in a transaction.
+</p><p>
+The DBAPI </p><i>doesn't</i><p> use autocommit by default.
+</p><p>
+Using with:
+
+</p><span>    with engine.begin() as conn:</span>
+<span>        conn.execute(query)</span>
+<p>
+Turning on debugging:
+
+</p><span>    engine.echo = True</span>
+<p>
+Connecting directly via the engine is called "connectionless execution". The engine connects and disconnects for us.
+</p><p>
+Using a Connection explicitly lets you control scope.
+</p><p>
+There's a connection pool.
+</p><p>
+Whatever you give to engine.execute() gets passed to the DBAPI directly.
+</p><h4>
+Level 2: Table Metadata, Reflection, DDL</h4><p>
+He was inspired by "Patterns of Enterprise Architecture" when he wrote the SQL generation code and the ORM.
+</p><p>
+You can use SQLAlchemy to generate a schema.
+</p><p>
+You can also have SQLAlchemy use reflection to load an existing schema.
+
+</p><span>    from sqlalchemy import MetaData, Table, Column, \</span>
+<span>        Integer, String</span>
+<span>    metadata = MetaData()</span>
+<span>    user_table = Table('user', metadata,</span>
+<span>        Column('id', Integer, primary_key=True),</span>
+<span>        ...</span>
+<span>    )</span>
+<span>    user_table.name</span>
+<p>
+String is a varchar.
+</p><p>
+user_table.c has all the columns:
+
+</p><span>    user_table.c.name.type</span>
+<p>
+Using it:
+
+</p><span>    user_table.select().where(user_table.c.fullname == 'asdf'))</span>
+<p>
+Creating tables:
+
+</p><span>    metadata.create_all(engine)</span>
+<p>
+Types:
+
+</p><span>    String(50)</span>
+<span>    DateTime</span>
+<span>    Numeric(10, 2)</span>
+<span>    Enum('a', 'b', 'c')</span>
+<span>    ...</span>
+<p>
+Constraints:
+
+</p><span>    from sqlalchemy import ForeignKey</span>
+<span>    ...</span>
+<span>    Column('user_id', Integer, ForeignKey('user.id'))</span>
+<p>
+The references are lazy, so user can be created later.
+</p><p>
+Composite foreign keys:
+
+</p><span>    ...</span>
+<span>    Column('story_id', Integer),</span>
+<span>    Column('version_id', Integer),</span>
+<span>    ForeignKeyConstraint(</span>
+<span>        ['story_id', 'version_id'],</span>
+<span>        ['story.story_id', 'story.version_id']</span>
+<span>    )</span>
+<p>
+There's a special setting to tell it to add foreign key dependencies later. Use this if you have mutually dependent tables.
+</p><p>
+Nullable is True by default. Here's how to make it False:
+
+</p><span>    nullable=False</span>
+<p>
+You can combine lines and leave out the type for foreign keys:
+
+</p><span>    Column('owner_id', ForeignKey('user.id'))</span>
+<p>
+Reflection:
+
+</p><span>    metadata2 = MetaData()</span>
+<span>    user_reflected = Table('user', metadata2, autoload=True,</span>
+<span>                           autoload_with=engine)</span>
+<span>    user_reflected.c</span>
+<p>
+It took a really long time for him to learn how to meet everyone's needs.
+</p><p>
+Don't use "bound metadata". It's an antipattern.
+</p><p>
+Another system (not using metadata):
+
+</p><span>    from sqlalchemy import inspect</span>
+<span>    inspector = inspect(engine)</span>
+<span>    inspector.get_table_names()</span>
+<span>    inspector.get_columns('address')</span>
+<span>    inspector.get_foreign_keys('address')</span>
+<h4>
+Types and Querying</h4><p>
+Types:
+
+</p><span>    Integer</span>
+<span>    String</span>
+<span>    Unicode</span>
+<span>    Boolean</span>
+<span>    DateTime</span>
+<span>    Float</span>
+<span>    Numeric </span><span>(a decimal)</span>
+<p>
+Create and drop:
+
+</p><span>    metadata.create_all()</span>
+<span>    table.create()</span>
+<span>    metadata.drop_all()</span>
+<span>    table.drop()</span>
+<p>
+These are classes. They have magic methods like __eq__, etc.
+
+</p><span>    user_table.c.username.__eq__</span>
+<p>
+This returns a BinaryExpression to be used as part of an expression:
+
+</p><span>    user_table.c.username == 'ed'</span>
+<p>
+Or:
+</p><p>
+    (</p><span>(user_table.c.username == 'ed') |</span>
+<span>  (user_table.c.username == 'jack'))</span>
+<p>
+There's also and_ and or_.
+</p><p>
+There's also &gt;, etc.
+</p><p>
+There's also == None. It translates to "</p><span>is NULL</span><p>".
+</p><p>
+There are lots of operators.
+
+</p><span>    user_table.c.something.in_(...)</span>
+<p>
+Execute:
+
+</p><span>    engine.execute(</span>
+<span>        user_table.select().where(user_table.c.username == 'ed')</span>
+<span>    )</span>
+<p>
+Dialects:
+
+</p><span>    from sqlalchemy.dialects import postgresql</span>
+<span>    expression.compile(dialect=postgresql.dialect())</span>
+<p>
+Inserts:
+
+</p><span>    insert_stmt = user_table.insert().values(</span>
+<span>        username='ed',</span>
+<span>        fullname='Ed Jones'</span>
+<span>    )</span>
+<span>    conn = engine.connect()</span>
+<span>    result = conn.execute(insert_stmt)</span>
+<p>
+Inserting many:
+
+</p><span>    conn.execute(user_table.insert(), [</span>
+<span>        {'username': 'jack', ...},</span>
+<span>    ])</span>
+<p>
+Select:
+
+</p><span>    conn.execute(</span>
+<span>        select([user_table.c.username, user_table.c.fullname])</span>
+<span>            .where(user_table.c.username == 'ed'))</span>
+<p>
+Select all:
+
+</p><span>    conn.execute(select([user_table]).where....)</span>
+<p>
+If you use where multiple times, it ands them together.
+</p><p>
+The result for an insert will have the primary key.
+</p><p>
+Looking at a statement:
+
+</p><span>    stmt = ...</span>
+<span>    print stmt</span>
+<span>    conn.execute(stmt)</span>
+<p>
+Look at the rowcount on the result to see how many rows were affected.
+</p><h4>
+Level 4: ORM</h4><p>
+The OO classes are called a "domain model".
+</p><p>
+The most basic level is:
+
+</p><span>    object.save()</span>
+<span>    class.load()</span>
+<p>
+Some ORMs can represent multiple rows as domain objects.
+</p><p>
+Most ORMs can do composition using foreign key associations.
+</p><p>
+SQLAlchemy can represent class inheritance hiearchies.
+</p><p>
+SQLAlchemy can handle sharding.
+</p><p>
+Flavors of ORMs:
+</p><p>
+    Active Record: Domain objects handle their own persistence.
+</p><p>
+    Data Mapper: It tries to keep the details of persistence separate from the</p><p>
+    object being persisted.
+</p><p>
+There's also different ways of configuring them. Most use an "all-at-once", or declarative style, where class and table information is together.
+</p><p>
+Another style is to have the class declaration and the ORM mapper configured separately.
+</p><p>
+Hibernate is more pure, but it's tedious and verbose.
+</p><p>
+That's how SQLAlchemy worked in the beginning, but then he realized it was too verbose.
+</p><p>
+The SQLAlchemy ORM is a data mapper on the bottom, but it has a declarative style on top.
+</p><p>
+.save() is lazy. It doesn't flush immediately.
+</p><p>
+Objects are identical if they have the same primary key.
+</p><p>
+SQLAlchemy uses lazy loading.
+</p><p>
+SQLAlchemy is not compatible with Tornado and Twisted because they're callback oriented, and the lazy loading conflicts with that.
+</p><p>
+It also supports eager loading.
+</p><p>
+It also has method chaining.
+</p><p>
+Using the ORM:
+
+</p><span>    from sqlalchemy.ext.declarative import declarative_base</span>
+<span>    Base = declarative_base()</span>
+<span><br/></span>
+<span>    class User(Base):</span>
+<span>        __tablename__ = 'user'</span>
+<span>        id = Column(Intger, primary_key=True)</span>
+<span>        name = Column(String)</span>
+<span>        ...</span>
+<span><br/></span>
+<span>        def __repr__(self):</span>
+<span>          return "<user r="">" % (self.name, self.fullname)</user></span>
+<span><br/></span>
+<span>    User.__table__</span>
+<p>
+The Mapper links a class to a table:
+
+</p><span>    User.__mapper__</span>
+<p>
+Other stuff:
+
+</p><span>    Base.metadata</span>
+<span>    Base._decl_class_registry</span>
+<p>
+Creating a user:
+
+</p><span>    ed_user = User(name='ed', ...)</span>
+<p>
+Setting stuff up:
+
+</p><span>    engine = ...</span>
+<span>    session = Session(bind=engine)</span>
+<p>
+The session is an ORM object.
+
+</p><span>    session.add(ed_user)</span>
+<p>
+Query:
+
+</p><span>    our_user = session.query(User).filter_by(name='ed').first()</span>
+<p>
+Instead of where, you use filter_by.
+</p><p>
+As soon as the session begins its work, it starts a transaction.
+</p><p>
+It keeps the identity map, so "is" works for ORM objects. Generally, other Active Record ORMs get this wrong.
+</p><p>
+Add all:
+
+</p><span>    session.add_all([</span>
+<span>        User(...), ...</span>
+<span>    ])</span>
+<p>
+session.dirty has state changes.
+</p><p>
+session.new has the new objects.
+</p><p>
+session.commit() flushes everything and commits the transaction.
+</p><p>
+session.flush() flushes changes to the database without doing a commit.
+</p><p>
+After a commit, there is no transaction. All data is invalidated. Accessing data will start a new transaction and re-load the data from the database.
+</p><p>
+He learned stuff from Storm and Hibernate about how to do things this way.
+</p><p>
+Expiring after the commit is the right thing to do.
+</p><p>
+session.rollback() also ends the transaction.
+</p><p>
+The object is a proxy to a row in the database. You only know about stuff in the database when there's a transaction in play.
+</p><p>
+One of the challenges with SQLAlchemy is performance, especially when setting a ton of attributes.
+</p><p>
+The core will do whatever you want. The ORM is more opinionated. It's clearer about how things should be done.
+</p><p>
+He has to be really careful about adding features. A lot of times, he's had to remove features that were not well thought out.
+</p><p>
+Here's a fuller example:
+
+</p><span>    class Network(Base):</span>
+<span>        __tablename__ = 'network'</span>
+<span>        network_id = Column(Integer, primary_key=True)</span>
+<span>        name = Column(String(100), nullable=False)</span>
+<span><br/></span>
+<span>    Base.metadata.create_all(engine)</span>
+<span>    session</span>
+<span>    session.add_all([Network(...), ...])</span>
+<p>
+nullable is True by default.
+</p><p>
+Inner workings:
+
+</p><span>    User.name.property.columns[0]</span>
+<span>    User.__table__</span>
+<span>    User.__table__.c.name == 'ed'</span>
+<p>
+But, you can write higher-level code such as:
+
+</p><span>    User.name == 'ed'</span>
+<p>
+Query:
+
+</p><span>    query = session.query(User).filter(</span>
+<span>        User.name == 'ed'</span>
+<span>    ).order_by(User.id)</span>
+<span>    query.all()</span>
+<span><br/></span>
+<span>    for name, fullname in session.query(</span>
+<span>        user.name, User.fullname</span>
+<span>    ):</span>
+<span>        ...</span>
+<p>
+Create a dict really easily:
+
+</p><span>    d = dict(session.query(User.name, User))</span>
+<p>
+Using order, limit, offset:
+
+</p><span>    session.query(User).order_by(...)[1:3]</span>
+<p>
+filter is for full-blown expressions:
+
+</p><span>    (User.something == "something")</span>
+<p>
+filter_by is for filtering by a specific field:
+
+    </p><span>(something == "something")</span>
+<p>
+If you use multiple filters in a chain, they are anded.
+</p><p>
+.first() limits things to one row.
+</p><p>
+.one() asserts that there is one and only one row This may raise NoResultFound or MultipleResultsFound.
+</p><p>
+Examples:
+
+</p><span>    q = session.query(User.fullname).order_by(User.fullname)</span>
+<span>    q.all()</span>
+<span><br/></span>
+<span>    q2 = q.filter(or_(User.name == 'mary', User.name == 'ed'))</span>
+<span>    print q2[1]</span>
+<h4>
+Advanced ORM Usage</h4><p>
+Start with the same mappings as above.
+</p><p>
+What he showed above is a little verbose. There are shortcuts.
+</p><p>
+Unlike other ORMs, SQLAlchemy doesn't assume you're going to have a primary key named id. He was trying to make it appealing for existing databases.
+</p><p>
+It doesn't decide what the database should look like. This makes it really explicit.
+</p><p>
+There are ways to enforce conventions using mixins.
+
+</p><span>    class Address(Base):</span>
+<span><br/></span>
+<span>        ...</span>
+<span>        user_id = Column(Integer, ForeignKey('user.id'))</span>
+<span><br/></span>
+<span>        # This gives you address.user and user.addresses.</span>
+<span>        user = relationship("User", backref="addresses") </span>
+<p>
+This stuff works with reflection too.
+
+</p><span>    jack.addresses = [</span>
+<span>        Address(...),</span>
+<span>        ...</span>
+<span>    ]</span>
+<p>
+You can do anything to jack.addresses that you can do with a list.
+</p><p>
+If you run session.add(jack), it adds everything else automatically.
+</p><p>
+This is where ORMs can save you a lot of time. They make persisting stuff much easier.
+</p><p>
+The collection stays in memory until the transaction ends.
+</p><p>
+There is a way to use eager loading to avoid the N+1 queries problem.
+</p><p>
+As soon as you begin working with the session, it starts a new transaction.
+</p><p>
+The only time you need to use session.begin() is if you explicitly turned on autocommit.
+</p><p>
+If you don't care about the transaction, just .close() it. Then the cursor pool will do whatever it does.
+</p><p>
+When he does a POST in a web app, he'll do an explicit commit().
+</p><p>
+SQLAlchemy uses a connection pool by default.
+</p><p>
+Collections and references are updated by manipulating objects, not primary / foreign key values.
+</p><p>
+An implicit join:
+
+</p><span>    session.query(User, Address).filter(</span>
+<span>        User.id == Address.user_id</span>
+<span>    ).all()</span>
+<p>
+Without the filter, you get the cartesian product.
+</p><p>
+Here's an explicit join:
+
+</p><span>    session.query(User, Address).join(</span>
+<span>        Address, User.id == Address.user_id</span>
+<span>    ).all()</span>
+<p>
+Using the relationship:
+
+</p><span>    session.query(User, Address).join(User.addresses).all()</span>
+<p>
+Self join:
+
+</p><span>    from sqlalchemy.orm import aliased</span>
+<span><br/></span>
+<span>    a1, a2 = aliased(Address), aliased(Address)</span>
+<span>    session.query(User).join(a1).join(a2).filter(</span>
+<span>        a1.email_address == '...'</span>
+<span>    ).filter(a2.email_address == '...').all()</span>
+<p>
+There's a group_by.
+</p><p>
+Add .subquery() to the end to make it a subquery:
+
+</p><span>    subq = session.query(</span>
+<span>        func.count(Address.id).label('count'),</span>
+<span>        User.id.label('user_id')</span>
+<span>    ).join(Address.user).group_by(User.id).subquery()</span>
+<span><br/></span>
+<span>    ...outerjoin(subq, User.id == subq.c.user_id)...</span>
+<p>
+Here's how to avoid the N+1 problem:
+
+</p><span>    for user in session.query(User).options(</span>
+<span>        subqueryload(User.addresses)</span>
+<span>    ):</span>
+<span>        print(user, user.addresses)</span>
+<p>
+There's a really good chapter in the docs that covers this stuff.
+</p><p>
+Use Alembic for migrations.
+</p><p>
+People used to use Elixir on top of SQLAlchemy, but Elixir isn't being maintained anymore. Everything you can do in Elixir can be done using Declarative in SQLAlchemy.
+</p><p>
+<br/></p>
+</div>
+</div></body></html>

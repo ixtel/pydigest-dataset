@@ -1,0 +1,464 @@
+<html><body><div><div class="content html_format"><p>
+      Несколько дней назад я установил Asterisk, загрузил свою старую конфигурацию с маршрутизацией вызовов и намеревался подключиться к местному SIP провайдеру. Буквально через несколько минут после запуска Asterisk'а обнаружил в логах попытки авторизации на сервере, что меня ничуть не удивило, т.к. такая картина наблюдается на любом астериске, смотрящем в Интернет. Было принято волевое решение поиграться с любимым микротиком и не менее любимым питоном, и придумать, что делать с этими злоумышленниками.</p>
+<p>
+Итак, у нас имеется:
+</p><ul>
+<li> Ubuntu Server 14.04 (думаю не принципиально, должно работать на других дистрибутивах)</li>
+<li> <a href="http://www.fail2ban.org/">Fail2Ban</a></li>
+<li> MySQL</li>
+<li> <a href="http://asterisk.org/">Asterisk</a> (или любой другой сервис, который нужно защитить от брут форс атак)</li>
+<li> Роутер <a href="http://routerboard.com/">MikroTik</a></li>
+<li> Руки</li>
+<li> Желание изобрести велосипед</li>
+</ul>
+<p>
+После прочтения пары статей (</p><a href="http://habrahabr.ru/post/194356/">один</a><p>, </p><a href="http://joshaven.com/resources/tricks/mikrotik-automatically-updated-address-list/">два</a><p>) родился следующий концепт:
+</p><ol>
+<li> баним злоумышленника на определённое время при помощи Fail2Ban и добавляем запись с его IP адресом в БД MySQL</li>
+<li> после определённого количества выданных банов добавляем IP адрес в список запрещённых на роутере</li>
+</ol>
+<a name="habracut"/><p>
+А теперь к реализации решения.</p><p>
+1. Создаём БД/таблицу, которая будет содержать следующую информацию — IP адрес, код страны, название страны, количество выданных банов, тип атак/сервис (jail name из конфигурации Fail2Ban), последняя попытка, первая попытка (с заделом на будущее, возможно буду как-то ещё использовать эти данные).
+
+</p><div class="spoiler"><b class="spoiler_title">Схема</b><div class="spoiler_text"><pre><code class="sql">CREATE DATABASE fail2ban CHARACTER SET utf8;
+
+CREATE TABLE `ban_history` (
+  `id` int(11) unsigned NOT NULL AUTO_INCREMENT,
+  `ip_address` char(15) NOT NULL DEFAULT '',
+  `country_code` varchar(5) DEFAULT NULL,
+  `country_name` varchar(30) DEFAULT NULL,
+  `count` int(11) NOT NULL,
+  `type` varchar(30) DEFAULT NULL,
+  `last_attempt` datetime NOT NULL,
+  `first_attempt` datetime NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+</code></pre>
+</div></div>
+<p>
+2. Создаём скрипт для добавления записей в БД. Скрипт написан на питоне и требует для своей работы следующие дополнительные модули — </p><a href="https://pypi.python.org/pypi/pygeoip/">pygeoip</a><p> и </p><a href="https://pypi.python.org/pypi/MySQL-python/">MySQL-python</a><p>. Оба модуля легко устанавливаются при помощи пакетного менеджера pip:
+
+</p><pre><code class="bash">pip install pygeoip MySQL-python
+</code></pre>
+<div class="spoiler"><b class="spoiler_title">Скрипт</b><div class="spoiler_text"><pre><code class="python">#!/usr/bin/env python2
+# -*- coding: utf-8 -*-
+
+import os
+import urllib
+import gzip
+import StringIO
+import logging
+import logging.handlers
+import MySQLdb
+import MySQLdb.cursors
+import ConfigParser
+import pygeoip
+from datetime import datetime
+from sys import exit
+from optparse import OptionParser
+
+
+def main(config, logger, ip_addr, attack_type, GEOIP_DAT):
+	url = urllib.urlopen('http://geolite.maxmind.com/download/geoip/database/GeoLiteCountry/GeoIP.dat.gz')
+	url_f = StringIO.StringIO(url.read())
+	handle = gzip.GzipFile(fileobj=url_f)
+	with open(GEOIP_DAT, 'w') as out:
+		for line in handle:
+			out.write(line)
+
+	if config.has_option('general', 'mysql_ip') and config.has_option('general', 'mysql_user') and config.has_option('general', 'mysql_password') and config.has_option('general', 'mysql_db'):
+		try:
+			logger.info("Connecting to MySQL host: %s" % config.get('general', 'mysql_ip'))
+			db = MySQLdb.connect(
+				host=config.get('general', 'mysql_ip'),
+				user=config.get('general', 'mysql_user'),
+				passwd=config.get('general', 'mysql_password'),
+				db=config.get('general', 'mysql_db'),
+				cursorclass=MySQLdb.cursors.DictCursor
+			)
+
+			cursor = db.cursor()
+			logger.debug("Connected")
+		except MySQLdb.Error, e:
+			logger.error("Error %d: %s" % (e.args[0], e.args[1]))
+			exit(2)
+		else:
+			query = """select * from ban_history where ip_address='%s' and type='%s'""" % (ip_addr, attack_type)
+			result = run_query(cursor, query, logger)
+			result = cursor.fetchall()
+			now = datetime.now()
+			gi = pygeoip.GeoIP(GEOIP_DAT, flags=pygeoip.const.MEMORY_CACHE)
+			country_code = gi.country_code_by_addr(ip_addr)
+			country_name = gi.country_name_by_addr(ip_addr)
+			if len(result) &gt; 0:
+				logger.info("Updating blacklist DB record for IP-address %s" % ip_addr)
+				result = result[0]
+				count = result['count'] + 1
+				query = """update ban_history set count=%s, last_attempt='%s', country_code='%s', country_name='%s' where id=%s""" % (count, now, country_code, country_name, result['id'])
+				result = run_query(cursor, query, logger)
+				db.commit()
+			else:
+				logger.info("Adding IP-address %s into blacklist DB" % ip_addr)
+				count = 1
+				query = """insert into ban_history (ip_address, country_code, country_name, count, type, last_attempt, first_attempt) values('%s', '%s', '%s', %s, '%s', '%s', '%s')""" % (ip_addr, country_code, country_name, count, attack_type, now, now)
+				result = run_query(cursor, query, logger)
+				db.commit()
+
+	else:
+		logger.error("Configuration incomplete")
+		exit(3)
+
+
+def run_query(cursor, query, logger):
+	try:
+		logger.debug("Running query \'%s\'" % query)
+		cursor.execute(query)
+	except MySQLdb.Error, e:
+		logger.error("Error %d: %s" % (e.args[0], e.args[1]))
+		exit(2)
+	else:
+		return True
+
+
+if __name__ == '__main__':
+	try:
+		ROOT_PATH = os.path.dirname(os.path.realpath(__file__))
+		GEOIP_DAT = os.path.join(ROOT_PATH, 'GeoIP.dat')
+		parser = OptionParser(usage="usage: %prog [-c &lt;configuration_file&gt;] [-v] --ip IP-ADDRESS --type TYPE")
+		parser.add_option("-v", "--verbose",
+			action="store_true",
+			default=False,
+			dest="verbose",
+			help="Verbose output")
+		parser.add_option("-c", "--config",
+			action="store",
+			default=False,
+			dest="cfg_file",
+			help="Full path to configuration file")
+		parser.add_option("--ip",
+			action="store",
+			default=False,
+			dest="ip_addr",
+			help="Attacker IP address")
+		parser.add_option("--type",
+			action="store",
+			default=False,
+			dest="attack_type",
+			help="Type of attack (service)")
+
+		(options, args) = parser.parse_args()
+		verbose = options.verbose
+
+		ip_addr = options.ip_addr
+		attack_type = options.attack_type
+
+		# Reading configuration file
+		cfg_file = options.cfg_file
+		if not cfg_file:
+			cfg_file = os.path.join(ROOT_PATH, 'blacklist_db.cfg')
+		config = ConfigParser.RawConfigParser()
+		config.read(cfg_file)
+
+		# Logging
+		if config.get('general', 'log_file'):
+			LOGFILE = config.get('general', 'log_file')
+		else:
+			LOGFILE = '/tmp/blacklist_db.log'
+
+		FORMAT = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+		try:
+			rotatetime = logging.handlers.TimedRotatingFileHandler(LOGFILE, when="midnight", interval=1, backupCount=14)
+		except IOError, e:
+			print "ERROR %s: Can not open log file - %s"  % (e[0], e[1])
+			exit(1)
+		except Exception, e:
+			print "Can not configure logger - %s"  % e
+			exit(1)
+	        
+		formatter = logging.Formatter('%(asctime)s: %(message)s','%y-%m-%d %H:%M:%S')
+
+		rotatetime.setFormatter(FORMAT)
+		logger = logging.getLogger('BLACKLIST-DB')
+		logger.addHandler(rotatetime)
+
+		if verbose:
+			lvl = logging.DEBUG
+			console = logging.StreamHandler()
+			formatter = logging.Formatter('%(asctime)s: %(message)s','%y-%m-%d %H:%M:%S')
+			console.setFormatter(formatter)
+			logger.addHandler(console)
+		else:
+			lvl = logging.INFO
+
+		logger.setLevel(lvl)
+
+		if ip_addr and attack_type:
+			main(config, logger, ip_addr, attack_type, GEOIP_DAT)
+		else:
+			logger.error("IP address and attack type are needed but not specified")
+			exit(1)
+
+	except (KeyboardInterrupt):
+		logger.info("CTRL-C... exit")
+		exit(0)
+
+	except (SystemExit):
+		logger.info("Exit")
+		exit(0)
+		
+</code></pre>
+</div></div>
+<p>
+Данные для подключения к БД скрипт берёт из конфигурационного файла, который по умолчанию пытается найти в той же директории, так же можно задать путь при помощи ключа "-c".
+
+</p><div class="spoiler"><b class="spoiler_title">Пример кофигурационного файла</b><p class="spoiler_text">[general]<br/>
+log_file = /var/log/blacklist_db.log<br/>
+mysql_ip = localhost<br/>
+mysql_user = db_user<br/>
+mysql_password = db_pass<br/>
+mysql_db = fail2ban<br/>
+<br/>
+# Количество банов, после которого мы добавляем IP адрес в блэклист, по умолчанию 10<br/>
+#ban_count = 10<br/>
+</p></div>
+<p>
+Ключевой момент — скрипт выполняется вместе с добавлением правил в iptables, посему я отредактировал следующие файлы:
+</p><div class="spoiler"><b class="spoiler_title">/etc/fail2ban/action.d/iptables-allports.conf</b><div class="spoiler_text"><pre><code class="bash"># Исходный вариант
+actionban = iptables -I fail2ban-&lt;name&gt; 1 -s &lt;ip&gt; -j &lt;blocktype&gt;
+
+# Изменённый вариант
+actionban = iptables -I fail2ban-&lt;name&gt; 1 -s &lt;ip&gt; -j &lt;blocktype&gt;
+            /путь/к/скрипту -v --ip &lt;ip&gt; --type &lt;name&gt;
+</code></pre>
+</div></div>
+<div class="spoiler"><b class="spoiler_title">/etc/fail2ban/action.d/iptables-multiport.conf</b><div class="spoiler_text"><pre><code class="bash"># Исходный вариант
+actionban = iptables -I fail2ban-&lt;name&gt; 1 -s &lt;ip&gt; -j &lt;blocktype&gt;
+
+# Изменённый вариант
+actionban = iptables -I fail2ban-&lt;name&gt; 1 -s &lt;ip&gt; -j &lt;blocktype&gt;
+            /путь/к/скрипту -v --ip &lt;ip&gt; --type &lt;name&gt;
+</code></pre>
+</div></div>
+<div class="spoiler"><b class="spoiler_title">/etc/fail2ban/action.d/iptables-new.conf</b><div class="spoiler_text"><p> (не уверен для чего используется это действие, внёс изменения для верности)</p>
+<pre><code class="bash"># Исходный вариант
+actionban = iptables -I fail2ban-&lt;name&gt; 1 -s &lt;ip&gt; -j &lt;blocktype&gt;
+
+# Изменённый вариант
+actionban = iptables -I fail2ban-&lt;name&gt; 1 -s &lt;ip&gt; -j &lt;blocktype&gt;
+            /путь/к/скрипту -v --ip &lt;ip&gt; --type &lt;name&gt;
+</code></pre>
+</div></div><p>
+Таким образом, после добавления соответствующих правил в iptables исполняется наш скрипт и добавляет, либо обновляет данные в БД.
+</p><p>
+3. Создаём скрипт для генерирования блэклистов, которые впоследствие будут импортированы в наш микротик. Скрипт использует тот же конфигурационный файл для получения настроек, необходимых для подключения к БД и так же ищет его в своей корневой директории, опять же можно задать путь при помощи ключа "-c". На выходе создаётся скрипт/список адресов для импорта в микротик, опять же в той же самой директории, можно указать альтернативный путь при помощи ключа "-o".
+
+</p><div class="spoiler"><b class="spoiler_title">Скрипт</b><div class="spoiler_text"><pre><code class="python">#!/usr/bin/env python2
+# -*- coding: utf-8 -*-
+
+import os
+import logging
+import logging.handlers
+import MySQLdb
+import MySQLdb.cursors
+import ConfigParser
+from sys import exit
+from optparse import OptionParser
+
+
+def main(config, logger, output):
+	if config.has_option('general', 'ban_count'):
+		ban_count = config.getint('general', 'ban_count')
+	else:
+		ban_count = 10
+
+	if config.has_option('general', 'mysql_ip') and config.has_option('general', 'mysql_user') and config.has_option('general', 'mysql_password') and config.has_option('general', 'mysql_db'):
+		try:
+			logger.info("Connecting to MySQL host: %s" % config.get('general', 'mysql_ip'))
+			db = MySQLdb.connect(
+				host=config.get('general', 'mysql_ip'),
+				user=config.get('general', 'mysql_user'),
+				passwd=config.get('general', 'mysql_password'),
+				db=config.get('general', 'mysql_db'),
+				cursorclass=MySQLdb.cursors.DictCursor
+			)
+
+			cursor = db.cursor()
+			logger.debug("Connected")
+		except MySQLdb.Error, e:
+			logger.error("Error %d: %s" % (e.args[0], e.args[1]))
+			exit(2)
+		else:
+			contents = ['/ip firewall address-list']
+			logger.info('Fetching adresses from the blacklist DB')
+			query = """select * from ban_history"""
+			result = run_query(cursor, query, logger)
+			result = cursor.fetchall()
+			for ip in result:
+				if ip['count'] &gt;= ban_count:
+					list_name = '%s_BLC' % ip['type'].upper()
+					logger.info('Adding IP %s into \'%s\' list' % (ip['ip_address'], list_name))
+					list_line = 'add address=%s list=%s comment=BLACKLIST' % (ip['ip_address'], list_name)
+					contents.append(list_line)
+
+			if len(contents) &gt; 1:
+				logger.info('Generating mikrotik rsc script...')
+				script_file = open(output, 'w')
+				for item in contents:
+					script_file.write("%s\r\n" % item)
+
+				script_file.close()
+
+			logger.info('Done')
+
+	else:
+		logger.error("Configuration incomplete")
+		exit(3)
+
+
+def run_query(cursor, query, logger):
+	try:
+		logger.debug("Running query \'%s\'" % query)
+		cursor.execute(query)
+	except MySQLdb.Error, e:
+		logger.error("Error %d: %s" % (e.args[0], e.args[1]))
+		exit(2)
+	else:
+		return True
+
+
+if __name__ == '__main__':
+	try:
+		ROOT_PATH = os.path.dirname(os.path.realpath(__file__))
+		parser = OptionParser(usage="usage: %prog [-c &lt;configuration_file&gt;] [-v] [-o &lt;output_file_path&gt;]")
+		parser.add_option("-v", "--verbose",
+			action="store_true",
+			default=False,
+			dest="verbose",
+			help="Verbose output")
+		parser.add_option("-c", "--config",
+			action="store",
+			default=False,
+			dest="cfg_file",
+			help="Full path to configuration file")
+		parser.add_option("-o",
+			action="store",
+			default=False,
+			dest="output",
+			help="Full path for the generated script file")
+
+		(options, args) = parser.parse_args()
+		verbose = options.verbose
+		output = options.output
+
+		if not output:
+			output = os.path.join(ROOT_PATH, 'blacklists.rsc')
+
+		# Reading configuration file
+		cfg_file = options.cfg_file
+		if not cfg_file:
+			cfg_file = os.path.join(ROOT_PATH, 'blacklist_db.cfg')
+		config = ConfigParser.RawConfigParser()
+		config.read(cfg_file)
+
+		# Logging
+		if config.get('general', 'log_file'):
+			LOGFILE = config.get('general', 'log_file')
+		else:
+			LOGFILE = '/tmp/blacklist_db.log'
+
+		FORMAT = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+		try:
+			rotatetime = logging.handlers.TimedRotatingFileHandler(LOGFILE, when="midnight", interval=1, backupCount=14)
+		except IOError, e:
+			print "ERROR %s: Can not open log file - %s"  % (e[0], e[1])
+			exit(1)
+		except Exception, e:
+			print "Can not configure logger - %s"  % e
+			exit(1)
+	        
+		formatter = logging.Formatter('%(asctime)s: %(message)s','%y-%m-%d %H:%M:%S')
+
+		rotatetime.setFormatter(FORMAT)
+		logger = logging.getLogger('BLACKLIST-DB')
+		logger.addHandler(rotatetime)
+
+		if verbose:
+			lvl = logging.DEBUG
+			console = logging.StreamHandler()
+			formatter = logging.Formatter('%(asctime)s: %(message)s','%y-%m-%d %H:%M:%S')
+			console.setFormatter(formatter)
+			logger.addHandler(console)
+		else:
+			lvl = logging.INFO
+
+		logger.setLevel(lvl)
+
+		main(config, logger, output)
+
+	except (KeyboardInterrupt):
+		logger.info("CTRL-C... exit")
+		exit(0)
+
+	except (SystemExit):
+		logger.info("Exit")
+		exit(0)
+
+</code></pre>
+</div></div>
+<p>
+Этот скрипт исполняется при помощи крона, я выставил периодичность запуска в 15 минут.
+</p><pre><code class="bash">*/15 * * * * /путь/к/скрипту &gt; /dev/null 2&gt;&amp;1
+</code></pre>
+<p>
+4. Импорт полученного списка в наш роутер.
+</p><p>
+Полученный скрипт для микротика нужно поместить в директорию нашего web-сервера, у меня стоит </p><a href="http://nginx.org/">nginx</a><p> в конфигурацию которого я добавил следующие строки:
+</p><pre><code class="bash">    location /blacklists.rsc {
+        root /путь/к/директории/содержащей/скрипт;
+    }
+</code></pre><p>
+Вместо web-сервера Вы можете </p><a href="http://wiki.mikrotik.com/wiki/Manual:Tools/Fetch">использовать ftp или tftp</a><p>, тут всё зависит от Вашего вкуса.
+</p><p>
+Данная часть практически полностью «украдена» из </p><a href="http://joshaven.com/resources/tricks/mikrotik-automatically-updated-address-list/">второй статьи</a><p>.
+</p><p>
+Раз в час файл скачивается с сервера по протоколу HTTP при помощи следующего скрипта (ниже скрипт и правило планировщика для микротика):
+</p><pre><code class="bash"># Скрипт для скачивания блэклиста, замените example.com на доменное имя, либо IP адрес Вашего сервера
+/system script add name="Download_blacklists" source={
+/tool fetch url="http://example.com/blacklists.rsc" mode=http;
+:log info "Downloaded blacklists.rsc";
+}
+
+# Правило планировщика для его исполнения
+/system scheduler add comment="Download blacklists" interval=1h name="DownloadBlackLists" on-event=Download_blacklists start-date=jan/01/1970 start-time=01:05:00
+</code></pre>
+<p>
+Скрипт для импорта блэклиста:
+</p><pre><code class="bash"># Скрипт
+/system script add name="Update_blacklists" source={
+/ip firewall address-list remove [/ip firewall address-list find comment="BLACKLIST"];
+/import file-name=blacklists.rsc;
+:log info "Removal old blacklists and add new";
+}
+
+# Правило планировщика
+/system scheduler add comment="Update BlackList" interval=1h name="InstallBlackLists" on-event=Update_blacklists start-date=jan/01/1970 start-time=01:15:00
+</code></pre>
+<p>
+Для использования этого списка создаются запрещающие правила и помещаются перед разрешающими (т.к. правила обрабатываются по порядку), в данном примере созданы 2 правила, для SSH соединений и SIP:
+</p><pre><code class="bash">/ip firewall filter
+add action=reject chain=forward comment="SIP: Reject Blacklisted IP addresses" dst-port=5060-5061 in-interface=ID-Net protocol=udp src-address-list=ASTERISK_BLC
+add action=reject chain=forward comment="SSH: Reject Blacklisted IP addresses" dst-port=22 in-interface=ID-Net protocol=tcp src-address-list=SSH_BLC
+</code></pre>
+<p>
+Где ID-Net имя моего внешнего интерфейса.
+</p><p>
+Данный «велосипед» ни на что не претендует и был собран «на коленке» за пару-тройку часов.</p><p>
+Надеюсь на конструктивную критику хабровчан и предложения по возможным улучшениям.
+
+</p><b><a href="https://www.dropbox.com/s/orf5wubkr7998ln/blacklist_db.zip?dl=0">Архив</a> со всеми представленными скриптами и схемой БД.</b>
+      <p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

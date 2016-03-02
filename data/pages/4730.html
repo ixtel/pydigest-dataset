@@ -1,0 +1,180 @@
+<html><body><div><div class="block-text">
+					
+<p>In this guest blog post Aaron Bassett talks about how and why he built <a href="https://github.com/pusher/django-pusherable">django-pusherable</a>, a mixin library for Django Class-based views that makes it easy to add real-time notifications to your Django apps.</p>
+<blockquote><p>
+  <img class="alignright" src="https://blog.pusher.com/wp-content/uploads/2015/03/aaron-bassett-avatar.jpg" alt=""/>Aaron Bassett is a freelance developer and technology strategist who is most comfortable with Python and CoffeeScript, but is a bit of a programming polyglot. He works with clients as <a href="https://rawtech.io">Rawtech.io Limited</a> and is currently developing systems to open Government data to the world. You can follow him at <a href="https://twitter.com/aaronbassett">@aaronbassett</a>
+</p></blockquote>
+<p>Content management systems are so completely ubiquitous that they have replaced <code>Hello World</code> as the introduction to new “full stack” frameworks. I struggle to think of a single web site or application I’ve built for a client in the last decade which has not had some form of CMS included.</p>
+<p>As clients have become more comfortable at managing their own content we have had to build better tools to help them to do so. We’ve added better HTML editors, access control layers, publishing workflows, and so on. The greatest leap forward however has been realtime collaborative editing. The ability to see when someone else is making changes on the same piece of content or is accessing the same instance of an object helps us avoid over-writes and conflicts, and work more efficiently.</p>
+<p>However, while <a href="https://blog.pusher.com/how-we-built-atom-pair/">adding realtime collaboration to your application is possible</a> it may not be applicable for some types of workflow and applications. The most important element in many cases is the knowledge that another editor has opened some content you’re currently working on.</p>
+<p><img src="https://blog.pusher.com/wp-content/uploads/2015/03/help-scout-notifications.gif" alt="Help Scout Notifications"/></p>
+<p><a href="http://www.helpscout.net/">Help Scout</a> uses this pattern to great effect within their help desk software. Notifying other agents when one of their colleagues has opened the same thread.</p>
+<h2>Sending our notifications</h2>
+<p>Sending events via Pusher is already very simple in Django (or in Flask, Bottle, web.py, etc) using the <a href="https://github.com/pusher/pusher-http-python">Pusher Python HTTP library</a></p>
+<pre><code class="language-python">pusher.trigger('a_channel', 'an_event', {'some': ‘data'})
+</code></pre>
+<p>But how would we go about adding this to our <code>update</code> view? Let’s use the example of a blog post. We have a model <code>Article</code> with a model form of <code>ArticleUpdateForm</code>, and our standard <a href="https://docs.djangoproject.com/en/1.8/topics/class-based-views/generic-display/">class based generic view</a> may look something like</p>
+<pre><code class="language-python">class ArticleUpdate(UpdateView):
+    model = Article
+    form_class = ArticleUpdateForm
+</code></pre>
+<p>If we wanted to trigger a Pusher event whenever anyone accessed the <code>ArticleUpdate</code> view we could add it to our <a href="https://docs.djangoproject.com/en/1.8/ref/class-based-views/mixins-simple/#django.views.generic.base.TemplateResponseMixin.render_to_response"><code>render_to_response</code></a> method.</p>
+<pre><code class="language-python">def render_to_response(self, context, **response_kwargs):
+
+    channel = u"article_{pk}".format(pk=self.object.pk)
+    event_data = {'user': self.request.user.username}
+    pusher.trigger(
+        [channel, ], 
+        u"update", 
+        event_data
+    )
+
+    return super(ArticleUpdate, self).render_to_response(context, **response_kwargs)
+</code></pre>
+<p>Notice how we set the <code>channel</code> to be the model name <strong>plus</strong> the object’s primary key. This way we create a channel unique to this particular object. We don’t want the client to have to subscribe to updates for all model instances and filter for particular instances. It can instead subscribe to updates for a single instance.</p>
+<p>This works great, now whenever someone accesses the update view for an object, anyone who is subscribed to that object’s channel will be notified instantly! But adding similar code to each different view on other models isn’t very <a href="http://en.wikipedia.org/wiki/Don%27t_repeat_yourself">DRY</a>. So, let’s make it more generic by creating a mixin.</p>
+<h2>Creating our Mixin</h2>
+<p>Let’s define a <code>PusherMixin</code>:</p>
+<pre><code class="language-python">from django.conf import settings
+from pusher import Pusher
+
+class PusherMixin(object):
+
+    def render_to_response(self, context, **response_kwargs):
+
+        channel = u"{model}_{pk}".format(
+            model=self.object._meta.model_name,
+            pk=self.object.pk
+        )
+        event_data = {'user': self.request.user.username}
+
+        pusher = Pusher(app_id=settings.PUSHER_APP_ID,
+                        key=settings.PUSHER_KEY,
+                        secret=settings.PUSHER_SECRET)
+        pusher.trigger(
+            [channel, ],
+            self.pusher_event_name,
+            event_data
+        )
+
+        return super(PusherMixin, self).render_to_response(context, **response_kwargs)
+</code></pre>
+<p>The first tricky part of creating our mixin is ensuring our channel is unique and uses the correct model name. But, we can find this as part of the object’s meta <code>object._meta.model_name</code>. In the example above we also need to define a <code>pusher_event_name</code> to identify the event we’re going to trigger.</p>
+<p>We now have the basis of our generic mixin that can be used with any <code>UpdateView</code> to enable automatic event notifications on the object’s Pusher channel. Our new <code>ArticleUpdate</code> view looks something like this</p>
+<pre><code class="language-python">class ArticleUpdate(PusherMixin, UpdateView):
+    model = Article
+    form_class = ArticleUpdateForm
+    pusher_event_name = u"update"
+</code></pre>
+<p>Sometimes it can be handy to get the data that has changed on the client. So a final improvement to this is to send the data for the current object along with the notification. Unfortunately Django models won’t serialise directly so we need to create a <code>dict</code> that can be.</p>
+<pre><code class="language-python">import json
+from django.core.serializers.json import DjangoJSONEncoder
+from django.forms.models import model_to_dict
+
+class PusherMixin(object):
+
+    def render_to_response(self, context, **response_kwargs):
+
+        # ...
+        event_data = self.__object_to_json_serializable(self.object)      
+
+        # trigger &amp; return
+
+    def __object_to_json_serializable(self, object):
+        model_dict = model_to_dict(object)
+        json_data = json.dumps(model_dict, cls=DjangoJSONEncoder)
+        data = json.loads(json_data)
+        return data
+</code></pre>
+<p>There are probably more elegant ways of doing this, but it does the trick.</p>
+<h2>Subscribing to events</h2>
+<p>Once you have your view pushing out notifications you need to allow your user’s to subscribe to them. As we’re going to be adding this to our web application we will use Pusher’s Javascript API.</p>
+<pre><code class="language-html">&lt;script src="//js.pusher.com/2.2/pusher.min.js"&gt;&lt;/script&gt;
+&lt;script&gt;
+    var pusher = new Pusher('{{ settings.PUSHER_KEY }}');
+    var channel = pusher.subscribe('model_{{ object.pk }}');
+    channel.bind('update', function(data) {
+      alert(data.user + " has begun updating this object");
+    });
+&lt;/script&gt;
+</code></pre>
+<p>Brilliant! Eight lines of HTML/JavaScript and we now have basic notifications. But, again it isn’t very DRY. We don’t want to copy and paste this piece of JavaScript on every page we need notifications, and then remember to change the model name and event type. So lets create a <a href="https://docs.djangoproject.com/en/1.8/howto/custom-template-tags/">custom template tag</a> to make things neater for us.</p>
+<pre><code class="language-python">@register.simple_tag
+def pusherable_subscribe(event, instance):
+
+    channel = u"{model}_{pk}".format(
+        model=instance._meta.model_name,
+        pk=instance.pk
+    )
+
+    return """
+    &lt;script&gt;
+    var pusher = new Pusher('{key}');
+    var channel = pusher.subscribe('{channel}');
+    channel.bind('{event}', function(data) {{
+      pusherable_notify('{event}', data);
+    }});
+    &lt;/script&gt;
+    """.format(
+        key=settings.PUSHER_KEY,
+        channel=channel,
+        event=event
+    )
+</code></pre>
+<p>When we want to add notifications to a page we can simply use our template tag:</p>
+<pre><code class="language-html">{% pusherable_subscribe 'update' object %}
+</code></pre>
+<p>Our new tag takes two arguments. The type of event to subscribe to, in this case <code>update</code>, and a reference to the object we want to receive events for.</p>
+<p>When a new event is triggered we call a JavaScript function called <code>pusherable_notify</code> which receives the event type as well as any data that is sent via Pusher. This function could show a modal, or place a banner along the top of the page, or even use the <a href="https://developer.mozilla.org/en/docs/Web/API/notification">web Notifications API</a> to send a desktop notification! We’ve left <code>pusherable_notify</code> as <code>undefined</code> as the specifics will be different on each site.</p>
+<h2>Introducing django-pusherable</h2>
+<p>To help you get started we’ve combined all of the above into an easy to use package. You can <a href="http://github.com/pusher/django-pusherable">view it on Github</a> or install it via pip.</p>
+<pre><code>pip install django-pusherable
+</code></pre>
+<p>It comes with mixins for the most common object views; <code>PusherDetailMixin</code>, <code>PusherUpdateMixin</code> and <code>PusherDeleteMixin</code>. However you can extend the <code>PusherMixin</code> object to add any others you require. We’ve also included the template tag to make subscribing to events a breeze. View the <a href="http://github.com/pusher/django-pusherable">Quickstart guide</a> for more details.</p>
+<h2>Wait! What was that about our own mixins?</h2>
+<p>For example imagine you are adding <a href="https://www.djangopackages.com/grids/g/messaging/">Private Messaging</a> to your application. You have already included the <code>PusherDetailMixin</code> to provide realtime read receipts to the sender, but you want to notify them when their friend begins to write a reply.</p>
+<p><img src="https://blog.pusher.com/wp-content/uploads/2015/03/replying-animation.gif" alt="Replying animation"/></p>
+<p>First create your custom mixin, and extend the <code>PusherMixin</code></p>
+<pre><code class="language-python">from pusherable.mixins import PusherMixin
+
+class PusherReplyMixin(PusherMixin):
+    pusher_event_name = u”reply"
+</code></pre>
+<p>Now add this to your reply view</p>
+<pre><code class="language-python">class MessageReply(PusherReplyMixin, View):
+</code></pre>
+<p>The only requirements for your custom mixins is that they define a <code>pusher_event_name</code> and are able to access the model instance via <code>self.object</code>.</p>
+<p>To subscribe to this new event, you can still use the template tag as normal, but don’t forget to use your custom event name!</p>
+<pre><code>{% load pusherable_tags %}
+
+{% pusherable_subscribe 'reply' object %}
+</code></pre>
+<p>Or to implement a <code>pusherable_notify</code>. For example, in this case a basic implementation may be:</p>
+<pre><code class="language-javascript">function pusherable_notify(eventName, data) {
+    if(eventName === 'reply') {
+        alert(data.user + ' has started to ' + eventName);
+    }
+    // ... handle other event types
+}
+</code></pre>
+<p>django-pusherable is only at v0.1.0 so we’re keen to get your feedback and input. If you develop any great new mixins I’d love to see them, <a href="http://twitter.com/aaronbassett">send me a tweet</a> or even better <a href="http://github.com/pusher/django-pusherable/pulls">open a pull request</a>!</p>
+<h3>Further reading</h3>
+<ul>
+<li>
+<p>This article is part of our <a href="https://pusher.com/tutorials">Building Realtime Applications tutorials</a>, which covers a wide range of frameworks, stacks, use cases, and is updated on a regular basis.</p>
+</li>
+<li>
+<p><a href="https://speakerdeck.com/northisup/scaling-realtime-at-disqus">Making Disqus Realtime</a> looks at the infrastructure required to roll your own real-time notification or messaging system.</p>
+</li>
+<li>
+<p>Another excellent article on real-time infrastructure and Python/Django is <a href="https://lincolnloop.com/blog/architecting-realtime-applications/">Lessons Learned Architecting Realtime Applications</a></p>
+</li>
+<li>
+<p>If you’re interested in rolling your own notification system by running a Node.js server in parallel then you can take a look at <a href="https://github.com/anishmenon/django-realtime">django-realtime</a> by Anish Menon that uses <a href="https://bitbucket.org/inzane/ishout">iShout.js</a>.</p>
+</li>
+<li>
+<p>Not about notifications, but still an interesting resource, is <a href="https://github.com/FZambia/django-realtime-playground">django-realtime-playground</a> by <a href="https://github.com/FZambia">FZambia</a>. It covers a whole bunch of possibilities for Django real-time integration including Node.js server + Socket.IO, Node.js server + Sock.js, Python Tornado + Socket.IO, Python Tornado + Sock.js and Python Cyclone + jQuery Eventsource lib.</p>
+</li>
+</ul>
+									</div>
+</div></body></html>

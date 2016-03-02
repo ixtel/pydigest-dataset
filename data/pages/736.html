@@ -1,0 +1,148 @@
+<html><body><div><div class="entry">
+                <p/><p>Если мы хотим использовать Postgres из-под CPython, то наверняка будем использовать <tt>psycopg2</tt>, обертку над С-шной <tt>libpq</tt>. Даже Django использует именно ее. Под PyPy ситуация сложнее – <tt>psycopg2</tt> не работает, т.к. написана на <tt>С</tt> и использует внутренее API CPython. Даже если такие библиотеки и работают под PyPy, то очень медленно, так как PyPy приходится эмулировать внутренности CPython. На данный момент самая подходящая библиотека для работы с Postgres под PyPy – это <a class="reference external" href="https://github.com/mvantellingen/psycopg2-ctypes">psycopg2ct</a>, использующая ctypes для вызовов в <tt>С</tt>. Но все равно, вызовы на <tt>ctypes</tt> под PyPy не очень быстры, и в целом бибилотека работает медленнее, чем <tt>psycopg2</tt>.</p>
+<p><span id="more-260"/></p>
+<p>Как правило, <a class="reference external" href="http://pypy.org/">PyPy</a> гораздо быстрее, чем CPython – по <a class="reference external" href="http://speed.pypy.org/">бенчмаркам</a>, основанным на реальных программах, в среднем в 5.7 раз. И в отличие от <a class="reference external" href="http://cython.org/">cython</a> или <a class="reference external" href="https://github.com/numba/numba">numba</a>, это полноценная реализация языка: почти всегда можно просто заменить CPython на PyPy и все будет работать (кроме некоторых модулей, использующих С-API CPython). Причем PyPy хорош как на чисто вычислительном коде, где он может работать почти так же быстро, как С, так и на типичном объекто-ориентированном, с кучей абстракций. Это достигается за счет just-in-time компилятора, который позволяет избежать создания промежуточных переменных, убрать вызовы функции и т.д.</p>
+<p>В одном из наших проектов PyPy работет примерно в 3 раза быстрее, чем CPython, и как правило использует меньше памяти. Но зачастую узким местом становился доступ к базе данных, и тут вылезала проблема с медленной библиотекой <tt>psycopg2ct</tt>. Вообще люди гораздо больше волнуются, когда что-то начинает работать медленнее, чем при ускорении, и эта история не давала спокойно переключиться на PyPy в production.</p>
+<p>Поэтому я решил попробовать портировать <tt>psycopg2ct</tt> на <tt>cffi</tt> – недавно выпущенную библиотеку для взаимодействия с С библиотеками из-под Python (работает под CPython 2.x, 3.x, и PyPy). Ее авторы – разработчики PyPy Armin Rigo и Maciej Fijałkowski, и они постарались, чтобы <tt>cffi</tt> работала быстро под PyPy. Кроме того, она очень удобна в использовании – достаточно скопировать объявления функций и структур из документации к С-шной библиотеки, или заголовочных файлов, и все работает! Смотрите <a class="reference external" href="http://cffi.readthedocs.org/en/latest">документацию</a> Вообще для взаимодействия с <tt>libpq</tt> скорость вызова С-шных функций очень важна, так как например для того, что получить только одну строку из результата запроса, нужно сделать по два-три вызова в <tt>С</tt> на каждое поле в этой строке.</p>
+<p>Портирование оказалось совсем не таким сложным, как я боялся – но об этом позже. Самое главное, что это позволило PyPy обогнать CPython при работе с Postgres – по крайней мере, так говорят бенчмарки.</p>
+<h3>Тестирование производительности</h3>
+<p>Опуская обычные отмазки по поводу какого-либо тестирования производительности, сразу перехожу к делу. Я написал простой тест, который проверяет скорость типичный операций с БД, в основном из Django:</p>
+<ul class="simple">
+<li>массовое создение объектов (используя <tt>model.objects.bulk_create</tt>)</li>
+<li>создание объектов по одному (<tt>model.objects.create</tt>)</li>
+<li>обновление объектов по одному (<tt>instance.save</tt>)</li>
+<li>большое количество мелких запросов (поступ по <tt>ForeignKey</tt>)</li>
+<li>выборка большого количества объектов при помощи <tt>model.objects.all</tt></li>
+<li>выборка большого количества объектов при помощи <tt>cursor.fetchall</tt></li>
+</ul>
+<p>Инструкция по установке и код лежат на github – все должно быть понятно отсюда – <a class="reference external" href="https://github.com/chtd/psycopg2-benchmarks/blob/master/django_bench/bench.py">bench.py</a>, Получается, что я измеряю не скорость работы самой обертки над <tt>libpq</tt>, а то, как она используется в реальности – что на мой взгляд полезнее.</p>
+<p>Я запускал тесты в трех вариантах:</p>
+<ul class="simple">
+<li>CPython и <tt>psycopg2</tt> – самый популярный сейчас вариант</li>
+<li>PyPy и <tt>psycopg2ct</tt> – наверное, лучший из известных вариантов для PyPy</li>
+<li>PyPy и <tt>psycopg2cffi</tt> – новый порт под cffi</li>
+</ul>
+<p>Версии ПО: CPython 2.7.3 для <tt>psycopg2</tt>, транк PyPy (<tt><span class="pre">pypy-c-jit-58548-12f7aa38e6e2-osx64</span></tt>) для cffi, и PyPy 1.9 для psycopg2ct (в транке сейчас немного медленнее работают ctypes).</p>
+<p>Все тесты прогонялись на Intel Core i7 с БД на SSD диске, под Postgres 9.1. Чтобы использовать psycopg2ct, пришлось немного поправить ее чтобы обойти этот <a class="reference external" href="https://github.com/mvantellingen/psycopg2-ctypes/issues/26">баг</a>. В обоих таблицах было по 5000 объектов. Сам тест прогонялся несколько раз подряд, чтобы дать время just-in-time компилятору прогрется. Брался второй по скорости результат.</p>
+<p>Итак, результаты (время в секундах, чем меньше тем лучше):</p>
+<table>
+<colgroup>
+<col/>
+<col/>
+<col/>
+<col/></colgroup>
+<thead valign="bottom">
+<tr>
+<th class="head">test</th>
+<th class="head">PyPy, pg2cffi</th>
+<th class="head">CPython, pg2</th>
+<th class="head">PyPy, pg2ct</th>
+</tr>
+</thead>
+<tbody valign="top">
+<tr>
+<td>bulk insert</td>
+<td>0.769</td>
+<td>1.305</td>
+<td>0.848</td>
+</tr>
+<tr>
+<td>many inserts</td>
+<td>0.548</td>
+<td>0.736</td>
+<td>0.607</td>
+</tr>
+<tr>
+<td>many updates</td>
+<td>0.479</td>
+<td>1.092</td>
+<td>0.565</td>
+</tr>
+<tr>
+<td>many selects</td>
+<td>0.909</td>
+<td>2.576</td>
+<td>1.274</td>
+</tr>
+<tr>
+<td>select all</td>
+<td>0.669</td>
+<td>1.119</td>
+<td>1.327</td>
+</tr>
+<tr>
+<td>fetchall</td>
+<td>1.151</td>
+<td>0.935</td>
+<td>2.488</td>
+</tr>
+<tr>
+<td>total</td>
+<td>4.527</td>
+<td>7.765</td>
+<td>7.112</td>
+</tr>
+</tbody>
+</table>
+<p>И на графике:</p>
+<p><a href="http://chtd.ru/blog/wp-content/uploads/2012/11/django_bench.png"><img class="size-full wp-image-277" src="http://chtd.ru/blog/wp-content/uploads/2012/11/django_bench.png" alt="Benchmark results"/></a></p>
+<p>Видно, что в целом PyPy + <tt>psycopg2cffi</tt> оказывается быстрее всех, хотя если брать выборку с использованием <tt>cursor.fetchall</tt> (почти то же, что и <tt>objects.values_list</tt> в Django), то CPython + <tt>psycopg2</tt> оказываются немного быстрее. Т.е. возможно в чистом виде, когда джанга не мешается, <tt>psycopg2cffi</tt> немного медленнее. Но все равно, это гораздо быстрее, чем <tt>psycopg2ct</tt>, что для нас очень важно.</p>
+<p>Может быть тут еще можно что-то ускорить, и я попробую. Но уже видно, что PyPy в этой ситуации горазо быстрее, чем CPython – чего и хотелось добиться.</p>
+<h3>Процесс портирования под cffi</h3>
+<p>Все оказалось не так страшно и сложно, как я боялся. Большую часть тестов удалось пройти уже после трех часов работы, при том что я никогда не видел <tt>cffi</tt> до этого и почти не имею опыта разработки на С. Помогло то, что у <tt>psycopg2ct</tt> отличные тесты, а <tt>cffi</tt> действительно очень проста и удобна. Кроме того, разработчики PyPy быстро помогли разобраться во всех оставшихся вопросах.</p>
+<p>Основные шаги:</p>
+<ul class="simple">
+<li>скопировал объявления используемых функций <tt>libpq</tt> из ее заголовочных файлов, подключил <tt>cffi</tt> и убедился, что они хотя бы импортируются</li>
+<li>начал запускать тесты и исправлять ошибки – в основном последствия отличий <tt>cffi</tt> и <tt>ctypes</tt>. Основное, с чем пришлось столкнуться:
+<ul>
+<li>когда C-функция возвращает <tt>NULL</tt>, <tt>ctypes</tt> возвращает <tt>None</tt>, а <tt>cffi</tt> возвращает объект, равный <tt>ffi.NULL</tt>.</li>
+<li>когда С-функция возвращает <tt>char *</tt>, то <tt>ctypes</tt> возвращает питоновскую строку, или <tt>None</tt>, а <tt>cffi</tt> возвращает объект <tt/>, который может равняться <tt>ffi.NULL</tt>. Дальше его можно преобразовать или в питоновскую строку (если это была строка с 0 в конце), или в буфер (если это бинарные данные).</li>
+<li>в <tt>cffi</tt> по-другому передаются callback-и и иначе создаются С-объекты, но при портировании это не вызввает затруднений, т.к. сначала все падает, а потом достаточно заменить одно на другое.</li>
+<li>если С-функция возвращает <tt>enum</tt>, то <tt>cffi</tt> будет представлять это значение как строку, которая содержит название значения, а не само целое значение. Чтобы функция вернула целое, нужно объявить ее именно возаращающей целое, а не <tt>enum</tt> – этот момент описан в документации, но мне было не очевидно – пришлось спросить в чате #pypy, ответили сразу. Спасибо!</li>
+</ul>
+</li>
+<li>исправил segfault-ы и повреждение памяти – к счастью получилось все отладить в питоне, нужно просто прочитать документацию по поводу того, как <tt>cffi</tt> работает с памятью.</li>
+<li>прогнал тесты на 64-битной системе, исправил еще несколько багов с типами</li>
+<li>посмотрел в целом на код, нашел еще несколько багов, немного дописал тесты</li>
+<li>протестировал под CPython, нашел небольшой <a class="reference external" href="https://bitbucket.org/cffi/cffi/issue/35/can-not-write-ffibuffer-into-iobytesio">баг в cffi</a></li>
+<li>подготовил пакет по <a class="reference external" href="http://cffi.readthedocs.org/en/latest/#distributing-modules-using-cffi">инструкции в документации cffi</a></li>
+<li>написал бенчмаркам, посмотрел на результат профилировки в <a class="reference external" href="https://bitbucket.org/pypy/jitviewer/">jitviewer</a>, немного ускорил получение данных из <tt>libpq</tt></li>
+</ul>
+<h3>Установка</h3>
+<p>Общие требования к системе примерно такие же, как у <tt>psycopg2</tt> – понадобятся исходники <tt>libpq</tt>, а <tt>pg_config</tt> должна быть в <tt>$PATH</tt>. Установка проверялась на Ubuntu 12.04 и CentOS (RHEL 5.0). Думаю что можно сделать так, чтобы все работало и под Windows, но я даже не пробовал.</p>
+<p><tt>psycopg2cffi</tt> работает под CPython 2.6+, и под PyPy 2.0 (недавно вышла бета, но она достаточно стабильна). Установка при помощи pip:</p>
+<p/>
+
+		
+
+<p/>
+<p>Чтобы использовать этот модуль вместо <tt>psycopg2</tt>, нужно положить куда-нибудь в PYTHONPATH (например, в <tt><span class="pre">site-packages</span></tt> виртуального окружения) файл под названием <tt>psycopg2.py</tt>:</p>
+<p/>
+
+		<div id="crayon-56d5b708706bd" class="crayon-syntax crayon-theme-classic crayon-font-monaco crayon-os-mac print-yes" data-settings=" minimize scroll-mouseover">
+		
+			
+			<p class="crayon-info"/>
+			<p class="crayon-plain-wrap"/>
+			<div class="crayon-main">
+				<table class="crayon-table">
+					<tr class="crayon-row">
+				<td class="crayon-nums " data-settings="show">
+					
+				</td>
+						<td class="crayon-code"><div class="crayon-pre"><p class="crayon-line" id="crayon-56d5b708706bd-1"><span class="e">from </span><span class="e">psycopg2cffi </span><span class="e">import </span><span class="e">compat</span></p><p class="crayon-line crayon-striped-line" id="crayon-56d5b708706bd-2"><span class="v">compat</span><span class="sy">.</span><span class="e">register</span><span class="sy">(</span><span class="sy">)</span></p></div></td>
+					</tr>
+				</table>
+			</div>
+		</div>
+
+<p/>
+<h3>Комментарии</h3>
+<p>Жду комментарии в твиттер <a href="https://twitter.com/python_chtd">@python_chtd</a> и баги/pull-request-ы на <a href="https://github.com/chtd/psycopg2cffi/">github</a></p>
+                                <p class="post-tag"> </p>
+                
+                <p> </p>
+                
+            </div> 
+
+        </div></body></html>

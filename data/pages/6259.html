@@ -1,0 +1,67 @@
+<html><body><div><div class="entry-content">
+		<p>I’ve recently been playing around with <a href="http://plivo.com" target="_blank">Plivo</a>, which is a competitor to <a href="http://twilio.com" target="_blank">Twilio</a> and lets you connect voice calls and text messages to HTTP endpoints.</p>
+<p>I decided to put together a silly demo app that used the <a href="https://www.plivo.com/docs/getting-started/text-to-speech-app/" target="_blank">text-to-speech API</a>.</p>
+<p>First off let’s parse <a href="http://www.bbc.co.uk/programmes/b013pqnm/broadcasts/upcoming" rel="nofollow">http://www.bbc.co.uk/programmes/b013pqnm/broadcasts/upcoming</a>, which happens to be the page listing the next time The Great British Bake Off is on.</p>
+<p>BBC’s HTML is pretty excellently marked up, so we’ll import BeautifulSoup and requests, then get to work.</p>
+<pre class="brush: plain; title: ; notranslate" title="">
+import requests
+from bs4 import BeautifulSoup
+import os
+import arrow
+
+def get_next_bakeoff():
+    url = "http://www.bbc.co.uk/programmes/b013pqnm/broadcasts/upcoming"
+
+    if not os.path.isfile("bakeoff.cache"):
+        print('downloading')
+        bakeoff = requests.get(url).content
+        open('bakeoff.cache', 'w').write(str(bakeoff))
+    else:
+        bakeoff = open('bakeoff.cache', 'r')
+        content = BeautifulSoup(bakeoff, 'html.parser')
+        elements = content.find('ol', 'highlight-box-wrapper')
+        spans = elements.find_all('span')
+</pre>
+<p>I’ll save you some of the work here. The main program listing on that page is in an ordered-list (ol element). The interesting meta-data is in spans, so the lazy way is to just grab all of them and then filter from there.</p>
+<p>Each program listing has a <code>span</code> with a <code>position</code> attribute so let’s use list comprehensions and magic.</p>
+<p><code>positions = [span for span in spans if span.get('property') == 'position']</code></p>
+<p>Now we have BeautifulSoup references for each program that has a ‘position’ in the list.</p>
+<p>.,<br/>
+Next, let’s sort the list and grab the ‘startTime’ attribute for the latest episode</p>
+<pre class="brush: plain; title: ; notranslate" title="">
+        positions.sort(key=lambda x: x.text)
+        start_time = [p.find('h3') for p in positions[-1].parents if
+                      p.find('h3') is not None and p.find('h3').get('property') == 'startDate'][0]['content']
+</pre>
+<p>Now we have a <code>start_time</code> of something like <code>2015-08-26T20:00:00+01:00</code> which is fantastic, because it’s a standard datetime, <em>and</em> it’s got a timezone offset. BBC are really making this easy for us.</p>
+<p>Next, let’s use the excellent <code>arrow</code> Python module to convert the datetime into our local timezone (at the moment for me that’s Canada’s Pacific time)</p>
+<pre class="brush: plain; title: ; notranslate" title="">
+        next_bakeoff = arrow.get(start_time).to('local') 
+</pre>
+<p>2015-08-26T20:00:00+01:00 becomes 2015-08-26T12:00:00-07:00, and we know I might be able to watch Bake Off in my lunch break on Wednesday, if I’m lucky.</p>
+<pre class="brush: plain; title: ; notranslate" title="">
+        next_bakeoff = arrow.get(start_time).to('local')
+        current_time = arrow.now('local')
+        if (next_bakeoff &gt; current_time):
+            return next_bakeoff
+</pre>
+<p>The text to speech part is really the easiest. Have a look at Plivo’s documentation<br/>
+We could use Plivo’s XML library but at the time I didn’t know about this and I was fighting compilation issues in <code>lxml</code>, so again, I did this the easy way – <code>"".format()</code>. There’s not a lot of magic here – Plivo’s servers do the hard work. I’m setting en-GB so I get a voice with a distinctly British accent. The TTS voices are really nice, I think Plivo have shelled out the big bucks for <a href="http://www.cepstral.com/" target="_blank">Cepstral</a> voices.</p>
+<pre class="brush: plain; title: ; notranslate" title="">
+            xml = '''&lt;Response&gt;
+                  &lt;Speak language="en-GB" loop="1" voice="WOMAN"&gt;
+                  The next episode of Bake Off is {0}
+                  &lt;/Speak&gt;
+                  &lt;/Response&gt;'''.format(next_bakeoff.humanize())
+</pre>
+<p>The call to .humanize() again comes from <code>arrow</code> and turns the timestamp into something nice like <code>in 5 days</code><br/>
+What I haven’t shown here is the Flask app that I’ve put my code in, so instead of <code>return xml</code> I do <code>return Response(xml, mimetype='text/xml')</code>.</p>
+<p>Plivo have posted a good example of a TTS application at <a href="https://github.com/plivo/phone-tts-python" rel="nofollow">https://github.com/plivo/phone-tts-python</a>.</p>
+<p>Left as an exercise to the reader is hooking up the application to a Plivo phone number. I just followed the tutorial in the <a href="https://www.plivo.com/docs/getting-started/text-to-speech-on-a-call/" target="_blank">Getting Started / Text to Speech on a Call</a> section.</p>
+<p>At 0.8 cents a call, it wouldn’t be a cheap toy to play around with in any significant amount, but it’s not going to break the bank, either.</p>
+<p><em>The Great British Bake Off</em> airs in the UK on BBC1 at 20:00 GMT.</p>
+<p>If you’d like to support me and this blog, send bitcoins to <strong>17RugTAi9LdxMUcgVhpWVRRvVsWg11P6V5</strong> or check out my <a href="https://blog.voltagex.org/support-me/">Support Me</a> page.</p>
+<p>If you’d like something completely different, try making some <a href="http://thecinnamonscrolls.com/2015/08/15/chicken-avocado-alfredo/" target="_blank">Chicken Avocado Alfredo</a> from <a href="http://thecinnamonscrolls.com/" target="_blank">The Cinnamon Scrolls</a></p>
+			</div>
+
+	</div></body></html>

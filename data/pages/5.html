@@ -1,0 +1,96 @@
+<html><body><div><div class="entry-content"><p><a href="http://ipython.org/">IPython</a>, as many of you may already know, is a set of frontends to the Python language and ecosystem which provides powerful interactive shells, inline data visualization, support for GUI toolkits, as well as a beautiful browser-based notebook interface and a number of other nifty features. In particular, I've found that the <a href="http://ipython.org/notebook.html">notebook</a> interface with its inline documentation and easy re-evaluation is incredibly helpful for development and debugging. As I started working more and more with Haskell, I began to miss the notebook interface. Luckily, IPython was designed from the start to be polymorphic in the language being used: it specifies a protocol and requires a language interpreting backend (which it calls a "kernel") which speaks that protocol. So, I set about creating a language kernel for Haskell, which I have creatively dubbed <a href="https://github.com/gibiansky/IHaskell">IHaskell</a>. Along the way, I found that the documentation for how I should go about creating this backend was rather sparse, so in this blog post I'd like to rectify that.</p>
+<p>Before continuing, I'd like to reiterate that this is all regurgitating information found elsewhere on the internet in a hopefully useful manner. You may find the <a href="http://ipython.org/ipython-doc/dev/development/messaging.html">complete IPython messaging protocol</a> and this <a href="http://stackoverflow.com/questions/16240747/sending-messages-from-other-languages-to-an-ipython-kernel">StackOverflow question</a> useful as well.</p>
+<p><strong>Note:</strong> The links and information in this post are meant to provide a general overview. Specifics of the protocols and API have changed since this was written (for IPython 2.x protocol), so make sure to carefully read the documentation of the protocols. The general picture remains the same, so most of the description in this post are still accurate.</p>
+<h1 id="ipython-architecture">IPython Architecture</h1>
+<p>IPython is designed for a very flexible configuration. Not only do the frontend and language kernel communicate entirely asynchronously, but the design allows for multiple frontends talking to the same kernel. Although with the advent of the multi-user notebook this may become a reality, in my own use I have always had a single frontend interacting with a single kernel, so I will stick to that for now. Note that making a kernel work with multiple frontends does require more work than just a single frontend, and the details are all in the complete messaging spec (see above). That said, we can picture the basic IPython communication system as follows:</p>
+<figure>
+<img src="images/ipython.png" alt="Simplified IPython Architecture"/><figcaption>Simplified IPython Architecture</figcaption>
+</figure>
+<p>I'm going to refer to these quite often, so keep this diagram handy.</p>
+<p>IPython communicates with its kernel backends using the <a href="http://zeromq.org/">ZeroMQ</a> networking and concurrency library. Luckily, bindings to ZeroMQ exist for most languages, so using it should cause no trouble.</p>
+<h2 id="zeromq">ZeroMQ</h2>
+<p>ZeroMQ allows you to establish generalized sockets for communication. Although the word 'socket' usually connotes networking, ZeroMQ sockets are slightly more general and are used as a communication and concurrency primitive. When creating the socket, it can be declared as a TCP, UDP, or even in-process socket which does not do any networking.</p>
+<p>In addition to the method of transportation (TCP, UDP, IPC, and so on), each socket has a type which indicates how the socket communicates and what type of sockets it can communicate with. Although ZeroMQ defines a number of socket types in order to support very distributed and fault tolerant applications, the ones we are interested in are as follows:</p>
+<ul>
+<li><strong>REP</strong>: The only thing this socket does is receive requests and then reply to them.</li>
+<li><strong>REQ</strong>: This socket is the opposite of <strong>REP</strong> - it sends requests and reads replies to them.</li>
+<li><strong>PUB</strong>: This socket broadcasts (publishes) information to anyone who is listening.</li>
+<li><strong>SUB</strong>: This socket subscribes to a <strong>PUB</strong> socket and listens to all its broadcasts.</li>
+<li><strong>ROUTER</strong>: This socket can be used as a multi-user <strong>REP</strong> socket. It can receive requests from many other sockets and reply to all of them. <strong>ROUTER</strong> sockets store the identity of the source of the message before sending the message to the application, and the application receives messages from all origins. When replying to a message, the <strong>ROUTER</strong> socket will send the reply to the origin of the request.</li>
+<li><strong>DEALER</strong>: This socket allows round-robin communication between sets of sockets. If a message is sent to a <strong>DEALER</strong>, the <strong>DEALER</strong> will send to all connected peers. This allows sets of sockets to communicate without explicit knowledge of all the sockets in the set.</li>
+</ul>
+<h2 id="kernel-sockets">Kernel Sockets</h2>
+<p>Although ZeroMQ is capable of much more, we are interested only in the sockets that we'll need for communicating with the IPython frontend. The backend should have the following ZeroMQ sockets:</p>
+<ul>
+<li><strong>Heartbeat</strong>: This is a <em>REP</em> socket which simply echoes anything its given. IPython uses this to check up on the kernel - if the heartbeat port does not respond within a few seconds, IPython assumes the kernel is dead and restarts it (or exits with an error).</li>
+<li><strong>Shell</strong>, <strong>Control</strong>: These two <em>ROUTER</em> sockets - which, as far as I can tell, are identical for the purpose of single frontend use - are what IPython uses to query the language backend. Requests for code evaluation, object inspection, and so on are sent through these sockets, and each request must have a corresponding reply.<br/>
+</li>
+<li><strong>Stdin</strong>: This <em>ROUTER</em> socket is a socket which the language backend can use to query the frontend for input. For instance, in Python, when <code>raw_input()</code> is used, the Python language backend requests input from the frontend.</li>
+<li><strong>IOPub</strong>: This <em>PUB</em> socket is used to publish all code output. When a block of code finishes (or partially finishes) running, messages are sent to all subscribed frontends via this socket, so they can display the output. All output is sent via this mechanism - the reply messages on the <strong>Shell</strong> messages are very simple and only indicate success and failure.</li>
+</ul>
+<h2 id="configuring-ipython">Configuring IPython</h2>
+<p>We've now covered all the fundamental ideas behind the IPython communication framework, but before diving in to the messaging details, let's go over getting IPython set up to talk to your kernel. A language kernel should define its own IPython profile. When started with this profile, IPython will know to communicate with the particular language kernel instead of defaulting to the Python backend. In addition, other language-specific configuration (such as initialization, extensions, etc) can be added to this profile. You can create the profile via the shell commands</p>
+<div class="sourceCode"><pre class="sourceCode bash"><code class="sourceCode bash"><span class="co"># Create the profile.</span>
+<span class="kw">ipython</span> profile create language-name
+
+<span class="co"># Start IPython with the profile.</span>
+<span class="kw">ipython</span> console --profile language-name</code></pre></div>
+<p>Once you've created the profile, you can edit the profile configuration to set the kernel. This will be located in your IPython configuration directory, which is going to be <code>~/.config/ipython</code> or <code>~/.ipython</code>, depending on your operating system. You will likely want to edit <code>profile_language-name/ipython-config.py</code>. In order to set the language kernel, use the following code:</p>
+<div class="sourceCode"><pre class="sourceCode python"><code class="sourceCode python"><span class="co"># Set the kernel command.</span>
+c <span class="op">=</span> get_config()
+c.KernelManager.kernel_cmd <span class="op">=</span> [<span class="st">"/path/to/executable/kernel_exe"</span>,
+                              <span class="co">"{connection_file}"</span>]            
+
+<span class="co"># Disable authentication.</span>
+c.Session.key <span class="op">=</span> b<span class="st">''</span>
+c.Session.keyfile <span class="op">=</span> b<span class="st">''</span>                                </code></pre></div>
+<p>With this configuration, your kernel will be called with a single command line parameter. This command line parameter will be a JSON file that looks like this:</p>
+<div class="sourceCode"><pre class="sourceCode javascript"><code class="sourceCode javascript"><span class="op">{</span>
+    <span class="st">"stdin_port"</span><span class="op">:</span> <span class="dv">48691</span><span class="op">,</span>
+    <span class="st">"ip"</span><span class="op">:</span> <span class="st">"127.0.0.1"</span><span class="op">,</span>
+    <span class="st">"control_port"</span><span class="op">:</span> <span class="dv">44808</span><span class="op">,</span> 
+    <span class="st">"hb_port"</span><span class="op">:</span> <span class="dv">49691</span><span class="op">,</span> 
+    <span class="st">"signature_scheme"</span><span class="op">:</span> <span class="st">"hmac-sha256"</span><span class="op">,</span> 
+    <span class="st">"key"</span><span class="op">:</span> <span class="st">""</span><span class="op">,</span> 
+    <span class="st">"shell_port"</span><span class="op">:</span> <span class="dv">40544</span><span class="op">,</span> 
+    <span class="st">"transport"</span><span class="op">:</span> <span class="st">"tcp"</span><span class="op">,</span> 
+    <span class="st">"iopub_port"</span><span class="op">:</span> <span class="dv">43462</span>
+<span class="op">}</span></code></pre></div>
+<p>This scheme defines the ports, IP, transport mechanism, and authentication mechanism that the kernel should use for communicating with the frontend. The kernel should then create sockets for each of those ports and bind them to the appropriate locations. (Note 'bind', as opposed to 'connect' - in ZeroMQ, <a href="http://zeromq.org/area:faq#toc5">there's a difference</a>.)</p>
+<h2 id="reading-messages">Reading Messages</h2>
+<p>Once IPython is attempting to connect to your kernel and you have sockets listening to the correct ports, you can begin parsing and replying to the messages IPython sends your kernel. There are one to two dozen different messages which are all described in the <a href="http://ipython.org/ipython-doc/dev/development/messaging.html">Messaging Protocol</a>. However, only some of them need to be implemented for a useful kernel.</p>
+<p>Each message (except for those on the heartbeat port) is serialized as a stream of binary blobs. Quoting the messaging protocol:</p>
+<div class="sourceCode"><pre class="sourceCode python"><code class="sourceCode python">[
+    b<span class="st">'u-u-i-d'</span>,         <span class="co"># Zmq identity(ies)</span>
+    b<span class="st">'&lt;IDS|MSG&gt;'</span>,       <span class="co"># delimiter</span>
+    b<span class="st">'baddad42'</span>,        <span class="co"># HMAC signature</span>
+    b<span class="st">'</span><span class="sc">{header}</span><span class="st">'</span>,        <span class="co"># Serialized header dict</span>
+    b<span class="st">'</span><span class="sc">{parent_header}</span><span class="st">'</span>, <span class="co"># Serialized parent header dict</span>
+    b<span class="st">'</span><span class="sc">{metadata}</span><span class="st">'</span>,      <span class="co"># Serialized metadata dict</span>
+    b<span class="st">'</span><span class="sc">{content}</span><span class="st">'</span>,       <span class="co"># Serialized content dict</span>
+    b<span class="st">'blob'</span>,            <span class="co"># extra raw data buffer(s)</span>
+    ...
+]</code></pre></div>
+<p>The dictionaries are simply serialized JSON, and can be read as such.</p>
+<p>If you are reading directly from ZeroMQ sockets, there are several small things to note:</p>
+<ul>
+<li>In order to read the ZeroMQ identities, read all the blobs until the identifier delimiter, "&lt;IDS|MSG&gt;". This will be in several messages if there are several ZeroMQ identities involved, but most of the time this will be a single <a href="http://en.wikipedia.org/wiki/Uuid">UUID</a> followed by a "&lt;IDS|MSG&gt;" message.</li>
+<li>The UUIDs are often used for comparison. For instance, the parent header UUID may be used by IPython to determine which message or which notebook is being replied to. However, IPython uses direct <em>string comparison</em> for UUID comparison, so "f47ac10b-58cc-4372-a567-0e02b2c3d479" and "F47AC10B58CC4372A5670E02B2C3D479" will be different, although they represent the same UUID. In addition, IPython console and IPython notebook will use differently formatted UUIDs (console uses the former version, while notebook uses the capitalized latter version). Anyway, be careful to always return the same UUID in the parent that you get in the request - parsing the UUID and later converting it back to a string may not work with all IPython frontends.</li>
+</ul>
+<h2 id="important-messages">Important Messages</h2>
+<p>For a basic language kernel, you must respond to two message types. The first of these is <code>"kernel_info_request"</code>. A <code>kernel_info_request</code> message has no content, but indicates that a <code>"kernel_info_reply"</code> message should be sent back. The <code>kernel_info_reply</code> message will contain information about the kernel, such as the IPython version expected, the protocol version, the language, and so on. This message <em>must</em> be sent before the IPython frontend finishes its initialization, and full detail about what should go into these messages can be found <a href="http://ipython.org/ipython-doc/dev/development/messaging.html#kernel-info">here</a>.</p>
+<p>The second and most important message type is <code>"execute_request"</code>. An <code>execute_request</code> messages indicates a request to evaluate a block of code. Note that this is not necessarily a single <em>line</em> of code - although the console will only send a single line, notebook interfaces may send significantly more. The full content of the message is available <a href="http://ipython.org/ipython-doc/dev/development/messaging.html#execute">here</a>.</p>
+<p>An <code>"execute_reply"</code> message must eventually be sent in reply to the <code>execute_request</code>. The only two fields are the execution counter (so that the frontend knows which <code>execute_request</code> is being replied to) and the status of the execution, which is either <code>"ok"</code>, <code>"error"</code>, or <code>"abort"</code>. The <code>execute_reply</code> indicates that the processing of the source code has been completed and that it has been executed.</p>
+<p>Note that the <code>execute_reply</code> message <em>doesn't</em> contain any information about the code that was just run! All information about the code and its output is sent in separate messages on the IOPub port.</p>
+<h2 id="publishing-output">Publishing Output</h2>
+<p>When your language kernel receives an <code>execute_request</code>, it needs to send back an <code>execute_reply</code> as well as several messages on the IOPub port.</p>
+<p>Before beginning the execution of the code, send a <a href="http://ipython.org/ipython-doc/dev/development/messaging.html#kernel-status">status update</a> to the frontend declaring that the kernel is busy. This <code>status</code> message informs the frontend that the kernel is currently busy, so that it can potentially display that information to the user. Similarly, when code is done executing, you should send another status update, this time informing the frontend that the kernel is now idle.</p>
+<p>During code execution, there are two types of data your kernel may want to send to the frontend. The <a href="http://ipython.org/ipython-doc/dev/development/messaging.html#display-data">display data message</a> message, <code>display_data</code>, allows you to publish multiple representations of your data. For instance, if your code outputs a table, it may do so simultaneously as printed monospace code, HTML, Latex, or even a PNG or SVG containing an image of the table. The kernel will then decide the optimal way to display your data, which can lead to beatiful presentations in the IPython notebook.</p>
+<p>However, you will likely also want to publish raw output, such as the output from <code>print</code> statements or their equivalent. Although you could do this in the <code>display_data</code> messages, you should instead use the simpler output message <code>pyout</code>. The <a href="http://ipython.org/ipython-doc/dev/development/messaging.html#python-outputs">Python output</a> message indicates that this is the raw output data and <em>not</em> just a representation of some data, and this output data is generally presented differently in IPython frontends.</p>
+<h2 id="further-development">Further Development</h2>
+<p>This describes a very basic IPython language kernel. However, there are many other messages required for full capability - things such as object introspection, looking up documentation, and so on. You can figure these out by thoroughly reading the messaging protocol.</p>
+<p>If you'd like to read a reference implementation in Haskell, I urge you to look at (and, if you'd like to, contribute to) the development of <a href="https://github.com/gibiansky/IHaskell">IHaskell</a> - an IPython kernel for Haskell.</p>
+</div>
+
+
+  </div></body></html>

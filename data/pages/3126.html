@@ -1,0 +1,64 @@
+<html><body><div><div itemprop="articleBody"><p>There are a bunch of solutions for making a bridge to use the flash sockets (<a class="reference external" href="http://livedocs.adobe.com/flex/2/langref/flash/net/Socket.html">flash.net.Socket</a>) in javascript, notably <a class="reference external" href="http://matthaynes.net/blog/2008/07/17/socketbridge-flash-javascript-socket-bridge/">socketBridge</a> and <a class="reference external" href="http://code.google.com/p/jssockets/">jssockets</a>. But I didn't like the way they made you write your client code: because you can't pass javascript function references through the ExternalInterface you usually pass your callbacks as strings representing the name of an global object. IMHO, that just sucks so I've made my own mix named HaxeSocketBridge.</p><p>You can write the client code like this:</p><div class="highlight"><pre><span/><span class="kd">var</span> <span class="nx">s</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">FlashSocket</span><span class="p">({</span>
+    <span class="nx">on_data</span><span class="o">:</span> <span class="kd">function</span><span class="p">(</span><span class="nx">data</span><span class="p">)</span> <span class="p">{</span>
+        <span class="nb">document</span><span class="p">.</span><span class="nx">getElementById</span><span class="p">(</span><span class="s1">'datapanel'</span><span class="p">).</span><span class="nx">value</span> <span class="o">=</span> <span class="nx">data</span><span class="p">;</span>
+    <span class="p">},</span>
+    <span class="nx">on_io_error</span><span class="o">:</span> <span class="kd">function</span><span class="p">(</span><span class="nx">msg</span><span class="p">)</span> <span class="p">{</span>
+        <span class="nx">alert</span><span class="p">(</span><span class="s2">"IO ERROR: "</span><span class="o">+</span><span class="nx">msg</span><span class="p">);</span>
+    <span class="p">},</span>
+    <span class="nx">on_security_error</span><span class="o">:</span> <span class="kd">function</span><span class="p">(</span><span class="nx">msg</span><span class="p">)</span> <span class="p">{</span>
+        <span class="nx">alert</span><span class="p">(</span><span class="s2">"SECURITY ERROR: "</span><span class="o">+</span><span class="nx">msg</span><span class="p">);</span>
+    <span class="p">},</span>
+    <span class="nx">on_close</span><span class="o">:</span> <span class="kd">function</span><span class="p">(</span><span class="nx">msg</span><span class="p">)</span> <span class="p">{</span>
+        <span class="nx">alert</span><span class="p">(</span><span class="s2">"Connection closed."</span><span class="p">);</span>
+    <span class="p">},</span>
+    <span class="nx">on_connect</span><span class="o">:</span> <span class="kd">function</span><span class="p">()</span> <span class="p">{</span>
+        <span class="nx">s</span><span class="p">.</span><span class="nx">write</span><span class="p">(</span><span class="s2">"GET / HTTP/1.0\r\n\r\n"</span><span class="p">);</span>
+    <span class="p">}</span>
+<span class="p">});</span>
+<span class="nx">s</span><span class="p">.</span><span class="nx">connect</span><span class="p">(</span><span class="s1">'example.com'</span><span class="p">,</span> <span class="mi">80</span><span class="p">);</span>
+</pre></div><p><a class="reference external" href="http://ionel-whatever-code.googlecode.com/svn/trunk/HaxeSocketBridge/test.html">Here</a>'s the whole example.</p><p>How does it work? You can execute arbitrary javascript code though the external interface, so why not execute some boilerplate code and setup a global FlashSocket class that handles all the nasty actionscript-javascript communication. I've seen this arguably good idea in the <a class="reference external" href="http://www.jimbojw.com/wiki/index.php?title=SWFHttpRequest.hx">SWFHttpRequest</a> bridge. If you do something like this be careful with those damn commas/semicolons or else you're in i-dont-know-why-it-breaks hell :)</p><p>Here's how the guts look like (note that the language is <a class="reference external" href="http://haxe.org/download">haxe</a>):</p><div class="highlight"><pre><span/><span class="nx">ExternalInterface</span><span class="p">.</span><span class="nx">addCallback</span><span class="p">(</span><span class="s2">"connect"</span><span class="p">,</span> <span class="nx">connect</span><span class="p">);</span>
+<span class="nx">ExternalInterface</span><span class="p">.</span><span class="nx">addCallback</span><span class="p">(</span><span class="s2">"close"</span><span class="p">,</span> <span class="nx">close</span><span class="p">);</span>
+<span class="nx">ExternalInterface</span><span class="p">.</span><span class="nx">addCallback</span><span class="p">(</span><span class="s2">"write"</span><span class="p">,</span> <span class="nx">write</span><span class="p">);</span>
+<span class="nx">ExternalInterface</span><span class="p">.</span><span class="nx">addCallback</span><span class="p">(</span><span class="s2">"CAN_I_HAS_SOCKET"</span><span class="p">,</span> <span class="nx">CAN_I_HAS_SOCKET</span><span class="p">);</span>
+<span class="nx">ExternalInterface</span><span class="p">.</span><span class="nx">call</span><span class="p">([</span>
+<span class="s2">"(function(){"</span><span class="p">,</span>
+    <span class="s2">"if (window.FlashSocket) return;"</span><span class="p">,</span>
+    <span class="s2">"var Class = function(properties){"</span><span class="p">,</span>
+        <span class="s2">"var klass = function(event_handlers){ "</span><span class="p">,</span>
+            <span class="s2">"for (var p in event_handlers) {"</span><span class="p">,</span>
+                <span class="s2">"if (event_handlers.hasOwnProperty(p)) {"</span><span class="p">,</span>
+                    <span class="s2">"this[p] = event_handlers[p];"</span><span class="p">,</span>
+                <span class="s2">"}"</span><span class="p">,</span>
+            <span class="s2">"}"</span><span class="p">,</span>
+            <span class="s2">"return this.init.apply(this);"</span><span class="p">,</span>
+        <span class="s2">"};"</span><span class="p">,</span>
+        <span class="s2">"klass.prototype = properties;"</span><span class="p">,</span>
+        <span class="s2">"klass.constructor = arguments.callee;"</span><span class="p">,</span>
+        <span class="s2">"return klass;"</span><span class="p">,</span>
+    <span class="s2">"};"</span><span class="p">,</span>
+    <span class="s2">"window.FlashSocket = new Class({"</span><span class="p">,</span>
+        <span class="s2">"init: function(){"</span><span class="p">,</span>
+            <span class="s2">"this._instance = ''+window.FlashSocket._instances.length;"</span><span class="p">,</span>
+            <span class="s2">"window.FlashSocket._instances.push(this);"</span><span class="p">,</span>
+        <span class="s2">"},"</span><span class="p">,</span>
+        <span class="s2">"close: function(){ "</span><span class="p">,</span>
+            <span class="s2">"window.FlashSocket._instances[this._instance] = null;"</span><span class="p">,</span>
+            <span class="s2">"window.FlashSocket._bridge.close(this._instance );"</span><span class="p">,</span>
+        <span class="s2">"},"</span><span class="p">,</span>
+        <span class="s2">"write: function(data){ "</span><span class="p">,</span>
+            <span class="s2">"window.FlashSocket._bridge.write(this._instance, data);"</span><span class="p">,</span>
+        <span class="s2">"},"</span><span class="p">,</span>
+        <span class="s2">"connect: function(host, port) {"</span><span class="p">,</span>
+            <span class="s2">"window.FlashSocket._bridge.connect(this._instance, host, port);"</span><span class="p">,</span>
+        <span class="s2">"}"</span><span class="p">,</span>
+    <span class="s2">"});"</span><span class="p">,</span>
+    <span class="s2">"window.FlashSocket._instances = [];"</span><span class="p">,</span>
+    <span class="s2">"var f = function(tag){"</span><span class="p">,</span>
+        <span class="s2">"var elems = document.getElementsByTagName(tag);"</span><span class="p">,</span>
+        <span class="s2">"for (var i=0; i&lt;elems.length; i++) if (elems[i].CAN_I_HAS_SOCKET) return elems[i];"</span><span class="p">,</span>
+    <span class="s2">"};"</span><span class="p">,</span>
+    <span class="s2">"window.FlashSocket._bridge = f('embed') || f('object');"</span><span class="p">,</span>
+<span class="s2">"})"</span> <span class="p">].</span><span class="nx">join</span><span class="p">(</span><span class="s1">''</span><span class="p">)</span> <span class="p">);</span>
+<span class="k">if</span> <span class="p">(</span><span class="nx">flash</span><span class="p">.</span><span class="nx">Lib</span><span class="p">.</span><span class="nx">current</span><span class="p">.</span><span class="nx">loaderInfo</span><span class="p">.</span><span class="nx">parameters</span><span class="p">.</span><span class="nx">onloadcallback</span> <span class="o">!=</span> <span class="kc">null</span><span class="p">)</span>
+    <span class="nx">ExternalInterface</span><span class="p">.</span><span class="nx">call</span><span class="p">(</span><span class="nx">flash</span><span class="p">.</span><span class="nx">Lib</span><span class="p">.</span><span class="nx">current</span><span class="p">.</span><span class="nx">loaderInfo</span><span class="p">.</span><span class="nx">parameters</span><span class="p">.</span><span class="nx">onloadcallback</span><span class="p">);</span>
+</pre></div><p>The trick is that we can setup a global javascript class-like object from the flash clip. You can grab the code here. Also, if you test from a local disc you might want to adjust your flash security settings. To compile the .hx file run "haxe compile.hxml". Now, the only thing I miss is some buffering/readline logic.</p></div></div></body></html>

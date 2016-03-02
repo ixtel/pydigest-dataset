@@ -1,0 +1,229 @@
+<html><body><div><div class="post-text" itemprop="text">
+
+<p>Given this initial graph:</p>
+
+<pre><code>import networkx as nx
+G=nx.MultiGraph()
+fromnodes=[0,0,1,1,1,1,1,2,3,4,5,5,5,7,8,9,10]
+tonodes=[1,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
+dupedgeind=0
+for x,y in zip(fromnodes,tonodes):
+    if G.has_edge(x,y):
+        dupedgeind=dupedgeind+1
+        G.add_edge(x,y,key=dupedgeind)
+    else:
+        dupedgeind=0
+        G.add_edge(x,y,key=dupedgeind)
+</code></pre>
+
+<p>Can anyone recreate this error?</p>
+
+<pre><code>pos=nx.nx_agraph.pygraphviz_layout(G,prog='sfdp')
+
+Traceback (most recent call last):
+  File "&lt;stdin&gt;", line 1, in &lt;module&gt;
+  File "C:\Python27\lib\site-packages\networkx\drawing\nx_agraph.py", line 262, in pygraphviz_layout
+    A=to_agraph(G)
+  File "C:\Python27\lib\site-packages\networkx\drawing\nx_agraph.py", line 155, in to_agraph
+    A.add_edge(u,v,key=str(key),**str_edgedata)
+  File "C:\Python27\lib\site-packages\pygraphviz\agraph.py", line 484, in add_edge
+    eh = gv.agedge(self.handle, uh, vh, key, _Action.find)
+KeyError: 'agedge: no key'
+</code></pre>
+
+<p>The problem has something to do with the call to graphviz's agedge function, it seems to not like the format of the <code>key</code> parameter; when I change (line 480 of <code>agraph.py</code>):</p>
+
+<pre><code>...
+    eh = gv.agedge(self.handle, uh, vh, key , _Action.create)
+...
+</code></pre>
+
+<p>to</p>
+
+<pre><code>...
+    eh = gv.agedge(self.handle, uh, vh, "a_string" , _Action.create)
+...
+</code></pre>
+
+<p>it no longer fails (but loses the key labels).</p>
+
+<p><strong>Is there an obvious way to fix this</strong> (so that <code>key</code> parameter values are retained)<strong>?</strong> - Nothing I try seems to work.</p>
+
+<p><strong>What are the most sensible next debugging steps?</strong></p>
+
+<hr/>
+
+<p>From <a href="http://www.graphviz.org/pdf/cgraph.3.pdf" rel="nofollow">here</a>, it appears that the <code>c</code> agedge function (which I can't see as it's in a .pyd binary) has the following format:</p>
+
+<pre><code>*agedge(Agraph_t *g, Agnode_t *t, Agnode_t *h, char *name, int createflag)
+</code></pre>
+
+<p>where the <code>char *name</code> is the key.</p>
+
+<p>I cannot work out why it won't accept a <code>str</code> dtype as in the initial error.</p>
+
+<hr/>
+
+<p>Note versions:</p>
+
+<p>networkx - 1.11,
+pygraphviz - 1.3.1
+ (installed from <a href="http://www.lfd.uci.edu/~gohlke/pythonlibs/#pygraphviz" rel="nofollow">http://www.lfd.uci.edu/~gohlke/pythonlibs/#pygraphviz</a>) on Windows 7, GraphViz - 2.38</p>
+
+<p>I have also seen this issue crop up in these questions:</p>
+
+
+
+<hr/>
+
+<p><strong>UPDATE 1</strong></p>
+
+<p>I have tried adjusting the <code>key</code> input to the agedge function to a number of variants of char arrays (e.g. <code>(ct.c_char_p * len(key))(key)</code> (ct is ctypes module) based on <a href="http://stackoverflow.com/a/16700183/1461850">this</a>). This changes the error to:</p>
+
+<pre><code>Traceback (most recent call last):
+  File "&lt;stdin&gt;", line 1, in &lt;module&gt;
+  File "C:\Python27\lib\site-packages\networkx\drawing\nx_agraph.py", line 262, in pygraphviz_layout
+    A=to_agraph(G)
+  File "C:\Python27\lib\site-packages\networkx\drawing\nx_agraph.py", line 155, in to_agraph
+    A.add_edge(u,v,str(key),**str_edgedata)
+  File "C:\Python27\lib\site-packages\pygraphviz\agraph.py", line 482, in add_edge
+    eh = gv.agedge(self.handle, uh, vh, (ct.c_char_p * len(key))(key), _Action.create)
+TypeError: in method 'agedge', argument 4 of type 'char *'
+</code></pre>
+
+<p><strong>UPDATE 2</strong></p>
+
+<p>I can get it to run (but not return a multigraph) if I do this:</p>
+
+<p>In <code>agraph.py</code> replacing the line</p>
+
+<pre><code>eh = gv.agedge(self.handle, uh, vh, key , _Action.create)
+</code></pre>
+
+<p>with</p>
+
+<pre><code>    try:
+        # new
+        if key==0:
+            eh = gv.agedge(self.handle, uh, vh, str(0), _Action.create)
+        else:
+            eh = gv.agedge(self.handle, uh, vh, str(1), _Action.create)
+</code></pre>
+
+<p>I don't know why just casting to a string <code>str(key)</code> does not work.</p>
+
+<p><strong>UPDATE 3 - EDIT with the function</strong></p>
+
+<p>Found the function here - <a href="https://github.com/ellson/graphviz/blob/master/lib/cgraph/edge.c" rel="nofollow">https://github.com/ellson/graphviz/blob/master/lib/cgraph/edge.c</a></p>
+
+<pre><code>Agedge_t *agedge(Agraph_t * g, Agnode_t * t, Agnode_t * h, char *name,
+int cflag)
+{
+    Agedge_t *e;
+    IDTYPE id;
+    int have_id;
+    have_id = agmapnametoid(g, AGEDGE, name, &amp;id, FALSE);
+    if (have_id || ((name == NILstr) &amp;&amp; (NOT(cflag) || agisstrict(g)))) {
+        /* probe for pre-existing edge */
+        Agtag_t key;
+        key = Tag;
+        if (have_id) {
+            key.id = id;
+            key.objtype = AGEDGE;
+        } else {
+            key.id = key.objtype = 0;
+        }
+        /* might already exist locally */
+        e = agfindedge_by_key(g, t, h, key);
+        if ((e == NILedge) &amp;&amp; agisundirected(g))
+            e = agfindedge_by_key(g, h, t, key);
+        if (e)
+            return e;
+        if (cflag) {
+            e = agfindedge_by_key(agroot(g), t, h, key);
+            if ((e == NILedge) &amp;&amp; agisundirected(g))
+                e = agfindedge_by_key(agroot(g), h, t, key);
+            if (e) {
+                subedge(g,e);
+                return e;
+            }
+        }
+}
+</code></pre>
+
+<p><strong>UPDATE 4:</strong></p>
+
+<p>The source of the error is within <a href="https://github.com/pygraphviz/pygraphviz/blob/245fc9507a9e40f8c35762dd5073e42edb0388d3/pygraphviz/graphviz_wrap.c" rel="nofollow">this</a> pygraphviz file, graphviz_wrap.c, line 3921:</p>
+
+<pre><code>SWIGINTERN PyObject *_wrap_agedge(PyObject *SWIGUNUSEDPARM(self), PyObject *args) {
+    PyObject *resultobj = 0;
+    Agraph_t *arg1 = (Agraph_t *) 0 ;
+    Agnode_t *arg2 = (Agnode_t *) 0 ;
+    Agnode_t *arg3 = (Agnode_t *) 0 ;
+    char *arg4 = (char *) 0 ;
+    int arg5 ;
+    void *argp1 = 0 ;
+    int res1 = 0 ;
+    void *argp2 = 0 ;
+    int res2 = 0 ;
+    void *argp3 = 0 ;
+    int res3 = 0 ;
+    int res4 ;
+    char *buf4 = 0 ;
+    int alloc4 = 0 ;
+    int val5 ;
+    int ecode5 = 0 ;
+    PyObject * obj0 = 0 ;
+    PyObject * obj1 = 0 ;
+    PyObject * obj2 = 0 ;
+    PyObject * obj3 = 0 ;
+    PyObject * obj4 = 0 ;
+    Agedge_t *result = 0 ;
+
+    if (!PyArg_ParseTuple(args, char*)"OOOOO:agedge",&amp;obj0,&amp;obj1,&amp;obj2,&amp;obj3,&amp;obj4)) SWIG_fail; 
+    res1 = SWIG_ConvertPtr(obj0, &amp;argp1,SWIGTYPE_p_Agraph_t, 0 | 0 );
+    if (!SWIG_IsOK(res1)) {
+        SWIG_exception_fail(SWIG_ArgError(res1), "in method '""agedge" "', argument " "1"" of type '" "Agraph_t *""'");
+    }
+    arg1 = (Agraph_t *)(argp1);
+    res2 = SWIG_ConvertPtr(obj1, &amp;argp2,SWIGTYPE_p_Agnode_t, 0 | 0 );
+    if (!SWIG_IsOK(res2)) {
+        SWIG_exception_fail(SWIG_ArgError(res2), "in method '" "agedge" "', argument " "2"" of type '" "Agnode_t *""'");
+    }
+    arg2 = (Agnode_t *)(argp2);
+    res3 = SWIG_ConvertPtr(obj2, &amp;argp3,SWIGTYPE_p_Agnode_t, 0 | 0 );
+    if (!SWIG_IsOK(res3)) {
+        SWIG_exception_fail(SWIG_ArgError(res3), "in method '" "agedge" "', argument " "3"" of type '" "Agnode_t *""'");
+    }
+    arg3 = (Agnode_t *)(argp3);
+    res4 = SWIG_AsCharPtrAndSize(obj3, &amp;buf4, NULL, &amp;alloc4);
+    if (!SWIG_IsOK(res4)) {
+        SWIG_exception_fail(SWIG_ArgError(res4), "in method '" "agedge" "', argument " "4"" of type '" "char *""'");
+    }
+    arg4 = (char *)(buf4);
+    ecode5 = SWIG_AsVal_int(obj4, &amp;val5);
+    if (!SWIG_IsOK(ecode5)) {
+        SWIG_exception_fail(SWIG_ArgError(ecode5), "in method '" "agedge" "', argument " "5"" of type '" "int""'");
+    }
+    arg5 = (int)(val5);
+    {
+        result = (Agedge_t *)agedge(arg1,arg2,arg3,arg4,arg5);
+        if (!result) {
+            PyErr_SetString(PyExc_KeyError,"agedge: no key");
+            return NULL;
+        }
+    }
+    resultobj = SWIG_NewPointerObj(SWIG_as_voidptr(result), SWIGTYPE_p_Agedge_t, 0 | 0 );
+    if (alloc4 == SWIG_NEWOBJ) free((char*)buf4);
+    return resultobj;
+    fail:
+        if (alloc4 == SWIG_NEWOBJ) free((char*)buf4);
+        return NULL;
+}
+</code></pre>
+
+<p>Or, it's within <a href="https://github.com/pygraphviz/pygraphviz/blob/245fc9507a9e40f8c35762dd5073e42edb0388d3/pygraphviz/graphviz.i" rel="nofollow">this one</a>, graphviz.i, line 68. </p>
+
+<p>Either way, it seems like the error string "agedge: no key" is return if <code>agedge</code> fails for any reason... Perhaps it's something to do with SWIG.</p>
+    </div>
+    </div></body></html>

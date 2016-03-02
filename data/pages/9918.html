@@ -1,0 +1,111 @@
+<html><body><div><div class="post-text" itemprop="text">
+
+<p>I'm trying to use a modified version of the <a href="https://github.com/django-oscar/django-oscar/blob/master/src/oscar/apps/partner/importers.py" rel="nofollow">django-oscar import_oscar_catalogue</a> class to import a bunch of products from a CSV, and on the first encounter of a product (defined by title), create a canonical parent product, and then for all future encounters create a child product under that parent product. </p>
+
+<p>This seems to work, but the canonical product does not reflect the combined stock levels of the child product, nor display the correct attributes for that product. It does correctly list them as variations within the django dashboard though.</p>
+
+<p>How can I programmatically create this child/parent relationship in products, with the correct stock records?</p>
+
+<p>Relevant code:</p>
+
+<pre><code>def _create_item(self, upc, title, product_class, other_product_attributes):
+    product_class, __ \
+        = ProductClass.objects.get_or_create(name=product_class)
+    try:
+        parent = Product.objects.get(title=title)
+        item = Product()
+        item.parent = parent
+    except Product.DoesNotExist:
+        # Here is where I think it might need to be changed
+        # Maybe pitem = ParentProduct() or something?
+        pitem = Product()
+        pitem.upc = upc
+        pitem.title = title
+        pitem.other_product_attributes = other_product_attributes
+        # Here parent item is saved to db
+        pitem.save()
+        # Create item because no parent was found
+        item = Product()
+        parent = Product.objects.get(title=title)
+        #Set parent
+        item.parent = parent
+    # Customize child attributes
+    item.product_class = product_class
+    item.title = title
+    item.other_product_attributes = other_product_attributes
+    # Save the child item
+    item.save()
+
+def _create_stockrecord(self, item, partner_name, partner_sku, price_excl_tax,
+    num_in_stock, stats):
+    # Create partner and stock record
+    partner, _ = Partner.objects.get_or_create(
+        name=partner_name)
+    try:
+        stock = StockRecord.objects.get(partner_sku=partner_sku)
+    except StockRecord.DoesNotExist:
+        stock = StockRecord()
+        stock.num_in_stock = 0
+    # General attributes
+    stock.product = item
+    stock.partner = partner
+    # SKU will be unique for every object
+    stock.partner_sku = partner_sku
+    stock.price_excl_tax = D(price_excl_tax)
+    stock.num_in_stock += int(num_in_stock)
+    # Save the object to database
+    stock.save()
+</code></pre>
+
+<p>The create_stockrecord() creates a record of 1 stock for each unique item variation, but these variation's stockrecords don't translate to the parent item.</p>
+
+<p>Thanks for any suggestions.</p>
+
+<p>EDIT:
+I've updated the class with a method that explicitly calls ProductClass.objects.track_stock() against the ProductClass instance, and I'm calling it after looping through all rows of the CSV file (passing it the name of the one product class I use currently). However, when looking at the stock in dashboard, none of the child/variations stock is being counted against the parent. </p>
+
+<pre><code>def track_stock(self, class_name):
+    self.logger.info("ProductClass name: %s" % class_name)
+    product_class = ProductClass.objects.get_or_create(name=class_name)
+    self.logger.info("ProductClass: %s" % str(product_class))
+    self.logger.info("TrackStock: %s" % str(product_class[0].track_stock))
+    product_class[0].track_stock = True
+    self.logger.info("TrackStock: %s" % str(product_class[0].track_stock))
+    product_class[0].save()
+
+
+INFO Starting catalogue import
+INFO  - Importing records from 'sample_inventory.csv'
+INFO  - Flushing product data before import
+INFO Parent items: 6, child items: 10
+INFO ProductClass name: ClassName
+INFO ProductClass: (&lt;ProductClass: ClassName&gt;, False)
+INFO TrackStock: True
+INFO TrackStock: True
+</code></pre>
+
+<p>I've checked the admin page, only 1 ProductClass is created, and it has the same name as is being passed to track_stock(). Is there something else that needs to be done to enable this feature? <a href="http://django-oscar.readthedocs.org/en/releases-1.1/ref/apps/catalogue.html" rel="nofollow">track_stock()</a> documentation is kind of sparse. In the output, track_stock looks like it is true in both instances. Does it have to be False while the child_objects are created, and then flipped to True?</p>
+
+<p>EDIT: SOLUTION:</p>
+
+<p>After some research from the <a href="https://github.com/django-oscar/django-oscar/blob/master/src/oscar/test/factories/__init__.py" rel="nofollow">test factory</a>, I solved the issue by specifying </p>
+
+<pre><code>product.stucture = 'parent' 
+</code></pre>
+
+<p>On the parent object, and </p>
+
+<pre><code>product.structure = 'child'
+</code></pre>
+
+<p>on the child object. I also needed to change the custom attributes of my objects to a dict <code>product_attributes</code>, and then set each value on the object:</p>
+
+<pre><code>if product_attributes:
+        for code, value in product_attributes.items():
+            product_class.attributes.get_or_create(name=code, code=code)
+            setattr(product.attr, code, value)
+</code></pre>
+
+<p>It was not necessary to create a stock record for each parent object, as they track the stock records of the child objects to which they are associated. It was also not necessary to set <code>track_stock = True</code>, as it is set to <code>True</code> by default when creating a <code>Product()</code></p>
+    </div>
+    </div></body></html>

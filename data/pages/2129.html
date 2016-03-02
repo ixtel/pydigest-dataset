@@ -1,0 +1,147 @@
+<html><body><div><div class="text" id="extended">
+    <p>Hello everyone!  Time for a bit of a diversion towards one of my
+favorite projects, <a class="reference external" href="http://hy.readthedocs.org/en/latest/">Hy</a>!  (I'm
+an occasional committer, but the main mastermind behind the project is
+my good friend <a class="reference external" href="http://pault.ag/">Paul Tagliamonte</a>.)  For those of
+you who don't know, Hy is a Lisp that transforms into the Python AST.
+Even more fun: you can import .hy files in .py files and .py files in
+.hy files!  Crazy!</p>
+<p>Now, when many people hear that, they say, "Huh what, why on earth
+would you do such a thing?"  The usual response is something like,
+"Because it's fun!"  But today, dear readers, I am going to show you a
+real... dare I say <em>practical</em> reason for using Hy.  Because a cool
+feature just landed in Hy: a backport of
+"<a class="reference external" href="https://docs.python.org/3/whatsnew/3.3.html#pep-380">yield from</a>"
+to Python 2.</p>
+<p>Let's back up a bit.  First, you might not know what "yield from" is
+or why it's cool.  Well, Python has this thing called coroutines which
+allow you to do cool things, including suspending and resuming
+functions, which it turns out is really great for writing asynchronous
+code (sure, just wake me back up when we get the next network stanza,
+eh buddy?).  Once you provide the ability to nest together coroutines
+by "delegating to subgenerators" (what "yield from" does that "yield"
+does not), this stuff starts to get <em>really</em> powerful.  This feature
+is so useful that it's the basis of maybe the world's coolest
+asynchronous programming environment,
+<a class="reference external" href="https://docs.python.org/3.4/library/asyncio.html">asyncio</a>.  Only one
+problem: "yield from" didn't exist until Python 3.3... which means you
+can't use it with Python 2.  Bummer!</p>
+<p>Or can you?  Time for our second bit of context.  Ever hear of a Lisp
+programmer talk about something called a "macro"?  No?  Okay, think
+harder.  Maybe it was in one of those conversations where you were
+talking about your favorite new your-pet-language feature, and the
+Lisp hacker was like, "Oh that's cute... yeah Lisp had that decades
+ago."  And then you got really mad and brought up a bunch more
+features, and the Lisp hacker kept saying that Lisp had them before
+you were born, and "Oh yeah, and whatever features Lisp doesn't have,
+you can add really fast because Lisp has macros.  You can basically
+program any feature with macros."  Maybe you asked them, what the heck
+is a macro, and they said something inane like "it's a feature where
+you can program other features, or write code that writes code", but
+you barely remember, because at that point you just wanted to punch
+them in their smug little face.  (And besides, you wondered, if you
+have higher order functions, isn't that enough?)</p>
+<p>Well friends, today it is my face that you will want to do the
+punching to, because I'm about to show you how cool macros are and why
+having them makes Hy so awesome.  But, after the face punching thing,
+you'll also thank me.  (Also, please don't punch me in the face, this
+blogpost is not consent for face-punching.)</p>
+<p>Enough with the talk.  Time for examples!  Let's look at some code.
+Say you have this Python 3.3+ code:</p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">awesomelib</span> <span class="kn">import</span> <span class="n">IrcBot</span><span class="p">,</span> <span class="n">bake_cookie</span><span class="p">,</span> <span class="n">async</span>
+
+<span class="k">def</span> <span class="nf">irc_to_cookies</span><span class="p">(</span><span class="o">**</span><span class="n">connection_stuff</span><span class="p">):</span>
+    <span class="n">our_bot</span> <span class="o">=</span> <span class="n">IrcBot</span><span class="p">(</span><span class="o">**</span><span class="n">connection_stuff</span><span class="p">)</span>
+    <span class="k">yield from</span> <span class="n">our_bot</span><span class="o">.</span><span class="n">open_connection</span><span class="p">()</span>
+
+    <span class="k">while</span> <span class="bp">True</span><span class="p">:</span>
+        <span class="n">message</span> <span class="o">=</span> <span class="k">yield from</span> <span class="n">our_bot</span><span class="o">.</span><span class="n">get_next_message</span><span class="p">()</span>
+
+        <span class="k">if</span> <span class="n">message</span><span class="o">.</span><span class="n">command</span> <span class="o">==</span> <span class="s">"bake_cookie"</span><span class="p">:</span>
+            <span class="k">yield from</span> <span class="n">async</span><span class="p">(</span><span class="n">bake_cookie</span><span class="p">())</span>
+</pre></div>
+<p>Groovy.  In our example above, we built a cookie baker that can be
+plugged into our awesomelib asynchronous network library and cookie
+baking pipeline system.  (And of course, we wrote it in Hy, because we
+love Hy, and you can still run Hy code in vanilla Python.)  We're
+feeling pretty good about this.  We kind of wish we could run it in
+Python 2.X still, but Python 3.3+ is the future anyway, and no use
+worrying about the past really... right?</p>
+<p>Our Hy example looks pretty similar:</p>
+<div class="highlight"><pre><span class="p">(</span><span class="nf">defn</span> <span class="nv">irc-to-cookies</span> <span class="p">[</span><span class="nv">&amp;kwargs</span> <span class="nv">connection-stuff</span><span class="p">]</span>
+  <span class="p">(</span><span class="nf">setv</span> <span class="nv">our-bot</span> <span class="p">(</span><span class="nb">apply </span><span class="nv">IrcBot</span> <span class="p">[]</span> <span class="nv">connection-stuff</span><span class="p">))</span>
+  <span class="p">(</span><span class="nf">yield-from</span> <span class="p">(</span><span class="o">.</span><span class="nv">open-connection</span> <span class="nv">our-bot</span><span class="p">))</span>
+
+  <span class="p">(</span><span class="nf">while</span> <span class="nv">True</span>
+    <span class="p">(</span><span class="nf">setv</span> <span class="nv">message</span> <span class="p">(</span><span class="nf">yield-from</span> <span class="p">(</span><span class="o">.</span><span class="nv">get-next-message</span> <span class="nv">our-bot</span><span class="p">)))</span>
+
+    <span class="c1">;; If an irc user gives the "bake_cookie" command,</span>
+    <span class="c1">;; put a cookie in our ez_bake oven</span>
+    <span class="p">(</span><span class="k">if </span><span class="p">(</span><span class="nb">= </span><span class="nv">message</span><span class="o">.</span><span class="nv">command</span> <span class="s">"bake_cookie"</span><span class="p">)</span>
+      <span class="p">(</span><span class="nf">yield-from</span> <span class="p">(</span><span class="nf">async</span> <span class="p">(</span><span class="nf">bake-cookie</span><span class="p">))))))</span>
+</pre></div>
+<p>But there's something magical... this code makes use of yield-from,
+which in Python 3.3+ Hy just uses the actual real built in "yield
+from" (or more accurately,
+<a class="reference external" href="https://docs.python.org/3.4/library/ast.html">ast.YieldFrom</a>).
+But what about Python 2?  Mere higher ordered function magic can't
+save us here.  We need a way to implement a new feature.</p>
+<p>Except oh right, <em>this is a lisp</em>, and we have macros!  So why not
+write a macro for yield-from?</p>
+<p>And it turns out that's
+<a class="reference external" href="https://github.com/hylang/hy/pull/686">exactly what paultag did</a>:</p>
+<div class="highlight"><pre><span class="p">(</span><span class="nf">if-python2</span>
+  <span class="p">(</span><span class="nf">defmacro/g!</span> <span class="nv">yield-from</span> <span class="p">[</span><span class="nv">expr</span><span class="p">]</span>
+    <span class="o">`</span><span class="p">(</span><span class="k">do </span><span class="p">(</span><span class="nf">import</span> <span class="nv">types</span><span class="p">)</span>
+         <span class="p">(</span><span class="nf">setv</span> <span class="nv">~g!iter</span> <span class="p">(</span><span class="nf">iter</span> <span class="nv">~expr</span><span class="p">))</span>
+         <span class="p">(</span><span class="nf">setv</span> <span class="nv">~g!return</span> <span class="nv">nil</span><span class="p">)</span>
+         <span class="p">(</span><span class="nf">setv</span> <span class="nv">~g!message</span> <span class="nv">nil</span><span class="p">)</span>
+         <span class="p">(</span><span class="nf">while</span> <span class="nv">true</span>
+           <span class="p">(</span><span class="nf">try</span> <span class="p">(</span><span class="k">if </span><span class="p">(</span><span class="nf">isinstance</span> <span class="nv">~g!iter</span> <span class="nv">types</span><span class="o">.</span><span class="nv">GeneratorType</span><span class="p">)</span>
+                  <span class="p">(</span><span class="nf">setv</span> <span class="nv">~g!message</span> <span class="p">(</span><span class="nf">yield</span> <span class="p">(</span><span class="o">.</span><span class="nv">send</span> <span class="nv">~g!iter</span> <span class="nv">~g!message</span><span class="p">)))</span>
+                  <span class="p">(</span><span class="nf">setv</span> <span class="nv">~g!message</span> <span class="p">(</span><span class="nf">yield</span> <span class="p">(</span><span class="nf">next</span> <span class="nv">~g!iter</span><span class="p">))))</span>
+           <span class="p">(</span><span class="nf">catch</span> <span class="p">[</span><span class="nv">~g!e</span> <span class="nv">StopIteration</span><span class="p">]</span>
+             <span class="p">(</span><span class="k">do </span><span class="p">(</span><span class="nf">setv</span> <span class="nv">~g!return</span> <span class="p">(</span><span class="k">if </span><span class="p">(</span><span class="nf">hasattr</span> <span class="nv">~g!e</span> <span class="s">"value"</span><span class="p">)</span>
+                                     <span class="p">(</span><span class="o">.</span> <span class="nv">~g!e</span> <span class="nv">value</span><span class="p">)</span>
+                                     <span class="nv">nil</span><span class="p">))</span>
+               <span class="p">(</span><span class="nf">break</span><span class="p">)))))</span>
+           <span class="nv">~g!return</span><span class="p">))</span>
+  <span class="nv">nil</span><span class="p">)</span>
+</pre></div>
+<p>This simple macro above is an implementation of yield-from which works
+in Python 2.  The macro is more or less a function that writes new
+code to be expanded in place... allowing us to use basic building
+blocks of the language to build more complex features.  Since in Lisp,
+code is a very simple, manipulatable data structure (lists!), we can
+literally write out code that writes code without too much trouble.
+(There's some magic going on with the ` character above, called
+backquoting... but it's best to read a tutorial on macros if it's not
+clear to you how the backquote is building the list of code there.)
+Hey look... we just brought a feature back to the future... as long as
+we're writing code in Hy, we can do subgenerator delegation with
+yield-from.  Cool!  That sure makes coroutines a lot more useful to
+those of us living in the past.</p>
+<p>So wait, does this mean you can now use asyncio with Python 2?  Well,
+not quite... asyncio is written in normal Python syntax, which means
+that it's using "yield from", not our more versatile "yield-from", and
+the library itself isn't written to support Python 2.7.  So, no.
+(But, if asyncio was written in Hy, we could, even though Python 2.7
+doesn't have "yield from"!)</p>
+<p>The real goal of this article isn't to convince you to start
+backporting features to Python 2.X via Hy, though.  Really, Python 3
+is the future, write Python 3 code!  But the point here is to get you
+thinking about how having macros allows you to implement new features
+<em>now</em>!  Why wait for the features of Python 4.X?  In Hy you can have
+them now!  (Or even start prototyping them today!)</p>
+<p>And <em>that's</em> worth getting excited about.  And once you realize that,
+it's a bit easier to understand where lispers are coming from when
+they nerd out about how cool macros are.  (Even if you still want to
+punch us in the face.)</p>
+<p>(PS: think this is pretty cool?  Hy is a really welcoming community,
+and there's a lot of fun stuff to do!  Learn about language
+implementation and learn about lisp in a paradoxically fun and
+pythonic environment!  We'd love to have you
+<a class="reference external" href="http://hy.readthedocs.org/en/latest/hacking.html">join in hacking with us</a>!)</p>
+
+  </div>
+    </div></body></html>

@@ -1,0 +1,150 @@
+<html><body><div><div class="post-text" itemprop="text">
+
+<p>I have a web application using Django and i am using Celery for some asynchronous tasks processing.</p>
+
+<p>For Celery, i am using Rabbitmq as a broker, and Redis as a result backend.</p>
+
+<p>Rabbitmq and Redis are running on the same Ubuntu 14.04 server hosted on a local virtual machine.</p>
+
+<p>Celery workers are running on remote machines (Windows 10) (no worker are running on the Django server).</p>
+
+<p>i have three issues (i think they are related somehow !).</p>
+
+<ol>
+<li>The tasks stay in the 'PENDING' state no matter if the tasks are succeeded or failed.</li>
+<li>the tasks doesn't retry when failed. and i get this error when trying to retry : </li>
+</ol>
+
+<blockquote>
+  <p>reject requeue=False: [WinError 10061] No connection could be made
+  because the target machine actively refused it</p>
+</blockquote>
+
+<ol start="3">
+<li>The results backend doesn't seems to work.</li>
+</ol>
+
+<p>i am also confused about my settings, and i don't know exactly where this issues might come from !</p>
+
+<p>so here is my settings so far:</p>
+
+<h1>my_app/settings.py</h1>
+
+<pre><code># region Celery Settings
+CELERY_CONCURRENCY = 1
+CELERY_ACCEPT_CONTENT = ['json']
+# CELERY_RESULT_BACKEND = 'redis://:C@pV@lue2016@cvc.ma:6379/0'
+BROKER_URL = 'amqp://soufiaane:C@pV@lue2016@cvc.ma:5672/cvcHost'
+CELERY_RESULT_SERIALIZER = 'json'
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_ACKS_LATE = True
+CELERYD_PREFETCH_MULTIPLIER = 1
+
+CELERY_REDIS_HOST = 'cvc.ma'
+CELERY_REDIS_PORT = 6379
+CELERY_REDIS_DB = 0
+CELERY_RESULT_BACKEND = 'redis'
+CELERY_RESULT_PASSWORD = "C@pV@lue2016"
+REDIS_CONNECT_RETRY = True
+
+AMQP_SERVER = "cvc.ma"
+AMQP_PORT = 5672
+AMQP_USER = "soufiaane"
+AMQP_PASSWORD = "C@pV@lue2016"
+AMQP_VHOST = "/cvcHost"
+CELERYD_HIJACK_ROOT_LOGGER = True
+CELERY_HIJACK_ROOT_LOGGER = True
+CELERYBEAT_SCHEDULER = 'djcelery.schedulers.DatabaseScheduler'
+# endregion
+</code></pre>
+
+<h1>my_app/celery_settings.py</h1>
+
+<pre><code>from __future__ import absolute_import
+from django.conf import settings
+from celery import Celery
+import django
+import os
+
+# set the default Django settings module for the 'celery' program.
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'my_app.settings')
+django.setup()
+app = Celery('CapValue', broker='amqp://soufiaane:C@pV@lue2016@cvc.ma/cvcHost', backend='redis://:C@pV@lue2016@cvc.ma:6379/0')
+
+# Using a string here means the worker will not have to
+# pickle the object when using Windows.
+app.config_from_object('django.conf:settings')
+app.autodiscover_tasks(lambda: settings.INSTALLED_APPS)
+
+
+@app.task(bind=True)
+def debug_task(self):
+    print('Request: {0!r}'.format(self.request))
+</code></pre>
+
+<h1>my_app__init__.py</h1>
+
+<pre><code>from __future__ import absolute_import
+
+# This will make sure the app is always imported when
+# Django starts so that shared_task will use this app.
+
+from .celery_settings import app as celery_app
+</code></pre>
+
+<h1>my_app\email\tasks.py</h1>
+
+<pre><code>from __future__ import absolute_import
+from my_app.celery_settings import app
+
+# here i only define the task skeleton because i'm executing this task on remote workers !
+@app.task(name='email_task', bind=True, max_retries=3, default_retry_delay=1)
+def email_task(self, job, email):
+    try:
+        print("x")
+    except Exception as exc:
+        self.retry(exc=exc)
+</code></pre>
+
+<p>on the workers side i have one file 'tasks.py' which have the actual implementation of the task:</p>
+
+<h1>Worker\tasks.py</h1>
+
+<pre><code>from __future__ import absolute_import
+from celery.utils.log import get_task_logger
+from celery import Celery
+
+
+logger = get_task_logger(__name__)
+app = Celery('CapValue', broker='amqp://soufiaane:C@pV@lue2016@cvc.ma/cvcHost', backend='redis://:C@pV@lue2016@cvc.ma:6379/0')
+
+@app.task(name='email_task', bind=True, max_retries=3, default_retry_delay=1)
+def email_task(self, job, email):
+    try:
+        """
+        The actual implementation of the task
+        """
+    except Exception as exc:
+        self.retry(exc=exc)
+</code></pre>
+
+<p>what i did notice though is:</p>
+
+<ul>
+<li>when i change the broker settings in my workers to a bad password, i get could not connect to broker error.</li>
+<li>when i change the result backend settings in my workers to a bad password, it runs normally as if everything is OK.</li>
+</ul>
+
+<p>What could be possibly causing me those problems ?</p>
+
+<h1>EDIT</h1>
+
+<p>on my Redis server, i already enabled remote connection</p>
+
+<h1>/etc/redis/redis.conf</h1>
+
+<p>...
+bind 0.0.0.0
+...</p>
+    </div>
+    </div></body></html>

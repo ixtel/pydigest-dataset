@@ -1,0 +1,64 @@
+<html><body><div><div class="entry-content">
+		<p>One of the first things that Python programmers learn is that you can easily read through the contents of an open file by iterating over it:</p>
+<pre>f = open('/etc/passwd')
+for line in f:
+    print(line)</pre>
+<p>Note that the above code is possible because our file object “f” is an iterator. In other words, f knows how to behave inside of a loop — or any other iteration context, such as a list comprehension.</p>
+<p><span>Most of the students in <a href="http://lerner.co.il/courses">my Python courses</a> come from other programming languages, in which they are expected to close a file when they’re done using it. It thus doesn’t surprise me when, soon after I introduce them to files in Python, they ask how we’re expected to close them.</span></p>
+<p>The simplest answer is that we can explicitly close our file by invoking f.close(). Once we have done that, the object continues to exist — but we can no longer read from it, and the object’s printed representation will also indicate that the file has been closed:</p>
+<pre>&gt;&gt;&gt; f = open('/etc/passwd')
+&gt;&gt;&gt; f
+&lt;open file '/etc/passwd', mode 'r' at 0x10f023270&gt;
+&gt;&gt;&gt; f.read(5)
+'##\n# '
+
+f.close()
+&gt;&gt;&gt; f
+&lt;closed file '/etc/passwd', mode 'r' at 0x10f023270&gt;
+
+f.read(5)
+---------------------------------------------------------------------------
+ValueError Traceback (most recent call last)
+&lt;ipython-input-11-ef8add6ff846&gt; in &lt;module&gt;()
+----&gt; 1 f.read(5)
+ValueError: I/O operation on closed file</pre>
+<p>But here’s the thing: When I’m programming in Python, it’s pretty rare for me to explicitly invoke the “close” method on a file. Moreover, the odds are good that you probably don’t want or need to do so, either.</p>
+<p>The preferred, best-practice way of opening files is with <a href="https://www.python.org/dev/peps/pep-0343/">the “with” statement</a>, as in the following:</p>
+<pre>with open('/etc/passwd') as f:
+    for line in f:
+        print(line)</pre>
+<p>The “with” statement invokes what Python calls a “context manager” on f. That is, it assigns f to be the new file instance, pointing to the contents of /etc/passwd. Within the block of code opened by “with”, our file is open, and can be read from freely.</p>
+<p>However, once Python exits from the “with” block, the file is automatically closed. Trying to read from f after we have exited from the “with” block will result in the same ValueError exception that we saw above. Thus, by using “with”, you avoid the need to explicitly close files. Python does it for you, in a somewhat un-Pythonic way, magically, silently, and behind the scenes.</p>
+<p>But what if you don’t explicitly close the file? What if you’re a bit lazy, and neither use a “with” block nor invoke f.close()?  When is the file closed?  When <em>should</em> the file be closed?</p>
+<p>I ask this, because I have taught Python to many people over the years, and am convinced that trying to teach “with” and/or context managers, while also trying to teach many other topics, is more than students can absorb. While I touch on “with” in my introductory classes, I normally tell them that at this point in their careers, it’s fine to let Python close files, either when the reference count to the file object drops to zero, or when Python exits.</p>
+<p>In <a href="http://lerner.co.il/courses/pythonfiles">my free e-mail course about working with Python files</a>, I took a similarly with-less view of things, and didn’t use it in all of my proposed solutions. Several people challenged me, saying that not using “with” is showing people a bad practice, and runs the risk of having data not saved to disk.</p>
+<p>I got enough e-mail on the subject to ask myself: When does Python close files, if we don’t explicitly do so ourselves or use a “with” block? That is, if I let the file close automatically, then what can I expect?</p>
+<p><span>My assumption was always that Python closes files when the object’s reference count drops to zero, and thus is garbage collected. This is hard to prove or check when we have opened a file for reading, but it’s trivially easy to check when we open a file for writing. That’s because when you write to a file, the contents aren’t immediately flushed to disk (unless you pass “False” as the third, optional argument to “open”), but are only flushed when the file is closed.</span></p>
+<p>I thus decided to conduct some experiments, to better understand what I can (and cannot) expect Python to do for me automatically. My experiment consisted of opening a file, writing some data to it, deleting the reference, and then exiting from Python. I was curious to know when the data would be written, if ever.</p>
+<p>My experiment looked like this:</p>
+<pre>f = open('/tmp/output', 'w')
+f.write('abc\n')
+f.write('def\n')
+# check contents of /tmp/output (1)
+del(f)
+# check contents of /tmp/output (2)
+# exit from Python
+# check contents of /tmp/output (3)</pre>
+<p>In my first experiment, conducted with Python 2.7.9 on my Mac, I can report that at stage (1) the file existed but was empty, and at stages (2) and (3), the file contained all of its contents. Thus, it would seem that in CPython 2.7, my original intuition was correct: When a file object is garbage collected, its __del__ (or the equivalent thereof) flushes and closes the file. And indeed, invoking “lsof” on my IPython process showed that the file was closed after the reference was removed.</p>
+<p>What about Python 3?  I ran the above experiment under Python 3.4.2 on my Mac, and got identical results. Removing the final (well, only) reference to the file object resulted in the file being flushed and closed.</p>
+<p>This is good for 2.7 and 3.4.  But what about alternative implementations, such as PyPy and Jython?  Perhaps they do things differently.</p>
+<p><span>I thus tried the same experiment under PyPy 2.7.8. And this time, I got different results! </span> Deleting the reference to our file object — that is, stage (2), did <em>not</em> result in the file’s contents being flushed to disk. I have to assume that this has to do with differences in the garbage collector, or something else that works differently in PyPy than in CPython. But if you’re running programs in PyPy, then you should definitely not expect files to be flushed and closed, just because the final reference pointing to them has gone out of scope. lsof showed that the file stuck around until the Python process exited.</p>
+<p>For fun, I decided to try Jython 2.7b3. And Jython exhibited the same behavior as PyPy.  That is, exiting from Python did always ensure that the data was flushed from the buffers, and stored to disk.</p>
+<p>I repeated these experiments, but instead of writing “abc\n” and “def\n”, I wrote “abc\n” * 1000 and “def\n” * 1000.</p>
+<p>In the case of Python 2.7, nothing was written after the “abc\n” * 1000. But when I wrote “def\n” * 1000, the file contained 4096 bytes — which probably indicates the buffer size. Invoking del(f) to remove the reference to the file object resulted in its being flushed and closed, with a total of 8,000 bytes. So in the case of Python 2.7, the behavior is basically the same regardless of string size; the only difference is that if you exceed the size of the buffer, then some data will be written to disk before the final flush + close.</p>
+<p>In the case of Python 3, the behavior was different: No data was written after either of the 4,000 byte outputs written with f.write. But as soon as the reference was removed, the file was flushed and closed. This might point to a larger buffer size. But still, it means that removing the final reference to a file causes the file to be flushed and closed.</p>
+<p>In the case of PyPy and Jython, the behavior with a large file was the same as with a small one: The file was flushed and closed when the PyPy or Jython process exited, not when the last reference to the file object was removed.</p>
+<p>Just to double check, I also tried these using “with”. In all of these cases, it was easy to predict when the file would be flushed and closed: When the block exited, and the context manager fired the appropriate method behind the scenes.</p>
+<p>In other words: If you don’t use “with”, then your data isn’t necessarily in danger of disappearing — at least, not in simple simple situations. However, you cannot know for sure when the data will be saved — whether it’s when the final reference is removed, or when the program exits. If you’re assuming that files will be closed when functions return, because the only reference to the file is in a local variable, then you might be in for a surprise. And if you have multiple processes or threads writing to the same file, then you’re really going to want to be careful here.</p>
+<p>Perhaps this behavior could be specified better, and thus work similarly or identically on different platforms? Perhaps we could even see the start of a Python specification, rather than pointing to CPython and saying, “Yeah, whatever that version does is the right thing.”</p>
+<p>I still think that “with” and context managers are great. And I still think that it’s hard for newcomers to Python to understand what “with” does. But I also think that I’ll have to start warning new developers that if they decide to use alternative versions of Python, there are all sorts of weird edge cases that might not work identically to CPython, and that might bite them hard if they’re not careful.</p>
+<p>If you enjoyed this explanation, check out my <a href="http://lerner.co.il/courses/pythonfiles">free e-mail course</a> on working with files in Python, or my <a href="http://lerner.co.il/practice-makes-python">e-book, “Practice Makes Python,”</a> with 50 battle-tested exercises in Python programming!</p>
+	</div>
+
+	
+	</div></body></html>

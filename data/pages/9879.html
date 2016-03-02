@@ -1,0 +1,211 @@
+<html><body><div><body id="readabilityBody">
+   <h1>[Python-Dev] Speeding up CPython 5-10%</h1>
+    <b>Yury Selivanov</b> 
+    <a href="mailto:python-dev%40python.org?Subject=Re%3A%20%5BPython-Dev%5D%20Speeding%20up%20CPython%205-10%25&amp;In-Reply-To=%3C56A90B97.7090001%40gmail.com%3E" title="[Python-Dev] Speeding up CPython 5-10%">yselivanov.ml at gmail.com
+       </a><br/>
+    <i>Wed Jan 27 13:25:27 EST 2016</i>
+    <p/>
+    <hr/>  
+
+<pre>Hi,
+
+
+tl;dr The summary is that I have a patch that improves CPython 
+performance up to 5-10% on macro benchmarks.  Benchmarks results on 
+Macbook Pro/Mac OS X, desktop CPU/Linux, server CPU/Linux are available 
+at [1].  There are no slowdowns that I could reproduce consistently.
+
+There are twodifferent optimizations that yield this speedup: 
+LOAD_METHOD/CALL_METHOD opcodes and per-opcode cache in ceval loop.
+
+
+LOAD_METHOD &amp; CALL_METHOD
+-------------------------
+
+We had a lot of conversations with Victor about his PEP 509, and he sent 
+me a link to his amazing compilation of notes about CPython performance 
+[2].  One optimization that he pointed out to me was LOAD/CALL_METHOD 
+opcodes, an idea first originated in PyPy.
+
+There is a patch that implements this optimization, it's tracked here: 
+[3].  There are some low level details that I explained in the issue, 
+but I'll go over the high level design in this email as well.
+
+Every time you access a method attribute on an object, a BoundMethod 
+object is created. It is a fairly expensive operation, despite a 
+freelist of BoundMethods (so that memory allocation is generally 
+avoided).  The idea is to detect what looks like a method call in the 
+compiler, and emit a pair of specialized bytecodes for that.
+
+So instead of LOAD_GLOBAL/LOAD_ATTR/CALL_FUNCTION we will have 
+LOAD_GLOBAL/LOAD_METHOD/CALL_METHOD.
+
+LOAD_METHOD looks at the object on top of the stack, and checks if the 
+name resolves to a method or to a regular attribute.  If it's a method, 
+then we push the unbound method object and the object to the stack.  If 
+it's an attribute, we push the resolved attribute and NULL.
+
+When CALL_METHOD looks at the stack it knows how to call the unbound 
+method properly (pushing the object as a first arg), or how to call a 
+regular callable.
+
+This idea does make CPython faster around 2-4%.  And it surely doesn't 
+make it slower.  I think it's a safe bet to at least implement this 
+optimization in CPython 3.6.
+
+So far, the patch only optimizes positional-only method calls. It's 
+possible to optimize all kind of calls, but this will necessitate 3 more 
+opcodes (explained in the issue).  We'll need to do some careful 
+benchmarking to see if it's really needed.
+
+
+Per-opcode cache in ceval
+-------------------------
+
+While reading PEP 509, I was thinking about how we can use 
+dict-&gt;ma_version in ceval to speed up globals lookups.  One of the key 
+assumptions (and this is what makes JITs possible) is that real-life 
+programs don't modify globals and rebind builtins (often), and that most 
+code paths operate on objects of the same type.
+
+In CPython, all pure Python functions have code objects.  When you call 
+a function, ceval executes its code object in a frame. Frames contain 
+contextual information, including pointers to the globals and builtins 
+dict.  The key observation here is that almost all code objects always 
+have same pointers to the globals (the module they were defined in) and 
+to the builtins.  And it's not a good programming practice to mutate 
+globals or rebind builtins.
+
+Let's look at this function:
+
+def spam():
+     print(ham)
+
+Here are its opcodes:
+
+   2           0 LOAD_GLOBAL              0 (print)
+               3 LOAD_GLOBAL              1 (ham)
+               6 CALL_FUNCTION            1 (1 positional, 0 keyword pair)
+               9 POP_TOP
+              10 LOAD_CONST               0 (None)
+              13 RETURN_VALUE
+
+The opcodes we want to optimize are LAOD_GLOBAL, 0 and 3.  Let's look at 
+the first one, that loads the 'print' function from builtins.  The 
+opcode knows the following bits of information:
+
+- its offset (0),
+- its argument (0 -&gt; 'print'),
+- its type (LOAD_GLOBAL).
+
+And these bits of information will *never* change.  So if this opcode 
+could resolve the 'print' name (from globals or builtins, likely the 
+latter) and save the pointer to it somewhere, along with 
+globals-&gt;ma_version and builtins-&gt;ma_version, it could, on its second 
+call, just load this cached info back, check that the globals and 
+builtins dict haven't changed and push the cached ref to the stack.  
+That would save it from doing two dict lookups.
+
+We can also optimize LOAD_METHOD.  There are high chances, that 'obj' in 
+'obj.method()' will be of the same type every time we execute the code 
+object.  So if we'd have an opcodes cache, LOAD_METHOD could then cache 
+a pointer to the resolved unbound method, a pointer to obj.__class__, 
+and tp_version_tag of obj.__class__.  Then it would only need to check 
+if the cached object type is the same (and that it wasn't modified) and 
+that obj.__dict__ doesn't override 'method'.  Long story short, this 
+caching really speeds up method calls on types implemented in C.  
+list.append becomes very fast, because list doesn't have a __dict__, so 
+the check is very cheap (with cache).
+
+A straightforward way to implement such a cache is simple, but consumes 
+a lot of memory, that would be just wasted, since we only need such a 
+cache for LOAD_GLOBAL and LOAD_METHOD opcodes. So we have to be creative 
+about the cache design.  Here's what I came up with:
+
+1. We add a few fields to the code object.
+
+2. ceval will count how many times each code object is executed.
+
+3. When the code object is executed over ~900 times, we mark it as 
+"hot".  We also create an 'unsigned char' array "MAPPING", with length 
+set to match the length of the code object.  So we have a 1-to-1 mapping 
+between opcodes and MAPPING array.
+
+4. Next ~100 calls, while the code object is "hot", LOAD_GLOBAL and 
+LOAD_METHOD do "MAPPING[opcode_offset()]++".
+
+5. After 1024 calls to the code object, ceval loop will iterate through 
+the MAPPING, counting all opcodes that were executed more than 50 times.
+
+6. We then create an array of cache structs "CACHE" (here's a link to 
+the updated code.h file: [6]).  We update MAPPING to be a mapping 
+between opcode position and position in the CACHE. The code object is 
+now "optimized".
+
+7. When the code object is "optimized", LOAD_METHOD and LOAD_GLOBAL use 
+the CACHE array for fast path.
+
+8. When there is a cache miss, i.e. the builtins/global/obj.__dict__ 
+were mutated, the opcode marks its entry in 'CACHE' as deoptimized, and 
+it will never try to use the cache again.
+
+Here's a link to the issue tracker with the first version of the patch: 
+[5].  I'm working on the patch in a github repo here: [4].
+
+
+Summary
+-------
+
+There are many things about this algorithm that we can improve/tweak.  
+Perhaps we should profile code objects longer, or account for time they 
+were executed.  Maybe we shouldn't deoptimize opcodes on their first 
+cache miss.  Maybe we can come up with better data structures.  We also 
+need to profile the memory and see how much more this cache will require.
+
+One thing I'm certain about, is that we can get a 5-10% speedup of 
+CPython with relatively low memory impact.  And I think it's worth 
+exploring that!
+
+If you're interested in these kind of optimizations, please help with 
+code reviews, ideas, profiling and benchmarks.  The latter is especially 
+important, I'd never imagine how hard it is to come up with a good macro 
+benchmark.
+
+I also want to thank my company MagicStack (magic.io) for sponsoring 
+this work.
+
+Thanks,
+Yury
+
+
+[1] <a href="https://gist.github.com/1st1/aed69d63a2ff4de4c7be">https://gist.github.com/1st1/aed69d63a2ff4de4c7be</a>
+[2] <a href="http://faster-cpython.readthedocs.org/index.html">http://faster-cpython.readthedocs.org/index.html</a>
+[3] <a href="http://bugs.python.org/issue26110">http://bugs.python.org/issue26110</a>
+[4] <a href="https://github.com/1st1/cpython/tree/opcache2">https://github.com/1st1/cpython/tree/opcache2</a>
+[5] <a href="http://bugs.python.org/issue26219">http://bugs.python.org/issue26219</a>
+[6] 
+<a href="https://github.com/python/cpython/compare/master...1st1:opcache2?expand=1#diff-b253e61c56dfa646a6b1b9e7aaad418aR18">https://github.com/python/cpython/compare/master...1st1:opcache2?expand=1#diff-b253e61c56dfa646a6b1b9e7aaad418aR18</a>
+</pre>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    <hr/>
+    <p/>
+
+<hr/>
+<a href="https://mail.python.org/mailman/listinfo/python-dev">More information about the Python-Dev
+mailing list</a><br/>
+</body></div></body></html>

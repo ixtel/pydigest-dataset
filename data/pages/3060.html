@@ -1,0 +1,51 @@
+<html><body><div><div class="post-text" itemprop="text">
+
+<p><em>The Context</em></p>
+
+<hr/>
+
+<p>I have located a rather critical bug in Django Cache Machine that causes it's invalidation logic to lose its mind after a upgrading from Django 1.4 to 1.7. </p>
+
+<p>The bug is localized to invocations of <code>only()</code> on models that extend cache machine's <code>CachingMixin</code>. It results in deep recursions that occasionally bust the stack, but otherwise create huge <code>flush_lists</code> that cache machine uses for bi-directional invalidation for models in <code>ForeignKey</code> relationships. </p>
+
+<pre><code>class MyModel(CachingMixin):
+    id = models.CharField(max_length=50, blank=True)
+    nickname = models.CharField(max_length=50, blank=True)
+    favorite_color = models.CharField(max_length=50, blank=True)
+    content_owner = models.ForeignKey(OtherModel)
+</code></pre>
+
+<hr/>
+
+<pre><code>m = MyModel.objects.only('id').all()
+</code></pre>
+
+<p><em>The Bug</em></p>
+
+<hr/>
+
+<p>The bug occurs in the following lines(<a href="https://github.com/jbalogh/django-cache-machine/blob/f827f05b195ad3fc1b0111131669471d843d631f/caching/base.py#L253-L254" rel="nofollow">https://github.com/jbalogh/django-cache-machine/blob/f827f05b195ad3fc1b0111131669471d843d631f/caching/base.py#L253-L254</a>). In this case <code>self</code> is a instance of <code>MyModel</code> with a mix of deferred and undeferred attributes:</p>
+
+<pre><code>    fks = dict((f, getattr(self, f.attname)) for f in self._meta.fields
+                if isinstance(f, models.ForeignKey))
+</code></pre>
+
+<p>Cache Machine does bidirectional invalidation across <code>ForeignKey</code> relationships. It does this by looping over all the fields in a <code>Model</code> and storing a series of pointers in cache that point to objects that need invalidated when the object in question is invalidated.</p>
+
+<p>The use of <code>only()</code> in the Django ORM does some meta programming magic that overrides the unfetched attributes with Django's <code>DeferredAttribute</code> implementation. Under normal circumstances an access to <code>favorite_color</code> would invoke <code>DeferredAttribute.__get__</code>(<a href="https://github.com/django/django/blob/18f3e79b13947de0bda7c985916d5a04e28936dc/django/db/models/query_utils.py#L121-L146" rel="nofollow">https://github.com/django/django/blob/18f3e79b13947de0bda7c985916d5a04e28936dc/django/db/models/query_utils.py#L121-L146</a>) and fetch the attribute either from the result cache or the data source. It does this by fetching the undeferred representation of the <code>Model</code> in question and calling another <code>only()</code> query on it. </p>
+
+<p>This is the problem when looping over the foreign keys in the <code>Model</code> and accessing their values, Cachine Machine introduces an unintentional recursion. <code>getattr(self, f.attname)</code> on an attribute that is deferred induces a fetch of a <code>Model</code> that has the <code>CachingMixin</code> applied and has deferred attributes. This starts the whole caching process over again.</p>
+
+<p><em>The Question</em></p>
+
+<hr/>
+
+<p>I would like to open a PR to fix this and I believe the answer to this is as simple as skipping over the deferred attributes, but I'm not sure how to do it because accessing the attribute causes the fetch process to start.</p>
+
+<p>If all I have is a handle on an instance of a <code>Model</code> with a mix of deferred and undeferred attributes, Is there a way to determine if an attribute is a <code>DeferredAttribute</code> <strong>without</strong> accessing it?</p>
+
+<pre><code>    fks = dict((f, getattr(self, f.attname)) for f in self._meta.fields
+                if (isinstance(f, models.ForeignKey) and &lt;f's value isn't a Deferred attribute))
+</code></pre>
+    </div>
+    </div></body></html>

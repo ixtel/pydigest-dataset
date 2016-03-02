@@ -1,0 +1,257 @@
+<html><body><div><div class="container">
+
+      <div class="row-fluid">
+	
+        <h3>Python vs. Scala vs. Spark</h3>
+        
+
+</div>
+	
+          <h5>Update 20 Jan 2015</h5>
+
+<p>Thanks to a suggestion from a reddit comment, I added benchmarks for the python
+code running under PyPy. This makes the results even more interesting. PyPy
+actually runs the join faster than Scala when more cores are present. On the
+other hand, it runs the sort slower, leading to an approximately equal
+performance when there are more than 2 cores available. This is really good
+news for people (like myself) who are more familiar with python and don't want
+to learn another language just to execute faster Spark queries.</p>
+
+<p>Apart from the extra data in the charts, the rest of this post is unmodified
+and thus doesn't mention PyPy.</p>
+
+<p/><hr/>
+
+<p>The fantastic <a href="https://spark.apache.org/">Apache Spark</a> framework provides an
+API for distributed data analysis and processing in three different languages:
+Scala, Java and Python. Being an ardent yet somewhat impatient Python user, I
+was curious if there would be a large advantage in using Scala to code my data
+processing tasks, so I created a small benchmark data processing script using
+Python, Scala, and SparkSQL. </p>
+
+<h4>The Task</h4>
+
+<p>The benchmark task consists of the following steps:</p>
+
+<ol>
+<li>Load a tab-separated table (gene2pubmed), and convert string values to integers (map, filter)</li>
+<li>Load another table (pmid_year), parse dates and convert to integers (map)</li>
+<li>Join the two tables on a key (join)</li>
+<li>Rearrange the keys and values (map)</li>
+<li>Count the number of occurances of a key (reduceByKey)</li>
+<li>Rearrange the keys and values (map)</li>
+<li>Sort by key (sortByKey)</li>
+</ol>
+
+<h4>The Data</h4>
+
+<p>The dataset consists of two text file tables, weighing in at 297M and 229M.</p>
+
+<h4>Total Running Time</h4>
+
+<p>Each of the scripts was run with a <code>collect</code> statement at the end to ensure that
+each step was executed. The time was recorded as the real time elapsed between
+the start of the script and the end. The scripts were run using 1,2,4 and 8 
+worker cores (as set by the <code>SPARK_WORKER_CORES</code> option).</p>
+
+
+
+<p><img itemprop="image" src="/img/python_vs_scala_vs_spark_small.png"/></p>
+
+<p>The fastest performance was achieved when using SparkSQL with Scala. The
+slowest, SparkSQL with Python. The more cores used, the more equal the results.
+This is likely due to the fact that parallelizable tasks start to contribute
+less and less of the total time and so the running time becomes dominated by
+the collection and aggregation which must be run synchronously, take a long
+time and are largely language independent (i.e. possibly run by some internal
+Spark API).</p>
+
+<p>To get a clearer picture of where the differences in performance lie, a <code>count()</code>
+action was performed after each transformation and other action. The time was
+recorded after each <code>count()</code>.</p>
+
+
+
+<p><img itemprop="image" src="/img/python_vs_scala_vs_spark_2_small.png"/></p>
+
+<p>This data indicates that just about every step in the Python implementation,
+except for the final sort, benefitted proportionally (~ 8x) from the extra cores.  The
+Scala implementation, in contrast, showed no large speedup in any of the steps.
+The longest, the join and sort steps, ran about 1.5 times faster when using 8
+cores vs when using just 1. This can be either because the dataset is too small
+to benefit from parallelization, given Scala's already fast execution, or
+that something strange is going on with the settings and the operations
+performed by the master node are being run concurrently even when there are less
+worker nodes available. </p>
+
+<p>This doesn't appear to be case as running both the master and worker nodes on a
+machine with only four available cores (vs 24 in the previous benchmarks) and
+allowing only one worker core actually led to faster execution. A more
+comprehensive test would require running the master node on a single core
+machine and placing the workers on separate more capable computers. I'll save
+that for another day though.</p>
+
+<h4>Conclusion</h4>
+
+<p>If you have less cores at your disposal, Scala is quite a bit faster than
+Python.  As more cores are added, its advantage dwindles. Having more computing
+power gives you the opportunity to use alternative languages
+without having to wait for your results. If computing resources are at a premium,
+then it might make sense to learn a little bit of Scala, if only enough to be
+able to code SparkSQL queries.</p>
+
+<h4>Apache Spark</h4>
+
+<p>The code for each programming language is listed in the sections below:</p>
+
+<h5>Master and Worker Nodes</h5>
+
+<p>The number of workers was set in the <code>SPARK_WORKER_CORES</code> variable in  <code>conf/spark-env.sh</code></p>
+
+<div class="highlight"><pre><code class="language-bash" data-lang="bash">./sbin/stop-all.sh<span class="p">;</span> rm logs/*<span class="p">;</span> ./sbin/start-all.sh</code></pre></div>
+
+<h5>Python Shell</h5>
+
+<div class="highlight"><pre><code class="language-bash" data-lang="bash">./spark-1.2.0/bin/pyspark --master spark://server.com:7077 --driver-memory 4g --executor-memory 4g</code></pre></div>
+
+<h5>Scala Shell</h5>
+
+<div class="highlight"><pre><code class="language-bash" data-lang="bash">./spark-1.2.0/bin/spark-shell --master spark://server.com:7077 --driver-memory 4g --executor-memory 4g</code></pre></div>
+
+<h4>Benchmark Code</h4>
+
+<p>The following code was pasted into its respective shell and timed.</p>
+
+<h5>Scala</h5>
+
+<div class="highlight"><pre><code class="language-scala" data-lang="scala"><span class="k">val</span> <span class="n">pmid_gene</span> <span class="k">=</span> <span class="n">sc</span><span class="o">.</span><span class="n">textFile</span><span class="o">(</span><span class="s">"/Users/pkerp/projects/genbank/data/gene2pubmed"</span><span class="o">).</span><span class="n">map</span><span class="o">(</span><span class="k">_</span><span class="o">.</span><span class="n">split</span><span class="o">(</span><span class="s">"\t"</span><span class="o">)).</span><span class="n">filter</span><span class="o">(</span><span class="k">_</span><span class="o">(</span><span class="mi">0</span><span class="o">).</span><span class="n">head</span> <span class="o">!=</span> <span class="sc">'#'</span><span class="o">).</span><span class="n">map</span><span class="o">(</span><span class="n">line</span> <span class="k">=&gt;</span> <span class="o">(</span><span class="n">line</span><span class="o">(</span><span class="mi">2</span><span class="o">).</span><span class="n">toInt</span><span class="o">,</span> <span class="n">line</span><span class="o">(</span><span class="mi">1</span><span class="o">).</span><span class="n">toInt</span><span class="o">)).</span><span class="n">cache</span><span class="o">()</span>
+
+<span class="c1">// the dates were obtained by doing entrez queries and stored as</span>
+<span class="c1">// table of the form "date pmid"</span>
+    <span class="k">object</span> <span class="nc">ParsingFunctions</span> <span class="o">{</span>
+        <span class="k">def</span> <span class="n">parseDate</span><span class="o">(</span><span class="n">line</span><span class="k">:</span> <span class="kt">String</span><span class="o">)</span><span class="k">:</span> <span class="o">(</span><span class="kt">Int</span><span class="o">,</span><span class="kt">Int</span><span class="o">)</span> <span class="k">=</span> <span class="o">{</span>
+            <span class="c1">// extract the date information and the pmid</span>
+            <span class="c1">// and return it as tuple</span>
+            <span class="k">val</span> <span class="n">parts</span> <span class="k">=</span> <span class="n">line</span><span class="o">.</span><span class="n">split</span><span class="o">(</span><span class="s">" "</span><span class="o">);</span>
+            <span class="c1">// the year is in %Y/%m/%d format</span>
+            <span class="k">val</span> <span class="n">year</span> <span class="k">=</span> <span class="n">parts</span><span class="o">(</span><span class="mi">0</span><span class="o">).</span><span class="n">split</span><span class="o">(</span><span class="s">"/"</span><span class="o">)(</span><span class="mi">0</span><span class="o">).</span><span class="n">toInt</span><span class="o">;</span>
+            <span class="k">val</span> <span class="n">pmid</span> <span class="k">=</span> <span class="n">parts</span><span class="o">(</span><span class="mi">1</span><span class="o">).</span><span class="n">toInt</span><span class="o">;</span>
+            <span class="k">return</span> <span class="o">(</span><span class="n">pmid</span><span class="o">,</span> <span class="n">year</span><span class="o">);</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+<span class="k">val</span> <span class="n">pmid_year</span> <span class="k">=</span> <span class="n">sc</span><span class="o">.</span><span class="n">textFile</span><span class="o">(</span><span class="s">"/Users/pkerp/projects/genbank/data/pmid_year.ssv"</span><span class="o">).</span><span class="n">map</span><span class="o">(</span><span class="nc">ParsingFunctions</span><span class="o">.</span><span class="n">parseDate</span><span class="o">)</span>
+<span class="k">val</span> <span class="n">pmid_gene_year</span> <span class="k">=</span> <span class="n">pmid_year</span><span class="o">.</span><span class="n">join</span><span class="o">(</span><span class="n">pmid_gene</span><span class="o">)</span>
+
+<span class="k">val</span> <span class="n">gene_year_1</span> <span class="k">=</span> <span class="n">pmid_gene_year</span><span class="o">.</span><span class="n">map</span><span class="o">{</span> <span class="k">case</span> <span class="o">(</span><span class="n">pmid</span><span class="o">,</span> <span class="o">(</span><span class="n">gene</span><span class="o">,</span> <span class="n">year</span><span class="o">))</span> <span class="k">=&gt;</span> <span class="o">((</span><span class="n">gene</span><span class="o">,</span> <span class="n">year</span><span class="o">),</span> <span class="mi">1</span><span class="o">)}</span>
+<span class="k">val</span> <span class="n">gene_year_counts</span> <span class="k">=</span> <span class="n">gene_year_1</span><span class="o">.</span><span class="n">reduceByKey</span><span class="o">((</span><span class="n">x</span><span class="o">,</span><span class="n">y</span><span class="o">)</span> <span class="k">=&gt;</span> <span class="n">x</span><span class="o">+</span><span class="n">y</span><span class="o">)</span>
+<span class="k">val</span> <span class="n">counts_gene_year</span> <span class="k">=</span> <span class="n">gene_year_counts</span><span class="o">.</span><span class="n">map</span><span class="o">{</span><span class="k">case</span> <span class="o">((</span><span class="n">gene</span><span class="o">,</span><span class="n">year</span><span class="o">),</span> <span class="n">count</span><span class="o">)</span> <span class="k">=&gt;</span> <span class="o">(</span><span class="n">count</span><span class="o">,</span> <span class="o">(</span><span class="n">gene</span><span class="o">,</span> <span class="n">year</span><span class="o">))}</span>
+<span class="k">val</span> <span class="n">sorted_counts_gene_year</span> <span class="k">=</span> <span class="n">counts_gene_year</span><span class="o">.</span><span class="n">sortByKey</span><span class="o">()</span>
+<span class="k">val</span> <span class="n">scgy</span> <span class="k">=</span> <span class="n">sorted_counts_gene_year</span><span class="o">.</span><span class="n">collect</span><span class="o">()</span>
+<span class="c1">//blah</span></code></pre></div>
+
+<h5>Scala SQL</h5>
+
+<div class="highlight"><pre><code class="language-scala" data-lang="scala"><span class="k">val</span> <span class="n">sqlContext</span> <span class="k">=</span> <span class="k">new</span> <span class="n">org</span><span class="o">.</span><span class="n">apache</span><span class="o">.</span><span class="n">spark</span><span class="o">.</span><span class="n">sql</span><span class="o">.</span><span class="nc">SQLContext</span><span class="o">(</span><span class="n">sc</span><span class="o">)</span>
+<span class="k">import</span> <span class="nn">sqlContext.createSchemaRDD</span>
+<span class="k">case</span> <span class="k">class</span> <span class="nc">PmidGene</span><span class="o">(</span><span class="n">taxid</span><span class="k">:</span> <span class="kt">Int</span><span class="o">,</span> <span class="n">geneid</span><span class="k">:</span> <span class="kt">Int</span><span class="o">,</span> <span class="n">pmid</span><span class="k">:</span> <span class="kt">Int</span><span class="o">)</span>
+<span class="k">case</span> <span class="k">class</span> <span class="nc">PmidYear</span><span class="o">(</span><span class="n">pmid</span><span class="k">:</span> <span class="kt">Int</span><span class="o">,</span> <span class="n">year</span><span class="k">:</span> <span class="kt">Int</span><span class="o">)</span>
+
+<span class="k">val</span> <span class="n">gene2pubmed</span> <span class="k">=</span> <span class="n">sc</span><span class="o">.</span><span class="n">textFile</span><span class="o">(</span><span class="s">"/Users/pkerp/projects/genbank/data/gene2pubmed"</span><span class="o">).</span><span class="n">map</span><span class="o">(</span><span class="k">_</span><span class="o">.</span><span class="n">split</span><span class="o">(</span><span class="s">"\t"</span><span class="o">)).</span><span class="n">filter</span><span class="o">(</span><span class="k">_</span><span class="o">(</span><span class="mi">0</span><span class="o">).</span><span class="n">head</span> <span class="o">!=</span> <span class="sc">'#'</span><span class="o">).</span><span class="n">map</span><span class="o">(</span><span class="n">line</span> <span class="k">=&gt;</span> <span class="nc">PmidGene</span><span class="o">(</span><span class="n">line</span><span class="o">(</span><span class="mi">0</span><span class="o">).</span><span class="n">toInt</span><span class="o">,</span> <span class="n">line</span><span class="o">(</span><span class="mi">1</span><span class="o">).</span><span class="n">toInt</span><span class="o">,</span> <span class="n">line</span><span class="o">(</span><span class="mi">2</span><span class="o">).</span><span class="n">toInt</span><span class="o">)).</span><span class="n">cache</span><span class="o">()</span>
+
+<span class="n">gene2pubmed</span><span class="o">.</span><span class="n">registerTempTable</span><span class="o">(</span><span class="s">"gene2pubmed"</span><span class="o">)</span>
+
+    <span class="k">object</span> <span class="nc">ParsingFunctions</span> <span class="o">{</span>
+        <span class="k">def</span> <span class="n">parseDate</span><span class="o">(</span><span class="n">line</span><span class="k">:</span> <span class="kt">String</span><span class="o">)</span><span class="k">:</span> <span class="kt">PmidYear</span> <span class="o">=</span> <span class="o">{</span>
+            <span class="c1">// extract the date information and the pmid</span>
+            <span class="c1">// and return it as tuple</span>
+            <span class="k">val</span> <span class="n">parts</span> <span class="k">=</span> <span class="n">line</span><span class="o">.</span><span class="n">split</span><span class="o">(</span><span class="s">" "</span><span class="o">);</span>
+            <span class="c1">// the year is in %Y/%m/%d format</span>
+            <span class="k">val</span> <span class="n">year</span> <span class="k">=</span> <span class="n">parts</span><span class="o">(</span><span class="mi">0</span><span class="o">).</span><span class="n">split</span><span class="o">(</span><span class="s">"/"</span><span class="o">)(</span><span class="mi">0</span><span class="o">).</span><span class="n">toInt</span><span class="o">;</span>
+            <span class="k">val</span> <span class="n">pmid</span> <span class="k">=</span> <span class="n">parts</span><span class="o">(</span><span class="mi">1</span><span class="o">).</span><span class="n">toInt</span><span class="o">;</span>
+
+            <span class="k">return</span> <span class="nc">PmidYear</span><span class="o">(</span><span class="n">pmid</span><span class="o">,</span> <span class="n">year</span><span class="o">);</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+
+<span class="k">val</span> <span class="n">pmid_year</span> <span class="k">=</span> <span class="n">sc</span><span class="o">.</span><span class="n">textFile</span><span class="o">(</span><span class="s">"/Users/pkerp/projects/genbank/data/pmid_year.ssv"</span><span class="o">).</span><span class="n">map</span><span class="o">(</span><span class="nc">ParsingFunctions</span><span class="o">.</span><span class="n">parseDate</span><span class="o">)</span>
+<span class="n">pmid_year</span><span class="o">.</span><span class="n">registerTempTable</span><span class="o">(</span><span class="s">"pmid_year"</span><span class="o">)</span>
+<span class="k">val</span> <span class="n">geneid_year</span> <span class="k">=</span> <span class="n">sqlContext</span><span class="o">.</span><span class="n">sql</span><span class="o">(</span><span class="s">"select geneid, year from pmid_year, gene2pubmed where pmid_year.pmid = gene2pubmed.pmid"</span><span class="o">)</span>
+<span class="n">geneid_year</span><span class="o">.</span><span class="n">registerTempTable</span><span class="o">(</span><span class="s">"geneid_year"</span><span class="o">)</span>
+<span class="k">val</span> <span class="n">result</span> <span class="k">=</span> <span class="n">sqlContext</span><span class="o">.</span><span class="n">sql</span><span class="o">(</span><span class="s">"select geneid, year, count(*) as cnt from geneid_year group by geneid, year order by cnt desc"</span><span class="o">)</span>
+<span class="k">val</span> <span class="n">x</span> <span class="k">=</span> <span class="n">result</span><span class="o">.</span><span class="n">collect</span><span class="o">()</span>
+<span class="c1">//blah</span></code></pre></div>
+
+<h5>Python</h5>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="c"># get the gene_id -&gt; pubmed mapping</span>
+<span class="n">pmid_gene</span> <span class="o">=</span> <span class="n">sc</span><span class="o">.</span><span class="n">textFile</span><span class="p">(</span><span class="s">"/Users/pkerp/projects/genbank/data/gene2pubmed"</span><span class="p">)</span><span class="o">.</span><span class="n">map</span><span class="p">(</span><span class="k">lambda</span> <span class="n">x</span><span class="p">:</span> <span class="n">x</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s">"</span><span class="se">\t</span><span class="s">"</span><span class="p">))</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="k">lambda</span> <span class="n">x</span><span class="p">:</span> <span class="n">x</span><span class="p">[</span><span class="mi">0</span><span class="p">][</span><span class="mi">0</span><span class="p">]</span> <span class="o">!=</span> <span class="s">'#'</span><span class="p">)</span><span class="o">.</span><span class="n">map</span><span class="p">(</span><span class="k">lambda</span> <span class="n">x</span><span class="p">:</span> <span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">x</span><span class="p">[</span><span class="mi">2</span><span class="p">]),</span> <span class="nb">int</span><span class="p">(</span><span class="n">x</span><span class="p">[</span><span class="mi">1</span><span class="p">])))</span><span class="o">.</span><span class="n">cache</span><span class="p">()</span>
+  
+<span class="c"># the dates were obtained by doing entrez queries and stored as</span>
+<span class="c"># table of the form "date pmid"</span>
+<span class="k">def</span> <span class="nf">parse_date_pmid_line</span><span class="p">(</span><span class="n">line</span><span class="p">):</span>
+    <span class="c"># extract the date information and the pmid</span>
+    <span class="c"># and return it as tuple</span>
+    <span class="n">parts</span> <span class="o">=</span> <span class="n">line</span><span class="o">.</span><span class="n">split</span><span class="p">()</span>
+    <span class="c"># the year is in %Y/%m/%d format</span>
+    <span class="n">year</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">parts</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s">'/'</span><span class="p">)[</span><span class="mi">0</span><span class="p">])</span>
+    <span class="n">pmid</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">parts</span><span class="p">[</span><span class="mi">1</span><span class="p">])</span>
+    <span class="k">return</span> <span class="p">(</span><span class="n">pmid</span><span class="p">,</span> <span class="n">year</span><span class="p">)</span>
+
+<span class="c"># extract the dates and store them as values where the key is the pmid</span>
+<span class="n">pmid_year</span> <span class="o">=</span> <span class="n">sc</span><span class="o">.</span><span class="n">textFile</span><span class="p">(</span><span class="s">'/Users/pkerp/projects/genbank/data/pmid_year.ssv'</span><span class="p">)</span><span class="o">.</span><span class="n">map</span><span class="p">(</span><span class="n">parse_date_pmid_line</span><span class="p">)</span><span class="o">.</span><span class="n">cache</span><span class="p">()</span>
+<span class="n">pmid_gene_year</span> <span class="o">=</span> <span class="n">pmid_year</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">pmid_gene</span><span class="p">)</span>
+
+<span class="n">gene_year_1</span> <span class="o">=</span> <span class="n">pmid_gene_year</span><span class="o">.</span><span class="n">map</span><span class="p">(</span><span class="k">lambda</span> <span class="p">(</span><span class="n">pmid</span><span class="p">,</span> <span class="p">(</span><span class="n">gene</span><span class="p">,</span> <span class="n">year</span><span class="p">)):</span> <span class="p">((</span><span class="n">gene</span><span class="p">,</span><span class="n">year</span><span class="p">),</span><span class="mi">1</span><span class="p">))</span>
+<span class="n">gene_year_counts</span> <span class="o">=</span> <span class="n">gene_year_1</span><span class="o">.</span><span class="n">reduceByKey</span><span class="p">(</span><span class="k">lambda</span> <span class="n">x</span><span class="p">,</span><span class="n">y</span><span class="p">:</span> <span class="n">x</span><span class="o">+</span><span class="n">y</span><span class="p">)</span>
+<span class="n">counts_gene_year</span> <span class="o">=</span> <span class="n">gene_year_counts</span><span class="o">.</span><span class="n">map</span><span class="p">(</span><span class="k">lambda</span> <span class="p">((</span><span class="n">gene</span><span class="p">,</span> <span class="n">year</span><span class="p">),</span> <span class="n">count</span><span class="p">):</span> <span class="p">(</span><span class="n">count</span><span class="p">,</span> <span class="p">(</span><span class="n">gene</span><span class="p">,</span> <span class="n">year</span><span class="p">)))</span>
+<span class="n">sorted_counts_gene_year</span> <span class="o">=</span> <span class="n">counts_gene_year</span><span class="o">.</span><span class="n">sortByKey</span><span class="p">(</span><span class="n">ascending</span><span class="o">=</span><span class="bp">False</span><span class="p">);</span>
+<span class="n">scgy</span> <span class="o">=</span> <span class="n">sorted_counts_gene_year</span><span class="o">.</span><span class="n">collect</span><span class="p">()</span>
+<span class="c">#blah</span></code></pre></div>
+
+<h5>Python SQL</h5>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="kn">from</span> <span class="nn">pyspark.sql</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="n">sqlContext</span> <span class="o">=</span> <span class="n">SQLContext</span><span class="p">(</span><span class="n">sc</span><span class="p">)</span>
+<span class="c"># get the gene_id -&gt; pubmed mapping</span>
+<span class="n">gene2pubmed</span> <span class="o">=</span> <span class="n">sc</span><span class="o">.</span><span class="n">textFile</span><span class="p">(</span><span class="s">"/Users/pkerp/projects/genbank/data/gene2pubmed"</span><span class="p">)</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="k">lambda</span> <span class="n">x</span><span class="p">:</span> <span class="n">x</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">!=</span> <span class="s">'#'</span><span class="p">)</span><span class="o">.</span><span class="n">map</span><span class="p">(</span><span class="k">lambda</span> <span class="n">x</span><span class="p">:</span> <span class="n">x</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s">'</span><span class="se">\t</span><span class="s">'</span><span class="p">))</span><span class="o">.</span><span class="n">map</span><span class="p">(</span><span class="k">lambda</span> <span class="n">p</span><span class="p">:</span> <span class="n">Row</span><span class="p">(</span><span class="n">taxid</span><span class="o">=</span><span class="nb">int</span><span class="p">(</span><span class="n">p</span><span class="p">[</span><span class="mi">0</span><span class="p">]),</span> <span class="n">geneid</span><span class="o">=</span><span class="nb">int</span><span class="p">(</span><span class="n">p</span><span class="p">[</span><span class="mi">1</span><span class="p">]),</span> <span class="n">pmid</span><span class="o">=</span><span class="nb">int</span><span class="p">(</span><span class="n">p</span><span class="p">[</span><span class="mi">2</span><span class="p">])))</span>
+<span class="n">schemaGene2Pubmed</span> <span class="o">=</span> <span class="n">sqlContext</span><span class="o">.</span><span class="n">inferSchema</span><span class="p">(</span><span class="n">gene2pubmed</span><span class="p">)</span>
+<span class="n">schemaGene2Pubmed</span><span class="o">.</span><span class="n">registerTempTable</span><span class="p">(</span><span class="s">"gene2pubmed"</span><span class="p">)</span>
+<span class="c"># the dates were obtained by doing entrez queries and stored as</span>
+<span class="c"># table of the form "date pmid"</span>
+<span class="k">def</span> <span class="nf">parse_date_pmid_line</span><span class="p">(</span><span class="n">line</span><span class="p">):</span>
+    <span class="c"># extract the date information and the pmid</span>
+    <span class="c"># and return it as tuple</span>
+    <span class="n">parts</span> <span class="o">=</span> <span class="n">line</span><span class="o">.</span><span class="n">split</span><span class="p">()</span>
+    <span class="c"># the year is in %Y/%m/%d format</span>
+    <span class="n">year</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">parts</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s">'/'</span><span class="p">)[</span><span class="mi">0</span><span class="p">])</span>
+    <span class="n">pmid</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">parts</span><span class="p">[</span><span class="mi">1</span><span class="p">])</span>
+    <span class="k">return</span> <span class="p">(</span><span class="n">pmid</span><span class="p">,</span> <span class="n">year</span><span class="p">)</span>
+
+
+<span class="n">pmid_year</span> <span class="o">=</span> <span class="n">sc</span><span class="o">.</span><span class="n">textFile</span><span class="p">(</span><span class="s">'/Users/pkerp/projects/genbank/data/pmid_year.ssv'</span><span class="p">)</span><span class="o">.</span><span class="n">map</span><span class="p">(</span><span class="n">parse_date_pmid_line</span><span class="p">)</span><span class="o">.</span><span class="n">map</span><span class="p">(</span><span class="k">lambda</span> <span class="n">p</span><span class="p">:</span> <span class="n">Row</span><span class="p">(</span><span class="n">pmid</span><span class="o">=</span><span class="n">p</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">year</span><span class="o">=</span><span class="n">p</span><span class="p">[</span><span class="mi">1</span><span class="p">]))</span>
+<span class="n">schemaPmidYear</span> <span class="o">=</span> <span class="n">sqlContext</span><span class="o">.</span><span class="n">inferSchema</span><span class="p">(</span><span class="n">pmid_year</span><span class="p">)</span>
+<span class="n">schemaPmidYear</span><span class="o">.</span><span class="n">registerTempTable</span><span class="p">(</span><span class="s">'pmid_year'</span><span class="p">)</span>
+<span class="n">geneid_year</span> <span class="o">=</span> <span class="n">sqlContext</span><span class="o">.</span><span class="n">sql</span><span class="p">(</span><span class="s">'select geneid, year from pmid_year, gene2pubmed where pmid_year.pmid = gene2pubmed.pmid'</span><span class="p">)</span>
+<span class="n">geneid_year</span><span class="o">.</span><span class="n">registerTempTable</span><span class="p">(</span><span class="s">'geneid_year'</span><span class="p">)</span>
+<span class="n">result</span> <span class="o">=</span> <span class="n">sqlContext</span><span class="o">.</span><span class="n">sql</span><span class="p">(</span><span class="s">'select geneid, year, count(*) as cnt from geneid_year group by geneid, year order by cnt desc'</span><span class="p">)</span>
+<span class="n">x</span> <span class="o">=</span> <span class="n">result</span><span class="o">.</span><span class="n">collect</span><span class="p">()</span>
+<span class="c">#blah</span></code></pre></div>
+
+
+
+          
+
+
+
+      
+
+    </div> 
+
+    
+
+
+    
+    
+    
+    
+  </div></body></html>

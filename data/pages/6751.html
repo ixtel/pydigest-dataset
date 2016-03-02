@@ -1,0 +1,369 @@
+<html><body><div><div class="content">
+      
+        <h1 class="content-title">Using the SQLite JSON1 and FTS5 Extensions with Python</h1>
+      
+      
+      
+  
+  
+  
+    <p>Back in September, <a href="https://news.ycombinator.com/item?id=10103695">word started getting around</a> trendy programming circles about a new file that had appeared in the SQLite fossil repo named <a href="http://www.sqlite.org/src/finfo?name=ext/misc/json1.c">json1.c</a>. I originally wrote up <a href="/blog/using-the-sqlite-json-extension-with-python-old-version-/">a post</a> that contained some gross hacks in order to get <a href="https://github.com/ghaering/pysqlite">pysqlite</a> to compile and work with the new <code>json1</code> extension. With the <a href="http://sqlite.org/releaselog/3_9_0.html">release of SQLite 3.9.0</a>, those hacks are no longer necessary.</p>
+<p>SQLite 3.9.0 is a fantastic release. In addition to the much anticipated <code>json1</code> extension, there is a new version of the full-text search extension called <code>fts5</code>. <code>fts5</code> improves performance of complex search queries and provides an out-of-the-box <a href="https://en.wikipedia.org/wiki/Okapi_BM25">BM25</a> ranking implementation. You can also boost the significance of particular fields in the ranking. I suggest you check out the <a href="http://sqlite.org/releaselog/3_9_0.html">release notes</a> for the full list of enhancements</p>
+<p>This post will describe how to compile SQLite with support for <code>json1</code> and <code>fts5</code>. We'll use the new SQLite library to compile a python driver so we can use the new features from python. Because I really like <code>pysqlite</code> <em>and</em> <code>apsw</code>, I've included instructions for building both of them. Finally, we'll use <a href="http://docs.peewee-orm.com/">peewee ORM</a> to run queries using the <code>json1</code> and <code>fts5</code> extensions.</p>
+<h3>Getting started</h3>
+<p>We'll be grabbing the latest SQLite source code. To do this you can use <code>fossil</code>, the source-code management system used by SQLite, or alternatively you can pull down a compressed image. SQLite also requires <code>tcl</code> and <code>awk</code> to create the source amalgamation, so before starting in, you'll need to install:</p>
+<ul>
+<li>tcl</li>
+<li>awk (available on most unix systems)</li>
+<li>fossil (optional)</li>
+</ul>
+<p>There were a couple steps involved, so I'll try and break it down into sub-steps. To get started, we need a nice clean home for the new libraries. I put mine in <code>~/bin/jqlite</code> for fun, but you can change the path to whatever you like.</p>
+<div class="highlight"><pre><span class="go">export JQLITE="$HOME/bin/jqlite"</span>
+<span class="go">mkdir -p $JQLITE</span>
+<span class="go">cd $JQLITE</span>
+</pre></div>
+<p>To use fossil to obtain the code, run the following commands:</p>
+<div class="highlight"><pre><span class="go">fossil clone http://www.sqlite.org/cgi/src sqlite.fossil</span>
+<span class="go">fossil open sqlite.fossil</span>
+</pre></div>
+<p>To fetch the snapshot tarball, run the following commands:</p>
+<div class="highlight"><pre><span class="go">curl 'https://www.sqlite.org/src/tarball/sqlite.tar.gz?ci=trunk' | tar xz</span>
+<span class="go">mv sqlite/* .</span>
+</pre></div>
+<p>If you prefer to use an official release, you can download one of the <em>autoconf</em> tarballs from <a href="http://sqlite.org/download.html">the SQLite downloads page</a>. Extract the contents into the <code>$JQLITE</code> directory.</p>
+<h3>Compiling SQLite with json1 and fts5</h3>
+<p>After downloading the code, you should now be in a directory alongside the SQLite source tree. SQLite supports a ton of <a href="http://www.sqlite.org/compile.html">compile configuration options</a>. Besides <code>json1</code> and <code>fts5</code>, I've included a number of other options I find useful.</p>
+<p>Compilation follows the typical <code>configure</code> -&gt; <code>make</code> -&gt; <code>make install</code> sequence:</p>
+<div class="highlight"><pre><span class="go">export CFLAGS="-DSQLITE_ENABLE_COLUMN_METADATA=1 \</span>
+<span class="go">-DSQLITE_ENABLE_DBSTAT_VTAB=1 \</span>
+<span class="go">-DSQLITE_ENABLE_FTS3=1 \</span>
+<span class="go">-DSQLITE_ENABLE_FTS3_PARENTHESIS=1 \</span>
+<span class="go">-DSQLITE_ENABLE_FTS5=1 \</span>
+<span class="go">-DSQLITE_ENABLE_JSON1=1 \</span>
+<span class="go">-DSQLITE_ENABLE_RTREE=1 \</span>
+<span class="go">-DSQLITE_ENABLE_UNLOCK_NOTIFY \</span>
+<span class="go">-DSQLITE_ENABLE_UPDATE_DELETE_LIMIT \</span>
+<span class="go">-DSQLITE_SECURE_DELETE \</span>
+<span class="go">-DSQLITE_SOUNDEX \</span>
+<span class="go">-DSQLITE_TEMP_STORE=3 \</span>
+<span class="go">-fPIC"</span>
+<span class="go">LIBS="-lm" ./configure --prefix=$JQLITE --enable-static --enable-shared</span>
+<span class="go">make</span>
+<span class="go">make install</span>
+</pre></div>
+<p>There should now be a file named <code>lib/libsqlite3.a</code> in the SQLite3 source checkout. If not, cruise the console output and hopefully the error is easy to spot. I've done this now on arch and ubuntu, but I'm not sure about fapple or windoze.</p>
+<h3>Building pysqlite</h3>
+<p><a href="https://github.com/ghaering/pysqlite">pysqlite</a> should be familiar to most python developers, as it is more or less the same as the <code>sqlite3</code> module in python's standard library. To build <code>pysqlite</code> against our new <code>libsqlite3</code>, really the only thing we need to do is modify the <code>setup.cfg</code> file to point it at the <code>include</code> and <code>lib</code> directories we just created.</p>
+<div class="highlight"><pre><span class="go">git clone https://github.com/ghaering/pysqlite</span>
+<span class="go">cd pysqlite/</span>
+<span class="go">cp ../sqlite3.c .</span>
+<span class="go">echo -e "library_dirs=$JQLITE/lib" &gt;&gt; setup.cfg</span>
+<span class="go">echo -e "include_dirs=$JQLITE/include" &gt;&gt; setup.cfg</span>
+<span class="go">LIBS="-lm" python setup.py build_static</span>
+</pre></div>
+<p>To test the install, you can <code>cd</code> into the <code>build/lib.linux-xfoobar/</code> directory, open a python interpreter, and run the following:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">pysqlite2</span> <span class="kn">import</span> <span class="n">dbapi2</span> <span class="k">as</span> <span class="n">sqlite</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">conn</span> <span class="o">=</span> <span class="n">sqlite</span><span class="o">.</span><span class="n">connect</span><span class="p">(</span><span class="s1">':memory:'</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">conn</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="s1">'CREATE VIRTUAL TABLE testing USING fts5(data);'</span><span class="p">)</span>
+<span class="go">&lt;pysqlite2.dbapi2.Cursor object at 0x7ff7d0a2dc60&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">conn</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="s1">'SELECT json(?)'</span><span class="p">,</span> <span class="p">(</span><span class="mi">1337</span><span class="p">,))</span><span class="o">.</span><span class="n">fetchone</span><span class="p">()</span>
+<span class="go">(u'1337',)</span>
+</pre></div>
+<p>Phew. Now it's your choice, you can run <code>python setup.py install</code>, or symlink the newly-built <code>pysqlite2</code> (look in <code>build/lib.linux.../</code>) into your <code>$PYTHONPATH</code>. If you have a virtualenv you want to use the new <code>pysqlite</code> with, you can activate the virtualenv, then switch back to the <code>pysqlite</code> directory and run <code>setup.py install</code>.</p>
+<h3>Building apsw</h3>
+<p>Building <a href="https://github.com/rogerbinns/apsw">apsw</a> is almost identical to building <code>pysqlite</code>. </p>
+<div class="highlight"><pre><span class="go">cd $JQLITE</span>
+<span class="go">git clone https://github.com/rogerbinns/apsw</span>
+<span class="go">cd apsw</span>
+<span class="go">cp ../sqlite3{ext.h,.h,.c} .</span>
+<span class="go">echo -e "library_dirs=$SQLITE_SRC/lib" &gt;&gt; setup.cfg</span>
+<span class="go">echo -e "include_dirs=$SQLITE_SRC/include" &gt;&gt; setup.cfg</span>
+<span class="go">LIBS="-lm" python setup.py build</span>
+</pre></div>
+<p>To test the new <code>apsw</code> library, change directories into <code>build/libXXX</code>, open a python interpreter, and run the following:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span> <span class="nn">apsw</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">conn</span> <span class="o">=</span> <span class="n">apsw</span><span class="o">.</span><span class="n">Connection</span><span class="p">(</span><span class="s1">':memory:'</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">cursor</span> <span class="o">=</span> <span class="n">conn</span><span class="o">.</span><span class="n">cursor</span><span class="p">()</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="s1">'CREATE VIRTUAL TABLE testing USING fts5(data);'</span><span class="p">)</span>
+<span class="go">&lt;apsw.Cursor at 0x7fcf6b17fa80&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">cursor</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="s1">'SELECT json(?)'</span><span class="p">,</span> <span class="p">(</span><span class="mi">1337</span><span class="p">,))</span><span class="o">.</span><span class="n">fetchone</span><span class="p">()</span>
+<span class="go">(u'1337',)</span>
+</pre></div>
+<p>You can run <code>python setup.py install</code> to install the new <code>apsw</code> system-wide, or symlink the <code>apsw.so</code> library (look in <code>build/lib.linux.../</code>) into your <code>$PYTHONPATH</code>. If you have a virtualenv you want to use <code>apsw</code> with, you can activate the virtualenv, then switch back to the <code>apsw</code> directory and run <code>setup.py install</code>.</p>
+<h2>Using the JSON extension</h2>
+<p>There are some really neat features in the <code>json1</code> extension, particularly the <code>json_tree</code> and <code>json_each</code> functions/virtual tables (<a href="https://www.sqlite.org/json1.html#jeach">documented here</a>). To demonstrate the new features, we'll use <a href="http://docs.peewee-orm.com/">peewee</a>, a small Python ORM, to write some JSON data then query it.</p>
+<p>I originally thought to get test data from GitHub's API, but in order to show off the features with minimum verbosity, I've instead contrived a little JSON file which can be <a href="http://media.charlesleifer.com/blog/downloads/misc/blogs.json">viewed here</a>. It is structured like so:</p>
+<div class="highlight"><pre><span class="p">[{</span>
+   <span class="s2">"title"</span><span class="o">:</span> <span class="s2">"My List of Python and SQLite Resources"</span><span class="p">,</span>
+   <span class="s2">"url"</span><span class="o">:</span> <span class="s2">"http://charlesleifer.com/blog/my-list-of-python-and-sqlite-resources/"</span><span class="p">,</span> 
+   <span class="s2">"metadata"</span><span class="o">:</span> <span class="p">{</span><span class="s2">"tags"</span><span class="o">:</span> <span class="p">[</span><span class="s2">"python"</span><span class="p">,</span> <span class="s2">"sqlite"</span><span class="p">]}</span>
+ <span class="p">},</span> 
+ <span class="p">{</span>
+   <span class="s2">"title"</span><span class="o">:</span> <span class="s2">"Using SQLite4's LSM Storage Engine as a Stand-alone NoSQL Database with Python"</span>
+   <span class="s2">"url"</span><span class="o">:</span> <span class="s2">"http://charlesleifer.com/blog/using-sqlite4-s-lsm-storage-engine-as-a-stand-alone-nosql-database-with-python/"</span><span class="p">,</span> 
+   <span class="s2">"metadata"</span><span class="o">:</span> <span class="p">{</span><span class="s2">"tags"</span><span class="o">:</span> <span class="p">[</span><span class="s2">"nosql"</span><span class="p">,</span> <span class="s2">"python"</span><span class="p">,</span> <span class="s2">"sqlite"</span><span class="p">,</span> <span class="s2">"cython"</span><span class="p">]}</span>
+  <span class="p">},</span>
+  <span class="p">...</span>
+<span class="p">]</span>
+</pre></div>
+<p>If you prefer to view the code in IPython notebook format, <a href="http://nbviewer.ipython.org/gist/coleifer/f1fc90c7d4938c73951c">you can view the notebook here</a>.</p>
+<h3>Populating the database</h3>
+<p>We'll start by fetching the JSON data file and decoding it:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span> <span class="nn">json</span><span class="o">,</span> <span class="nn">urllib2</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">fh</span> <span class="o">=</span> <span class="n">urllib2</span><span class="o">.</span><span class="n">urlopen</span><span class="p">(</span><span class="s1">'http://media.charlesleifer.com/blog/downloads/misc/blogs.json'</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">data</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">fh</span><span class="o">.</span><span class="n">read</span><span class="p">())</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">data</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+<span class="go">{u'metadata': {u'tags': [u'python', u'sqlite']},</span>
+<span class="go"> u'title': u'My List of Python and SQLite Resources',</span>
+<span class="go"> u'url': u'http://charlesleifer.com/blog/my-list-of-python-and-sqlite-resources/'}</span>
+</pre></div>
+<p>Now we need to tell peewee how to access our database, so we'll wrap the SQLite database to use our custom <code>pysqlite</code>. I'm importing <code>pysqlite2</code>, which is the module we just compiled, but I'm aliasing it to <code>jqlite</code> just so there's no confusion. After the database class has been defined, we'll create an in-memory database. (note: in the next release, 2.6.5, peewee will use <code>pysqlite2</code> automatically if it is compiled against a newer version than <code>sqlite3</code>).</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">pysqlite2</span> <span class="kn">import</span> <span class="n">dbapi2</span> <span class="k">as</span> <span class="n">jqlite</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">peewee</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">playhouse.sqlite_ext</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="k">class</span> <span class="nc">JQLiteDatabase</span><span class="p">(</span><span class="n">SqliteExtDatabase</span><span class="p">):</span>
+<span class="gp">... </span>    <span class="k">def</span> <span class="nf">_connect</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">database</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+<span class="gp">... </span>        <span class="n">conn</span> <span class="o">=</span> <span class="n">jqlite</span><span class="o">.</span><span class="n">connect</span><span class="p">(</span><span class="n">database</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+<span class="gp">... </span>        <span class="n">conn</span><span class="o">.</span><span class="n">isolation_level</span> <span class="o">=</span> <span class="bp">None</span>
+<span class="gp">... </span>        <span class="bp">self</span><span class="o">.</span><span class="n">_add_conn_hooks</span><span class="p">(</span><span class="n">conn</span><span class="p">)</span>
+<span class="gp">... </span>        <span class="k">return</span> <span class="n">conn</span>
+<span class="gp">...</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">db</span> <span class="o">=</span> <span class="n">JQLiteDatabase</span><span class="p">(</span><span class="s1">':memory:'</span><span class="p">)</span>
+</pre></div>
+<p>Populating the database with our JSON data is pretty straightforward. We'll create a generic table with a single <code>TEXT</code> field. At present, SQLite does not expose a separate column/data-type for JSON data, so we will use <code>TextField</code>:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="k">class</span> <span class="nc">Entry</span><span class="p">(</span><span class="n">Model</span><span class="p">):</span>
+<span class="gp">... </span>    <span class="n">data</span> <span class="o">=</span> <span class="n">TextField</span><span class="p">()</span>
+<span class="gp">... </span>    <span class="k">class</span> <span class="nc">Meta</span><span class="p">:</span>
+<span class="gp">... </span>        <span class="n">database</span> <span class="o">=</span> <span class="n">db</span>
+<span class="gp">... </span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">Entry</span><span class="o">.</span><span class="n">create_table</span><span class="p">()</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="k">with</span> <span class="n">db</span><span class="o">.</span><span class="n">atomic</span><span class="p">():</span>
+<span class="gp">... </span>    <span class="k">for</span> <span class="n">entry_json</span> <span class="ow">in</span> <span class="n">data</span><span class="p">:</span>
+<span class="gp">... </span>        <span class="n">Entry</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">data</span><span class="o">=</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">entry_json</span><span class="p">))</span>
+<span class="gp">...</span>
+</pre></div>
+<h3>JSON functions</h3>
+<p>We'll start by looking at <code>json_extract()</code>. It takes a dotted / bracketed path describing the element to find (unlike postgres which always uses <code>[]</code>). Each <code>Entry</code> in the database contains a single <code>data</code> column which contains a JSON object. This JSON object has a <code>title</code>, <code>url</code> and <code>metadata</code> key at the top-level. Let's see how to extract the titles of our entries:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">title</span> <span class="o">=</span> <span class="n">fn</span><span class="o">.</span><span class="n">json_extract</span><span class="p">(</span><span class="n">Entry</span><span class="o">.</span><span class="n">data</span><span class="p">,</span> <span class="s1">'$.title'</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">query</span> <span class="o">=</span> <span class="p">(</span><span class="n">Entry</span>
+<span class="gp">... </span>         <span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">title</span><span class="o">.</span><span class="n">alias</span><span class="p">(</span><span class="s1">'title'</span><span class="p">))</span>
+<span class="gp">... </span>         <span class="o">.</span><span class="n">order_by</span><span class="p">(</span><span class="n">title</span><span class="p">)</span>
+<span class="gp">... </span>         <span class="o">.</span><span class="n">limit</span><span class="p">(</span><span class="mi">5</span><span class="p">))</span>
+<span class="gp">...</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="p">[</span><span class="n">row</span> <span class="k">for</span> <span class="n">row</span> <span class="ow">in</span> <span class="n">query</span><span class="o">.</span><span class="n">dicts</span><span class="p">()]</span>
+<span class="go">[{'title': u'A Tour of Tagging Schemas: Many-to-many, Bitmaps and More'},</span>
+<span class="go"> {'title': u'Alternative Redis-Like Databases with Python'},</span>
+<span class="go"> {'title': u'Building the SQLite FTS5 Search Extension'},</span>
+<span class="go"> {'title': u'Connor Thomas Leifer'},</span>
+<span class="go"> {'title': u'Extending SQLite with Python'}]</span>
+</pre></div>
+<p>The query we created corresponds to the following SQL:</p>
+<div class="highlight"><pre><span class="k">SELECT</span> <span class="n">json_extract</span><span class="p">(</span><span class="ss">"t1"</span><span class="p">.</span><span class="ss">"data"</span><span class="p">,</span> <span class="s1">'$.title'</span><span class="p">)</span> <span class="k">AS</span> <span class="n">title</span> 
+<span class="k">FROM</span> <span class="ss">"entry"</span> <span class="k">AS</span> <span class="n">t1</span> 
+<span class="k">ORDER</span> <span class="k">BY</span> <span class="n">json_extract</span><span class="p">(</span><span class="ss">"t1"</span><span class="p">.</span><span class="ss">"data"</span><span class="p">,</span> <span class="s1">'$.title'</span><span class="p">)</span>
+<span class="k">LIMIT</span> <span class="mi">5</span>
+</pre></div>
+<p>In the next example we will extract the titles of entries that contain the given tag. To search the tags list, we will use a new function <code>json_each()</code>. This function behaves like a table (and in fact refers to a virtual table), and returns the direct children of the specified JSON path. Here is how to find the titles of entries tagged with "Sqlite":</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">peewee</span> <span class="kn">import</span> <span class="n">Entity</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">tags_src</span> <span class="o">=</span> <span class="n">fn</span><span class="o">.</span><span class="n">json_each</span><span class="p">(</span><span class="n">Entry</span><span class="o">.</span><span class="n">data</span><span class="p">,</span> <span class="s1">'$.metadata.tags'</span><span class="p">)</span><span class="o">.</span><span class="n">alias</span><span class="p">(</span><span class="s1">'tags'</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">tags_ref</span> <span class="o">=</span> <span class="n">Entity</span><span class="p">(</span><span class="s1">'tags'</span><span class="p">)</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="n">query</span> <span class="o">=</span> <span class="p">(</span><span class="n">Entry</span>
+<span class="gp">... </span>         <span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">title</span><span class="o">.</span><span class="n">alias</span><span class="p">(</span><span class="s1">'title'</span><span class="p">))</span>
+<span class="gp">... </span>         <span class="o">.</span><span class="n">from_</span><span class="p">(</span><span class="n">Entry</span><span class="p">,</span> <span class="n">tags_src</span><span class="p">)</span>
+<span class="gp">... </span>         <span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">tags_ref</span><span class="o">.</span><span class="n">value</span> <span class="o">==</span> <span class="s1">'sqlite'</span><span class="p">)</span>
+<span class="gp">... </span>         <span class="o">.</span><span class="n">order_by</span><span class="p">(</span><span class="n">title</span><span class="p">))</span>
+<span class="gp">... </span>
+<span class="gp">&gt;&gt;&gt; </span><span class="p">[</span><span class="n">row</span> <span class="k">for</span> <span class="n">row</span><span class="p">,</span> <span class="ow">in</span> <span class="n">query</span><span class="o">.</span><span class="n">tuples</span><span class="p">()]</span>
+<span class="go">[u'Building the SQLite FTS5 Search Extension',</span>
+<span class="go"> u'Extending SQLite with Python',</span>
+<span class="go"> u'Meet Scout, a Search Server Powered by SQLite',</span>
+<span class="go"> u'My List of Python and SQLite Resources',</span>
+<span class="go"> u'Querying Tree Structures in SQLite using Python and the Transitive Closure Extension',</span>
+<span class="go"> u"Using SQLite4's LSM Storage Engine as a Stand-alone NoSQL Database with Python",</span>
+<span class="go"> u'Web-based SQLite Database Browser, powered by Flask and Peewee']</span>
+</pre></div>
+<p>The SQL for the above query may help elucidate what's going on:</p>
+<div class="highlight"><pre><span class="k">SELECT</span> <span class="n">json_extract</span><span class="p">(</span><span class="ss">"t1"</span><span class="p">.</span><span class="ss">"data"</span><span class="p">,</span> <span class="s1">'$.title'</span><span class="p">)</span> <span class="k">AS</span> <span class="n">title</span> 
+<span class="k">FROM</span>
+    <span class="ss">"entry"</span> <span class="k">AS</span> <span class="n">t1</span><span class="p">,</span> 
+    <span class="n">json_each</span><span class="p">(</span><span class="ss">"t1"</span><span class="p">.</span><span class="ss">"data"</span><span class="p">,</span> <span class="s1">'$.metadata.tags'</span><span class="p">)</span> <span class="k">AS</span> <span class="n">tags</span> 
+<span class="k">WHERE</span> <span class="p">(</span><span class="ss">"tags"</span><span class="p">.</span><span class="ss">"value"</span> <span class="o">=</span> <span class="s1">'sqlite'</span><span class="p">)</span> 
+<span class="k">ORDER</span> <span class="k">BY</span> <span class="n">json_extract</span><span class="p">(</span><span class="ss">"t1"</span><span class="p">.</span><span class="ss">"data"</span><span class="p">,</span> <span class="s1">'$.title'</span><span class="p">)</span>
+</pre></div>
+<p>As queries grow more complex, being able to encapsulate pieces of the query with Peewee objects becomes more useful and can facilitate code reuse.</p>
+<p>Here is another example of <code>json_each()</code>. This time we will select the title of each entry, and build a comma-separated string of their associated tags. We will re-use the <code>tags_src</code> and <code>tags_ref</code> definitions created above.</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">query</span> <span class="o">=</span> <span class="p">(</span><span class="n">Entry</span>
+<span class="gp">... </span>         <span class="o">.</span><span class="n">select</span><span class="p">(</span>
+<span class="gp">... </span>             <span class="n">title</span><span class="o">.</span><span class="n">alias</span><span class="p">(</span><span class="s1">'title'</span><span class="p">),</span>
+<span class="gp">... </span>             <span class="n">fn</span><span class="o">.</span><span class="n">group_concat</span><span class="p">(</span><span class="n">tags_ref</span><span class="o">.</span><span class="n">value</span><span class="p">,</span> <span class="s1">', '</span><span class="p">)</span><span class="o">.</span><span class="n">alias</span><span class="p">(</span><span class="s1">'tags'</span><span class="p">))</span>
+<span class="gp">... </span>         <span class="o">.</span><span class="n">from_</span><span class="p">(</span><span class="n">Entry</span><span class="p">,</span> <span class="n">tags_src</span><span class="p">)</span>
+<span class="gp">... </span>         <span class="o">.</span><span class="n">group_by</span><span class="p">(</span><span class="n">title</span><span class="p">)</span>
+<span class="gp">... </span>         <span class="o">.</span><span class="n">limit</span><span class="p">(</span><span class="mi">5</span><span class="p">))</span>
+<span class="gp">...</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="p">[</span><span class="n">row</span> <span class="k">for</span> <span class="n">row</span> <span class="ow">in</span> <span class="n">query</span><span class="o">.</span><span class="n">tuples</span><span class="p">()]</span>
+<span class="go">[(u'A Tour of Tagging Schemas: Many-to-many, Bitmaps and More',</span>
+<span class="go">  u'peewee, sql, python'),</span>
+<span class="go"> (u'Alternative Redis-Like Databases with Python',</span>
+<span class="go">  u'python, walrus, redis, nosql'),</span>
+<span class="go"> (u'Building the SQLite FTS5 Search Extension',</span>
+<span class="go">  u'sqlite, search, python, peewee'),</span>
+<span class="go"> (u'Connor Thomas Leifer', u'thoughts'),</span>
+<span class="go"> (u'Extending SQLite with Python', u'peewee, python, sqlite')]</span>
+</pre></div>
+<p>Again, for clarity, here is the corresponding SQL query:</p>
+<div class="highlight"><pre><span class="k">SELECT</span> 
+    <span class="n">json_extract</span><span class="p">(</span><span class="ss">"t1"</span><span class="p">.</span><span class="ss">"data"</span><span class="p">,</span> <span class="s1">'$.title'</span><span class="p">)</span> <span class="k">AS</span> <span class="n">title</span><span class="p">,</span> 
+    <span class="n">group_concat</span><span class="p">(</span><span class="ss">"tags"</span><span class="p">.</span><span class="ss">"value"</span><span class="p">,</span> <span class="s1">', '</span><span class="p">)</span> <span class="k">AS</span> <span class="n">tags</span> 
+<span class="k">FROM</span> 
+    <span class="ss">"entry"</span> <span class="k">AS</span> <span class="n">t1</span><span class="p">,</span> 
+    <span class="n">json_each</span><span class="p">(</span><span class="ss">"t1"</span><span class="p">.</span><span class="ss">"data"</span><span class="p">,</span> <span class="s1">'$.metadata.tags'</span><span class="p">)</span> <span class="k">AS</span> <span class="n">tags</span> 
+<span class="k">GROUP</span> <span class="k">BY</span> <span class="n">json_extract</span><span class="p">(</span><span class="ss">"t1"</span><span class="p">.</span><span class="ss">"data"</span><span class="p">,</span> <span class="s1">'$.title'</span><span class="p">)</span> 
+<span class="k">LIMIT</span> <span class="mi">5</span>
+</pre></div>
+<p>The last function I'll cover is <code>json_tree()</code>. Like <code>json_each()</code>, <code>json_tree()</code> is a multi-valued function that behaves like a table. Where <code>json_each()</code> only returns the direct descendants of the specified path, <code>json_tree()</code> will recursively traverse the object, returning all children.</p>
+<p>If the <code>tags</code> key was nested somewhere arbitrarily deep for each entry, here is how we might find entries that matched a given tag:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">tree</span> <span class="o">=</span> <span class="n">fn</span><span class="o">.</span><span class="n">json_tree</span><span class="p">(</span><span class="n">Entry</span><span class="o">.</span><span class="n">data</span><span class="p">,</span> <span class="s1">'$'</span><span class="p">)</span><span class="o">.</span><span class="n">alias</span><span class="p">(</span><span class="s1">'tree'</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">parent</span> <span class="o">=</span> <span class="n">fn</span><span class="o">.</span><span class="n">json_tree</span><span class="p">(</span><span class="n">Entry</span><span class="o">.</span><span class="n">data</span><span class="p">,</span> <span class="s1">'$'</span><span class="p">)</span><span class="o">.</span><span class="n">alias</span><span class="p">(</span><span class="s1">'parent'</span><span class="p">)</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="n">tree_ref</span> <span class="o">=</span> <span class="n">Entity</span><span class="p">(</span><span class="s1">'tree'</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">parent_ref</span> <span class="o">=</span> <span class="n">Entity</span><span class="p">(</span><span class="s1">'parent'</span><span class="p">)</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="n">query</span> <span class="o">=</span> <span class="p">(</span><span class="n">Entry</span>
+<span class="gp">... </span>         <span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">title</span><span class="o">.</span><span class="n">alias</span><span class="p">(</span><span class="s1">'title'</span><span class="p">))</span>
+<span class="gp">... </span>         <span class="o">.</span><span class="n">from_</span><span class="p">(</span><span class="n">Entry</span><span class="p">,</span> <span class="n">tree</span><span class="p">,</span> <span class="n">parent</span><span class="p">)</span>
+<span class="gp">... </span>         <span class="o">.</span><span class="n">where</span><span class="p">(</span>
+<span class="gp">... </span>             <span class="p">(</span><span class="n">tree_ref</span><span class="o">.</span><span class="n">parent</span> <span class="o">==</span> <span class="n">parent_ref</span><span class="o">.</span><span class="n">id</span><span class="p">)</span> <span class="o">&amp;</span>
+<span class="gp">... </span>             <span class="p">(</span><span class="n">parent_ref</span><span class="o">.</span><span class="n">key</span> <span class="o">==</span> <span class="s1">'tags'</span><span class="p">)</span> <span class="o">&amp;</span>
+<span class="gp">... </span>             <span class="p">(</span><span class="n">tree_ref</span><span class="o">.</span><span class="n">value</span> <span class="o">==</span> <span class="s1">'sqlite'</span><span class="p">))</span>
+<span class="gp">... </span>         <span class="o">.</span><span class="n">order_by</span><span class="p">(</span><span class="n">title</span><span class="p">))</span>
+<span class="gp">...</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="p">[</span><span class="n">title</span> <span class="k">for</span> <span class="n">title</span><span class="p">,</span> <span class="ow">in</span> <span class="n">query</span><span class="o">.</span><span class="n">tuples</span><span class="p">()]</span>
+<span class="go">[u'Building the SQLite FTS5 Search Extension',</span>
+<span class="go"> u'Extending SQLite with Python',</span>
+<span class="go"> u'Meet Scout, a Search Server Powered by SQLite',</span>
+<span class="go"> u'My List of Python and SQLite Resources',</span>
+<span class="go"> u'Querying Tree Structures in SQLite using Python and the Transitive Closure Extension',</span>
+<span class="go"> u"Using SQLite4's LSM Storage Engine as a Stand-alone NoSQL Database with Python",</span>
+<span class="go"> u'Web-based SQLite Database Browser, powered by Flask and Peewee']</span>
+</pre></div>
+<p>What's going on in the above code is we are selecting the Entry itself, along with two trees representing the entry's child nodes. Since each tree node contains a reference to it's parent, we can simply search for a parent node named "tags" that contains a child node with the value "sqlite".</p>
+<p>Here it is in SQL:</p>
+<div class="highlight"><pre><span class="k">SELECT</span> <span class="n">json_extract</span><span class="p">(</span><span class="ss">"t1"</span><span class="p">.</span><span class="ss">"data"</span><span class="p">,</span> <span class="s1">'$.title'</span><span class="p">)</span> <span class="k">AS</span> <span class="n">title</span> 
+<span class="k">FROM</span> 
+    <span class="ss">"entry"</span> <span class="k">AS</span> <span class="n">t1</span><span class="p">,</span> 
+    <span class="n">json_tree</span><span class="p">(</span><span class="ss">"t1"</span><span class="p">.</span><span class="ss">"data"</span><span class="p">,</span> <span class="s1">'$'</span><span class="p">)</span> <span class="k">AS</span> <span class="n">tree</span><span class="p">,</span> 
+    <span class="n">json_tree</span><span class="p">(</span><span class="ss">"t1"</span><span class="p">.</span><span class="ss">"data"</span><span class="p">,</span> <span class="s1">'$'</span><span class="p">)</span> <span class="k">AS</span> <span class="n">parent</span> 
+<span class="k">WHERE</span> <span class="p">(</span>
+    <span class="p">(</span><span class="ss">"tree"</span><span class="p">.</span><span class="ss">"parent"</span> <span class="o">=</span> <span class="ss">"parent"</span><span class="p">.</span><span class="ss">"id"</span><span class="p">)</span> <span class="k">AND</span> 
+    <span class="p">(</span><span class="ss">"parent"</span><span class="p">.</span><span class="ss">"key"</span> <span class="o">=</span> <span class="s1">'tags'</span><span class="p">)</span> <span class="k">AND</span> 
+    <span class="p">(</span><span class="ss">"tree"</span><span class="p">.</span><span class="ss">"value"</span> <span class="o">=</span> <span class="s1">'sqlite'</span><span class="p">))</span> 
+<span class="k">ORDER</span> <span class="k">BY</span> <span class="n">json_extract</span><span class="p">(</span><span class="ss">"t1"</span><span class="p">.</span><span class="ss">"data"</span><span class="p">,</span> <span class="s1">'$.title'</span><span class="p">)</span>
+</pre></div>
+<p>This is just a sampling of the <a href="https://www.sqlite.org/draft/json1.html">functionality in the json1 extension</a>, and I'm looking forward to experimenting with it more over the coming weeks. Please feel free to <a href="#comments">leave a comment</a> here, or if you have specific questions about the extension, you might wish to refer to the <a href="http://mailinglists.sqlite.org/cgi-bin/mailman/listinfo/sqlite-users">sqlite-users mailing list</a>.</p>
+<h3>FTS5 with Python</h3>
+<p>The code in this section is a continuation of the previous JSON example code, as we'll be using the titles from the <code>Entry</code> data file and using them to populate a search index. The <code>FTS5Model</code> feature of peewee will be included in the 2.6.5 release, and is currently available in the <code>master</code> branch <a href="https://github.com/coleifer/peewee">on github</a>.</p>
+<p>Picking up from where we left off in the JSON examples, let's create another table that will be our search index for Entry data.</p>
+<p>The <code>fts5</code> extension requires that all columns be completely devoid of any types or constraints. The only additional information we can provide is to indicate a column is <em>unindexed</em>, meaning that the data is stored but not searchable.</p>
+<p>Let's define a search index for the entry model that allows us to search over the titles and determine the associated URL. To do this we'll leave the <code>url</code> field as unindexed.</p>
+<div class="highlight"><pre><span class="k">class</span> <span class="nc">EntryIndex</span><span class="p">(</span><span class="n">FTS5Model</span><span class="p">):</span>
+    <span class="n">title</span> <span class="o">=</span> <span class="n">SearchField</span><span class="p">()</span>
+    <span class="n">url</span> <span class="o">=</span> <span class="n">SearchField</span><span class="p">(</span><span class="n">unindexed</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+    <span class="k">class</span> <span class="nc">Meta</span><span class="p">:</span>
+        <span class="n">database</span> <span class="o">=</span> <span class="n">db</span>
+        <span class="n">options</span> <span class="o">=</span> <span class="p">{</span><span class="s1">'tokenize'</span><span class="p">:</span> <span class="s1">'porter'</span><span class="p">,</span> <span class="s1">'prefix'</span><span class="p">:</span> <span class="s1">'2,3'</span><span class="p">}</span>
+
+<span class="n">EntryIndex</span><span class="o">.</span><span class="n">create_table</span><span class="p">()</span>
+</pre></div>
+<p>The <code>options</code> dictionary provides additional metadata to the <code>fts5</code> extension telling it how to tokenize words, and what lengths of prefixes to store for fast prefix search. The SQL for the <code>CREATE TABLE</code> looks like this:</p>
+<div class="highlight"><pre><span class="k">CREATE</span> <span class="n">VIRTUAL</span> <span class="k">TABLE</span> <span class="ss">"entryindex"</span> <span class="k">USING</span> <span class="n">fts5</span> <span class="p">(</span>
+    <span class="ss">"title"</span> <span class="p">,</span>
+    <span class="ss">"url"</span>  <span class="n">UNINDEXED</span><span class="p">,</span>
+    <span class="k">prefix</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span><span class="mi">3</span><span class="p">,</span>
+    <span class="n">tokenize</span><span class="o">=</span><span class="n">porter</span><span class="p">)</span>
+</pre></div>
+<p>To populate our index, we'll use a couple JSON functions to copy data over from the <code>Entry</code> model:</p>
+<div class="highlight"><pre><span class="n">title</span> <span class="o">=</span> <span class="n">fn</span><span class="o">.</span><span class="n">json_extract</span><span class="p">(</span><span class="n">Entry</span><span class="o">.</span><span class="n">data</span><span class="p">,</span> <span class="s1">'$.title'</span><span class="p">)</span><span class="o">.</span><span class="n">alias</span><span class="p">(</span><span class="s1">'title'</span><span class="p">)</span>
+<span class="n">url</span> <span class="o">=</span> <span class="n">fn</span><span class="o">.</span><span class="n">json_extract</span><span class="p">(</span><span class="n">Entry</span><span class="o">.</span><span class="n">data</span><span class="p">,</span> <span class="s1">'$.url'</span><span class="p">)</span><span class="o">.</span><span class="n">alias</span><span class="p">(</span><span class="s1">'url'</span><span class="p">)</span>
+<span class="n">query</span> <span class="o">=</span> <span class="n">Entry</span><span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">title</span><span class="p">,</span> <span class="n">url</span><span class="p">)</span><span class="o">.</span><span class="n">dicts</span><span class="p">()</span>
+<span class="k">with</span> <span class="n">db</span><span class="o">.</span><span class="n">atomic</span><span class="p">():</span>
+    <span class="k">for</span> <span class="n">entry</span> <span class="ow">in</span> <span class="n">query</span><span class="p">:</span>
+        <span class="n">EntryIndex</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="o">**</span><span class="n">entry</span><span class="p">)</span>
+</pre></div>
+<p>Now that our index is populated, let's perform a few searches:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">query</span> <span class="o">=</span> <span class="n">EntryIndex</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="s1">'sqlite'</span><span class="p">)</span><span class="o">.</span><span class="n">limit</span><span class="p">(</span><span class="mi">3</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="k">for</span> <span class="n">result</span> <span class="ow">in</span> <span class="n">query</span><span class="p">:</span>
+<span class="gp">... </span>    <span class="k">print</span> <span class="n">result</span><span class="o">.</span><span class="n">title</span>
+
+<span class="go">Extending SQLite with Python</span>
+<span class="go">Building the SQLite FTS5 Search Extension</span>
+<span class="go">My List of Python and SQLite Resources</span>
+</pre></div>
+<p>The SQL for the above query looks like this:</p>
+<div class="highlight"><pre><span class="k">SELECT</span> <span class="ss">"t1"</span><span class="p">.</span><span class="ss">"title"</span><span class="p">,</span> <span class="ss">"t1"</span><span class="p">.</span><span class="ss">"url"</span> 
+<span class="k">FROM</span> <span class="ss">"entryindex"</span> <span class="k">AS</span> <span class="n">t1</span> 
+<span class="k">WHERE</span> <span class="p">(</span><span class="ss">"entryindex"</span> <span class="k">MATCH</span> <span class="s1">'sqlite'</span><span class="p">)</span> 
+<span class="k">ORDER</span> <span class="k">BY</span> <span class="n">rank</span>
+</pre></div>
+<p>We can retrieve the score of our results as well:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">query</span> <span class="o">=</span> <span class="n">EntryIndex</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="s1">'sqlite AND python'</span><span class="p">,</span> <span class="n">with_score</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="k">for</span> <span class="n">result</span> <span class="ow">in</span> <span class="n">query</span><span class="p">:</span>
+<span class="gp">... </span>    <span class="k">print</span> <span class="nb">round</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">score</span><span class="p">,</span> <span class="mi">3</span><span class="p">),</span> <span class="n">result</span><span class="o">.</span><span class="n">title</span>
+
+<span class="go">-1.259 Extending SQLite with Python</span>
+<span class="go">-1.059 My List of Python and SQLite Resources</span>
+<span class="go">-0.838 Querying Tree Structures in SQLite using Python and the Transitive Closure Extension</span>
+</pre></div>
+<p>Notice how sensible those results are? The SQL for the above query looks like:</p>
+<div class="highlight"><pre><span class="k">SELECT</span> <span class="ss">"t1"</span><span class="p">.</span><span class="ss">"title"</span><span class="p">,</span> <span class="ss">"t1"</span><span class="p">.</span><span class="ss">"url"</span><span class="p">,</span> <span class="n">rank</span> <span class="k">AS</span> <span class="n">score</span> 
+<span class="k">FROM</span> <span class="ss">"entryindex"</span> <span class="k">AS</span> <span class="n">t1</span> 
+<span class="k">WHERE</span> <span class="p">(</span><span class="ss">"entryindex"</span> <span class="k">MATCH</span> <span class="s1">'sqlite AND python'</span><span class="p">)</span> 
+<span class="k">ORDER</span> <span class="k">BY</span> <span class="n">rank</span>
+</pre></div>
+<p>I've barely scratched the surface of the functionality provided by the <code>fts5</code> extension, but if you check out the <a href="https://www.sqlite.org/fts5.html">documentation</a> you'll find a lot of great features. Here are some examples:</p>
+<ul>
+<li>index multiple columns, then assign different weights to them when ranking.</li>
+<li>search by prefix, quoted phrase, or words within a certain proximity to one another.</li>
+<li>boolean operators can combine any of the above search types.</li>
+<li><code>unicode61</code> default tokenizer, <code>porter</code> tokenizer performs stemming.</li>
+<li>new C API for defining your own ranking functions and tokenizers</li>
+<li><em>vocab tables</em>, which allow you to query term counts, and generally inspect the index.</li>
+</ul>
+<h3>Thanks for reading</h3>
+<p>I hope you enjoyed reading this post. I think the addition of a JSON extension to SQLite is very exciting for both the project and for its users. Postgresql and MySQL both have their own JSON implementations, so it's good to see SQLite is not lagging behind. Having JSON also may obviate the need, in some cases, to reach for dedicated embedded document stores like <a href="/blog/introduction-to-the-fast-new-unqlite-python-bindings/">UnQLite</a>.</p>
+<p>It's also worth noting that the file is named <code>json1.c</code>. This is an effort, on Dr. Hipp's part, to show that this is just the first step, and that there will be more in the future. So whatever issues there may be with the current implementation, I'm sure future releases will continue to improve both the performance and APIs. For one, I believe he is looking into a binary format that would be more performant.</p>
+<p>I'm also excited to see SQLite continuing to improve and innovate on the quality of it's full-text search extension. Providing a built-in ranking algorithm and an API for users to implement their own is a much-needed addition.</p>
+<p>Links of interest:</p>
+
+<p>Other blog posts you may like:</p>
+
+<p>And, just to put this out there ahead of time, here are some responses to the news of SQLite's JSON module. Don't be one of these people!</p>
+<ul>
+<li>HackerNews sheeple: <em>Why would anyone use anything besides Postgres?</em></li>
+<li>Graybeards: <em>I thought it was called SQL-lite, now they're bloating it up with JSON?</em></li>
+<li>Trolls: <em>Why don't you just use MongoDB?</em></li>
+</ul>
+  
+  
+
+  
+  
+  
+
+  
+  
+  
+
+  
+  
+  
+
+
+<hr/>
+
+  <p>Commenting has been closed, but please feel free to <a href="/contact/">contact me</a></p>
+
+
+    </div>
+
+    </div></body></html>

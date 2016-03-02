@@ -1,0 +1,305 @@
+<html><body><div><div class="right_panel">
+    <a href="/blog/2015/08/retrying-celery-failed-tasks/" class="noline"><h1 class="post_title" itemprop="headline">Retrying celery failed tasks</h1></a>
+    
+    
+      <p/><p>I assume you have a basic understanding of celery. If you want to learn about basics of celery, you can check our <a href="http://agiliq.com/blog/2015/07/getting-started-with-celery-and-redis/" target="_blank">last blog</a>.</p>
+<h3>Use case</h3>
+<p>In one of my projects, I work with Twitter api. I need to fetch a user's tweets. Twitter provides an api endpoint for fetching user's tweets. Fetching of tweets involve network calls and so should happen in background, so we fetch the tweets using a celery task. So I have a celery task which makes one api call to Twitter. If I am able to fetch the tweets I consider the celery task was successful.</p>
+<p>But Twitter rate limits this api endpoint and I can't hit this api endpoint indefinite number of times. Twitter allows maximum of 180 calls to this endpoint in a 15 minute window. Any call beyond 180 calls will start failing and Twitter will raise an exception instead of returning tweets. If Twitter raises exception instead of returning tweets, I consider that the celery task has failed.</p>
+<p>Assuming a very active Twitter user signs up and we need 200 api calls to fetch all his tweets. So my celery tasks run 200 times. First 180 tasks would succeed but next 20 tasks would fail because of rate limiting.</p>
+<p>I do not want to miss any tweet by a user, and so any failed task must be retried after 15 minutes. This is where celery retry functionality comes into picture.</p>
+<h4>Pseudocode for my usecase</h4>
+<div class="highlight"><pre><span class="err">@</span><span class="n">app</span><span class="p">.</span><span class="n">task</span><span class="p">(</span><span class="n">bind</span><span class="o">=</span><span class="n">True</span><span class="p">)</span>
+<span class="n">def</span> <span class="n">fetch_tweets</span><span class="p">(</span><span class="n">token_details</span><span class="p">)</span><span class="o">:</span>
+    <span class="err">#</span> <span class="n">token_details</span> <span class="n">is</span> <span class="n">user</span> <span class="n">specific</span> <span class="n">User</span> <span class="n">token</span> <span class="n">that</span> <span class="n">needs</span> <span class="n">to</span> <span class="n">be</span> <span class="n">passed</span> <span class="n">to</span> <span class="n">Twitter</span>
+    <span class="nl">try:</span>
+        <span class="n">resp</span> <span class="o">=</span> <span class="n">make_twitter_call</span><span class="p">()</span>  
+        <span class="err">#</span> <span class="n">Till</span> <span class="mi">180</span> <span class="n">calls</span> <span class="n">to</span> <span class="n">Twitter</span><span class="p">,</span> <span class="n">we</span> <span class="n">will</span> <span class="n">get</span> <span class="err">`</span><span class="n">resp</span><span class="err">`</span>
+        <span class="err">#</span> <span class="n">process</span> <span class="n">result</span>
+    <span class="n">except</span> <span class="n">TwitterException</span><span class="o">:</span>
+        <span class="err">#</span> <span class="n">Till</span> <span class="mi">180</span><span class="n">th</span> <span class="n">call</span><span class="p">,</span> <span class="n">this</span> <span class="n">part</span> <span class="n">will</span> <span class="n">not</span> <span class="n">be</span> <span class="n">executed</span>
+        <span class="err">#</span> <span class="mi">181</span><span class="n">th</span> <span class="n">call</span> <span class="n">onwards</span><span class="p">,</span> <span class="n">Twitter</span> <span class="n">will</span> <span class="n">raise</span> <span class="n">an</span> <span class="n">error</span> <span class="n">and</span> <span class="n">this</span> <span class="n">part</span> <span class="n">of</span> <span class="n">code</span> <span class="n">will</span> <span class="n">be</span> <span class="n">executed</span>
+        <span class="err">#</span> <span class="n">Retry</span> <span class="n">fetch_tweets</span> <span class="n">after</span> <span class="mi">15</span> <span class="n">mins</span><span class="p">.</span>
+</pre></div>
+
+
+<p>Before fixing this use case, let's play around with some basic examples.</p>
+<h3>Basic example</h3>
+<p>Create a file called add.py with following content</p>
+<h6>add.py</h6>
+<div class="highlight"><pre><span class="n">from</span> <span class="n">celery</span> <span class="n">import</span> <span class="n">Celery</span>
+
+<span class="n">app</span> <span class="o">=</span> <span class="n">Celery</span><span class="p">(</span><span class="err">'</span><span class="n">add</span><span class="err">'</span><span class="p">,</span> <span class="n">broker</span><span class="o">=</span><span class="err">'</span><span class="n">redis</span><span class="o">:</span><span class="c1">//localhost:6379/0')</span>
+
+<span class="err">@</span><span class="n">app</span><span class="p">.</span><span class="n">task</span><span class="p">(</span><span class="n">bind</span><span class="o">=</span><span class="n">True</span><span class="p">)</span>
+<span class="n">def</span> <span class="n">add</span><span class="p">(</span><span class="n">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">)</span><span class="o">:</span>
+    <span class="k">return</span> <span class="n">x</span> <span class="o">+</span> <span class="n">y</span>
+</pre></div>
+
+
+<p>Ensure task defined in this file is running properly by running the worker and trying to run the task from ipython shell.</p>
+<h6>Worker terminal</h6>
+<div class="highlight"><pre><span class="n">celery</span> <span class="n">worker</span> <span class="o">-</span><span class="n">A</span> <span class="n">add</span> <span class="o">-</span><span class="n">l</span> <span class="n">info</span>
+</pre></div>
+
+
+<h6>Ipython</h6>
+<div class="highlight"><pre><span class="n">from</span> <span class="n">add</span> <span class="n">import</span> <span class="n">add</span>
+<span class="n">add</span><span class="p">.</span><span class="n">delay</span><span class="p">(</span><span class="mi">3</span><span class="p">,</span> <span class="mi">4</span><span class="p">)</span>
+</pre></div>
+
+
+<p>After you do this, addition should happen and "7", i.e 3+4, should be printed on worker terminal.</p>
+<h4>Explicity raising error</h4>
+<p>Setting up Twitter access tokens etc will take effort and time, so instead of setting up Twitter, let's try to replicate a similar scenario where some calls to our task succeed and some calls to task fail.</p>
+<p>Let's first replicate a failed task. A failed task means an error happening in the task. Raise an error in your task, and see how it behaves.</p>
+<div class="highlight"><pre><span class="n">from</span> <span class="n">celery</span> <span class="n">import</span> <span class="n">Celery</span>
+
+<span class="n">app</span> <span class="o">=</span> <span class="n">Celery</span><span class="p">(</span><span class="err">'</span><span class="n">add</span><span class="err">'</span><span class="p">,</span> <span class="n">broker</span><span class="o">=</span><span class="err">'</span><span class="n">redis</span><span class="o">:</span><span class="c1">//localhost:6379/0')</span>
+
+<span class="err">@</span><span class="n">app</span><span class="p">.</span><span class="n">task</span><span class="p">(</span><span class="n">bind</span><span class="o">=</span><span class="n">True</span><span class="p">)</span>
+<span class="n">def</span> <span class="n">add</span><span class="p">(</span><span class="n">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">)</span><span class="o">:</span>
+    <span class="n">raise</span> <span class="n">Exception</span><span class="p">()</span>
+    <span class="k">return</span> <span class="n">x</span> <span class="o">+</span> <span class="n">y</span>
+</pre></div>
+
+
+<p>Restart celery worker</p>
+<div class="highlight"><pre><span class="n">celery</span> <span class="n">worker</span> <span class="o">-</span><span class="n">A</span> <span class="n">add</span> <span class="o">-</span><span class="n">l</span> <span class="n">info</span>
+</pre></div>
+
+
+<p>Run the task again</p>
+<div class="highlight"><pre><span class="n">from</span> <span class="n">add</span> <span class="n">import</span> <span class="n">add</span>
+<span class="n">add</span><span class="p">.</span><span class="n">delay</span><span class="p">(</span><span class="mi">3</span><span class="p">,</span> <span class="mi">4</span><span class="p">)</span>
+</pre></div>
+
+
+<p>On celery terminal, you will see that an exception is raised.</p>
+<div class="highlight"><pre><span class="p">[</span><span class="mi">2015</span><span class="o">-</span><span class="mo">07</span><span class="o">-</span><span class="mi">31</span> <span class="mi">16</span><span class="o">:</span><span class="mi">39</span><span class="o">:</span><span class="mi">13</span><span class="p">,</span><span class="mi">440</span><span class="o">:</span> <span class="n">ERROR</span><span class="o">/</span><span class="n">MainProcess</span><span class="p">]</span> <span class="n">Task</span> <span class="n">add</span><span class="p">.</span><span class="n">add</span><span class="p">[</span><span class="n">fb067fbf</span><span class="o">-</span><span class="n">e79e</span><span class="o">-</span><span class="mf">4f</span><span class="n">dd</span><span class="o">-</span><span class="n">b398</span><span class="o">-</span><span class="mi">94</span><span class="n">da6be960e1</span><span class="p">]</span> <span class="n">raised</span> <span class="n">unexpected</span><span class="o">:</span> <span class="n">Exception</span><span class="p">()</span>
+<span class="n">Traceback</span> <span class="p">(</span><span class="n">most</span> <span class="n">recent</span> <span class="n">call</span> <span class="n">last</span><span class="p">)</span><span class="o">:</span>
+  <span class="n">File</span> <span class="s">"/Users/akshar/.virtualenvs/hack/lib/python2.7/site-packages/celery/app/trace.py"</span><span class="p">,</span> <span class="n">line</span> <span class="mi">240</span><span class="p">,</span> <span class="n">in</span> <span class="n">trace_task</span>
+    <span class="n">R</span> <span class="o">=</span> <span class="n">retval</span> <span class="o">=</span> <span class="n">fun</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+  <span class="n">File</span> <span class="s">"/Users/akshar/.virtualenvs/hack/lib/python2.7/site-packages/celery/app/trace.py"</span><span class="p">,</span> <span class="n">line</span> <span class="mi">438</span><span class="p">,</span> <span class="n">in</span> <span class="n">__protected_call__</span>
+    <span class="k">return</span> <span class="n">self</span><span class="p">.</span><span class="n">run</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+  <span class="n">File</span> <span class="s">"/Users/akshar/Play/Python/hack/add.py"</span><span class="p">,</span> <span class="n">line</span> <span class="mi">7</span><span class="p">,</span> <span class="n">in</span> <span class="n">add</span>
+    <span class="n">raise</span> <span class="n">Exception</span><span class="p">()</span>
+<span class="n">Exception</span>
+</pre></div>
+
+
+<p>Suppose you want to retry the task after 2 seconds when it fails. Make the following code change</p>
+<div class="highlight"><pre><span class="n">from</span> <span class="n">celery</span> <span class="n">import</span> <span class="n">Celery</span>
+
+<span class="n">app</span> <span class="o">=</span> <span class="n">Celery</span><span class="p">(</span><span class="err">'</span><span class="n">add</span><span class="err">'</span><span class="p">,</span> <span class="n">broker</span><span class="o">=</span><span class="err">'</span><span class="n">redis</span><span class="o">:</span><span class="c1">//localhost:6379/0')</span>
+
+<span class="err">@</span><span class="n">app</span><span class="p">.</span><span class="n">task</span><span class="p">(</span><span class="n">bind</span><span class="o">=</span><span class="n">True</span><span class="p">)</span>
+<span class="n">def</span> <span class="n">add</span><span class="p">(</span><span class="n">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">)</span><span class="o">:</span>
+    <span class="nl">try:</span>
+        <span class="n">raise</span> <span class="n">Exception</span><span class="p">()</span>
+    <span class="n">except</span> <span class="n">Exception</span> <span class="n">as</span> <span class="n">e</span><span class="o">:</span>
+        <span class="n">self</span><span class="p">.</span><span class="n">retry</span><span class="p">(</span><span class="n">countdown</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span> <span class="n">exc</span><span class="o">=</span><span class="n">e</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">x</span> <span class="o">+</span> <span class="n">y</span>
+</pre></div>
+
+
+<p>Restart celery, run the task and check the output. Output would be</p>
+<div class="highlight"><pre><span class="mi">2015</span><span class="o">-</span><span class="mo">07</span><span class="o">-</span><span class="mi">31</span> <span class="mi">16</span><span class="o">:</span><span class="mi">59</span><span class="o">:</span><span class="mi">24</span><span class="p">,</span><span class="mo">027</span><span class="o">:</span> <span class="n">INFO</span><span class="o">/</span><span class="n">MainProcess</span><span class="p">]</span> <span class="n">Received</span> <span class="n">task</span><span class="o">:</span> <span class="n">add</span><span class="p">.</span><span class="n">add</span><span class="p">[</span><span class="n">f9c6a487</span><span class="o">-</span><span class="mf">9f</span><span class="n">d7</span><span class="o">-</span><span class="mi">4</span><span class="n">bb2</span><span class="o">-</span><span class="mi">8</span><span class="n">db6</span><span class="o">-</span><span class="mi">2</span><span class="n">c58849809c7</span><span class="p">]</span> <span class="n">eta</span><span class="o">:</span><span class="p">[</span><span class="mi">2015</span><span class="o">-</span><span class="mo">07</span><span class="o">-</span><span class="mi">31</span> <span class="mi">11</span><span class="o">:</span><span class="mi">29</span><span class="o">:</span><span class="mf">26.014576</span><span class="o">+</span><span class="mo">00</span><span class="o">:</span><span class="mo">00</span><span class="p">]</span>
+<span class="p">[</span><span class="mi">2015</span><span class="o">-</span><span class="mo">07</span><span class="o">-</span><span class="mi">31</span> <span class="mi">16</span><span class="o">:</span><span class="mi">59</span><span class="o">:</span><span class="mi">24</span><span class="p">,</span><span class="mo">030</span><span class="o">:</span> <span class="n">INFO</span><span class="o">/</span><span class="n">MainProcess</span><span class="p">]</span> <span class="n">Task</span> <span class="n">add</span><span class="p">.</span><span class="n">add</span><span class="p">[</span><span class="n">f9c6a487</span><span class="o">-</span><span class="mf">9f</span><span class="n">d7</span><span class="o">-</span><span class="mi">4</span><span class="n">bb2</span><span class="o">-</span><span class="mi">8</span><span class="n">db6</span><span class="o">-</span><span class="mi">2</span><span class="n">c58849809c7</span><span class="p">]</span> <span class="n">retry</span><span class="o">:</span> <span class="n">Retry</span> <span class="n">in</span> <span class="mi">2</span><span class="n">s</span><span class="o">:</span> <span class="n">Exception</span><span class="p">()</span>
+<span class="p">[</span><span class="mi">2015</span><span class="o">-</span><span class="mo">07</span><span class="o">-</span><span class="mi">31</span> <span class="mi">16</span><span class="o">:</span><span class="mi">59</span><span class="o">:</span><span class="mi">26</span><span class="p">,</span><span class="mo">075</span><span class="o">:</span> <span class="n">INFO</span><span class="o">/</span><span class="n">MainProcess</span><span class="p">]</span> <span class="n">Received</span> <span class="n">task</span><span class="o">:</span> <span class="n">add</span><span class="p">.</span><span class="n">add</span><span class="p">[</span><span class="n">f9c6a487</span><span class="o">-</span><span class="mf">9f</span><span class="n">d7</span><span class="o">-</span><span class="mi">4</span><span class="n">bb2</span><span class="o">-</span><span class="mi">8</span><span class="n">db6</span><span class="o">-</span><span class="mi">2</span><span class="n">c58849809c7</span><span class="p">]</span> <span class="n">eta</span><span class="o">:</span><span class="p">[</span><span class="mi">2015</span><span class="o">-</span><span class="mo">07</span><span class="o">-</span><span class="mi">31</span> <span class="mi">11</span><span class="o">:</span><span class="mi">29</span><span class="o">:</span><span class="mf">28.065412</span><span class="o">+</span><span class="mo">00</span><span class="o">:</span><span class="mo">00</span><span class="p">]</span>
+<span class="p">[</span><span class="mi">2015</span><span class="o">-</span><span class="mo">07</span><span class="o">-</span><span class="mi">31</span> <span class="mi">16</span><span class="o">:</span><span class="mi">59</span><span class="o">:</span><span class="mi">26</span><span class="p">,</span><span class="mo">076</span><span class="o">:</span> <span class="n">INFO</span><span class="o">/</span><span class="n">MainProcess</span><span class="p">]</span> <span class="n">Task</span> <span class="n">add</span><span class="p">.</span><span class="n">add</span><span class="p">[</span><span class="n">f9c6a487</span><span class="o">-</span><span class="mf">9f</span><span class="n">d7</span><span class="o">-</span><span class="mi">4</span><span class="n">bb2</span><span class="o">-</span><span class="mi">8</span><span class="n">db6</span><span class="o">-</span><span class="mi">2</span><span class="n">c58849809c7</span><span class="p">]</span> <span class="n">retry</span><span class="o">:</span> <span class="n">Retry</span> <span class="n">in</span> <span class="mi">2</span><span class="n">s</span><span class="o">:</span> <span class="n">Exception</span><span class="p">()</span>
+<span class="p">[</span><span class="mi">2015</span><span class="o">-</span><span class="mo">07</span><span class="o">-</span><span class="mi">31</span> <span class="mi">16</span><span class="o">:</span><span class="mi">59</span><span class="o">:</span><span class="mi">28</span><span class="p">,</span><span class="mi">127</span><span class="o">:</span> <span class="n">INFO</span><span class="o">/</span><span class="n">MainProcess</span><span class="p">]</span> <span class="n">Received</span> <span class="n">task</span><span class="o">:</span> <span class="n">add</span><span class="p">.</span><span class="n">add</span><span class="p">[</span><span class="n">f9c6a487</span><span class="o">-</span><span class="mf">9f</span><span class="n">d7</span><span class="o">-</span><span class="mi">4</span><span class="n">bb2</span><span class="o">-</span><span class="mi">8</span><span class="n">db6</span><span class="o">-</span><span class="mi">2</span><span class="n">c58849809c7</span><span class="p">]</span> <span class="n">eta</span><span class="o">:</span><span class="p">[</span><span class="mi">2015</span><span class="o">-</span><span class="mo">07</span><span class="o">-</span><span class="mi">31</span> <span class="mi">11</span><span class="o">:</span><span class="mi">29</span><span class="o">:</span><span class="mf">30.115907</span><span class="o">+</span><span class="mo">00</span><span class="o">:</span><span class="mo">00</span><span class="p">]</span>
+<span class="p">[</span><span class="mi">2015</span><span class="o">-</span><span class="mo">07</span><span class="o">-</span><span class="mi">31</span> <span class="mi">16</span><span class="o">:</span><span class="mi">59</span><span class="o">:</span><span class="mi">28</span><span class="p">,</span><span class="mi">128</span><span class="o">:</span> <span class="n">INFO</span><span class="o">/</span><span class="n">MainProcess</span><span class="p">]</span> <span class="n">Task</span> <span class="n">add</span><span class="p">.</span><span class="n">add</span><span class="p">[</span><span class="n">f9c6a487</span><span class="o">-</span><span class="mf">9f</span><span class="n">d7</span><span class="o">-</span><span class="mi">4</span><span class="n">bb2</span><span class="o">-</span><span class="mi">8</span><span class="n">db6</span><span class="o">-</span><span class="mi">2</span><span class="n">c58849809c7</span><span class="p">]</span> <span class="n">retry</span><span class="o">:</span> <span class="n">Retry</span> <span class="n">in</span> <span class="mi">2</span><span class="n">s</span><span class="o">:</span> <span class="n">Exception</span><span class="p">()</span>
+<span class="p">[</span><span class="mi">2015</span><span class="o">-</span><span class="mo">07</span><span class="o">-</span><span class="mi">31</span> <span class="mi">16</span><span class="o">:</span><span class="mi">59</span><span class="o">:</span><span class="mi">30</span><span class="p">,</span><span class="mi">771</span><span class="o">:</span> <span class="n">ERROR</span><span class="o">/</span><span class="n">MainProcess</span><span class="p">]</span> <span class="n">Task</span> <span class="n">add</span><span class="p">.</span><span class="n">add</span><span class="p">[</span><span class="n">f9c6a487</span><span class="o">-</span><span class="mf">9f</span><span class="n">d7</span><span class="o">-</span><span class="mi">4</span><span class="n">bb2</span><span class="o">-</span><span class="mi">8</span><span class="n">db6</span><span class="o">-</span><span class="mi">2</span><span class="n">c58849809c7</span><span class="p">]</span> <span class="n">raised</span> <span class="n">unexpected</span><span class="o">:</span> <span class="n">Exception</span><span class="p">()</span>
+<span class="n">Traceback</span> <span class="p">(</span><span class="n">most</span> <span class="n">recent</span> <span class="n">call</span> <span class="n">last</span><span class="p">)</span><span class="o">:</span>
+  <span class="n">File</span> <span class="s">"/Users/akshar/.virtualenvs/hack/lib/python2.7/site-packages/celery/app/trace.py"</span><span class="p">,</span> <span class="n">line</span> <span class="mi">240</span><span class="p">,</span> <span class="n">in</span> <span class="n">trace_task</span>
+  <span class="p">...</span>
+  <span class="p">....</span>
+  <span class="n">File</span> <span class="s">"/Users/akshar/Play/Python/hack/add.py"</span><span class="p">,</span> <span class="n">line</span> <span class="mi">8</span><span class="p">,</span> <span class="n">in</span> <span class="n">add</span>
+    <span class="n">raise</span> <span class="n">Exception</span><span class="p">()</span>
+<span class="n">Exception</span>
+</pre></div>
+
+
+<h4>Explanation</h4>
+<ul>
+<li>Task ran for first time.</li>
+<li>An error was raised which you caught.</li>
+<li>We retried the task after 2 seconds in case of error.</li>
+<li>Currently our task is written in such a way that every run of task raises error. So first retry of task also raised error.</li>
+<li>Task was retried for 3 times, which is the celery default.</li>
+<li>Third retry also raised an error, but instead of executing the code of "except" block, celery is smart to figure out that a task should only be retried 3 times and should not be retried forever.</li>
+</ul>
+<h4>Retry only once</h4>
+<p>Suppose you only want to retry a failed task once instead of three which is the celery default.</p>
+<p>Change self.retry line, so it looks like</p>
+<div class="highlight"><pre><span class="n">self</span><span class="p">.</span><span class="n">retry</span><span class="p">(</span><span class="n">countdown</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span> <span class="n">exc</span><span class="o">=</span><span class="n">e</span><span class="p">,</span> <span class="n">max_retries</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+</pre></div>
+
+
+<p>Restart celery and run the task, output would be</p>
+<div class="highlight"><pre><span class="k">[2015-07-31 17:36:57,065: INFO/MainProcess] Received task: add.add[d1b099a4-026f-4bff-9bfd-8833a2b742e3]</span>
+<span class="k">[2015-07-31 17:36:57,086: INFO/MainProcess] Received task: add.add[d1b099a4-026f-4bff-9bfd-8833a2b742e3] eta:[2015-07-31 12:06:59.076743+00:00]</span>
+<span class="err">[2015-07-31</span> <span class="err">17:36:57,087:</span> <span class="err">INFO/MainProcess]</span> <span class="err">Task</span> <span class="err">add.add[d1b099a4-026f-4bff-9bfd-8833a2b742e3]</span> <span class="err">retry:</span> <span class="err">Retry</span> <span class="err">in</span> <span class="err">2s:</span> <span class="err">Exception()</span>
+<span class="err">[2015-07-31</span> <span class="err">17:37:00,968:</span> <span class="err">ERROR/MainProcess]</span> <span class="err">Task</span> <span class="err">add.add[d1b099a4-026f-4bff-9bfd-8833a2b742e3]</span> <span class="err">raised</span> <span class="err">unexpected:</span> <span class="err">Exception()</span>
+<span class="err">Traceback</span> <span class="err">(most</span> <span class="err">recent</span> <span class="err">call</span> <span class="err">last):</span>
+  <span class="err">File</span> <span class="err">"/Users/akshar/.virtualenvs/hack/lib/python2.7/site-packages/celery/app/trace.py",</span> <span class="err">line</span> <span class="err">240,</span> <span class="err">in</span> <span class="err">trace_task</span>
+  <span class="err">......</span>
+  <span class="err">File</span> <span class="err">"/Users/akshar/Play/Python/hack/add.py",</span> <span class="err">line</span> <span class="err">8,</span> <span class="err">in</span> <span class="err">add</span>
+    <span class="err">raise</span> <span class="err">Exception()</span>
+<span class="err">Exception</span>
+</pre></div>
+
+
+<p>This time, the failed task was retried only once.</p>
+<h3>Replicating exact Twitter scenario</h3>
+<p>We want the task to succeed in some cases and fail in other cases. Modify your code, so it looks like:</p>
+<div class="highlight"><pre><span class="n">import</span> <span class="n">random</span>
+
+<span class="n">from</span> <span class="n">celery</span> <span class="n">import</span> <span class="n">Celery</span>
+
+<span class="n">app</span> <span class="o">=</span> <span class="n">Celery</span><span class="p">(</span><span class="err">'</span><span class="n">add</span><span class="err">'</span><span class="p">,</span> <span class="n">broker</span><span class="o">=</span><span class="err">'</span><span class="n">redis</span><span class="o">:</span><span class="c1">//localhost:6379/0')</span>
+
+<span class="err">@</span><span class="n">app</span><span class="p">.</span><span class="n">task</span><span class="p">(</span><span class="n">bind</span><span class="o">=</span><span class="n">True</span><span class="p">)</span>
+<span class="n">def</span> <span class="n">add</span><span class="p">(</span><span class="n">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">)</span><span class="o">:</span>
+    <span class="err">#</span> <span class="n">Get</span> <span class="n">a</span> <span class="n">random</span> <span class="n">number</span> <span class="n">between</span> <span class="mi">1</span> <span class="n">and</span> <span class="mi">10</span>
+    <span class="n">num</span> <span class="o">=</span> <span class="n">random</span><span class="p">.</span><span class="n">randint</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">10</span><span class="p">)</span>
+    <span class="n">print</span> <span class="n">num</span> <span class="err">#</span> <span class="n">To</span> <span class="n">help</span> <span class="n">properly</span> <span class="n">understand</span> <span class="n">output</span>
+    <span class="nl">try:</span>
+        <span class="err">#</span> <span class="n">If</span> <span class="n">number</span> <span class="n">is</span> <span class="n">odd</span><span class="p">,</span> <span class="n">fail</span> <span class="n">the</span> <span class="n">task</span>
+        <span class="k">if</span> <span class="n">num</span> <span class="o">%</span> <span class="mi">2</span><span class="o">:</span>
+            <span class="n">raise</span> <span class="n">Exception</span><span class="p">()</span>
+        <span class="err">#</span> <span class="n">If</span> <span class="n">number</span> <span class="n">is</span> <span class="n">even</span><span class="p">,</span> <span class="n">succeed</span> <span class="n">the</span> <span class="n">task</span>
+        <span class="nl">else:</span>
+            <span class="k">return</span> <span class="n">x</span> <span class="o">+</span> <span class="n">y</span>
+    <span class="n">except</span> <span class="n">Exception</span> <span class="n">as</span> <span class="n">e</span><span class="o">:</span>
+        <span class="n">self</span><span class="p">.</span><span class="n">retry</span><span class="p">(</span><span class="n">countdown</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span> <span class="n">exc</span><span class="o">=</span><span class="n">e</span><span class="p">,</span> <span class="n">max_retries</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+</pre></div>
+
+
+<h4>Explanation</h4>
+<p>In our task, we generate a random number between 1 and 10. If the number is even then the task succeeds and returns the sum of numbers. If the generated random number is odd then the task fails, in which case we retry the task after 2 seconds.</p>
+<h4>Outputs of some random runs of tasks</h4>
+<div class="highlight"><pre><span class="k">[2015-07-31 17:47:13,800: INFO/MainProcess] Received task: add.add[879c089d-54fb-4592-96e4-325f61bdce39]</span>
+<span class="err">[2015-07-31</span> <span class="err">17:47:13,801:</span> <span class="err">WARNING/Worker-3]</span> <span class="err">7</span>
+<span class="k">[2015-07-31 17:47:13,822: INFO/MainProcess] Received task: add.add[879c089d-54fb-4592-96e4-325f61bdce39] eta:[2015-07-31 12:17:15.811826+00:00]</span>
+<span class="err">[2015-07-31</span> <span class="err">17:47:13,823:</span> <span class="err">INFO/MainProcess]</span> <span class="err">Task</span> <span class="err">add.add[879c089d-54fb-4592-96e4-325f61bdce39]</span> <span class="err">retry:</span> <span class="err">Retry</span> <span class="err">in</span> <span class="err">2s:</span> <span class="err">Exception()</span>
+<span class="err">[2015-07-31</span> <span class="err">17:47:16,873:</span> <span class="err">WARNING/Worker-1]</span> <span class="err">8</span>
+<span class="err">[2015-07-31</span> <span class="err">17:47:16,874:</span> <span class="err">INFO/MainProcess]</span> <span class="err">Task</span> <span class="err">add.add[879c089d-54fb-4592-96e4-325f61bdce39]</span> <span class="err">succeeded</span> <span class="err">in</span> <span class="err">0.00106367497938s:</span> <span class="err">7</span>
+</pre></div>
+
+
+<p>Generated random number was 7. So task raised an exception and so it was retried in 2 secs. In the retried run, generated random number was 8 which is even and so no exception was raised and instead the sum was calculated and returned.</p>
+<p>Another output</p>
+<div class="highlight"><pre><span class="k">[2015-07-31 17:47:33,681: INFO/MainProcess] Received task: add.add[64e43f81-0f80-49ac-a068-4c84c689ea16]</span>
+<span class="err">[2015-07-31</span> <span class="err">17:47:33,681:</span> <span class="err">WARNING/Worker-2]</span> <span class="err">7</span>
+<span class="k">[2015-07-31 17:47:33,703: INFO/MainProcess] Received task: add.add[64e43f81-0f80-49ac-a068-4c84c689ea16] eta:[2015-07-31 12:17:35.692557+00:00]</span>
+<span class="err">[2015-07-31</span> <span class="err">17:47:33,704:</span> <span class="err">INFO/MainProcess]</span> <span class="err">Task</span> <span class="err">add.add[64e43f81-0f80-49ac-a068-4c84c689ea16]</span> <span class="err">retry:</span> <span class="err">Retry</span> <span class="err">in</span> <span class="err">2s:</span> <span class="err">Exception()</span>
+<span class="err">[2015-07-31</span> <span class="err">17:47:36,890:</span> <span class="err">WARNING/Worker-4]</span> <span class="err">3</span>
+<span class="err">[2015-07-31</span> <span class="err">17:47:36,894:</span> <span class="err">ERROR/MainProcess]</span> <span class="err">Task</span> <span class="err">add.add[64e43f81-0f80-49ac-a068-4c84c689ea16]</span> <span class="err">raised</span> <span class="err">unexpected:</span> <span class="err">Exception()</span>
+<span class="err">Traceback</span> <span class="err">(most</span> <span class="err">recent</span> <span class="err">call</span> <span class="err">last):</span>
+  <span class="err">File</span> <span class="err">"/Users/akshar/.virtualenvs/hack/lib/python2.7/site-packages/celery/app/trace.py",</span> <span class="err">line</span> <span class="err">240,</span> <span class="err">in</span> <span class="err">trace_task</span>
+  <span class="err">...</span>
+  <span class="err">File</span> <span class="err">"/Users/akshar/Play/Python/hack/add.py",</span> <span class="err">line</span> <span class="err">15,</span> <span class="err">in</span> <span class="err">add</span>
+    <span class="err">raise</span> <span class="err">Exception()</span>
+<span class="err">Exception</span>
+</pre></div>
+
+
+<p>Generated random number was 7. So task raised an exception and so it was retried in 2 secs. In the retried run, generated random number was 3 which is again odd, so retried task also raised an exception. And since we have set <code>max_retries</code> as 1, no furter retry was done.</p>
+<h4>Setting a datetime instead of countdown</h4>
+<p>Till now we have been working with <strong>countdown</strong> which tells the number of seconds in which failed task should be retried. We can also set a datetime at which task should be retried.</p>
+<p>Let's retry the failed task after 2 seconds but using datetime instead of countdown.</p>
+<div class="highlight"><pre><span class="n">import</span> <span class="n">random</span>
+<span class="n">import</span> <span class="n">datetime</span>
+<span class="n">import</span> <span class="n">pytz</span>
+
+<span class="n">from</span> <span class="n">celery</span> <span class="n">import</span> <span class="n">Celery</span>
+
+<span class="n">app</span> <span class="o">=</span> <span class="n">Celery</span><span class="p">(</span><span class="err">'</span><span class="n">add</span><span class="err">'</span><span class="p">,</span> <span class="n">broker</span><span class="o">=</span><span class="err">'</span><span class="n">redis</span><span class="o">:</span><span class="c1">//localhost:6379/0')</span>
+
+<span class="err">@</span><span class="n">app</span><span class="p">.</span><span class="n">task</span><span class="p">(</span><span class="n">bind</span><span class="o">=</span><span class="n">True</span><span class="p">)</span>
+<span class="n">def</span> <span class="n">add</span><span class="p">(</span><span class="n">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">)</span><span class="o">:</span>
+    <span class="err">#</span> <span class="n">Get</span> <span class="n">a</span> <span class="n">random</span> <span class="n">number</span> <span class="n">between</span> <span class="mi">1</span> <span class="n">and</span> <span class="mi">10</span>
+    <span class="n">num</span> <span class="o">=</span> <span class="n">random</span><span class="p">.</span><span class="n">randint</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">10</span><span class="p">)</span>
+    <span class="n">print</span> <span class="n">num</span>
+    <span class="nl">try:</span>
+        <span class="err">#</span> <span class="n">If</span> <span class="n">number</span> <span class="n">is</span> <span class="n">odd</span><span class="p">,</span> <span class="n">fail</span> <span class="n">the</span> <span class="n">task</span>
+        <span class="k">if</span> <span class="n">num</span> <span class="o">%</span> <span class="mi">2</span><span class="o">:</span>
+            <span class="n">raise</span> <span class="n">Exception</span><span class="p">()</span>
+        <span class="err">#</span> <span class="n">If</span> <span class="n">number</span> <span class="n">is</span> <span class="n">even</span><span class="p">,</span> <span class="n">succeed</span> <span class="n">the</span> <span class="n">task</span>
+        <span class="nl">else:</span>
+            <span class="k">return</span> <span class="n">x</span> <span class="o">+</span> <span class="n">y</span>
+    <span class="n">except</span> <span class="n">Exception</span> <span class="n">as</span> <span class="n">e</span><span class="o">:</span>
+        <span class="n">dt</span> <span class="o">=</span> <span class="n">datetime</span><span class="p">.</span><span class="n">datetime</span><span class="p">.</span><span class="n">now</span><span class="p">(</span><span class="n">pytz</span><span class="p">.</span><span class="n">utc</span><span class="p">)</span> <span class="o">+</span> <span class="n">datetime</span><span class="p">.</span><span class="n">timedelta</span><span class="p">(</span><span class="n">seconds</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+        <span class="n">self</span><span class="p">.</span><span class="n">retry</span><span class="p">(</span><span class="n">eta</span><span class="o">=</span><span class="n">dt</span><span class="p">,</span> <span class="n">exc</span><span class="o">=</span><span class="n">e</span><span class="p">,</span> <span class="n">max_retries</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+</pre></div>
+
+
+<p>Output</p>
+<div class="highlight"><pre><span class="k">[2015-07-31 18:59:17,177: INFO/MainProcess] Received task: add.add[b5f95e50-da3a-4295-871a-fc940bef5c46]</span>
+<span class="err">[2015-07-31</span> <span class="err">18:59:17,178:</span> <span class="err">WARNING/Worker-3]</span> <span class="err">1</span>
+<span class="k">[2015-07-31 18:59:17,200: INFO/MainProcess] Received task: add.add[b5f95e50-da3a-4295-871a-fc940bef5c46] eta:[2015-07-31 13:29:19.178833+00:00]</span>
+<span class="err">[2015-07-31</span> <span class="err">18:59:17,202:</span> <span class="err">INFO/MainProcess]</span> <span class="err">Task</span> <span class="err">add.add[b5f95e50-da3a-4295-871a-fc940bef5c46]</span> <span class="err">retry:</span> <span class="err">Retry</span> <span class="err">at</span> <span class="err">2015-07-31</span> <span class="err">13:29:19.178833+00:00:</span> <span class="err">Exception()</span>
+<span class="err">[2015-07-31</span> <span class="err">18:59:19,690:</span> <span class="err">WARNING/Worker-1]</span> <span class="err">10</span>
+<span class="err">[2015-07-31</span> <span class="err">18:59:19,691:</span> <span class="err">INFO/MainProcess]</span> <span class="err">Task</span> <span class="err">add.add[b5f95e50-da3a-4295-871a-fc940bef5c46]</span> <span class="err">succeeded</span> <span class="err">in</span> <span class="err">0.00107540999306s:</span> <span class="err">7</span>
+</pre></div>
+
+
+<h3>Retrying failed Twitter tasks</h3>
+<p>I assume you have the idea of <a href="https://pypi.python.org/pypi/twitter" target="_blank">Python twitter library.</a>. My code before using retry looked like.</p>
+<div class="highlight"><pre><span class="n">import</span> <span class="n">twitter</span>
+
+<span class="err">@</span><span class="n">app</span><span class="p">.</span><span class="n">task</span><span class="p">(</span><span class="n">bind</span><span class="o">=</span><span class="n">True</span><span class="p">)</span>
+<span class="n">def</span> <span class="n">fetch_tweets</span><span class="p">(</span><span class="n">self</span><span class="p">)</span>
+    <span class="n">auth</span> <span class="o">=</span> <span class="n">twitter</span><span class="p">.</span><span class="n">OAuth</span><span class="p">(</span><span class="n">oauth_token</span><span class="p">,</span> <span class="n">oauth_token_secret</span><span class="p">,</span> <span class="n">key</span><span class="p">,</span> <span class="n">secret</span><span class="p">)</span>
+    <span class="n">client</span> <span class="o">=</span> <span class="n">twitter</span><span class="p">.</span><span class="n">Twitter</span><span class="p">(</span><span class="n">auth</span><span class="o">=</span><span class="n">auth</span><span class="p">)</span>
+    <span class="n">params</span> <span class="o">=</span> <span class="p">{</span><span class="err">'</span><span class="n">user_id</span><span class="err">'</span><span class="o">:</span> <span class="n">user_id</span><span class="p">,</span> <span class="err">'</span><span class="n">count</span><span class="err">'</span><span class="o">:</span> <span class="mi">2</span><span class="p">}</span>
+    <span class="n">response</span> <span class="o">=</span> <span class="n">client</span><span class="p">.</span><span class="n">favorites</span><span class="p">.</span><span class="n">list</span><span class="p">(</span><span class="o">**</span><span class="n">params</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">response</span>
+</pre></div>
+
+
+<p>Till first 180 calls, tasks were succeeding. 181st call onwards the tasks started failing. So I changed it to.</p>
+<div class="highlight"><pre><span class="n">import</span> <span class="n">twitter</span>
+
+<span class="err">@</span><span class="n">app</span><span class="p">.</span><span class="n">task</span><span class="p">(</span><span class="n">bind</span><span class="o">=</span><span class="n">True</span><span class="p">)</span>
+<span class="n">def</span> <span class="n">fetch_tweets</span><span class="p">(</span><span class="n">self</span><span class="p">)</span>
+    <span class="n">auth</span> <span class="o">=</span> <span class="n">twitter</span><span class="p">.</span><span class="n">OAuth</span><span class="p">(</span><span class="n">oauth_token</span><span class="p">,</span> <span class="n">oauth_token_secret</span><span class="p">,</span> <span class="n">key</span><span class="p">,</span> <span class="n">secret</span><span class="p">)</span>
+    <span class="n">client</span> <span class="o">=</span> <span class="n">twitter</span><span class="p">.</span><span class="n">Twitter</span><span class="p">(</span><span class="n">auth</span><span class="o">=</span><span class="n">auth</span><span class="p">)</span>
+    <span class="n">params</span> <span class="o">=</span> <span class="p">{</span><span class="err">'</span><span class="n">user_id</span><span class="err">'</span><span class="o">:</span> <span class="n">user_id</span><span class="p">,</span> <span class="err">'</span><span class="n">count</span><span class="err">'</span><span class="o">:</span> <span class="mi">2</span><span class="p">}</span>
+    <span class="nl">try:</span>
+        <span class="n">response</span> <span class="o">=</span> <span class="n">client</span><span class="p">.</span><span class="n">favorites</span><span class="p">.</span><span class="n">list</span><span class="p">(</span><span class="o">**</span><span class="n">params</span><span class="p">)</span>
+    <span class="n">except</span> <span class="n">twitter</span><span class="p">.</span><span class="n">TwitterError</span> <span class="n">as</span> <span class="n">e</span><span class="o">:</span>
+        <span class="k">if</span> <span class="n">e</span><span class="p">.</span><span class="n">e</span><span class="p">.</span><span class="n">code</span> <span class="o">==</span> <span class="mi">429</span><span class="o">:</span>
+            <span class="err">#</span> <span class="mi">429</span><span class="o">:</span> <span class="n">rate</span> <span class="n">limit</span> <span class="n">exceeded</span>
+            <span class="err">#</span> <span class="n">Ask</span> <span class="n">Twitter</span> <span class="n">to</span> <span class="n">tell</span> <span class="n">at</span> <span class="n">what</span> <span class="n">time</span> <span class="n">rate</span> <span class="n">limit</span> <span class="n">window</span> <span class="n">gets</span> <span class="n">reset</span>
+            <span class="n">rate_limit_status</span> <span class="o">=</span> <span class="n">self</span><span class="p">.</span><span class="n">client</span><span class="p">.</span><span class="n">application</span><span class="p">.</span><span class="n">rate_limit_status</span><span class="p">(</span><span class="n">resources</span><span class="o">=</span><span class="s">"statuses"</span><span class="p">)</span>
+            <span class="n">reset</span> <span class="o">=</span> <span class="n">rate_limit_status</span><span class="p">[</span><span class="s">"resources"</span><span class="p">][</span><span class="s">"statuses"</span><span class="p">][</span><span class="s">"/statuses/user_timeline"</span><span class="p">][</span><span class="s">"reset"</span><span class="p">]</span>
+            <span class="n">dt</span> <span class="o">=</span> <span class="n">datetime</span><span class="p">.</span><span class="n">datetime</span><span class="p">.</span><span class="n">utcfromtimestamp</span><span class="p">(</span><span class="n">reset</span><span class="p">)</span>
+            <span class="n">raise</span> <span class="n">self</span><span class="p">.</span><span class="n">retry</span><span class="p">(</span><span class="n">eta</span><span class="o">=</span><span class="n">dt</span><span class="p">,</span> <span class="n">exc</span><span class="o">=</span><span class="n">e</span><span class="p">,</span> <span class="n">max_retries</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">response</span>
+</pre></div>
+
+
+<p>After this, any failed tasks were retried when Twitter rate limit window gets reset.</p>
+
+      
+          <hr/>
+          
+      
+
+      
+      
+        <h4>Related Posts</h4>
+        
+      
+
+      <hr/>
+      <p>Can we help you build amazing apps? <a href="/contactus">Contact us today.</a>
+    
+    </p> 
+
+
+  </div>
+</div></body></html>

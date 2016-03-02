@@ -1,0 +1,154 @@
+<html><body><div><div class="post-body entry-content">
+<p>
+I caught Toshio Kuratomi's post about <a href="https://anonbadger.wordpress.com/2014/12/20/pattern-or-antipattern-splitting-up-initialization-with-asyncio/">asyncio initialization patterns (or anti-patterns)</a> on Planet Python.  This is something I've dealt with a lot over the years using <a href="http://twistedmatrix.com/">Twisted</a> (one of the sources of inspiration for the asyncio developers).
+</p>
+
+<p>
+To recap, Toshio wondered about a pattern involving asynchronous initialization of an instance.  He wondered whether it was a good idea to start this work in <code>__init__</code> and then explicitly wait for it in other methods of the class before performing the distinctive operations required by those other methods.  Using asyncio (and using Toshio's example with some omissions for simplicity) this looks something like:
+</p>
+
+<p>
+</p><pre>
+class Microblog:
+    def __init__(self, ...):
+        loop = asyncio.get_event_loop()
+        self.init_future = loop.run_in_executor(None, self._reading_init)
+
+    def _reading_init(self):
+        # ... do some initialization work,
+        # presumably expensive or otherwise long-running ...
+
+   @asyncio.coroutine
+    def sync_latest(self):
+        # Don't do anything until initialization is done
+        yield from self.init_future
+        # ... do some work that depends on that initialization ...
+</pre>
+
+
+<p>
+It's quite possible to do something similar to this when using Twisted.  It only looks a little bit difference:
+</p>
+
+<p>
+</p><pre>
+class Microblog:
+    def __init__(self, ...):
+        self.init_deferred = deferToThread(self._reading_init)
+
+    def _reading_init(self):
+        # ... do some initialization work,
+        # presumably expensive or otherwise long-running ...
+
+   @inlineCallbacks
+    def sync_latest(self):
+        # Don't do anything until initialization is done
+        yield self.init_deferred
+        # ... do some work that depends on that initialization ...
+</pre>
+
+
+<p>
+Despite the differing names, these two pieces of code basical do the same thing:
+</p><ul>
+<li>run <code>_reading_init</code> in a thread from a thread pool</li>
+<li>whenever <code>sync_latest</code> is called, first suspend its execution until the thread running <code>_reading_init</code> has finished running it</li>
+</ul>
+
+
+<h3>Maintenance costs</h3>
+
+<p>
+One thing this pattern gives you is an <em>incompletely initialized object</em>.  If you write <code>m = Microblog()</code> then <code>m</code> refers to an object that's not actually ready to perform all of the operations it supposedly can perform.  It's either up to the implementation or the caller to make sure to wait until it <strong>is</strong> ready.  Toshio suggests that each method should do this implicitly (by starting with <code>yield self.init_deferred</code> or the equivalent).  This is definitely better than forcing each call-site of a <code>Microblog</code> method to explicitly wait for this event before actually calling the method.
+</p><p>
+
+</p><p>
+Still, this is a maintenance burden that's going to get old quickly.  If you want full test coverage, it means you now need twice as many unit tests (one for the case where method is called before initialization is complete and another for the case where the method is called after this has happened).  At least.  Toshio's <code>_reading_init</code> method actually modifies attributes of <code>self</code> which means there are potentially many more than just two possible cases.  Even if you're not particularly interested in having full automated test coverage (... for <em>some</em> reason ...), you still have to remember to add this yield statement to the beginning of all of <code>Microblog</code>'s methods.  It's not exactly a ton of work but it's one more thing to remember any time you maintain this code.  And this is the kind of mistake where making a mistake creates a race condition that you might not immediately notice - which means you may ship the broken code to clients and you get to discover the problem when they start complaining about it.
+</p>
+
+<h3>Diminished flexibility</h3>
+
+<p>
+Another thing this pattern gives you is an object that <em>does</em> things as soon as you create it.  Have you ever had a class with a <code>__init__</code> method that raised an exception as a result of a failing interaction with some other part of the system?  Perhaps it did file I/O and got a permission denied error or perhaps it was a socket doing blocking I/O on a network that was clogged and unresponsive.  Among other problems, these cases are often difficult to report well because you <em>don't have</em> an object to blame the problem on yet.  The asynchronous version is perhaps even worse since a failure in this asynchronous initialization doesn't actually prevent you from getting the instance - it's just another way you can end up with an incompletely initialized object (this time, one that is never going to be completely initialized and use of which is unsafe in difficult to reason-about ways).</p>
+
+<p>
+Another related problem is that it removes one of your options for controlling the behavior of instances of that class.  It's great to be able to control everything a class does just by the values passed in to <code>__init__</code> but most programmers have probably come across a case where behavior is controlled via an attribute instead.  If <code>__init__</code> starts an operation then instantiating code doesn't have a chance to change the values of any attributes first (except, perhaps, by resorting to setting them on the class - which has global consequences and is generally icky).
+</p>
+
+<h3>Loss of control</h3>
+
+<p>
+A third consequence of this pattern is that instances of classes which employ it are inevitably <em>doing</em> something.  It may be that you don't always <strong>want</strong> the instance to do something.  It's certainly fine for a <code>Microblog</code> instance to create a SQLite3 database and initialize a cache directory if the program I'm writing which uses it is actually intent on hosting a blog.  It's most likely the case that other useful things can be done with a <code>Microblog</code> instance, though.  Toshio's own example includes a <code>post</code> method which <em>doesn't use</em> the SQLite3 database or the cache directory.  His code correctly <em>doesn't</em> wait for <code>init_future</code> at the beginning of his <code>post</code> method - but this should leave the reader wondering why we need to create a SQLite3 database if all we want to do is post new entries.
+</p>
+
+<p>
+Using this pattern, the SQLite3 database is always created - whether we want to use it or not.  There are other reasons you might want a <code>Microblog</code> instance that hasn't initialized a bunch of on-disk state too - one of the most common is unit testing (yes, I said "unit testing" twice in one post!).  A very convenient thing for a lot of unit tests, both of <code>Microblog</code> itself and of code that uses <code>Microblog</code>, is to <em>compare instances of the class</em>.  How do you know you got a <code>Microblog</code> instance that is configured to use the right cache directory or database type?  You most likely want to make some comparisons against it.  The ideal way to do this is to be able to instantiate a <code>Microblog</code> instance in your test suite and uses its <code>==</code> implementation to compare it against an object given back by some API you've implemented.  If creating a <code>Microblog</code> instance always goes off and creates a SQLite3 database then at the very least your test suite is going to be doing a lot of unnecessary work (making it slow) and at worst perhaps the two instances will fight with each other over the same SQLite3 database file (which they must share since they're meant to be instances representing the same state).
+
+Another way to look at this is that inextricably embedding the database connection logic into your <code>__init__</code> method has taken control away from the user.  Perhaps they have their own database connection setup logic.  Perhaps they want to re-use connections or pass in a fake for testing.  Saving a reference to that object on the instance for later use is a separate operation from creating the connection itself.  They shouldn't be bound together in <code>__init__</code> where you have to take them both or give up on using <code>Microblog</code>.
+</p>
+
+<h3>Alternatives</h3>
+
+<p>
+You might notice that these three observations I've made all sound a bit negative.  You might conclude that I think this is an antipattern to be avoided.  If so, feel free to give yourself a pat on the back at this point.
+</p>
+
+<p>
+But if this is an antipattern, is there a pattern to use instead?  I think so.  I'll try to explain it.
+</p>
+
+<p>
+The general idea behind the pattern I'm going to suggest comes in two parts.  The first part is that your object should primarily be about representing state and your <code>__init__</code> method should be about accepting that state from the outside world and storing it away on the instance being initialized for later use.  It should always represent complete, internally consistent state - not partial state as asynchronous initialization implies.  This means your <code>__init__</code> methods should mostly look like this:
+</p>
+
+<p>
+</p><pre>
+class Microblog(object):
+    def __init__(self, cache_dir, database_connection):
+        self.cache_dir = cache_dir
+        self.database_connection = database_connection
+</pre>
+
+
+<p>
+If you think that looks boring - yes, it does.  Boring is a good thing here.  Anything exciting your <code>__init__</code> method does is probably going to be the cause of someone's bad day sooner or later.  If you think it looks tedious - yes, it does.  Consider using Hynek Schlawack's excellent <a href="https://pypi.python.org/pypi/characteristic">characteristic</a> package (full disclosure - I contributed some ideas to characteristic's design and Hynek ocassionally says nice things about me (I don't know if he means them, I just know he says them)).
+</p>
+
+<p>
+The second part of the idea an acknowledgement that asynchronous initialization is a reality of programming with asynchronous tools.  Fortunately <code>__init__</code> isn't the only place to put code.  <em>Asynchronous factory functions</em> are a great way to wrap up the asynchronous work sometimes necessary before an object can be fully and consistently initialized.  Put another way:
+</p>
+
+<p>
+</p><pre>
+class Microblog(object):
+    # ... __init__ as above ...
+
+    @classmethod
+    @asyncio.coroutine
+    def from_database(cls, cache_dir, database_path):
+        # ... or make it a free function, not a classmethod, if you prefer
+        loop = asyncio.get_event_loop()
+        database_connection = yield from loop.run_in_executor(None, cls._reading_init)
+        return cls(cache_dir, database_connection)
+</pre>
+
+
+<p>
+Notice that the setup work for a <code>Microblog</code> instance is still asynchronous but <em>initialization</em> of the <code>Microblog</code> instance is not.  There is never a time when a <code>Microblog</code> instance is hanging around <strong>partially</strong> ready for action.  There is setup work and then there is a complete, usable <code>Microblog</code>.
+</p>
+
+<p>
+This addresses the three observations I made above:
+</p><ul>
+<li>Methods of <code>Microblog</code> never need to concern themselves with worries about whether the instance has been <em>completely</em> initialized yet or not.</li>
+<li>Nothing happens in <code>Microblog.__init__</code>.  If <code>Microblog</code> has some methods which depend on instance attributes, any of those attributes can be set after <code>__init__</code> is done and before those other methods are called.  If the <code>from_database</code> constructor proves insufficiently flexible, it's easy to introduce a new constructor that accounts for the new requirements (named constructors mean never having to overload <code>__init__</code> for different competing purposes again).</li>
+<li>It's easy to treat a <code>Microblog</code> instance as an inert lump of state.  Simply instantiating one (using <code>Microblog(...)</code> has no side-effects.  The special extra operations required if one wants the more convenient constructor are still available - but elsewhere, where they won't get in the way of unit tests and unplanned-for uses.</li>
+</ul>
+
+
+<p>
+I hope these points have made a strong case for one of these approaches being an anti-pattern to avoid (in Twisted, in asyncio, or in any other asynchronous programming context) and for the other as being a useful pattern to provide both convenient, expressive constructors while at the same time making object initializers unsurprising and maximizing their usefulness.
+</p>
+<p/>
+</div>
+</div></body></html>

@@ -1,0 +1,133 @@
+<html><body><div><div class="content">
+  
+  <p class="postdate">August 26, 2014</p>
+  
+<p>
+Subclass relationships are not transitive in Python. That is, if A is a subclass of B, and B is a subclass of C, it is not necessarily true that A is a subclass of C. The reason for this is that with <a href="http://legacy.python.org/dev/peps/pep-3119/">PEP 3119</a>, anyone is allowed to define their own, arbitrary __subclasscheck__ in a <a href="http://stackoverflow.com/questions/100003/what-is-a-metaclass-in-python">metaclass</a>.
+</p>
+<p>
+Now, it's true that many others Python features trust the programmer to preserve invariants--for example, you can define an intransitive __le__ method, or mess up reference counts in a C-extension. But even the classes defined in the standard libraries do not obey subclass transitivity! Here's a simple example demonstrating this:
+</p>
+<pre data-language="python">
+&gt;&gt;&gt; from collections import Hashable
+&gt;&gt;&gt; issubclass(list, object)
+True
+&gt;&gt;&gt; issubclass(object, Hashable)
+True
+&gt;&gt;&gt; issubclass(list, Hashable)
+False
+</pre>
+
+<p>
+As we see in the (Python 3.4) code below, when you call issubclass(cls, Hashable), the Hashable class simply looks for the presence of a non-Falsey "__hash__" method in cls or anything it inherits from. (The Python 2.7 code has the same logic but is a bit more complicated in order to handle old-style classes).
+</p>
+<pre data-language="python">
+class Hashable(metaclass=ABCMeta):
+
+    __slots__ = ()
+
+    @abstractmethod
+    def __hash__(self):
+        return 0
+
+    @classmethod
+    def __subclasshook__(cls, C): 
+        if cls is Hashable:
+            for B in C.__mro__:
+                if "__hash__" in B.__dict__:
+                    if B.__dict__["__hash__"]:
+                        return True
+                    break
+        return NotImplemented
+</pre>
+
+<p>
+Since object is hashable, subclass transitivity then breaks for all non-hashable <a href="http://stackoverflow.com/questions/54867/old-style-and-new-style-classes-in-python">new-style classes</a>. Or more generally, it breaks any time someone inherits from a hashable class and then sets __hash__ = None in the child class. The other abstract collections do similar things in their __subclasshook__ methods, and thus introduce the same potential problems.
+</p>
+<p>
+But the real causes of subclass intransitivity are metaclass-defined __subclasscheck__'s in general, not the ABCMeta __subclasscheck__ in particular, (which calls into the __subclasshook__ method above). Here's a (Python 2.7) example showing how to make issubclass do whatever you want:
+</p>
+<pre data-language="python">
+class MyMetaClass(type):
+    def __subclasscheck__(cls, subclass):
+        print("Whateva, I do what I want!")
+        import random
+        return random.choice([True, False])
+
+
+#class MyClass(metaclass=MyMetaClass):  # for Python 3
+class MyClass:
+    __metaclass__ = MyMetaClass
+
+print(issubclass(list, MyClass))
+</pre>
+
+<p>
+To determine how often subclass transitivity fails, I slapped together a <a href="https://gist.github.com/naftaliharris/68b4a09af50df8c15381">script</a> that finds all the intransitive triplets in the standard library. I found 2,371 classes in the Python 2.7.3 standard library on Linux; (note that a few platform-specific modules are only available on some platforms). These 2,371 classes resulted in 33,541  "eligible triplets", that is, triplets of types A, B, and C, where A is a subclass of B, and B is a subclass of C. Of these 33,541 eligible triplets, 1,449 (4.3%) were intransitive; that is, A was not a subclass of C.
+</p>
+<p>
+These 1,449 intransitive triplets were mostly caused by abstract collections like Hashable. Sometimes, old-style classes would also play a role in subclass intransitivity, since old-style classes aren't subclasses of object, but are often "subclasses" of abstract collections which are subclasses of object. Below I've summarized the intransitive pairs with counts of the classes B and C.
+</p>
+<pre>
+267  (_, _abcoll.Iterable, _abcoll.Hashable)
+229  (_, _abcoll.Iterable, __builtin__.object)
+219  (_, _abcoll.Container, _abcoll.Hashable)
+183  (_, _abcoll.Container, __builtin__.object)
+119  (_, _abcoll.Iterator, _abcoll.Hashable)
+118  (_, _abcoll.Iterator, __builtin__.object)
+103  (_, _abcoll.Sized, _abcoll.Hashable)
+66   (_, _abcoll.Sized, __builtin__.object)
+50   (_, __builtin__.object, _abcoll.Hashable)
+20   (_, _abcoll.Callable, _abcoll.Hashable)
+18   (_, _abcoll.Callable, __builtin__.object)
+12   (_, io.IOBase, _io._IOBase)
+7    (_, io.BufferedIOBase, _io._BufferedIOBase)
+7    (_, io.BufferedIOBase, _io._IOBase)
+6    (_, _abcoll.Sequence, _abcoll.Hashable)
+6    (_, _abcoll.MutableSequence, _abcoll.Hashable)
+3    (_, io.TextIOBase, _io._TextIOBase)
+3    (_, io.TextIOBase, _io._IOBase)
+3    (_, _abcoll.Hashable, __builtin__.object)
+2    (_, _abcoll.MutableMapping, __builtin__.object)
+2    (_, _abcoll.MappingView, _abcoll.Hashable)
+2    (_, _abcoll.Mapping, __builtin__.object)
+1    (_, io.RawIOBase, _io._RawIOBase)
+1    (_, UserString.UserString, _abcoll.Hashable)
+1    (_, argparse._AttributeHolder, _abcoll.Hashable)
+1    (_, io.RawIOBase, _io._IOBase)
+</pre>
+<p>
+For example, Iterable is a "subclass" of Hashable--seriously, because Iterable has the __hash__ method it inherits from object--but 267 iterable classes are not hashable.
+</p>
+<p>
+So are Python's intransitive subclass relationships a big deal? For day-to-day coding, it's probably not the end of the world: I'd be surprised if very many people have written code relying on subclass transitivity. And in a community which emphasizes duck-typing, extensive use of issubclass and isinstance is somewhat frowned upon anyway.
+</p>
+<p>
+But I do think this is a big deal from a language beauty and simplicity perspective. Intransitive subclass relationships defy the common-sense understanding of what it means for A to be a subclass of B. They turn the naive, simple concept of subclasses into a complicated one involving metaclasses, abstract classes, subclasschecks, and subclasshooks. In short, I believe subclass intransitivity goes against the spirit of several of the pythonic guidelines written by Tim Peters in his wonderful "The Zen of Python":
+</p>
+
+<pre>
+Beautiful is better than ugly.
+Explicit is better than implicit.
+Simple is better than complex.
+Complex is better than complicated.
+Flat is better than nested.
+...
+</pre>
+
+<p>
+The alternative I'd prefer is to remove the __subclasscheck__ capability from metaclasses. For those who want it, I'd keep the logic that's currently in the __subclasshook__'s of these abstract collections, and move it into functions with names like "is_hashable" in the inspect module. This is keeping with the idea that "explicit is better than implicit" and "flat is better than nested": When someone calls issubclass(A, Hashable), they really just want to run the code in the Hashable __subclasshook__, but instead end up calling into code nested several layers deep.
+</p>
+<p>
+Moving this logic into inspect would preserve the same functionality of the abstract collections, while being be simpler, flatter, and more explicit. It would also keep subclass relationships simple and transitive.
+</p>
+
+
+  
+
+  <h3>You might also enjoy...</h3>
+  
+
+</div>
+
+</div></body></html>

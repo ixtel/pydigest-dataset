@@ -1,0 +1,1467 @@
+<html><body><div><section>
+            
+
+<p>We have implemented a number of systems in support of our <a href="http://www.erlang.org/">Erlang</a>-based
+  real-time bidding platform.  One of these is a <a href="http://www.celeryproject.org/">Celery</a> task system which runs
+  code implemented in Python on a set of worker instances running on <a href="https://aws.amazon.com/ec2/">Amazon
+  EC2</a>.</p>
+
+<p>With the <a href="https://aws.amazon.com/blogs/aws/aws-lambda-update-python-vpc-increased-function-duration-scheduling-and-more/">recent announcement</a> of built-in support for Python
+  in <a href="http://aws.amazon.com/lambda/">AWS Lambda</a> functions (and upcoming access to VPC resources from
+  Lambda), we’ve started considering increased use of Lambda for a number of applications.</p>
+
+<p>In this post, we’ll present a complete example of a data aggregation system using
+  Python-based Lambda functions, S3 events, and DynamoDB triggers; and configured using
+  the AWS command-line tools (<code>awscli</code>) wherever possible.  <em>(Note: Some of these steps
+  are handled automatically when using the AWS console.)</em></p>
+
+<p>Here’s how our completed system will look:</p>
+
+<p><img src="/images/post_images/lambda-counter-aggregator-overview.png" alt="Lambda-based counter aggregation system overview, image made with draw.io"/></p>
+
+<h2 id="why">Why?</h2>
+
+<p>Each of our EC2 instances participating in RTB maintains a set of counter values: these
+  represent the health of an important aspect of our platform.  Each instance reports
+  these values using Kinesis, and also periodically uploads its set of counters to a
+  per-instance key on S3 as part of a failsafe system.  When we aggregate these counter
+  values, we have greater insight into whether our system as a whole is healthy (and we
+  can take action automatically when it isn’t).  This post will focus on a system which
+  can process the data we upload to S3.</p>
+
+<p>Here’s what we actually want to do with our per-instance counters:</p>
+
+<ol>
+  <li>
+    <p>Have an up-to-date global view of total summed counter values across all instances.</p>
+  </li>
+  <li>
+    <p>Take action whenever the summed counter values change.</p>
+  </li>
+</ol>
+
+<h3 id="current-solution">Current solution</h3>
+
+<p>One of our Celery tasks <em>(A)</em> implements counter aggregation, with the output consumed
+  by a periodic downstream task <em>(B)</em> implementing our business logic.  Every few minutes,
+  task <em>A</em> does the following:</p>
+
+<ol>
+  <li>
+    <p>Scans an S3 bucket prefix for keys having a certain naming convention.  <em>(Each of
+  these keys represents counter data uploaded by a single EC2 instance, and each key name
+  includes the current date and the ID of the instance which uploaded it.  An instance
+  usually writes to the same key.)</em></p>
+  </li>
+  <li>
+    <p>Reads the contents of all these keys, which have a format like the following:</p>
+
+    <pre>
+ COUNTER1 VALUE1
+ COUNTER2 VALUE2
+ COUNTER3 VALUE3</pre>
+  </li>
+  <li>
+    <p>Sums all the values for each counter.  <em>(The same counter can appear in multiple
+  files.)</em></p>
+  </li>
+  <li>
+    <p>Writes the summed counter values to a single S3 key for use in task <em>B</em>, which
+  can then take action on the aggregate counter values.</p>
+  </li>
+</ol>
+
+<h3 id="drawbacks-of-current-solution">Drawbacks of current solution</h3>
+
+<p>We’re essentially polling S3 to detect file changes, and we’re also reprocessing data
+  which has not necessarily changed.  This is time-consuming and ties up resources which
+  could have been allocated elsewhere.</p>
+
+<p>It also would be nice to react more quickly to updated counter values.  With our current
+  implementation, there can be significant lag between a counter data upload and actually
+  observing its contribution to the global aggregate value.</p>
+
+<h2 id="enter-lambda">Enter Lambda</h2>
+
+<p>Lambda promises scalable, serverless, event-based code execution with granular billing.
+  This is a compelling value proposition for the following reasons:</p>
+
+<ul>
+  <li>
+    <p>Standalone code bundles are the unit of deployment;</p>
+  </li>
+  <li>
+    <p>We can run our code while only paying for the time spent actually executing it instead
+of spending money on idle CPU time;</p>
+  </li>
+  <li>
+    <p>We can reduce the peak load experienced by our task system (by migrating certain
+frequent and spiky tasks to Lambda), allowing us to reduce the amount of resources
+allocated to it while increasing utilization of the remaining resources;</p>
+  </li>
+  <li>
+    <p>Our counter system will perform its work in a more timely manner by responding to
+events instead of scanning S3, and it will avoid reprocessing data which has not
+changed.</p>
+  </li>
+</ul>
+
+<p>Using Lambda is now much easier thanks to the recently-announced built-in support for
+  Python.  <em>(Note: it has always been possible to run Python-based code, but now it’s
+  easier to get started.)</em></p>
+
+<h2 id="system-design">System design</h2>
+
+<p>We want a system which can react to S3 events, process and aggregate data associated
+  with those events, and eventually convey some processed data back to S3 after executing
+  some business logic.</p>
+
+<h3 id="cost-comparison">Cost comparison</h3>
+
+<p>We can do all of this using Lambda, but should we?  Let’s do a rough cost estimate
+  assuming we have 100 instances each uploading to S3 a file containing 100 counters every
+  60 seconds.</p>
+
+<h4 id="original-system">Original system</h4>
+
+<p>Suppose (1) we created our task system only to support <a href="#current-solution">our two tasks <em>A</em> and
+  <em>B</em></a>, (2) that we scan S3 every five minutes, (3) that task <em>A</em>
+  completes in 60 seconds, and (4) that we deploy four times.</p>
+
+<p>We might then have the following costs:</p>
+
+<table class="cost-comparison">
+  <thead>
+    <tr>
+      <th>Description</th>
+      <th>Cost</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>task scheduler (t2.micro)</td>
+      <td>$0.013 / hour</td>
+    </tr>
+    <tr>
+      <td>task worker (m3.medium)</td>
+      <td>$0.067 / hour</td>
+    </tr>
+    <tr>
+      <td>S3 usage</td>
+      <td>negligible</td>
+    </tr>
+    <tr>
+      <td>design/configure/test/deploy task infrastructure</td>
+      <td>16 hours</td>
+    </tr>
+    <tr>
+      <td>design/test this task</td>
+      <td>4 hours</td>
+    </tr>
+    <tr>
+      <td>deploy this task</td>
+      <td>0.5 hours / deploy</td>
+    </tr>
+    <tr>
+      <td>infrastructure maintenance</td>
+      <td>1 hour / month</td>
+    </tr>
+  </tbody>
+</table>
+
+<table class="cost-summary">
+  <thead>
+    <tr>
+      <th> </th>
+      <th> </th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Initial developer time</td>
+      <td>22 hours</td>
+    </tr>
+    <tr>
+      <td>Ongoing developer time</td>
+      <td>12 hours / year</td>
+    </tr>
+    <tr>
+      <td>Recurring costs</td>
+      <td>$701 / year</td>
+    </tr>
+    <tr>
+      <td>Reaction time</td>
+      <td>1 to 6 minutes</td>
+    </tr>
+  </tbody>
+</table>
+
+<h4 id="lambda-based-system">Lambda-based system</h4>
+
+<p>We’ll assume the following for our Lambda-based implementation:</p>
+
+<ul>
+  <li>
+    <p>100 files are uploaded to S3 every 60 seconds, each containing 100 counters.  We want
+all data to be processed within 50 seconds.</p>
+  </li>
+  <li>
+    <p>We’ll write counter values to a DynamoDB table.  To support 10,000 writes over 50
+seconds, we’ll need 200 units of provisioned write capacity.  We assume our library
+(<a href="https://github.com/boto/boto3">boto3</a>) will handle retries and spread out our writes when we exceed our
+provisioned write capacity and burst limits.</p>
+  </li>
+  <li>
+    <p>To support the implementation described later in this post, we’ll have a second table
+which is updated as a result of each change made to the first.  This second table
+therefore will also need 200 units of provisioned write capacity.  It will be updated
+by a second Lambda function (which we assume has the same characteristics as the
+first) triggered by events on a DynamoDB stream.</p>
+  </li>
+  <li>
+    <p>We’ll need to create some packaging / testing / deployment helper scripts to deploy
+our code.</p>
+  </li>
+</ul>
+
+<table class="cost-comparison">
+  <thead>
+    <tr>
+      <th>Description</th>
+      <th>Cost</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>(table 1) provision 200 DynamoDB writes/sec</td>
+      <td>$0.13 / hour</td>
+    </tr>
+    <tr>
+      <td>(table 2) provision 200 DynamoDB writes/sec</td>
+      <td>$0.13 / hour</td>
+    </tr>
+    <tr>
+      <td>(table 1 stream) 200 GetRecords/sec (worst case)</td>
+      <td>negligible</td>
+    </tr>
+    <tr>
+      <td>Lambda invocation cost</td>
+      <td>negligible</td>
+    </tr>
+    <tr>
+      <td>Lambda duration cost @ 1536 MB, 2 * 100 * 50000 ms (worst case)</td>
+      <td>$0.25 / hour</td>
+    </tr>
+    <tr>
+      <td>design/test Lambda deployment scripts</td>
+      <td>4 hours</td>
+    </tr>
+    <tr>
+      <td>design/test needed Lambda functions</td>
+      <td>4 hours</td>
+    </tr>
+    <tr>
+      <td>deploy needed Lambda functions</td>
+      <td>5 minutes / deploy</td>
+    </tr>
+    <tr>
+      <td>infrastructure maintenance</td>
+      <td>$0</td>
+    </tr>
+  </tbody>
+</table>
+
+<table class="cost-summary">
+  <thead>
+    <tr>
+      <th> </th>
+      <th> </th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Initial developer time</td>
+      <td>8 hours</td>
+    </tr>
+    <tr>
+      <td>Ongoing developer time</td>
+      <td>20 minutes / year</td>
+    </tr>
+    <tr>
+      <td>Recurring costs (DynamoDB)</td>
+      <td>$2279 / year</td>
+    </tr>
+    <tr>
+      <td>Recurring costs (Lambda)</td>
+      <td>$2192 / year</td>
+    </tr>
+    <tr>
+      <td>Reaction time</td>
+      <td>0.1 to 51 seconds</td>
+    </tr>
+  </tbody>
+</table>
+
+<h4 id="worth-it-possibly">Worth it? Possibly.</h4>
+
+<ul>
+  <li>
+    <p>We’ve greatly improved the upper (7x) and lower (600x) bounds for hypothetical system
+reaction time (length of time after a file upload before we can start observing its
+effects).  With the Lambda-based system, we start updating our stored state in
+DynamoDB as soon as our function begins executing.</p>
+  </li>
+  <li>
+    <p>Less developer time is required to get a working system.  The original design requires
+almost 3x initial developer time, and almost 40x ongoing time to maintain.  The Lambda
+solution saves 3 developer-days of time in the first year.</p>
+  </li>
+  <li>
+    <p>More money is required on an ongoing basis—around 6.5x—but we don’t have
+to manage any infrastructure, which leaves more time for other projects.</p>
+  </li>
+  <li>
+    <p>It’s easier to scale (up to a point):</p>
+
+    <ul>
+      <li>
+        <p>If we wanted to halve our maximum reaction time, we could double our provisioned
+DynamoDB write capacity without changing anything else.  <em>(This would double our
+DynamoDB costs and halve our worst-case Lambda costs, for a total recurring cost
+increase of 26%.)</em></p>
+      </li>
+      <li>
+        <p>If our RTB system were to suddenly double in size, we could simply double our
+provisioned write capacity using the console without exploring alternate
+designs or modifying our infrastructure!</p>
+      </li>
+    </ul>
+  </li>
+</ul>
+
+<h4 id="theres-more-than-one-way-to-do-ittrade">There’s More Than One Way To Do It™</h4>
+
+<p>We could take a different approach which (1) doesn’t involve Lambda or DynamoDB, or (2)
+  uses these services in a different way.  This cost estimate shows that using Lambda
+  for a system like the one described here is within the realm of possibility.</p>
+
+<h4 id="eventual-consistency">Eventual consistency</h4>
+
+<p>Working with distributed systems requires balancing trade-offs.  It’s worth noting that
+  the Lambda-based system we describe exhibits eventual consistency: the state we can
+  observe at any particular moment in time may not yet include all updates we’ve made, but
+  all updates will eventually be observable if we stop performing them.  This is due to
+  the use of DynamoDB and S3 as well as the system’s overall design.</p>
+
+<ul>
+  <li>
+    <p>DynamoDB supports eventually-consistent reads (the default) as well as
+strongly-consistent reads.  The consistency time scale is relatively small (usually
+“within one second”) compared to other parts of our system.  Whenever we read an item,
+we’ll observe a state which is the result of some sequence of atomic updates (but not
+necessarily all of the most recent updates).  We can live with this trade-off.</p>
+  </li>
+  <li>
+    <p>S3 supports eventual consistency for overwritten objects, and the typical consistency
+time scale is again relatively small—on the order of seconds.  We shouldn’t need
+to worry about it as long as we don’t receive out-of-order event notifications for the
+same key: we’ll always read data which was valid at one point in time, and we can
+check timestamps and versions if we’re concerned about stale events or reads.</p>
+  </li>
+</ul>
+
+<p>Our system as a whole wouldn’t be strongly-consistent even if S3 and DynamoDB presented
+  only strongly-consistent interfaces, as we can observe our system’s output (contents of
+  second DynamoDB table) before all current input (S3 file uploads) has been processed.
+  We essentially have a view of an atomic update stream which periodically will be a few
+  seconds out of date; this is fine for our purposes.</p>
+
+<h2 id="implementation">Implementation</h2>
+
+<p>Enough background—let’s implement our system!</p>
+
+<p>We need to react to S3 file uploads.  We can configure our S3 bucket to emit events
+  which will cause a Lambda function to run.  Our first new component will therefore look
+  like this:</p>
+
+<p><img src="/images/post_images/counter-upload-processor-1.png" alt="initial counter upload processor"/></p>
+
+<h4 id="sns-topic-creation">SNS topic creation</h4>
+
+<p>We’ll create an SNS topic to receive S3 events.  While Lambda directly supports S3
+  events, using an SNS topic will allow us to more easily configure additional S3 event
+  handlers in the future for events having the same prefix.  <em>(S3 doesn’t currently
+  support event handlers dispatching on prefixes which overlap.)</em></p>
+
+<div class="highlight"><pre><code class="sh"><span class="nv">REGION</span><span class="o">=</span><span class="s2">"us-west-2"</span>
+<span class="nv">BUCKET</span><span class="o">=</span><span class="s2">"your-bucket-name"</span>
+<span class="nv">TOPIC_NAME</span><span class="o">=</span><span class="s2">"your-file-upload-topic"</span>
+<span class="nv">SOURCE_ARN</span><span class="o">=</span><span class="s2">"arn:aws:s3:::$BUCKET"</span>
+
+<span class="c"># creating a topic gives us its ARN.  we'll need that later along with</span>
+<span class="c"># our account number:</span>
+<span class="nv">TOPIC_ARN</span><span class="o">=</span><span class="k">$(</span>aws sns create-topic <span class="se">\</span>
+              --region <span class="nv">$REGION</span>   <span class="se">\</span>
+              --name <span class="nv">$TOPIC_NAME</span> <span class="se">\</span>
+              --output text      <span class="se">\</span>
+              --query <span class="s1">'TopicArn'</span><span class="k">)</span>
+<span class="nv">ACCOUNT</span><span class="o">=</span><span class="k">$(</span><span class="nb">echo</span> <span class="nv">$TOPIC_ARN</span> <span class="p">|</span> awk -F<span class="s1">':'</span> <span class="s1">'{print $5}'</span><span class="k">)</span>
+</code></pre></div>
+
+<p>We also need to configure the SNS topic’s policy to allow our S3 bucket to publish
+  events to it:</p>
+
+<div class="highlight"><pre><code class="sh"><span class="nv">POLICY</span><span class="o">=</span><span class="k">$(</span>python -c <span class="s2">"import json; print json.dumps(</span>
+<span class="s2"> {'Version': '2008-10-17',</span>
+<span class="s2">       'Id': 'upload-events-policy',</span>
+<span class="s2">'Statement': [</span>
+
+<span class="s2">  {'Resource': '$TOPIC_ARN',</span>
+<span class="s2">     'Effect': 'Allow',</span>
+<span class="s2">        'Sid': 'allow_s3_publish',</span>
+<span class="s2">     'Action': 'SNS:Publish',</span>
+<span class="s2">  'Condition': {'ArnEquals': {'aws:sourceArn': '$SOURCE_ARN'}},</span>
+<span class="s2">  'Principal': '*'},</span>
+
+<span class="s2">  {'Resource': '$TOPIC_ARN',</span>
+<span class="s2">     'Effect': 'Allow',</span>
+<span class="s2">        'Sid': 'owner_sns_permissions',</span>
+<span class="s2">     'Action': ['SNS:Subscribe', 'SNS:ListSubscriptionsByTopic',</span>
+<span class="s2">                'SNS:DeleteTopic', 'SNS:GetTopicAttributes',</span>
+<span class="s2">                'SNS:Publish', 'SNS:RemovePermission',</span>
+<span class="s2">                'SNS:AddPermission', 'SNS:Receive',</span>
+<span class="s2">                'SNS:SetTopicAttributes'],</span>
+<span class="s2">  'Condition': {'StringEquals': {'AWS:SourceOwner': '$ACCOUNT'}},</span>
+<span class="s2">  'Principal': {'AWS': '*'}}</span>
+<span class="s2">]})"</span><span class="k">)</span>
+
+aws sns <span class="nb">set</span>-topic-attributes <span class="se">\</span>
+  --region <span class="nv">$REGION</span>           <span class="se">\</span>
+  --topic-arn <span class="s2">"$TOPIC_ARN"</span>   <span class="se">\</span>
+  --attribute-name <span class="s2">"Policy"</span>  <span class="se">\</span>
+  --attribute-value <span class="s2">"$POLICY"</span>
+</code></pre></div>
+
+<h4 id="s3-bucket-configuration">S3 bucket configuration</h4>
+
+<p>We need to configure our S3 bucket to publish events to the topic.  If any event
+  settings already exist for the bucket, we should instead do this in the S3 console:</p>
+
+<div class="highlight"><pre><code class="sh"><span class="c"># we're interested in events occurring under this prefix:</span>
+<span class="nv">PREFIX</span><span class="o">=</span><span class="s2">"path/to/data/"</span>
+
+<span class="c"># we don't want to accidentally overwrite an existing event</span>
+<span class="c"># configuration:</span>
+<span class="nv">EXISTING</span><span class="o">=</span><span class="k">$(</span>aws s3api get-bucket-notification-configuration <span class="se">\</span>
+             --bucket <span class="nv">$BUCKET</span><span class="k">)</span>
+
+<span class="k">if</span> <span class="o">[</span> -z <span class="s2">"$EXISTING"</span> <span class="o">]</span><span class="p">;</span> <span class="k">then</span>
+  <span class="c"># there was no existing configuration.  install our new one:</span>
+  <span class="nv">EVENT_CONFIG</span><span class="o">=</span><span class="k">$(</span>python -c <span class="s2">"import json; print json.dumps(</span>
+<span class="s2">   {'TopicConfigurations': [</span>
+<span class="s2">     {      'Id': '$TOPIC_NAME events',</span>
+<span class="s2">      'TopicArn': '$TOPIC_ARN',</span>
+<span class="s2">        'Events': ['s3:ObjectCreated:*'],</span>
+<span class="s2">        'Filter': {</span>
+<span class="s2">          'Key': { 'FilterRules': [</span>
+<span class="s2">                    { 'Name': 'prefix', 'Value': '$PREFIX' }</span>
+<span class="s2">                    ]}</span>
+<span class="s2">        }</span>
+<span class="s2">     }]})"</span><span class="k">)</span>
+
+  aws s3api put-bucket-notification-configuration <span class="se">\</span>
+    --bucket <span class="nv">$BUCKET</span> <span class="se">\</span>
+    --notification-configuration <span class="s2">"$EVENT_CONFIG"</span>
+<span class="k">else</span>
+<span class="k">  </span><span class="nb">echo</span> <span class="s2">"bucket already has an event configuration."</span>
+  <span class="nb">echo</span> <span class="s2">"use the S3 console to configure events."</span>
+<span class="k">fi</span>
+</code></pre></div>
+
+<h4 id="lambda-function-creation">Lambda function creation</h4>
+
+<p>We need to choose a name for our first Lambda function, create a role to use when
+  executing, and enable AWS Lambda to assume that role so it can actually execute our
+  function:</p>
+
+<div class="highlight"><pre><code class="sh"><span class="nv">FUNCTION1_NAME</span><span class="o">=</span><span class="s2">"counter-upload-processor"</span>
+
+<span class="nv">ASSUMEROLE_POLICY</span><span class="o">=</span><span class="k">$(</span>python -c <span class="s2">"import json; print json.dumps(</span>
+<span class="s2">  {  'Version': '2012-10-17',</span>
+<span class="s2">   'Statement': [{      'Sid': '',</span>
+<span class="s2">                     'Effect': 'Allow',</span>
+<span class="s2">                  'Principal': {'Service': 'lambda.amazonaws.com'},</span>
+<span class="s2">                     'Action': 'sts:AssumeRole'</span>
+<span class="s2">                 }] })"</span><span class="k">)</span>
+
+<span class="nv">ROLE1_NAME</span><span class="o">=</span><span class="s2">"$FUNCTION1_NAME-execute"</span>
+
+<span class="c"># create the execution role and save its ARN for later:</span>
+<span class="nv">EXEC_ROLE1_ARN</span><span class="o">=</span><span class="k">$(</span>aws iam create-role        <span class="se">\</span>
+                  --region <span class="nv">$REGION</span>          <span class="se">\</span>
+                  --role-name <span class="s2">"$ROLE1_NAME"</span> <span class="se">\</span>
+                  --assume-role-policy-document <span class="s2">"$ASSUMEROLE_POLICY"</span> <span class="se">\</span>
+                  --output text <span class="se">\</span>
+                  --query <span class="s1">'Role.Arn'</span><span class="k">)</span>
+</code></pre></div>
+
+<p>Lambda functions normally emit logs using CloudWatch to a log group whose name is
+  derived from the function’s name.  Let’s create a log group for our function:</p>
+
+<div class="highlight"><pre><code class="sh"><span class="nv">LOG_GROUP1</span><span class="o">=</span><span class="s2">"/aws/lambda/$FUNCTION1_NAME"</span>
+
+aws logs create-log-group <span class="se">\</span>
+  --region <span class="nv">$REGION</span>        <span class="se">\</span>
+  --log-group-name <span class="s2">"$LOG_GROUP1"</span>
+</code></pre></div>
+
+<p>To actually emit logs, we need to grant some permissions to the role used by our Lambda
+  function:</p>
+
+<div class="highlight"><pre><code class="sh"><span class="nv">CLOUDWATCH_POLICY1</span><span class="o">=</span><span class="k">$(</span>python -c <span class="s2">"import json; print json.dumps(</span>
+<span class="s2">  { 'Version': '2012-10-17',</span>
+<span class="s2">    'Statement': [</span>
+<span class="s2">    { 'Effect': 'Allow',</span>
+<span class="s2">      'Action': ['logs:PutLogEvents',</span>
+<span class="s2">                 'logs:CreateLogStream'],</span>
+<span class="s2">    'Resource': 'arn:aws:logs:$REGION:$ACCOUNT:log-group:$LOG_GROUP1:*' }</span>
+<span class="s2">   ]})"</span><span class="k">)</span>
+
+aws iam put-role-policy    <span class="se">\</span>
+  --region <span class="nv">$REGION</span>         <span class="se">\</span>
+  --role-name <span class="s2">"$ROLE1_NAME"</span> <span class="se">\</span>
+  --policy-name <span class="s2">"emit-cloudwatch-logs"</span> <span class="se">\</span>
+  --policy-document <span class="s2">"$CLOUDWATCH_POLICY1"</span>
+</code></pre></div>
+
+<p>We can now create a Python Lambda function.  This naming convention and zip file layout
+  will allow it to be edited using the AWS Lambda console:</p>
+
+<div class="highlight"><pre><code class="sh">cat &gt;lambda_function.py <span class="s">&lt;&lt;EOF</span>
+<span class="s">import logging</span>
+
+<span class="s">def lambda_handler(event, context):</span>
+<span class="s">    logging.getLogger().setLevel(logging.INFO)</span>
+<span class="s">    logging.info('got event: {}'.format(event))</span>
+<span class="s">    logging.info('got context: {}'.format(context))</span>
+<span class="s">    return False</span>
+<span class="s">EOF</span>
+
+zip -j lambda-example-1.zip lambda_function.py
+
+<span class="c"># we'll need the function ARN later:</span>
+<span class="nv">FUNCTION1_ARN</span><span class="o">=</span><span class="k">$(</span>aws lambda create-function  <span class="se">\</span>
+                  --region <span class="nv">$REGION</span>          <span class="se">\</span>
+                  --runtime python2.7       <span class="se">\</span>
+                  --role <span class="s2">"$EXEC_ROLE1_ARN"</span>  <span class="se">\</span>
+                  --description <span class="s2">"counter file reverse mapper"</span> <span class="se">\</span>
+                  --timeout 10      <span class="se">\</span>
+                  --memory-size 128 <span class="se">\</span>
+                  --handler lambda_function.lambda_handler <span class="se">\</span>
+                  --zip-file fileb://lambda-example-1.zip  <span class="se">\</span>
+                  --function-name <span class="nv">$FUNCTION1_NAME</span> <span class="se">\</span>
+                  --output text <span class="se">\</span>
+                  --query <span class="s1">'FunctionArn'</span><span class="k">)</span>
+</code></pre></div>
+
+<p>Let’s manually test the function:</p>
+
+<div class="highlight"><pre><code class="sh">aws lambda invoke <span class="se">\</span>
+  --region <span class="nv">$REGION</span> <span class="se">\</span>
+  --function-name <span class="nv">$FUNCTION1_ARN</span> <span class="se">\</span>
+  --payload <span class="s1">'{}'</span> <span class="se">\</span>
+  --log-type <span class="s1">'Tail'</span> <span class="se">\</span>
+  --output text <span class="se">\</span>
+  --query <span class="s1">'LogResult'</span> <span class="se">\</span>
+  - <span class="se">\</span>
+  <span class="p">|</span> base64 --decode
+</code></pre></div>
+
+<p>The result should look like this:</p>
+
+<pre>
+START RequestId: e7739dcd-7380-11e5-aa63-c740254a89b5 Version: $LATEST
+[INFO]  2015-11-16T21:08:38.830Z    e7739dcd-7380-11e5-aa63-c740254a89b5    got event {}
+[INFO]  2015-11-16T21:08:38.830Z    e7739dcd-7380-11e5-aa63-c740254a89b5    got context &lt;__main__.LambdaContext object at 0x7f61bfd246d0&gt;
+END RequestId: e7739dcd-7380-11e5-aa63-c740254a89b5
+REPORT RequestId: e7739dcd-7380-11e5-aa63-c740254a89b5  Duration: 0.41 ms   Billed Duration: 100 ms     Memory Size: 128 MB Max Memory Used: 13 MB
+</pre>
+
+<h4 id="putting-it-all-together">Putting it all together</h4>
+
+<p>We now have a working Lambda function implemented in Python.  We can subscribe it to the
+  SNS topic we created earlier:</p>
+
+<div class="highlight"><pre><code class="sh">aws sns subscribe   <span class="se">\</span>
+  --region <span class="nv">$REGION</span>  <span class="se">\</span>
+  --protocol lambda <span class="se">\</span>
+  --topic-arn <span class="nv">$TOPIC_ARN</span> <span class="se">\</span>
+  --notification-endpoint <span class="nv">$FUNCTION1_ARN</span>
+</code></pre></div>
+
+<p>But before things will actually work, we need to grant the SNS topic permission to
+  invoke our Lambda function:</p>
+
+<div class="highlight"><pre><code class="sh">aws lambda add-permission       <span class="se">\</span>
+  --region <span class="nv">$REGION</span>              <span class="se">\</span>
+  --function-name <span class="nv">$FUNCTION1_ARN</span> <span class="se">\</span>
+  --statement-id <span class="s2">"$FUNCTION1_NAME-invoke"</span> <span class="se">\</span>
+  --principal <span class="s2">"sns.amazonaws.com"</span> <span class="se">\</span>
+  --action <span class="s2">"lambda:InvokeFunction"</span> <span class="se">\</span>
+  --source-arn <span class="nv">$TOPIC_ARN</span>
+</code></pre></div>
+
+<p>As objects are uploaded to our S3 bucket, we should start seeing records of invocations
+  and logs appearing in the CloudWatch log group we created earlier.  Let’s upload a test
+  file:</p>
+
+<div class="highlight"><pre><code class="sh"><span class="nb">echo</span> <span class="s2">"COUNTER1 12345"</span> <span class="se">\</span>
+    <span class="p">|</span> aws s3 cp - s3://<span class="nv">$BUCKET</span>/<span class="k">${</span><span class="nv">PREFIX</span><span class="k">}$(</span>date +<span class="s1">'%Y-%m-%d'</span><span class="k">)</span>/values_i-deadbeef
+</code></pre></div>
+
+<p>We can view our CloudWatch logs from the command line.  We should see some output
+  corresponding to the key we just uploaded:</p>
+
+<div class="highlight"><pre><code class="sh"><span class="k">for </span>STREAM_NAME in <span class="k">$(</span>aws logs describe-log-streams <span class="se">\</span>
+                         --region <span class="nv">$REGION</span> <span class="se">\</span>
+                         --log-group-name <span class="nv">$LOG_GROUP1</span> <span class="se">\</span>
+                         --descending <span class="se">\</span>
+                         --order-by <span class="s1">'LastEventTime'</span> <span class="se">\</span>
+                         --output text <span class="se">\</span>
+                         --query <span class="s1">'logStreams[].logStreamName'</span><span class="k">)</span><span class="p">;</span> <span class="k">do</span>
+<span class="k">    </span>aws logs get-log-events <span class="se">\</span>
+        --region <span class="nv">$REGION</span> <span class="se">\</span>
+        --log-group-name <span class="nv">$LOG_GROUP1</span> <span class="se">\</span>
+        --log-stream-name <span class="nv">$STREAM_NAME</span> <span class="se">\</span>
+        --start-from-head <span class="se">\</span>
+        --output text <span class="se">\</span>
+        --query <span class="s1">'events[].message'</span>
+<span class="k">done</span>
+</code></pre></div>
+
+<p>If you see something like this, it worked:</p>
+
+<pre>
+[INFO] 2015-11-16T23:44:15.876Z 1ad60ef6-3417-12c5-92b0-0f211eba5fc1 got event: {u'Records': [{u'EventVersion': u'1.0', u'EventSubscriptionArn': ... u'EventSource': u'aws:sns', u'Sns': { ... u'Message': u'{"Records":[{"eventVersion":"2.0","eventSource":"aws:s3", ...
+</pre>
+
+<h3 id="data-persistence">Data persistence</h3>
+
+<p>Our Lambda function is now hooked up to events emitted from S3!  However, it doesn’t yet
+  do anything useful.  We want our system to react to events and to only reprocess data
+  which has changed.  We’ll achieve this by (1) storing some intermediate state in
+  DynamoDB and (2) using a second Lambda function to process updates to this state.</p>
+
+<p>Our updated system will look like this:</p>
+
+<p><img src="/images/post_images/counter-upload-processor-2.png" alt="updated counter upload processor"/></p>
+
+<h4 id="create-a-dynamodb-table">Create a DynamoDB table</h4>
+
+<p>We want to store items which look like this in our intermediate state table:</p>
+
+<pre>
+
+    {       'Counter': { 'S': 'XXXXXXXXXXXXXXXXXXXXXX' },
+               'Date': { 'S': 'YYYY-MM-DD' },
+     'InstanceValues': { 'M': { 'i-deadbeef': { 'N': '1234' },
+                                'i-beefdead': { 'N': '5678' },
+                                ...
+                              }
+                       }
+    }
+
+</pre>
+
+<p>Using a <code>map</code> type (“M”) and <a href="http://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Expressions.AccessingItemAttributes.html#DocumentPaths">document paths</a> to store
+  per-instance counter values will allow concurrently-executing Lambda function invocations to
+  update the same DynamoDB item without interfering with each other.</p>
+
+<p>Our table schema will look like this:</p>
+
+<div class="highlight"><pre><code class="sh"><span class="nv">TABLE</span><span class="o">=</span><span class="s2">"$FUNCTION1_NAME-state"</span>
+
+aws dynamodb create-table        <span class="se">\</span>
+  --region <span class="nv">$REGION</span>               <span class="se">\</span>
+  --table-name <span class="nv">$TABLE</span>            <span class="se">\</span>
+  --provisioned-throughput <span class="nv">ReadCapacityUnits</span><span class="o">=</span>10,WriteCapacityUnits<span class="o">=</span>10 <span class="se">\</span>
+  --key-schema <span class="nv">AttributeName</span><span class="o">=</span>Counter,KeyType<span class="o">=</span>HASH                     <span class="se">\</span>
+               <span class="nv">AttributeName</span><span class="o">=</span>Date,KeyType<span class="o">=</span>RANGE                       <span class="se">\</span>
+  --attribute-definitions <span class="nv">AttributeName</span><span class="o">=</span>Counter,AttributeType<span class="o">=</span>S       <span class="se">\</span>
+                          <span class="nv">AttributeName</span><span class="o">=</span>Date,AttributeType<span class="o">=</span>S
+</code></pre></div>
+
+<h4 id="s3-sns-event-handling">S3-SNS event handling</h4>
+
+<p>We want to update our intermediate state whenever an event comes in.  Our SNS events
+  will look like this:</p>
+
+<div class="highlight"><pre><code class="json"><span class="p">{</span><span class="nt">"Records"</span><span class="p">:</span> <span class="p">[</span>
+ <span class="p">{</span><span class="nt">"EventVersion"</span><span class="p">:</span> <span class="s2">"1.0"</span><span class="p">,</span>
+  <span class="nt">"EventSubscriptionArn"</span><span class="p">:</span> <span class="s2">"SUBSCRIPTION_ARN"</span><span class="p">,</span>
+  <span class="nt">"EventSource"</span><span class="p">:</span> <span class="s2">"aws:sns"</span><span class="p">,</span>
+  <span class="nt">"Sns"</span><span class="p">:</span> <span class="p">{</span>
+    <span class="nt">"SignatureVersion"</span><span class="p">:</span> <span class="s2">"1"</span><span class="p">,</span>
+    <span class="nt">"Timestamp"</span><span class="p">:</span> <span class="s2">"2015-11-16T22:08:36.726Z"</span><span class="p">,</span>
+    <span class="nt">"Signature"</span><span class="p">:</span> <span class="s2">"SIG_DATA"</span><span class="p">,</span>
+    <span class="nt">"SigningCertUrl"</span><span class="p">:</span> <span class="s2">"SIG_CERT_URL"</span><span class="p">,</span>
+    <span class="nt">"MessageId"</span><span class="p">:</span> <span class="s2">"MESSAGE_ID"</span><span class="p">,</span>
+    <span class="nt">"Message"</span><span class="p">:</span> <span class="s2">"JSON_MESSAGE_DATA"</span><span class="p">,</span>
+    <span class="nt">"MessageAttributes"</span><span class="p">:</span> <span class="p">{},</span>
+    <span class="nt">"Type"</span><span class="p">:</span> <span class="s2">"Notification"</span><span class="p">,</span>
+    <span class="nt">"UnsubscribeUrl"</span><span class="p">:</span> <span class="s2">"UNSUBSCRIBE_URL"</span><span class="p">,</span>
+    <span class="nt">"TopicArn"</span><span class="p">:</span> <span class="s2">"$TOPIC_ARN"</span><span class="p">,</span>
+    <span class="nt">"Subject"</span><span class="p">:</span> <span class="s2">"Amazon S3 Notification"</span>
+  <span class="p">}</span>
+ <span class="p">}</span>
+<span class="p">]}</span>
+</code></pre></div>
+
+<p>The <code>JSON_MESSAGE_DATA</code> value in these events will be a json-encoded S3 event.  It will
+  look like this when decoded:</p>
+
+<div class="highlight"><pre><code class="json"><span class="p">{</span><span class="nt">"Records"</span><span class="p">:</span> <span class="p">[</span>
+ <span class="p">{</span><span class="nt">"eventVersion"</span><span class="p">:</span> <span class="s2">"2.0"</span><span class="p">,</span>
+  <span class="nt">"eventTime"</span><span class="p">:</span> <span class="s2">"2015-11-16T22:08:36.682Z"</span><span class="p">,</span>
+  <span class="nt">"requestParameters"</span><span class="p">:</span> <span class="p">{</span><span class="nt">"sourceIPAddress"</span><span class="p">:</span> <span class="s2">"1.2.3.4"</span><span class="p">},</span>
+  <span class="nt">"s3"</span><span class="p">:</span> <span class="p">{</span>
+    <span class="nt">"s3SchemaVersion"</span><span class="p">:</span> <span class="s2">"1.0"</span><span class="p">,</span>
+    <span class="nt">"configurationId"</span><span class="p">:</span> <span class="s2">"$TOPIC_NAME events"</span><span class="p">,</span>
+    <span class="nt">"object"</span><span class="p">:</span> <span class="p">{</span><span class="nt">"versionId"</span><span class="p">:</span> <span class="s2">"NEW_OBJECT_VERSION_ID"</span><span class="p">,</span>
+                    <span class="nt">"eTag"</span><span class="p">:</span> <span class="s2">"NEW_OBJECT_ETAG"</span><span class="p">,</span>
+               <span class="nt">"sequencer"</span><span class="p">:</span> <span class="s2">"SEQUENCER_VALUE"</span><span class="p">,</span>
+                     <span class="nt">"key"</span><span class="p">:</span> <span class="s2">"${PREFIX}2015-11-16/values_i-deadbeef"</span><span class="p">,</span>
+                    <span class="nt">"size"</span><span class="p">:</span> <span class="mi">16</span><span class="p">},</span>
+    <span class="nt">"bucket"</span><span class="p">:</span> <span class="p">{</span>          <span class="nt">"arn"</span><span class="p">:</span> <span class="s2">"$SOURCE_ARN"</span><span class="p">,</span>
+                        <span class="nt">"name"</span><span class="p">:</span> <span class="s2">"$BUCKET"</span><span class="p">,</span>
+               <span class="nt">"ownerIdentity"</span><span class="p">:</span> <span class="p">{</span><span class="nt">"principalId"</span><span class="p">:</span> <span class="s2">"OWNING_PRINCIPAL_ID"</span><span class="p">}</span>
+  <span class="p">}},</span>
+  <span class="nt">"responseElements"</span><span class="p">:</span> <span class="p">{</span>      <span class="nt">"x-amz-id-2"</span><span class="p">:</span> <span class="s2">"AMZ_ID_1"</span><span class="p">,</span>
+                       <span class="nt">"x-amz-request-id"</span><span class="p">:</span> <span class="s2">"AMZ_ID_2"</span> <span class="p">},</span>
+         <span class="nt">"awsRegion"</span><span class="p">:</span> <span class="s2">"$REGION"</span><span class="p">,</span>
+         <span class="nt">"eventName"</span><span class="p">:</span> <span class="s2">"ObjectCreated:Put"</span><span class="p">,</span>
+      <span class="nt">"userIdentity"</span><span class="p">:</span> <span class="p">{</span><span class="nt">"principalId"</span><span class="p">:</span> <span class="s2">"CREATING_PRINCIPAL_ID"</span><span class="p">},</span>
+       <span class="nt">"eventSource"</span><span class="p">:</span> <span class="s2">"aws:s3"</span>
+ <span class="p">}</span>
+<span class="p">]}</span>
+</code></pre></div>
+
+<p><em>(Note: the <code>key</code> value in the event is url-encoded.)</em></p>
+
+<p>Let’s update the code in <code>lambda_function.py</code> to process these events:</p>
+
+<div class="highlight"><pre><code class="python"><span class="kn">import</span> <span class="nn">logging</span><span class="o">,</span> <span class="nn">boto3</span><span class="o">,</span> <span class="nn">botocore.exceptions</span><span class="o">,</span> <span class="nn">json</span><span class="o">,</span> <span class="nn">urllib</span>
+
+
+<span class="n">TABLE</span> <span class="o">=</span> <span class="s">"counter-upload-processor-state"</span>
+<span class="n">FILENAME_PREFIX</span> <span class="o">=</span> <span class="s">'values_'</span>
+
+<span class="k">def</span> <span class="nf">lambda_handler</span><span class="p">(</span><span class="n">event</span><span class="p">,</span> <span class="n">context</span><span class="p">):</span>
+  <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">()</span><span class="o">.</span><span class="n">setLevel</span><span class="p">(</span><span class="n">logging</span><span class="o">.</span><span class="n">INFO</span><span class="p">)</span>
+  <span class="k">for</span> <span class="n">record</span> <span class="ow">in</span> <span class="n">event</span><span class="p">[</span><span class="s">'Records'</span><span class="p">]:</span>
+    <span class="k">if</span> <span class="s">'aws:sns'</span> <span class="o">==</span> <span class="n">record</span><span class="p">[</span><span class="s">'EventSource'</span><span class="p">]</span> <span class="ow">and</span> <span class="n">record</span><span class="p">[</span><span class="s">'Sns'</span><span class="p">][</span><span class="s">'Message'</span><span class="p">]:</span>
+      <span class="n">handle_sns_event</span><span class="p">(</span><span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">record</span><span class="p">[</span><span class="s">'Sns'</span><span class="p">][</span><span class="s">'Message'</span><span class="p">]),</span> <span class="n">context</span><span class="p">)</span>
+  <span class="k">return</span> <span class="bp">True</span>
+
+
+<span class="k">def</span> <span class="nf">handle_sns_event</span><span class="p">(</span><span class="n">event</span><span class="p">,</span> <span class="n">context</span><span class="p">):</span>
+  <span class="k">for</span> <span class="n">record</span> <span class="ow">in</span> <span class="n">event</span><span class="p">[</span><span class="s">'Records'</span><span class="p">]:</span>
+    <span class="n">logging</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s">'looking at {}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">record</span><span class="p">))</span>
+    <span class="k">if</span> <span class="s">'aws:s3'</span> <span class="o">==</span> <span class="n">record</span><span class="p">[</span><span class="s">'eventSource'</span><span class="p">]</span> \
+      <span class="ow">and</span> <span class="n">record</span><span class="p">[</span><span class="s">'eventName'</span><span class="p">]</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s">'ObjectCreated:'</span><span class="p">):</span>
+      <span class="n">region</span> <span class="o">=</span> <span class="n">record</span><span class="p">[</span><span class="s">'awsRegion'</span><span class="p">]</span>
+      <span class="n">bucket_name</span> <span class="o">=</span> <span class="n">record</span><span class="p">[</span><span class="s">'s3'</span><span class="p">][</span><span class="s">'bucket'</span><span class="p">][</span><span class="s">'name'</span><span class="p">]</span>
+      <span class="n">key_name</span> <span class="o">=</span> <span class="n">urllib</span><span class="o">.</span><span class="n">unquote</span><span class="p">(</span><span class="n">record</span><span class="p">[</span><span class="s">'s3'</span><span class="p">][</span><span class="s">'object'</span><span class="p">][</span><span class="s">'key'</span><span class="p">])</span>
+      <span class="n">key_vsn</span> <span class="o">=</span> <span class="n">record</span><span class="p">[</span><span class="s">'s3'</span><span class="p">][</span><span class="s">'object'</span><span class="p">]</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'versionId'</span><span class="p">)</span>
+      <span class="n">logging</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s">'new object: s3://{}/{} (v:{})'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">bucket_name</span><span class="p">,</span>
+                                                          <span class="n">key_name</span><span class="p">,</span>
+                                                          <span class="n">key_vsn</span><span class="p">))</span>
+      <span class="n">key</span> <span class="o">=</span> <span class="n">boto3</span><span class="o">.</span><span class="n">resource</span><span class="p">(</span><span class="s">'s3'</span><span class="p">,</span> <span class="n">region_name</span><span class="o">=</span><span class="n">region</span><span class="p">)</span> \
+                 <span class="o">.</span><span class="n">Bucket</span><span class="p">(</span><span class="n">bucket_name</span><span class="p">)</span> \
+                 <span class="o">.</span><span class="n">Object</span><span class="p">(</span><span class="n">key_name</span><span class="p">)</span>
+      <span class="n">data</span> <span class="o">=</span> <span class="n">key</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="o">**</span><span class="p">{</span><span class="s">'VersionId'</span><span class="p">:</span> <span class="n">key_vsn</span><span class="p">}</span> <span class="k">if</span> <span class="n">key_vsn</span> <span class="k">else</span> <span class="p">{})</span>
+      <span class="n">process_key</span><span class="p">(</span><span class="n">region</span><span class="p">,</span> <span class="n">key</span><span class="p">,</span> <span class="n">data</span><span class="p">,</span> <span class="n">context</span><span class="p">)</span>
+
+
+<span class="k">def</span> <span class="nf">process_key</span><span class="p">(</span><span class="n">region</span><span class="p">,</span> <span class="n">key</span><span class="p">,</span> <span class="n">data</span><span class="p">,</span> <span class="n">context</span><span class="p">):</span>
+  <span class="n">filename</span> <span class="o">=</span> <span class="n">key</span><span class="o">.</span><span class="n">key</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s">'/'</span><span class="p">)[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span>
+  <span class="k">if</span> <span class="n">filename</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="n">FILENAME_PREFIX</span><span class="p">):</span>
+    <span class="n">date</span> <span class="o">=</span> <span class="n">key</span><span class="o">.</span><span class="n">key</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s">'/'</span><span class="p">)[</span><span class="o">-</span><span class="mi">2</span><span class="p">]</span>
+    <span class="n">instance_id</span> <span class="o">=</span> <span class="n">filename</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s">'_'</span><span class="p">)[</span><span class="mi">1</span><span class="p">]</span>
+    <span class="n">logging</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s">'processing ({}, {})'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">date</span><span class="p">,</span> <span class="n">instance_id</span><span class="p">))</span>
+    <span class="k">for</span> <span class="n">line</span> <span class="ow">in</span> <span class="n">data</span><span class="p">[</span><span class="s">'Body'</span><span class="p">]</span><span class="o">.</span><span class="n">read</span><span class="p">()</span><span class="o">.</span><span class="n">splitlines</span><span class="p">():</span>
+      <span class="n">counter</span><span class="p">,</span> <span class="n">value</span> <span class="o">=</span> <span class="p">[</span><span class="n">x</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="n">line</span><span class="o">.</span><span class="n">split</span><span class="p">()]</span>
+      <span class="n">update_instance_value</span><span class="p">(</span><span class="n">region</span><span class="p">,</span> <span class="n">date</span><span class="p">,</span> <span class="n">instance_id</span><span class="p">,</span> <span class="n">counter</span><span class="p">,</span> <span class="n">value</span><span class="p">)</span>
+
+
+<span class="k">def</span> <span class="nf">update_instance_value</span><span class="p">(</span><span class="n">region</span><span class="p">,</span> <span class="n">date</span><span class="p">,</span> <span class="n">instance_id</span><span class="p">,</span> <span class="n">counter</span><span class="p">,</span> <span class="n">value</span><span class="p">):</span>
+  <span class="n">logging</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s">'updating instance counter value: {} {} {}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span>
+      <span class="n">instance_id</span><span class="p">,</span> <span class="n">counter</span><span class="p">,</span> <span class="n">value</span><span class="p">))</span>
+  <span class="n">tbl</span> <span class="o">=</span> <span class="n">boto3</span><span class="o">.</span><span class="n">resource</span><span class="p">(</span><span class="s">'dynamodb'</span><span class="p">,</span> <span class="n">region_name</span><span class="o">=</span><span class="n">region</span><span class="p">)</span> \
+             <span class="o">.</span><span class="n">Table</span><span class="p">(</span><span class="n">TABLE</span><span class="p">)</span>
+  <span class="n">key</span> <span class="o">=</span> <span class="p">{</span><span class="s">'Counter'</span><span class="p">:</span> <span class="n">counter</span><span class="p">,</span>
+            <span class="s">'Date'</span><span class="p">:</span> <span class="n">date</span><span class="p">}</span>
+  <span class="c"># updating a document path in an item currently fails if the ancestor</span>
+  <span class="c"># attributes don't exist, and multiple SET expressions can't</span>
+  <span class="c"># (currently) be used to update overlapping document paths (even with</span>
+  <span class="c"># `if_not_exists`), so we must first create the `InstanceValues` map</span>
+  <span class="c"># if needed.  we use a condition expression to avoid needlessly</span>
+  <span class="c"># triggering an update event on the stream we'll create for this</span>
+  <span class="c"># table.  in a real application, we might first query the table to</span>
+  <span class="c"># check if these updates are actually needed (reads are cheaper than</span>
+  <span class="c"># writes).</span>
+  <span class="n">lax_update</span><span class="p">(</span><span class="n">tbl</span><span class="p">,</span>
+             <span class="n">Key</span><span class="o">=</span><span class="n">key</span><span class="p">,</span>
+             <span class="n">UpdateExpression</span><span class="o">=</span><span class="s">'SET #valuemap = :empty'</span><span class="p">,</span>
+             <span class="n">ExpressionAttributeNames</span><span class="o">=</span><span class="p">{</span><span class="s">'#valuemap'</span><span class="p">:</span> <span class="s">'InstanceValues'</span><span class="p">},</span>
+             <span class="n">ExpressionAttributeValues</span><span class="o">=</span><span class="p">{</span><span class="s">':empty'</span><span class="p">:</span> <span class="p">{}},</span>
+             <span class="n">ConditionExpression</span><span class="o">=</span><span class="s">'attribute_not_exists(#valuemap)'</span><span class="p">)</span>
+  <span class="c"># we can now actually update the target path.  we only update if the</span>
+  <span class="c"># new value is different (in a real application, we might first query</span>
+  <span class="c"># and refrain from attempting the conditional write if the value is</span>
+  <span class="c"># unchanged):</span>
+  <span class="n">lax_update</span><span class="p">(</span><span class="n">tbl</span><span class="p">,</span>
+             <span class="n">Key</span><span class="o">=</span><span class="n">key</span><span class="p">,</span>
+             <span class="n">UpdateExpression</span><span class="o">=</span><span class="s">'SET #valuemap.#key = :value'</span><span class="p">,</span>
+             <span class="n">ExpressionAttributeNames</span><span class="o">=</span><span class="p">{</span>     <span class="s">'#key'</span><span class="p">:</span> <span class="n">instance_id</span><span class="p">,</span>
+                                       <span class="s">'#valuemap'</span><span class="p">:</span> <span class="s">'InstanceValues'</span><span class="p">},</span>
+             <span class="n">ExpressionAttributeValues</span><span class="o">=</span><span class="p">{</span><span class="s">':value'</span><span class="p">:</span> <span class="nb">int</span><span class="p">(</span><span class="n">value</span><span class="p">)},</span>
+             <span class="n">ConditionExpression</span><span class="o">=</span><span class="s">'NOT #valuemap.#key = :value'</span><span class="p">)</span>
+
+
+<span class="k">def</span> <span class="nf">lax_update</span><span class="p">(</span><span class="n">table</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+  <span class="k">try</span><span class="p">:</span>
+    <span class="k">return</span> <span class="n">table</span><span class="o">.</span><span class="n">update_item</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+  <span class="k">except</span> <span class="n">botocore</span><span class="o">.</span><span class="n">exceptions</span><span class="o">.</span><span class="n">ClientError</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+    <span class="n">code</span> <span class="o">=</span> <span class="n">exc</span><span class="o">.</span><span class="n">response</span><span class="p">[</span><span class="s">'Error'</span><span class="p">][</span><span class="s">'Code'</span><span class="p">]</span>
+    <span class="k">if</span> <span class="s">'ConditionalCheckFailedException'</span> <span class="o">!=</span> <span class="n">code</span><span class="p">:</span>
+      <span class="k">raise</span>
+</code></pre></div>
+
+<p>We can now update our Lambda function’s code:</p>
+
+<div class="highlight"><pre><code class="sh">zip -j lambda-example-2.zip lambda_function.py
+
+aws lambda update-function-code  <span class="se">\</span>
+  --region <span class="nv">$REGION</span>               <span class="se">\</span>
+  --function-name <span class="nv">$FUNCTION1_ARN</span> <span class="se">\</span>
+  --zip-file fileb://lambda-example-2.zip
+</code></pre></div>
+
+<p>Before this updated code will work, we need to grant permission to the execution role we
+  created earlier for our Lambda function—otherwise, it won’t be able to access our S3
+  bucket or update our DynamoDB table:</p>
+
+<div class="highlight"><pre><code class="sh"><span class="nv">REV_MAPPER_POLICY</span><span class="o">=</span><span class="k">$(</span>python -c <span class="s2">"import json; print json.dumps(</span>
+<span class="s2">  { 'Version': '2012-10-17',</span>
+<span class="s2">    'Statement': [</span>
+
+<span class="s2">    { 'Effect': 'Allow',</span>
+<span class="s2">      'Action': ['dynamodb:UpdateItem'],</span>
+<span class="s2">    'Resource': 'arn:aws:dynamodb:$REGION:$ACCOUNT:table/$TABLE' },</span>
+
+<span class="s2">    { 'Effect': 'Allow',</span>
+<span class="s2">      'Action': ['s3:GetObject',</span>
+<span class="s2">                 's3:GetObjectVersion'],</span>
+<span class="s2">    'Resource': '$SOURCE_ARN/${PREFIX}*' }</span>
+<span class="s2">   ]})"</span><span class="k">)</span>
+
+aws iam put-role-policy     <span class="se">\</span>
+  --region <span class="nv">$REGION</span>          <span class="se">\</span>
+  --role-name <span class="s2">"$ROLE1_NAME"</span> <span class="se">\</span>
+  --policy-name <span class="s2">"fetch-data-and-update-dynamo"</span> <span class="se">\</span>
+  --policy-document <span class="s2">"$REV_MAPPER_POLICY"</span>
+</code></pre></div>
+
+<p>As new files appear in our bucket under the target prefix, we should see our table being
+  updated accordingly.  Let’s give it a try:</p>
+
+<div class="highlight"><pre><code class="sh"><span class="nb">echo</span> <span class="s2">"COUNTER1 12345"</span> <span class="se">\</span>
+    <span class="p">|</span> aws s3 cp - s3://<span class="nv">$BUCKET</span>/<span class="k">${</span><span class="nv">PREFIX</span><span class="k">}$(</span>date +<span class="s1">'%Y-%m-%d'</span><span class="k">)</span>/values_i-deadbeef
+<span class="nb">echo</span> <span class="s2">"COUNTER1 12345"</span> <span class="se">\</span>
+    <span class="p">|</span> aws s3 cp - s3://<span class="nv">$BUCKET</span>/<span class="k">${</span><span class="nv">PREFIX</span><span class="k">}$(</span>date +<span class="s1">'%Y-%m-%d'</span><span class="k">)</span>/values_i-beefdead
+<span class="nb">echo</span> <span class="s2">"COUNTER1 54321</span>
+<span class="s2">COUNTER2 54321"</span> <span class="p">|</span> aws s3 cp - s3://<span class="nv">$BUCKET</span>/<span class="k">${</span><span class="nv">PREFIX</span><span class="k">}$(</span>date +<span class="s1">'%Y-%m-%d'</span><span class="k">)</span>/values_i-foobazzled
+</code></pre></div>
+
+<p>If we scan our intermediate state table, we should now see that it has been updated by
+  our Lambda function:</p>
+
+<pre>
+
+    aws dynamodb scan    \
+        --region $REGION \
+        --table-name $TABLE
+
+</pre>
+
+<div class="highlight"><pre><code class="json"><span class="p">{</span>
+    <span class="nt">"Count"</span><span class="p">:</span> <span class="mi">2</span><span class="p">,</span>
+    <span class="nt">"Items"</span><span class="p">:</span> <span class="p">[</span>
+        <span class="p">{</span>
+            <span class="nt">"Date"</span><span class="p">:</span> <span class="p">{</span>
+                <span class="nt">"S"</span><span class="p">:</span> <span class="s2">"2015-11-16"</span>
+            <span class="p">},</span>
+            <span class="nt">"InstanceValues"</span><span class="p">:</span> <span class="p">{</span>
+                <span class="nt">"M"</span><span class="p">:</span> <span class="p">{</span>
+                    <span class="nt">"i-foobazzled"</span><span class="p">:</span> <span class="p">{</span>
+                        <span class="nt">"N"</span><span class="p">:</span> <span class="s2">"54321"</span>
+                    <span class="p">}</span>
+                <span class="p">}</span>
+            <span class="p">},</span>
+            <span class="nt">"Counter"</span><span class="p">:</span> <span class="p">{</span>
+                <span class="nt">"S"</span><span class="p">:</span> <span class="s2">"COUNTER2"</span>
+            <span class="p">}</span>
+        <span class="p">},</span>
+        <span class="p">{</span>
+            <span class="nt">"Date"</span><span class="p">:</span> <span class="p">{</span>
+                <span class="nt">"S"</span><span class="p">:</span> <span class="s2">"2015-11-16"</span>
+            <span class="p">},</span>
+            <span class="nt">"InstanceValues"</span><span class="p">:</span> <span class="p">{</span>
+                <span class="nt">"M"</span><span class="p">:</span> <span class="p">{</span>
+                    <span class="nt">"i-beefdead"</span><span class="p">:</span> <span class="p">{</span>
+                        <span class="nt">"N"</span><span class="p">:</span> <span class="s2">"12345"</span>
+                    <span class="p">},</span>
+                    <span class="nt">"i-deadbeef"</span><span class="p">:</span> <span class="p">{</span>
+                        <span class="nt">"N"</span><span class="p">:</span> <span class="s2">"12345"</span>
+                    <span class="p">},</span>
+                    <span class="nt">"i-foobazzled"</span><span class="p">:</span> <span class="p">{</span>
+                        <span class="nt">"N"</span><span class="p">:</span> <span class="s2">"54321"</span>
+                    <span class="p">}</span>
+                <span class="p">}</span>
+            <span class="p">},</span>
+            <span class="nt">"Counter"</span><span class="p">:</span> <span class="p">{</span>
+                <span class="nt">"S"</span><span class="p">:</span> <span class="s2">"COUNTER1"</span>
+            <span class="p">}</span>
+        <span class="p">}</span>
+    <span class="p">],</span>
+    <span class="nt">"ScannedCount"</span><span class="p">:</span> <span class="mi">2</span><span class="p">,</span>
+    <span class="nt">"ConsumedCapacity"</span><span class="p">:</span> <span class="kc">null</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>If you see something like this, it worked.  Huzzah!  We’ve completed the first part of
+  our system:</p>
+
+<p><img src="/images/post_images/counter-upload-processor-2.png" alt="updated counter upload processor"/></p>
+
+<h3 id="enter-dynamodb-streams">Enter DynamoDB Streams</h3>
+
+<p>In our intermediate state table we’re now maintaining an inverted map of the original
+  data uploaded to S3, converting per-instance lists of per-counter values on S3 to
+  per-counter lists of per-instance values in DynamoDB.  Our goal is to sum up all
+  per-instance values for each counter and to take action when these values exceed a
+  per-counter limit, only processing data which has changed.</p>
+
+<p>DynamoDB Streams is a <a href="https://aws.amazon.com/blogs/aws/dynamodb-update-triggers-streams-lambda-cross-region-replication-app/">recently-released feature</a>
+  which grants a view of change events on a DynamoDB table (akin to a Kinesis stream).  We
+  can use “DynamoDB Triggers” (the combination of DynamoDB Streams and Lambda functions)
+  to achieve our goal.</p>
+
+<p>The current version of the <code>awscli</code> tools doesn’t support enabling or modifying DynamoDB
+  stream settings, so for now we must use the console to configure a table stream:</p>
+
+<p><img src="/images/post_images/enable-dynamo-streams.png" alt="Enable DynamoDB streams"/></p>
+
+<p>Since we’ll be performing an operation on the entire new value of updated items, select
+  “new image” as the stream view type:</p>
+
+<p><img src="/images/post_images/dynamo-stream-view-new-image.png" alt="Configure new DynamoDB stream"/></p>
+
+<p>After configuring the table stream in the DynamoDB console, we can fetch its ARN:</p>
+
+<div class="highlight"><pre><code class="sh"><span class="nv">STREAM_ARN</span><span class="o">=</span><span class="k">$(</span>aws dynamodbstreams list-streams   <span class="se">\</span>
+                 --region <span class="nv">$REGION</span>               <span class="se">\</span>
+                 --table-name <span class="nv">$TABLE</span>            <span class="se">\</span>
+                 --query <span class="s1">'Streams[0].StreamArn'</span> <span class="se">\</span>
+                 --output text<span class="k">)</span>
+</code></pre></div>
+
+<h4 id="putting-it-all-together-again">Putting it all together (again)</h4>
+
+<p>We’ll need another Lambda function to process change events on our state table.  We’ll
+  use the same recipe (and initial code) as our first Lambda function.</p>
+
+<p>Here’s how the next stage of our system will look:</p>
+
+<p><img src="/images/post_images/counter-upload-aggregator-1.png" alt="counter upload aggregator"/></p>
+
+<div class="highlight"><pre><code class="sh"><span class="nv">FUNCTION2_NAME</span><span class="o">=</span><span class="s2">"counter-upload-aggregator"</span>
+<span class="nv">ROLE2_NAME</span><span class="o">=</span><span class="s2">"$FUNCTION2_NAME-execute"</span>
+<span class="nv">EXEC_ROLE2_ARN</span><span class="o">=</span><span class="k">$(</span>aws iam create-role        <span class="se">\</span>
+                  --region <span class="nv">$REGION</span>          <span class="se">\</span>
+                  --role-name <span class="s2">"$ROLE2_NAME"</span> <span class="se">\</span>
+                  --assume-role-policy-document <span class="s2">"$ASSUMEROLE_POLICY"</span> <span class="se">\</span>
+                  --output text <span class="se">\</span>
+                  --query <span class="s1">'Role.Arn'</span><span class="k">)</span>
+
+<span class="nv">LOG_GROUP2</span><span class="o">=</span><span class="s2">"/aws/lambda/$FUNCTION2_NAME"</span>
+aws logs create-log-group <span class="se">\</span>
+  --region <span class="nv">$REGION</span>        <span class="se">\</span>
+  --log-group-name <span class="s2">"$LOG_GROUP2"</span>
+
+<span class="nv">CLOUDWATCH_POLICY2</span><span class="o">=</span><span class="k">$(</span>python -c <span class="s2">"import json; print json.dumps(</span>
+<span class="s2">  { 'Version': '2012-10-17',</span>
+<span class="s2">    'Statement': [</span>
+<span class="s2">    { 'Effect': 'Allow',</span>
+<span class="s2">      'Action': ['logs:PutLogEvents',</span>
+<span class="s2">                 'logs:CreateLogStream'],</span>
+<span class="s2">    'Resource': 'arn:aws:logs:$REGION:$ACCOUNT:log-group:$LOG_GROUP2:*' }</span>
+<span class="s2">   ]})"</span><span class="k">)</span>
+
+aws iam put-role-policy     <span class="se">\</span>
+  --region <span class="nv">$REGION</span>          <span class="se">\</span>
+  --role-name <span class="s2">"$ROLE2_NAME"</span> <span class="se">\</span>
+  --policy-name <span class="s2">"emit-cloudwatch-logs"</span> <span class="se">\</span>
+  --policy-document <span class="s2">"$CLOUDWATCH_POLICY2"</span>
+
+<span class="nv">FUNCTION2_ARN</span><span class="o">=</span><span class="k">$(</span>aws lambda create-function  <span class="se">\</span>
+                  --region <span class="nv">$REGION</span>          <span class="se">\</span>
+                  --runtime python2.7       <span class="se">\</span>
+                  --role <span class="s2">"$EXEC_ROLE2_ARN"</span>  <span class="se">\</span>
+                  --description <span class="s2">"counter data aggregator"</span> <span class="se">\</span>
+                  --timeout 10      <span class="se">\</span>
+                  --memory-size 128 <span class="se">\</span>
+                  --handler lambda_function.lambda_handler <span class="se">\</span>
+                  --zip-file fileb://lambda-example-1.zip  <span class="se">\</span>
+                  --function-name <span class="nv">$FUNCTION2_NAME</span> <span class="se">\</span>
+                  --output text <span class="se">\</span>
+                  --query <span class="s1">'FunctionArn'</span><span class="k">)</span>
+</code></pre></div>
+
+<p>We need to grant some additional permissions to allow access to our table stream:</p>
+
+<div class="highlight"><pre><code class="sh"><span class="nv">STREAM_POLICY</span><span class="o">=</span><span class="k">$(</span>python -c <span class="s2">"import json; print json.dumps(</span>
+<span class="s2">  { 'Version': '2012-10-17',</span>
+<span class="s2">    'Statement': [</span>
+
+<span class="s2">    { 'Effect': 'Allow',</span>
+<span class="s2">      'Action': ['dynamodb:GetRecords',</span>
+<span class="s2">                 'dynamodb:GetShardIterator',</span>
+<span class="s2">                 'dynamodb:DescribeStream'],</span>
+<span class="s2">    'Resource': '$STREAM_ARN' },</span>
+
+<span class="s2">    { 'Effect': 'Allow',</span>
+<span class="s2">      'Action': ['dynamodb:DescribeStreams'],</span>
+<span class="s2">    'Resource': '*' }</span>
+<span class="s2">   ]})"</span><span class="k">)</span>
+
+aws iam put-role-policy     <span class="se">\</span>
+  --region <span class="nv">$REGION</span>          <span class="se">\</span>
+  --role-name <span class="s2">"$ROLE2_NAME"</span> <span class="se">\</span>
+  --policy-name <span class="s2">"dynamodb-stream-access"</span> <span class="se">\</span>
+  --policy-document <span class="s2">"$STREAM_POLICY"</span>
+</code></pre></div>
+
+<p>We can now create an event source mapping between our table stream and our new Lambda
+  function.  This will cause Lambda to poll the DynamoDB stream and execute our new
+  function with events read from it:</p>
+
+<div class="highlight"><pre><code class="sh">aws lambda create-event-source-mapping <span class="se">\</span>
+    --region <span class="nv">$REGION</span>                   <span class="se">\</span>
+    --event-source-arn <span class="nv">$STREAM_ARN</span>     <span class="se">\</span>
+    --function-name <span class="nv">$FUNCTION2_ARN</span>     <span class="se">\</span>
+    --starting-position LATEST         <span class="se">\</span>
+    --enabled
+</code></pre></div>
+
+<p>Let’s upload another test file.  <em>(Note: there may be a delay after configuring the
+  event source mapping before this upload will result in the second function being
+  triggered.)</em></p>
+
+<div class="highlight"><pre><code class="sh"><span class="nb">echo</span> <span class="s2">"COUNTER1 123456"</span> <span class="se">\</span>
+    <span class="p">|</span> aws s3 cp - s3://<span class="nv">$BUCKET</span>/<span class="k">${</span><span class="nv">PREFIX</span><span class="k">}$(</span>date +<span class="s1">'%Y-%m-%d'</span><span class="k">)</span>/values_i-deadbeef
+</code></pre></div>
+
+<p>This upload should cause our first Lambda function to update the intermediate state
+  table.  Our second Lambda function should receive an event like this:</p>
+
+<div class="highlight"><pre><code class="json"><span class="p">{</span><span class="nt">"Records"</span><span class="p">:</span> <span class="p">[</span>
+  <span class="p">{</span>     <span class="nt">"awsRegion"</span><span class="p">:</span> <span class="s2">"us-east-1"</span><span class="p">,</span>
+        <span class="nt">"eventName"</span><span class="p">:</span> <span class="s2">"MODIFY"</span><span class="p">,</span>
+   <span class="nt">"eventSourceARN"</span><span class="p">:</span> <span class="s2">"$STREAM_ARN"</span><span class="p">,</span>
+      <span class="nt">"eventSource"</span><span class="p">:</span> <span class="s2">"aws:dynamodb"</span><span class="p">,</span>
+          <span class="nt">"eventID"</span><span class="p">:</span> <span class="s2">"SOME_EVENT_ID"</span><span class="p">,</span>
+     <span class="nt">"eventVersion"</span><span class="p">:</span> <span class="s2">"1.0"</span><span class="p">,</span>
+         <span class="nt">"dynamodb"</span><span class="p">:</span> <span class="p">{</span> <span class="nt">"StreamViewType"</span><span class="p">:</span> <span class="s2">"NEW_IMAGE"</span><span class="p">,</span>
+                        <span class="nt">"SequenceNumber"</span><span class="p">:</span> <span class="s2">"SOME_SEQUENCE_NUMBER"</span><span class="p">,</span>
+                             <span class="nt">"SizeBytes"</span><span class="p">:</span> <span class="mi">125</span><span class="p">,</span>
+                        <span class="nt">"Keys"</span><span class="p">:</span> <span class="p">{</span>
+                            <span class="nt">"Date"</span><span class="p">:</span> <span class="p">{</span><span class="nt">"S"</span><span class="p">:</span> <span class="s2">"2015-11-16"</span><span class="p">},</span>
+                         <span class="nt">"Counter"</span><span class="p">:</span> <span class="p">{</span><span class="nt">"S"</span><span class="p">:</span> <span class="s2">"COUNTER1"</span><span class="p">}</span>
+                                <span class="p">},</span>
+                    <span class="nt">"NewImage"</span><span class="p">:</span> <span class="p">{</span>
+                      <span class="nt">"Counter"</span><span class="p">:</span> <span class="p">{</span><span class="nt">"S"</span><span class="p">:</span> <span class="s2">"COUNTER1"</span><span class="p">},</span>
+                         <span class="nt">"Date"</span><span class="p">:</span> <span class="p">{</span><span class="nt">"S"</span><span class="p">:</span> <span class="s2">"2015-11-16"</span><span class="p">},</span>
+               <span class="nt">"InstanceValues"</span><span class="p">:</span> <span class="p">{</span><span class="nt">"M"</span><span class="p">:</span> <span class="p">{</span><span class="nt">"i-foobazzled"</span><span class="p">:</span> <span class="p">{</span><span class="nt">"N"</span><span class="p">:</span> <span class="s2">"54321"</span><span class="p">},</span>
+                                          <span class="nt">"i-beefdead"</span><span class="p">:</span> <span class="p">{</span><span class="nt">"N"</span><span class="p">:</span> <span class="s2">"12345"</span><span class="p">},</span>
+                                          <span class="nt">"i-deadbeef"</span><span class="p">:</span> <span class="p">{</span><span class="nt">"N"</span><span class="p">:</span> <span class="s2">"123456"</span><span class="p">}}}</span>
+                                 <span class="p">}</span>
+                      <span class="p">}</span>
+  <span class="p">}</span>
+<span class="p">]}</span>
+</code></pre></div>
+
+<p>If we repeat the same upload, our second Lambda function should not be executed a second
+  time—our first Lambda function only updates an item if it would result in a new or
+  changed value.  This is good, but it doesn’t quite fulfill our goal of only processing
+  changed data: if a new instance comes online and emits a value of zero for a counter,
+  our second Lambda function will still see an update despite the global value for that
+  counter remaining unchanged.</p>
+
+<h3 id="rinse-and-repeat">Rinse and Repeat</h3>
+
+<p>To fulfill our goal of only acting on changed data, we’ll create a second DynamoDB table
+  to hold actual per-counter aggregate values.  <em>(A third Lambda function monitoring this
+  second table’s event stream could contain the business logic acting on changed counter
+  values; all of our goals would then have been met.)</em></p>
+
+<p>Here’s how this part of our updated system will look:</p>
+
+<p><img src="/images/post_images/counter-upload-aggregator-2.png" alt="updated counter upload aggregator"/></p>
+
+<p>In our second table, we want to store items which look like this:</p>
+
+<pre>
+
+    {    'Counter': { 'S': 'XXXXXXXXXXXXXXXXXXXXXX' },
+            'Date': { 'S': 'YYYY-MM-DD' },
+           'Value': { 'N': '1234567'    }
+    }
+
+</pre>
+
+<p>Our second DynamoDB table has the following schema.  Including the <code>ByDate</code> global
+  secondary index will allow us to query the table for all items having a particular date,
+  which might come in handy later (although it will double our table cost, because all
+  attributes participate in the index):</p>
+
+<div class="highlight"><pre><code class="sh"><span class="nv">TABLE2</span><span class="o">=</span><span class="s2">"aggregate-counters"</span>
+
+aws dynamodb create-table        <span class="se">\</span>
+  --region <span class="nv">$REGION</span>               <span class="se">\</span>
+  --table-name <span class="nv">$TABLE2</span>           <span class="se">\</span>
+  --provisioned-throughput <span class="nv">ReadCapacityUnits</span><span class="o">=</span>10,WriteCapacityUnits<span class="o">=</span>10 <span class="se">\</span>
+  --key-schema <span class="nv">AttributeName</span><span class="o">=</span>Counter,KeyType<span class="o">=</span>HASH                     <span class="se">\</span>
+               <span class="nv">AttributeName</span><span class="o">=</span>Date,KeyType<span class="o">=</span>RANGE                       <span class="se">\</span>
+  --attribute-definitions <span class="nv">AttributeName</span><span class="o">=</span>Counter,AttributeType<span class="o">=</span>S       <span class="se">\</span>
+                          <span class="nv">AttributeName</span><span class="o">=</span>Date,AttributeType<span class="o">=</span>S          <span class="se">\</span>
+  --global-secondary-indexes <span class="s1">'[{</span>
+<span class="s1">                 "IndexName": "ByDate",</span>
+<span class="s1">                 "KeySchema": [{ "AttributeName": "Date",</span>
+<span class="s1">                                       "KeyType": "HASH" }],</span>
+<span class="s1">     "ProvisionedThroughput": { "ReadCapacityUnits": 1,</span>
+<span class="s1">                               "WriteCapacityUnits": 10 },</span>
+<span class="s1">                "Projection": { "ProjectionType": "ALL" }</span>
+<span class="s1">     }]'</span>
+</code></pre></div>
+
+<p>Let’s update our second Lambda function’s <code>lambda_function.py</code> file:</p>
+
+<div class="highlight"><pre><code class="python"><span class="kn">import</span> <span class="nn">logging</span><span class="o">,</span> <span class="nn">boto3</span><span class="o">,</span> <span class="nn">botocore.exceptions</span>
+
+
+<span class="n">TABLE</span> <span class="o">=</span> <span class="s">"aggregate-counters"</span>
+
+
+<span class="k">def</span> <span class="nf">lambda_handler</span><span class="p">(</span><span class="n">event</span><span class="p">,</span> <span class="n">context</span><span class="p">):</span>
+  <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">()</span><span class="o">.</span><span class="n">setLevel</span><span class="p">(</span><span class="n">logging</span><span class="o">.</span><span class="n">INFO</span><span class="p">)</span>
+  <span class="k">for</span> <span class="n">record</span> <span class="ow">in</span> <span class="n">event</span><span class="p">[</span><span class="s">'Records'</span><span class="p">]:</span>
+    <span class="k">if</span> <span class="s">'aws:dynamodb'</span> <span class="o">==</span> <span class="n">record</span><span class="p">[</span><span class="s">'eventSource'</span><span class="p">]</span> \
+        <span class="ow">and</span> <span class="s">'MODIFY'</span> <span class="o">==</span> <span class="n">record</span><span class="p">[</span><span class="s">'eventName'</span><span class="p">]</span>    \
+        <span class="ow">and</span> <span class="s">'NEW_IMAGE'</span> <span class="o">==</span> <span class="n">record</span><span class="p">[</span><span class="s">'dynamodb'</span><span class="p">][</span><span class="s">'StreamViewType'</span><span class="p">]:</span>
+      <span class="n">region</span> <span class="o">=</span> <span class="n">record</span><span class="p">[</span><span class="s">'awsRegion'</span><span class="p">]</span>
+      <span class="n">keys</span> <span class="o">=</span> <span class="n">record</span><span class="p">[</span><span class="s">'dynamodb'</span><span class="p">][</span><span class="s">'Keys'</span><span class="p">]</span>
+      <span class="n">date</span> <span class="o">=</span> <span class="n">keys</span><span class="p">[</span><span class="s">'Date'</span><span class="p">][</span><span class="s">'S'</span><span class="p">]</span>
+      <span class="n">counter</span> <span class="o">=</span> <span class="n">keys</span><span class="p">[</span><span class="s">'Counter'</span><span class="p">][</span><span class="s">'S'</span><span class="p">]</span>
+      <span class="n">new_item</span> <span class="o">=</span> <span class="n">record</span><span class="p">[</span><span class="s">'dynamodb'</span><span class="p">][</span><span class="s">'NewImage'</span><span class="p">]</span>
+      <span class="n">instance_values</span> <span class="o">=</span> <span class="n">new_item</span><span class="p">[</span><span class="s">'InstanceValues'</span><span class="p">][</span><span class="s">'M'</span><span class="p">]</span>
+      <span class="n">total_value</span> <span class="o">=</span> <span class="nb">sum</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">v</span><span class="p">[</span><span class="s">'N'</span><span class="p">])</span>
+                        <span class="k">for</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">instance_values</span><span class="o">.</span><span class="n">values</span><span class="p">())</span>
+      <span class="n">logging</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s">'updated counter: {} {} {}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span>
+          <span class="n">date</span><span class="p">,</span> <span class="n">counter</span><span class="p">,</span> <span class="n">total_value</span><span class="p">))</span>
+      <span class="c"># go! thou art counted:</span>
+      <span class="n">lax_update</span><span class="p">(</span><span class="n">boto3</span><span class="o">.</span><span class="n">resource</span><span class="p">(</span><span class="s">'dynamodb'</span><span class="p">,</span> <span class="n">region_name</span><span class="o">=</span><span class="n">region</span><span class="p">)</span> \
+                      <span class="o">.</span><span class="n">Table</span><span class="p">(</span><span class="n">TABLE</span><span class="p">),</span>
+                 <span class="n">Key</span><span class="o">=</span><span class="p">{</span><span class="s">'Counter'</span><span class="p">:</span> <span class="n">counter</span><span class="p">,</span>
+                         <span class="s">'Date'</span><span class="p">:</span> <span class="n">date</span><span class="p">},</span>
+                 <span class="n">UpdateExpression</span><span class="o">=</span><span class="s">'SET #value = :value'</span><span class="p">,</span>
+                 <span class="n">ExpressionAttributeNames</span><span class="o">=</span><span class="p">{</span><span class="s">'#value'</span><span class="p">:</span> <span class="s">'Value'</span><span class="p">},</span>
+                 <span class="n">ExpressionAttributeValues</span><span class="o">=</span><span class="p">{</span><span class="s">':value'</span><span class="p">:</span> <span class="n">total_value</span><span class="p">},</span>
+                 <span class="n">ConditionExpression</span><span class="o">=</span><span class="s">'NOT #value = :value'</span><span class="p">)</span>
+  <span class="k">return</span> <span class="bp">True</span>
+
+
+<span class="k">def</span> <span class="nf">lax_update</span><span class="p">(</span><span class="n">table</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+  <span class="k">try</span><span class="p">:</span>
+    <span class="k">return</span> <span class="n">table</span><span class="o">.</span><span class="n">update_item</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+  <span class="k">except</span> <span class="n">botocore</span><span class="o">.</span><span class="n">exceptions</span><span class="o">.</span><span class="n">ClientError</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+    <span class="n">code</span> <span class="o">=</span> <span class="n">exc</span><span class="o">.</span><span class="n">response</span><span class="p">[</span><span class="s">'Error'</span><span class="p">][</span><span class="s">'Code'</span><span class="p">]</span>
+    <span class="k">if</span> <span class="s">'ConditionalCheckFailedException'</span> <span class="o">!=</span> <span class="n">code</span><span class="p">:</span>
+      <span class="k">raise</span>
+</code></pre></div>
+
+<p>And update our second Lambda function’s code:</p>
+
+<div class="highlight"><pre><code class="sh">zip -j lambda-example-3.zip lambda_function.py
+
+aws lambda update-function-code  <span class="se">\</span>
+  --region <span class="nv">$REGION</span>               <span class="se">\</span>
+  --function-name <span class="nv">$FUNCTION2_ARN</span> <span class="se">\</span>
+  --zip-file fileb://lambda-example-3.zip
+</code></pre></div>
+
+<p>As before, we need to grant permission to the execution role used by our second Lambda
+  function so it can update our second DynamoDB table:</p>
+
+<div class="highlight"><pre><code class="sh"><span class="nv">AGGREGATOR_POLICY</span><span class="o">=</span><span class="k">$(</span>python -c <span class="s2">"import json; print json.dumps(</span>
+<span class="s2">  { 'Version': '2012-10-17',</span>
+<span class="s2">    'Statement': [</span>
+
+<span class="s2">    { 'Effect': 'Allow',</span>
+<span class="s2">      'Action': ['dynamodb:UpdateItem'],</span>
+<span class="s2">    'Resource': 'arn:aws:dynamodb:$REGION:$ACCOUNT:table/$TABLE2' }</span>
+<span class="s2">   ]})"</span><span class="k">)</span>
+
+aws iam put-role-policy     <span class="se">\</span>
+  --region <span class="nv">$REGION</span>          <span class="se">\</span>
+  --role-name <span class="s2">"$ROLE2_NAME"</span> <span class="se">\</span>
+  --policy-name <span class="s2">"update-dynamo-aggregate-counters"</span> <span class="se">\</span>
+  --policy-document <span class="s2">"$AGGREGATOR_POLICY"</span>
+</code></pre></div>
+
+<p>When we upload new counter data, our second table should be updated with the total
+  summed value:</p>
+
+<div class="highlight"><pre><code class="sh"><span class="nb">echo</span> <span class="s2">"COUNTER1 1000"</span> <span class="se">\</span>
+    <span class="p">|</span> aws s3 cp - s3://<span class="nv">$BUCKET</span>/<span class="k">${</span><span class="nv">PREFIX</span><span class="k">}$(</span>date +<span class="s1">'%Y-%m-%d'</span><span class="k">)</span>/values_i-flub
+</code></pre></div>
+
+<p>This upload should have triggered the following sequence of events:</p>
+
+<ol>
+  <li>
+    <p>Our S3 bucket emits an <code>ObjectCreated</code> event to our SNS topic.</p>
+  </li>
+  <li>
+    <p>Our topic wraps the S3 event in an SNS notification and delivers it to our first
+  Lambda function (invoking it).</p>
+  </li>
+  <li>
+    <p>Our first Lambda function executes and updates our first table.</p>
+  </li>
+  <li>
+    <p>An event appears on our first table’s event stream, which (Lambda on behalf of) our
+  second Lambda function has been polling.</p>
+  </li>
+  <li>
+    <p>Our second Lambda function executes and updates our second table.</p>
+  </li>
+</ol>
+
+<p>We should see a value of <code>12345+123456+1000+54321 = 191122</code> in our second table, which
+  is the sum of all uploaded values for <code>COUNTER1</code>.  We haven’t updated any other counter
+  values since setting up our second table and function, so they shouldn’t yet exist in
+  our second table:</p>
+
+<div class="highlight"><pre><code class="sh">aws dynamodb query        <span class="se">\</span>
+    --region <span class="nv">$REGION</span>      <span class="se">\</span>
+    --table-name <span class="nv">$TABLE2</span>  <span class="se">\</span>
+    --index-name <span class="s2">"ByDate"</span> <span class="se">\</span>
+    --key-condition-expression <span class="s1">'#date = :date'</span> <span class="se">\</span>
+    --expression-attribute-names <span class="s1">'{"#date": "Date",</span>
+<span class="s1">                                   "#value": "Value",</span>
+<span class="s1">                                   "#counter": "Counter"}'</span> <span class="se">\</span>
+    --expression-attribute-values <span class="s1">'{":date":</span>
+<span class="s1">                                     {"S": "'</span><span class="k">$(</span>date +<span class="s1">'%Y-%m-%d'</span><span class="k">)</span><span class="s1">'"}}'</span> <span class="se">\</span>
+    --projection-expression <span class="s2">"#date, #counter, #value"</span>
+</code></pre></div>
+
+<div class="highlight"><pre><code class="json"><span class="p">{</span>
+    <span class="nt">"Count"</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span>
+    <span class="nt">"Items"</span><span class="p">:</span> <span class="p">[</span>
+        <span class="p">{</span>
+            <span class="nt">"Date"</span><span class="p">:</span> <span class="p">{</span>
+                <span class="nt">"S"</span><span class="p">:</span> <span class="s2">"2015-11-16"</span>
+            <span class="p">},</span>
+            <span class="nt">"Value"</span><span class="p">:</span> <span class="p">{</span>
+                <span class="nt">"N"</span><span class="p">:</span> <span class="s2">"191122"</span>
+            <span class="p">},</span>
+            <span class="nt">"Counter"</span><span class="p">:</span> <span class="p">{</span>
+                <span class="nt">"S"</span><span class="p">:</span> <span class="s2">"COUNTER1"</span>
+            <span class="p">}</span>
+        <span class="p">}</span>
+    <span class="p">],</span>
+    <span class="nt">"ScannedCount"</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span>
+    <span class="nt">"ConsumedCapacity"</span><span class="p">:</span> <span class="kc">null</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>If you see this, it worked!  Our final system:</p>
+
+<p><img src="/images/post_images/lambda-counter-aggregator-overview.png" alt="Lambda-based counter aggregation system overview"/></p>
+
+<h2 id="onward-and-upward">Onward and Upward</h2>
+
+<p>We have successfully implemented a basic system which can count things we care about by
+  reacting appropriately to S3 uploads.  We also eliminated the need to worry about server
+  configuration tools and management!</p>
+
+<p>By implementing two simple Python modules and making some configuration calls, we have:</p>
+
+<ul>
+  <li>
+    <p><strong>Decreased coupling between components:</strong> Instead of a set of cooperating periodic
+tasks, we have some small Lambda functions each doing one simple thing—reacting
+to events.  Each is also easily testable (1) locally with a test suite, (2) in the
+Lambda console, and (3) from the command line using <code>awscli</code>.</p>
+  </li>
+  <li>
+    <p><strong>Improved responsiveness and scalability:</strong> Our new system can begin reacting to
+updates with less latency than the original, and we can realize significant
+performance gains simply by deciding to spend more money—or less, if our
+requirements decrease—without any need for a redesign.</p>
+  </li>
+</ul>
+
+<h3 id="overcoming-failure">Overcoming Failure</h3>
+
+<p>The example system described in this post glosses over certain issues which would be
+  problematic in a real application, and no discussion involving distributed systems
+  would be complete without addressing some of the ways in which they can fail.</p>
+
+<p>We expect our system to finish processing each event within 50 seconds.  What if it
+  doesn’t?</p>
+
+<p>With the system we’ve implemented here, the most likely failures are:</p>
+
+<ol>
+  <li>
+    <p>Incomplete file processing due to reaching the Lambda invocation time limit.  There
+  might be too many counters in each file for us to process even after making improvements
+  to our implementation and paying for more DynamoDB capacity.</p>
+  </li>
+  <li>
+    <p>Incomplete file processing due to a provisioned throughput exception.  Our library
+  will perform retries, but only up to a point before giving up and raising an exception.</p>
+  </li>
+</ol>
+
+<p>Both timing out and raising an exception are treated as execution errors by Lambda and
+  will result in our function being invoked again with the same event some time later (up
+  to a certain number of retry attempts).</p>
+
+<p>While the system we’ve described is idempotent—each instance uploads its current
+  set of counter values, not counter deltas—this retry behavior can still be
+  problematic for our system as-written: a failing invocation <em>C</em> might be followed by a
+  successful invocation <em>D</em>, which is then followed by a successful retry of <em>C</em> (“lost
+  update” problem).  Unless we take steps to mitigate this, older data from <em>C</em> could wipe
+  out newer data from <em>D</em> if our bucket uses versioning and they correspond to the same
+  uploading instance.  We can handle this by adding a per-instance event timestamp to
+  our first table’s items and including it in our condition expression.</p>
+
+<p>We could also encounter a situation where we can never catch up because the incoming
+  data rate exceeds the maximum sustained processing rate.  If this happens after we’ve
+  already made our implementation more efficient and increased our provisioned capacity,
+  we should consider adjusting our schema (i.e., so that we may use <code>BatchWriteItem</code>
+  operations on our first table) and/or rethink our system’s design.  <em>(We also control
+  the systems producing this data, so nothing is set in stone!)</em></p>
+
+<h4 id="a-word-on-latency">A word on latency</h4>
+
+<p>We listed reaction times earlier in our cost estimate, based on the following system
+  latency formula:</p>
+
+
+
+<table class="math-legend">
+  <thead>
+    <tr>
+      <th> </th>
+      <th> </th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td/>
+      <td>latency</td>
+    </tr>
+    <tr>
+      <td/>
+      <td>time until upload</td>
+    </tr>
+    <tr>
+      <td/>
+      <td>delivery time (first lambda function)</td>
+    </tr>
+    <tr>
+      <td/>
+      <td>processing time (first lambda function)</td>
+    </tr>
+    <tr>
+      <td/>
+      <td>delivery time (second lambda function)</td>
+    </tr>
+    <tr>
+      <td/>
+      <td>processing time (second lambda function)</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>We estimated our system’s reaction time by ignoring time until upload, assuming minimal
+  delivery time values (0-0.1s), the same processing time values (50s), and a small fudge
+  factor, giving a range of 0.1-51s.  This ignores two important details: (1) concurrency
+  limits for Lambda (100 concurrent executions in each account region by default) and (2)
+  the sharding of our DynamoDB stream (maximum stream reader invocation concurrency is the
+  number of shards in the stream).</p>
+
+<p>Item (2) is most problematic in our system—compared to our first Lambda function,
+  our second function will be invoked more frequently (smaller batches of counter updates)
+  and with less concurrency (limited by number of stream shards); therefore, the
+  assumption we made in our cost estimate about “similar function characteristics” was
+  flawed.</p>
+
+<p>Experimentation reveals that even with tuning and implementation improvements, our
+  system’s best total latency is 64s (with 100 file uploads of 100 counters every 60s).
+  If this is due to our second Lambda function taking more than 60s to finish processing
+  all events, this is the “never catch up” situation described earlier.  Updating our
+  second Lambda function to use <code>BatchWriteItem</code> instead of <code>UpdateItem</code> requires no
+  schema change and greatly improves performance, bringing total system latency back in
+  line with our expectations.</p>
+
+<h2 id="final-words">Final words</h2>
+
+<p>While no tool is right for every job, I had fun writing this post and I look forward to
+  using Lambda more often in situations where it makes sense to do so.  I hope you found
+  this discussion and example interesting!</p>
+
+<p><strong>Exercises for the reader:</strong></p>
+
+<ol>
+  <li>
+    <p>Improve the efficiency and implementation of both Lambda functions.  Try using
+  <code>multiprocessing</code> in the first (but note that <code>Pool</code> and <code>Queue</code> won’t work) and
+  implement exponential backoff/retry for provisioned throughput exception handling.  Use
+  <code>BatchWriteItem</code> in the second Lambda function.</p>
+  </li>
+  <li>
+    <p>Implement a third Lambda function using the recipes in this post which watches our
+  second DynamoDB table for per-counter updates, and which emits the summed values for all
+  of a particular day’s counters back to S3 when any counter’s summed value changes.</p>
+  </li>
+</ol>
+
+<p><strong>Want to learn more about AdRoll? <a href="https://www.adroll.com/about/careers/">Roll with Us</a>!</strong></p>
+
+
+            
+
+
+        </section>
+
+        
+        
+        
+
+        </div></body></html>

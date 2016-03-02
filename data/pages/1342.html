@@ -1,0 +1,394 @@
+<html><body><div><div class="content html_format"><p>
+      В этой статье рассказывается, как за короткое время решить с помощью фреймворка Django, простую, но интересную задачу: создание системы баг-трекинга (система тикетов) для своего проекта. Наша система будет интегрирована с системой аутентификации пользователей Django и административным интерфейсом. Несмотря на свою примитивность, такое приложение, при некотором усовершенствовании, вполне может быть полезно для разработчика-одиночки или небольшой группы.</p>
+
+<img src="https://habrastorage.org/files/e85/50d/cba/e8550dcba207460b8296c10da49a753c.png"/>
+<a name="habracut"/><p>
+Я опишу действия в linux-окружении, используя Django версии 1.6, поэтому надо иметь ввиду, что для других операционных систем и версий фреймворка, что-то может работать по-другому (но без существенных изменений). Уровень статьи рассчитан на новичков, однако заострять внимание на подготовке рабочего окружения и разжевывать совсем элементарные вещи я не буду, и, если вам не понятно, что вообще делать вначале, рекомендую почитать </p><a href="http://www.jeffknupp.com/blog/2013/12/18/starting-a-django-16-project-the-right-way/">вот эту прекрасную статью</a><p> и пройти </p><a href="http://docs.djangoproject.com/en/1.6/intro/tutorial01/">Django tutorial</a><p>. 
+</p><p>
+Итак, какие задачи должно выполнять наше приложение:
+</p><ul>
+<li>Редактирование багрепортов (доступно для администраторов, через стандартную админку Django)</li>
+<li>Просмотр багрепортов в виде списка и по отдельности (доступно для всех посетителей)</li>
+<li>Возможность регистрации в качестве нового пользователя</li>
+<li>Соответственно, login и logout через веб-интерфейс</li>
+<li>Добавление багрепортов через веб-интерфейс (доступно только для залогиненых пользователей)</li>
+</ul>
+<p>
+В целях соблюдения концепции минималистичности багрепорт (или тикет) будет содержать название (title), описание (description), дату и время создания (created), автора (author), и статус открыт\закрыт (closed). 
+</p><p>
+Процесс работы над приложением будет разделен на несколько этапов, и, чтобы упростить перемещение от одного этапа к другому, я создал </p><a href="https://github.com/svfat/django-tutorial-bugreport/">репозиторий</a><p> на GitHub со всеми исходными кодами и коммитами на каждом этапе. Конечно, можно просто делать копипаст кода из статьи, но я предлагаю поступить иначе:
+</p><ol>
+<li>Подготоваливаете ваше рабочее окружение, устанавливаете django</li>
+<li>Если у вас еще нет аккаунта на GitHub — создаете его</li>
+<li>Делаете <a href="https://github.com/svfat/django-tutorial-bugreport/fork">форк (fork) моего репозитория</a></li>
+<li>В рабочей папке (в шелле) выполняете команду git clone &lt;url вашего репозитория&gt;</li>
+<li>Далее, в начале каждого этапа, я буду указывать команду git checkout -f &lt;part-#&gt;, которую необходимо выполнить, чтобы код в рабочей папке синхронизировался с соответствующим коммитом репозитория.</li>
+</ol>
+<p>
+Вы получите полный код готового проекта, в вашей рабочей среде. Можно запустить </p><pre><code class="bash">cd django-tutorial-bugreport
+./manage.py runserver
+</code></pre><p> и в браузере перейдя по адресу </p><a href="http://127.0.0.1:8000/bugs/">127.0.0.1:8000/bugs</a><p> «пощупать» финальный результат.
+
+</p><h2>Этап №0 — создание приложения</h2><p>
+Прелесть git в том, что можно легко откатиться на любой этап разработки проекта, и для вашего удобства, я эти этапы пометил тегами. Итак, выполняем команду:
+</p><pre><code class="bash">
+git checkout -f part-0
+</code></pre><p> — тем самым сбросив проект к начальному состоянию, каким бы он был, если бы вы только что выполнили команду django-admin.py startproject…</p><p>
+Перейдем в папку проекта и создадим приложение bugtracker
+</p><pre><code class="bash">
+./manage.py startapp bugtracker
+</code></pre><p>
+Вносим наше приложение в project/settings.py (добавив </p><code>'bugtracker'</code><p> в кортеж </p><code>INSTALLED_APPS</code><p>)</p><p>
+Сразу настроим каталоги для темплейтов и статики:
+</p><code>TEMPLATE_DIRS = (os.path.join(BASE_DIR, 'templates/'),)<br/>
+STATICFILES_DIRS = (os.path.join(BASE_DIR, 'static/'),)</code>
+<p>
+Добавим такой urlpattern в project/urls.py — </p><code>url(r'^bugs/', include('bugtracker.urls'))</code><p>, после чего, все остальные нужные нам урлы уже будем описывать именно в bugtracker\urls.py, который мы создадим вот таким, пока почти пустым, иначе django будет выдавать ошибку:
+</p><pre><code class="python"># coding: utf-8
+from django.conf.urls import patterns, include, url
+
+urlpatterns = patterns('',
+)
+
+</code></pre>
+<p>
+Затем создаем модель для багрепорта в файле bugtracker/models.py:
+</p><pre><code class="python"># coding: utf-8
+from django.db import models
+from django.contrib.auth.models import User
+
+class Ticket(models.Model):
+    title = models.CharField(max_length=128)
+    text = models.TextField()
+    created = models.DateTimeField(auto_now=True)
+    closed = models.BooleanField(default=False)
+    user = models.ForeignKey(User,)
+
+    def __unicode__(self):
+        return self.title
+</code></pre><p>
+Рассмотрим ее поближе: </p><b>title</b><p> — это название тикета, например </p><i>«Пепелац не взлетает»</i><p>, </p><b>text</b><p> — описание и шаги для воспроизведения бага, </p><b>created</b><p> — время и дата создания тикета, будет автоматически заполняться благодаря </p><code>auto_now=True</code><p>, </p><b>closed</b><p> — простейший вариант описания статуса тикета, закрыт он или открыт, по-умолчанию (при созданию) </p><code>closed = False</code><p>, то есть тикет не закрыт, </p><b>user</b><p> — пользователь, сообщивший о баге. В качестве юникодного представления модель возвращает </p><b>title</b>
+<p>
+Отредактируем bugtracker/admin.py, чтобы появилась возможность управлять тикетами из админки:
+</p><pre><code class="bash">
+# coding: utf-8
+from django.contrib import admin
+from .models import Ticket
+
+admin.site.register(Ticket)
+</code></pre>
+<p>
+И запустим </p><pre><code class="bash">
+./manage.py syncdb
+</code></pre>
+<p>
+В результате этого, в базе данных создадутся необходимые таблицы, и будут запрошены логин, e-mail и пароль для создания пользователя-администратора.</p><p>
+Внимание, далее по тексту, при команде git checkout из git-репозитория db.sqlite3, и администратор имеет логин: admin, пароль: 123 (один-два-три)</p><p>
+Создав его, можно запускать:
+</p><pre><code class="bash">
+./manage.py runserver
+</code></pre><p>
+И заходить по адресу </p><a href="http://127.0.0.1:8000/admin">http://127.0.0.1:8000/admin</a><p>, а после ввода логина и пароля, </p><a href="http://127.0.0.1:8000/admin/bugtracker/ticket/">создавать, редактировать и удалять тикеты.</a>
+
+<h2>Этап №1 — список тикетов</h2><p>
+Выполняем:
+</p><pre><code class="bash">
+git checkout -f part-1
+</code></pre><p> — по этой команде, появится файл db.sqlite3 содержащий ту самую базу данных, в которой уже созданы некоторые тикеты для тестирования, и логин администратора: admin, пароль: 123. Посмотрев содержимое тикетов, вы увидите, что я использовал небогатый функционал нашего приложения в качестве TODO-списка для него самого. Вид конечно в административном интерфейсе непригляден, и мы попробуем это исправить. Добавим в bugtracker/admin.py новый класс, который определяет интерфейс списка тикетов в админке и зарегистрируем его:
+</p><pre><code class="python">class TicketAdmin(admin.ModelAdmin):
+    list_display = ('closed', 'title', 'text', 'created', 'user')
+    list_filter = ['created', 'closed']
+    search_fields = ['title', 'text']
+
+admin.site.register(Ticket, TicketAdmin)
+</code></pre><p>
+После этого админка станет намного удобнее. Можно отметить пункт «Редактирование багрепортов» как выполненный.
+</p><p>
+Следующее, что мы сделаем — добавим возможность просмотра списка тикетов, не заходя в административный интерфейс. Для этого нам нужно создать базовый html-шаблон и шаблон собственно списка тикетов. Базовый шаблон будет находиться в файле templates/base.html:
+
+</p><pre><code class="django">&lt;!doctype html&gt;
+&lt;html&gt;
+    &lt;head&gt;
+        &lt;meta charset="utf-8"&gt;
+        &lt;title&gt;Bugtracker - {% block title_block %}{% endblock %}&lt;/title&gt;
+    &lt;/head&gt;
+    &lt;body&gt;
+        {% block content_block %}
+        {% endblock %}
+    &lt;/body&gt;
+&lt;/html&gt;
+</code></pre><p>
+Как видите он очень прост и содержит в себе два блока, для заголовка и содержимого.
+</p><p>
+Шаблон списка создадим в файле templates/list.html
+</p><pre><code class="django">{% extends 'base.html' %}
+{% block title_block %}Main{% endblock %}
+{% block content_block %}
+&lt;div&gt;
+    &lt;h1&gt;Bug list&lt;/h1&gt;
+    &lt;table&gt;
+        &lt;thead&gt;
+        &lt;tr&gt;
+            &lt;td&gt;Title&lt;/td&gt;
+            &lt;td&gt;Created&lt;/td&gt;
+            &lt;td&gt;Author&lt;/td&gt;
+            &lt;td&gt;Status&lt;/td&gt;
+        &lt;/tr&gt;
+        &lt;/thead&gt;
+        &lt;tbody&gt;
+        {% for ticket in object_list %}
+        &lt;tr&gt;
+            &lt;td&gt;{{ ticket.title }}&lt;/td&gt;
+            &lt;td&gt;{{ ticket.created|date }}&lt;/td&gt;
+            &lt;td&gt;{{ ticket.user }}&lt;/td&gt;
+            &lt;td&gt;{{ ticket.closed|yesno:"CLOSED, OPENED" }}&lt;/td&gt;
+        &lt;/tr&gt;
+        {% empty %}
+        &lt;tr&gt;
+            &lt;td colspan=4&gt;No tickets yet.&lt;/td&gt;
+        &lt;/tr&gt;
+        {% endfor %}
+        &lt;/tbody&gt;
+    &lt;/table&gt;
+&lt;/div&gt;
+{% endblock %}
+</code></pre>
+<p>
+Все это будет подставлено в базовый шаблон вместо 
+</p><pre><code class="django">{% block content_block %}
+{% endblock %}
+</code></pre><p>. Содержимое представляет собой таблицу из четырек колонок, которая будет заполнена данными тикетов, а при их отсутствии (пустая) в таблице будет надпись </p><blockquote>No tickets yet.</blockquote>
+<p>
+Теперь напишем class-based view для этой функции в файле bugtracker/views.py, он очень прост:
+</p><pre><code class="python">from django.views.generic import ListView
+from .models import Ticket
+
+class BugListView(ListView):
+    model = Ticket
+    template_name = 'list.html'
+</code></pre><p>
+Здесь определена модель для отображения в виде списка, и шаблон для отображения.
+</p><p>
+Осталось только, создать новый паттерн для URL "/bugs/" в файле bugtracker/urls.py: добавив </p><pre><code class="python">from .views import BugListView</code></pre><p>и </p><pre><code class="python">url(r'^$', BugListView.as_view(), name='index'),</code></pre><p> (как мы помним, в файле project/urls.py — общего для всего проекта, мы определили, что паттерны для </p><code>"/bugs"</code><p> находятся в </p><code>bugtracker/urls.py</code><p>, соответственно регэксп паттерна для URL </p><code>"/bugs/"</code><p> будет выглядеть именно так: </p><code>r'^$'</code><p>.
+</p><p>
+Заходим на </p><a href="http://127.0.0.1:8000/bugs/">http://127.0.0.1:8000/bugs/</a><p> и видим страшноватую таблицу со списком всех наших тикетов. Так как дизайн мы прикрутим потом, можем смело поставить статус «Closed» для этого этапа в админке.
+
+</p><h2>Этап №2 — детали тикета</h2><p>
+Выполняем:
+</p><pre><code class="bash">
+git checkout -f part-2
+</code></pre><p>
+Добавим возможность просмотра каждого тега по-отдельности, используя DetailView, действуем по старой схеме.</p><p>
+Создаем шаблон templates/detail.html:
+</p><pre><code class="django">{% extends 'base.html' %}
+{% block title_block %}{{ object.title }}{% endblock %}
+{% block content_block %}
+&lt;div&gt;
+    &lt;h1&gt;{{ object.closed|yesno:"CLOSED, OPENED" }} - {{ object.title }}&lt;/h1&gt;
+    &lt;p&gt;{{ object.user }} - {{ object.created|date }}&lt;/p&gt;
+    &lt;p&gt;{{ object.text }}&lt;/p&gt;
+&lt;/div&gt;
+{% endblock %}
+</code></pre><p>
+Создаем view в bugtracker/views.py:
+</p><pre><code class="python">from django.views.generic import DetailView
+
+class BugDetailView(DetailView):
+    model = Ticket
+    template_name = 'detail.html'
+</code></pre><p>
+и в bugtracker/urls.py:
+</p><pre><code class="python">from .views import BugDetailView
+</code></pre><p>
+в urlpattens добавляем
+</p><pre><code class="python">url(r'^(?P&lt;pk&gt;[0-9]+)/$', BugDetailView.as_view(), name='detail'),
+</code></pre><p>
+Кроме того, добавляем в шаблон templates/list.html ссылку на такой URL для каждого тикета, можно например сделать так:
+</p><pre><code class="django">&lt;td&gt;&lt;a href="{% url 'detail' ticket.pk %}"&gt;{{ ticket.title }}&lt;/a&gt;&lt;/td&gt;
+</code></pre><p>
+благодаря url 'detail' наши урлы будут генерироваться автоматически, и даже если структура урлов поменяется, то шаблон не «поломаются»
+</p><p>
+Проверяем, перейдя на </p><a href="http://127.0.0.1:8000/bugs/">http://127.0.0.1:8000/bugs/</a><p> и затем кликнув по любой из ссылок. Если все работает, отмечаем в админке, что тикет закрыт.
+
+</p><h2>Этап №3 — регистрация пользователей</h2>
+<pre><code class="bash">
+git checkout -f part-3
+</code></pre><p>
+Правильнее, конечно, вынести работу с пользователями в отдельное приложение и воспользоваться, например, </p><a href="http://django-registration.readthedocs.org/en/latest/index.html">django-registration</a><p> для удобной работы с активацией, сменой и восстановлением паролей и т.д., но так как мы обучаемся, то не будем использовать батарейки, дабы не умножать сущности сверх необходимого.</p><p>
+При регистрации пользователей мы будем использовать встроенные функции django по работе с формами, для этого создадим шаблон templates/register.html:
+</p><pre><code class="django">{% extends 'base.html' %}
+{% block title_block %}Registration{% endblock %}
+{% block content_block %}
+{% if user.is_authenticated %}
+    &lt;a href="{% url 'index' %}"&gt;Back to main page&lt;/a&gt;
+{% else %}
+    &lt;form action="{% url 'register' %}" method="post"&gt;
+      {% csrf_token %}
+      {{ form.as_p }}
+      &lt;input type="submit" value="Submit" /&gt;
+    &lt;/form&gt;
+{% endif %}
+{% endblock %}
+</code></pre><p>
+В случае, если юзер не залогинен, то мы отображаем форму, которые передается в шаблон из следующего view (bugtracker/views.py):
+</p><pre><code class="python">from django.views.generic import CreateView
+from django.core.urlresolvers import reverse_lazy
+from django.contrib.auth.forms import UserCreationForm
+
+class RegisterView(CreateView):
+    form_class = UserCreationForm
+    template_name = 'register.html'
+    success_url = reverse_lazy('index')
+</code></pre>
+<b>success_url</b><p> — это куда пользователя будет направлять при успешной регистрации, урл будет излечен из urlpatterns с помощью reverse_lazy('index'), то есть в нашем случае "/bugs/"
+</p><p>
+Дополним базовый шаблон ссылкой на форму регистрации, которая будет отображаться только если юзер не залогинен:
+</p><pre><code class="html">{% if user.is_authenticated %}
+        &lt;div&gt;Welcome, {{ user.username }}!&lt;/div&gt;
+{% else %}
+        &lt;div&gt;&lt;a href="{% url 'register' %}"&gt;Register&lt;/a&gt;&lt;/div&gt;
+{% endif %}
+</code></pre>
+<p>
+Не забываем добавить импорт RegisterView в bugtracker/urls.py и в urlpattern — </p><code>url(r'^register/$', RegisterView.as_view(), name='register'),</code><p>
+Теперь можно проверить работоспособность и перейти к следующему этапу. 
+
+</p><h2>Этап №4 — логин и логаут</h2>
+<pre><code class="bash">
+git checkout -f part-4
+</code></pre>
+<p>
+Здесь все просто, мы будем использовать встроенные джанговские шорткаты. Для логаута шаблон, не понадобиться, так как отображать-то в этой функции и нечего, нас просто будет переносить на главную страницу. Поэтому создаем шаблон только для логина (templates/login.html):
+</p><pre><code class="html">{% extends 'base.html' %}
+{% block title_block %}Login{% endblock %}
+{% block content_block %}
+&lt;form action="{% url 'login' %}" method="post"&gt;
+  {% csrf_token %}
+  {% if form.non_field_errors %}
+    &lt;p&gt;
+      {% for error in form.non_field_errors %}
+      {{ error }}
+      {% endfor %}
+    &lt;/p&gt;
+  {% endif %}
+  {% for field in form %}
+    &lt;div&gt;
+      {{ field.label_tag }}
+      {{ field }}
+      {% if field.errors %}
+        &lt;p&gt;
+          {% for error in field.errors %}
+          {{ error }}
+          {% endfor %}
+        &lt;/p&gt;
+      {% endif %}
+    &lt;/div&gt;
+  {% endfor %}
+  &lt;input type="submit" value="Submit" /&gt;
+&lt;/form&gt;
+{% endblock %}
+</code></pre>
+<p>
+В bugtracker/urls.py пропишем следующее:
+</p><pre><code class="python">from django.core.urlresolvers import reverse_lazy
+</code></pre><p>
+и
+</p><pre><code class="python">    url(r'^login/$', 'django.contrib.auth.views.login',
+          {"template_name" : "login.html"}, name="login"),
+    url(r'^logout/$', 'django.contrib.auth.views.logout',
+          {"next_page" : reverse_lazy('login')}, name="logout"),
+</code></pre><p>
+А templates/base.html переделаем так:
+</p><pre><code class="django">        {% if user.is_authenticated %}
+            &lt;div&gt;Welcome, {{ user.username }}
+             | &lt;a href="{% url 'logout' %}"&gt;Logout&lt;/a&gt;&lt;/div&gt;
+        {% else %}
+            &lt;div&gt;&lt;a href="{% url 'register' %}"&gt;Register
+             | &lt;a href="{% url 'login' %}"&gt;Login&lt;/a&gt;&lt;/div&gt;
+        {% endif %}
+</code></pre><p>
+Что бы после логина нас редиректило на главную страницу в settings.py пропишем
+</p><pre><code class="python">from django.core.urlresolvers import reverse_lazy
+LOGIN_REDIRECT_URL = reverse_lazy('index')
+</code></pre>
+<p>
+Поиграем вдоволь, создавая новых пользователей, логинясь и разлогиниваясь под ними.
+
+</p><h2>Этап №5 — добавление нового тикета</h2>
+<pre><code class="bash">
+git checkout -f part-5
+</code></pre><p>
+Шаблон templates/add.html очень похож на тот, что мы создавали для RegisterView, только наоборот — функционал доступен авторизованному пользователю:
+</p><pre><code class="django">{% extends 'base.html' %}
+{% block title_block %}Add ticket{% endblock %}
+{% block content_block %}
+{% if user.is_authenticated %}
+    &lt;a href="{% url 'index' %}"&gt;Back to main page&lt;/a&gt;
+    &lt;form action="{% url 'add' %}" method="post"&gt;
+      {% csrf_token %}
+      {{ form.as_p }}
+      &lt;input type="submit" value="Submit" /&gt;
+    &lt;/form&gt;
+{% else %}
+    &lt;p&gt;You should be logged in to add tickets!&lt;/p&gt;
+{% endif %}
+{% endblock %}
+</code></pre>
+<p>
+Добавляем куда-нибудь в базовый шаблон ссылочку на add:
+</p><pre><code class="django">&lt;div&gt;&lt;a href="{% url 'add' %}"&gt;Add ticket&lt;/a&gt;&lt;/div&gt;
+</code></pre>
+<p>
+View будет таким, </p><pre><code class="python">class BugCreateView(CreateView):
+    model = Ticket
+    template_name = 'add.html'
+    fields = ['title', 'text']
+    success_url = reverse_lazy('index')
+
+    def form_valid(self, form):
+        form.instance.user = self.request.user
+        return super(BugCreateView, self).form_valid(form)
+</code></pre><p>
+То есть пользователю будут видны только поля title и text, а благодаря переопределению метода form_valid в поле user будет подставлен индекс текущего пользователя.
+</p><p>
+Прописываем паттерн для урла 'add/' в bugtracker/urls.py, не забыв импортировать BugCreateView: 
+</p><pre><code class="python">    url(r'^add/$', BugCreateView.as_view(), name='add'),
+</code></pre>
+<p>
+Попробуем добавить новых тикетов, и переходим к следующему этапу.
+
+</p><h2>Этап №6 — сделать нарядно</h2>
+<pre><code class="bash">
+git checkout -f part-6
+</code></pre>
+<p>
+Все это более-менее удовлетворительно работает, но выглядит страшновато. На мой взгляд, самый простой и удобный способ улучшить наш интерфейс, доступный даже неспециалисту в верстке (как я) — это использовать twitter bootstrap. Для этого скачаем соответствующую библиотеку и распакуем её в папку static. После чего мы приступим к верстке шаблонов. У bootstrap куча примеров, поэтому особых сложностей возникнуть не должно. Поскольку, приводить здесь простыни получившегося HTML не имеет смысла, а нюансы верстки под bootstrap выходят за рамки этой статьи (и моих познаний), просто посмотрите исходники в </p><a href="https://github.com/svfat/django-tutorial-bugreport/">репозитории</a><p>, или выполните </p><code>git checkout -f final</code><p>, что бы получить окончательный вариант кода.
+</p><p>
+Стоит заметить, что третья версия bootstrap требует добавлять class=«form-control» к инпутам в формах.Известный мне самый простой метод, сделать это в шаблонах django (не используя дополнительных батареек) — это кастомный фильтр, который описан </p><a href="http://vanderwijk.info/blog/adding-css-classes-formfields-in-django-templates/#comment-1193609278">здесь</a><p>. Буду благодарен, если более искушенные читатели моей статьи поделятся своим опытом в комментариях.
+
+</p><h2>Итог</h2><p>
+Буквально за пару часов, а то и меньше, мы с вами создали вполне функциональное приложение, которое при дальнейшем улучшении, настройке и развитии, может хорошо послужить, в каких то других проектах, а может быть и как standalone-сервис. Вот мои несколько вполне реализуемых идей для его улучшения:
+</p><ul>
+<li>HTTP API (сразу появляется возможность взаимодействия практически со всем чем угодно — программы, консольные скрипты, другие веб-сервисы и т.д.</li>
+<li>Побольше статусов для тикетов</li>
+<li>Пагинация в шаблоне вывода списка</li>
+<li>Возможность поручить исполнение тикета другому юзеру и контролировать статус</li>
+<li>Загрузка файлов и изображений</li>
+<li>Легкая настройка и кастомизация дополнительных полей для тикетов</li>
+<li>Система плагинов</li>
+</ul><p>
+Жду ваших замечаний, идей и предложений в комментариях. Спасибо!
+
+</p><b>UPD:</b><p>Пока я готовил статью, вышел релиз django 1.7, в которую внедрена поддержка миграций, что раньше осуществлялось с помощью south. Команда syncdb теперь deprecated, поэтому, после изменений в моделях делаем:</p><p>
+./manage.py makemigrations &lt;имя_приложения&gt; </p><p>
+./manage.py migrate
+</p><p>
+Для просмотра SQL-запроса соответствующего миграции, выполняем</p><p>
+./manage.py sqlmigrate &lt;имя_приложения&gt; &lt;номер_миграции&gt;
+
+      
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

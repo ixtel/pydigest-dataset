@@ -1,0 +1,173 @@
+<html><body><div><p>Django Migrations support for raw SQL.</p>
+<div id="usage">
+<h2>Usage</h2>
+<ol>
+<li>Create <tt>sql_config.py</tt> module to root of a target app you want to
+manage custom SQL for.</li>
+<li>Define SQL items in it (<tt>sql_items</tt>), for example:</li>
+</ol>
+<pre><span class="c1"># PostgreSQL example.</span>
+<span class="c1"># Let's define a simple function and let `migrate_sql` manage it's changes.</span>
+
+<span class="kn">from</span> <span class="nn">migrate_sql.config</span> <span class="kn">import</span> <span class="n">SQLItem</span>
+
+<span class="n">sql_items</span> <span class="o">=</span> <span class="p">[</span>
+    <span class="n">SQLItem</span><span class="p">(</span>
+        <span class="s1">'make_sum'</span><span class="p">,</span>   <span class="c1"># name of the item</span>
+        <span class="s1">'create or replace function make_sum(a int, b int) returns int as $$ '</span>
+        <span class="s1">'begin return a + b; end; '</span>
+        <span class="s1">'$$ language plpgsql;'</span><span class="p">,</span>  <span class="c1"># forward sql</span>
+        <span class="n">reverse_sql</span><span class="o">=</span><span class="s1">'drop function make_sum(int, int);'</span><span class="p">,</span>  <span class="c1"># sql for removal</span>
+    <span class="p">),</span>
+<span class="p">]</span>
+</pre>
+<ol>
+<li><p>Create migration <tt>./manage.py makemigrations</tt>:</p>
+<pre>Migrations for 'app_name':
+  0002_auto_xxxx.py:
+- Create SQL "make_sum"
+</pre>
+</li>
+</ol>
+<p>You can take a look at content this generated:</p>
+<pre><span class="c1"># -*- coding: utf-8 -*-</span>
+<span class="kn">from</span> <span class="nn">__future__</span> <span class="kn">import</span> <span class="n">unicode_literals</span>
+<span class="kn">from</span> <span class="nn">django.db</span> <span class="kn">import</span> <span class="n">migrations</span><span class="p">,</span> <span class="n">models</span>
+<span class="kn">import</span> <span class="nn">migrate_sql.operations</span>
+
+
+<span class="k">class</span> <span class="nc">Migration</span><span class="p">(</span><span class="n">migrations</span><span class="o">.</span><span class="n">Migration</span><span class="p">):</span>
+    <span class="n">dependencies</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="p">(</span><span class="s1">'app_name'</span><span class="p">,</span> <span class="s1">'0001_initial'</span><span class="p">),</span>
+    <span class="p">]</span>
+    <span class="n">operations</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="n">migrate_sql</span><span class="o">.</span><span class="n">operations</span><span class="o">.</span><span class="n">CreateSQL</span><span class="p">(</span>
+            <span class="n">name</span><span class="o">=</span><span class="s1">'make_sum'</span><span class="p">,</span>
+            <span class="n">sql</span><span class="o">=</span><span class="s1">'create or replace function make_sum(a int, b int) returns int as $$ begin return a + b; end; $$ language plpgsql;'</span><span class="p">,</span>
+            <span class="n">reverse_sql</span><span class="o">=</span><span class="s1">'drop function make_sum(int, int);'</span><span class="p">,</span>
+        <span class="p">),</span>
+    <span class="p">]</span>
+</pre>
+<ol>
+<li><p>Execute migration <tt>./manage.py migrate</tt>:</p>
+<pre>Operations to perform:
+  Apply all migrations: app_name
+Running migrations:
+  Rendering model states... DONE
+  Applying app_name.0002_xxxx... OK
+</pre>
+</li>
+</ol>
+<p>Check result in <tt>./manage.py dbshell</tt>:</p>
+<pre>db_name=# select make_sum(12, 15);
+ make_sum
+----------
+       27
+(1 row)
+</pre>
+<p>Now, say, you want to change the function implementation so that it
+takes a custom type as argument:</p>
+<ol>
+<li>Edit your <tt>sql_config.py</tt>:</li>
+</ol>
+<pre><span class="c1"># PostgreSQL example #2.</span>
+<span class="c1"># Function and custom type.</span>
+
+<span class="kn">from</span> <span class="nn">migrate_sql.config</span> <span class="kn">import</span> <span class="n">SQLItem</span>
+
+<span class="n">sql_items</span> <span class="o">=</span> <span class="p">[</span>
+    <span class="n">SQLItem</span><span class="p">(</span>
+        <span class="s1">'make_sum'</span><span class="p">,</span>  <span class="c1"># name of the item</span>
+        <span class="s1">'create or replace function make_sum(a mynum, b mynum) returns mynum as $$ '</span>
+        <span class="s1">'begin return (a.num + b.num, '</span><span class="n">result</span><span class="s1">')::mynum; end; '</span>
+        <span class="s1">'$$ language plpgsql;'</span><span class="p">,</span>  <span class="c1"># forward sql</span>
+        <span class="n">reverse_sql</span><span class="o">=</span><span class="s1">'drop function make_sum(mynum, mynum);'</span><span class="p">,</span>  <span class="c1"># sql for removal</span>
+        <span class="c1"># depends on `mynum` since takes it as argument. we won't be able to drop function</span>
+        <span class="c1"># without dropping `mynum` first.</span>
+        <span class="n">dependencies</span><span class="o">=</span><span class="p">[(</span><span class="s1">'app_name'</span><span class="p">,</span> <span class="s1">'mynum'</span><span class="p">)],</span>
+    <span class="p">),</span>
+    <span class="n">SQLItem</span><span class="p">(</span>
+        <span class="s1">'mynum'</span>   <span class="c1"># name of the item</span>
+        <span class="s1">'create type mynum as (num int, name varchar(20));'</span><span class="p">,</span>  <span class="c1"># forward sql</span>
+        <span class="n">reverse_sql</span><span class="o">=</span><span class="s1">'drop type mynum;'</span><span class="p">,</span>  <span class="c1"># sql for removal</span>
+    <span class="p">),</span>
+<span class="p">]</span>
+</pre>
+<ol>
+<li>Generate migration <tt>./manage.py makemigrations</tt>:</li>
+</ol>
+<pre>Migrations for 'app_name':
+  0003_xxxx:
+    - Reverse alter SQL "make_sum"
+    - Create SQL "mynum"
+    - Alter SQL "make_sum"
+    - Alter SQL state "make_sum"
+</pre>
+<p>You can take a look at the content this generated:</p>
+<pre><span class="c1"># -*- coding: utf-8 -*-</span>
+<span class="kn">from</span> <span class="nn">__future__</span> <span class="kn">import</span> <span class="n">unicode_literals</span>
+<span class="kn">from</span> <span class="nn">django.db</span> <span class="kn">import</span> <span class="n">migrations</span><span class="p">,</span> <span class="n">models</span>
+<span class="kn">import</span> <span class="nn">migrate_sql.operations</span>
+
+
+<span class="k">class</span> <span class="nc">Migration</span><span class="p">(</span><span class="n">migrations</span><span class="o">.</span><span class="n">Migration</span><span class="p">):</span>
+    <span class="n">dependencies</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="p">(</span><span class="s1">'app_name'</span><span class="p">,</span> <span class="s1">'0002_xxxx'</span><span class="p">),</span>
+    <span class="p">]</span>
+    <span class="n">operations</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="n">migrate_sql</span><span class="o">.</span><span class="n">operations</span><span class="o">.</span><span class="n">ReverseAlterSQL</span><span class="p">(</span>
+            <span class="n">name</span><span class="o">=</span><span class="s1">'make_sum'</span><span class="p">,</span>
+            <span class="n">sql</span><span class="o">=</span><span class="s1">'drop function make_sum(int, int);'</span><span class="p">,</span>
+            <span class="n">reverse_sql</span><span class="o">=</span><span class="s1">'create or replace function make_sum(a int, b int) returns int as $$ begin return a + b; end; $$ language plpgsql;'</span><span class="p">,</span>
+        <span class="p">),</span>
+        <span class="n">migrate_sql</span><span class="o">.</span><span class="n">operations</span><span class="o">.</span><span class="n">CreateSQL</span><span class="p">(</span>
+            <span class="n">name</span><span class="o">=</span><span class="s1">'mynum'</span><span class="p">,</span>
+            <span class="n">sql</span><span class="o">=</span><span class="s1">'create type mynum as (num int, name varchar(20));'</span><span class="p">,</span>
+            <span class="n">reverse_sql</span><span class="o">=</span><span class="s1">'drop type mynum;'</span><span class="p">,</span>
+        <span class="p">),</span>
+        <span class="n">migrate_sql</span><span class="o">.</span><span class="n">operations</span><span class="o">.</span><span class="n">AlterSQL</span><span class="p">(</span>
+            <span class="n">name</span><span class="o">=</span><span class="s1">'make_sum'</span><span class="p">,</span>
+            <span class="n">sql</span><span class="o">=</span><span class="s1">'create or replace function make_sum(a mynum, b mynum) returns mynum as $$ begin return (a.num + b.num, </span><span class="se">\'</span><span class="s1">result</span><span class="se">\'</span><span class="s1">)::mynum; end; $$ language plpgsql;'</span><span class="p">,</span>
+            <span class="n">reverse_sql</span><span class="o">=</span><span class="s1">'drop function make_sum(mynum, mynum);'</span><span class="p">,</span>
+        <span class="p">),</span>
+        <span class="n">migrate_sql</span><span class="o">.</span><span class="n">operations</span><span class="o">.</span><span class="n">AlterSQLState</span><span class="p">(</span>
+            <span class="n">name</span><span class="o">=</span><span class="s1">'make_sum'</span><span class="p">,</span>
+            <span class="n">add_dependencies</span><span class="o">=</span><span class="p">((</span><span class="s1">'app_name'</span><span class="p">,</span> <span class="s1">'mynum'</span><span class="p">),),</span>
+        <span class="p">),</span>
+    <span class="p">]</span>
+</pre>
+<p><strong>*NOTE:</strong> Previous function is completely dropped before creation
+because definition of it changed. <tt>CREATE OR REPLACE</tt> would create
+another version of it, so <tt>DROP</tt> makes it clean.*</p>
+<p><strong>*If you put “replace=True“ as kwarg to an “SQLItem“ definition, it
+will NOT drop + create it, but just rerun forward SQL, which is
+“CREATE OR REPLACE“ in this example.*</strong></p>
+<ol>
+<li>Execute migration <tt>./manage.py migrate</tt>:</li>
+</ol>
+<pre>Operations to perform:
+  Apply all migrations: app_name
+Running migrations:
+  Rendering model states... DONE
+  Applying brands.0003_xxxx... OK
+</pre>
+<p>Check results:</p>
+<pre>db_name=# select make_sum((5, 'a')::mynum, (3, 'b')::mynum);
+  make_sum
+------------
+ (8,result)
+(1 row)
+
+db_name=# select make_sum(12, 15);
+ERROR:  function make_sum(integer, integer) does not exist
+LINE 1: select make_sum(12, 15);
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+</pre>
+<p>For more examples see <tt>tests</tt>.</p>
+<p>Feel free to <a href="https://github.com/klichukb/django-migrate-sql/issues" rel="nofollow">open new
+issues</a>.</p>
+</div>
+
+
+</div></body></html>

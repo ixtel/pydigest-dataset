@@ -1,0 +1,207 @@
+<html><body><div><div itemprop="articleBody"><p>I always had this issue with libraries that logs useful stuff but make figuring out how you called said library very hard. For example, Django <a class="reference external" href="https://docs.djangoproject.com/en/1.6/topics/logging/#django-db-backends">logs SQL queries</a> but it's hard to figure out what code made the <a class="reference external" href="https://docs.djangoproject.com/en/1.6/topics/db/queries/">ORM query</a>. This is a huge pain for Ajax requests - <a class="reference external" href="https://github.com/django-debug-toolbar/django-debug-toolbar">django-debug-toolbar</a> can't help you much with those ... well, not <a class="reference external" href="https://github.com/recamshak/django-debug-panel">yet</a>.</p><p>Turns out Python's logging module allows custom formatters. How about we write one?</p><p>The filter is just a class with a <tt class="docutils literal">filter(record)</tt> method. It appears that filter can be called multiple times so we need to make sure we don't patch the record more than 1 time:</p><div class="highlight"><pre><span/><span class="k">class</span> <span class="nc">WithStacktrace</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">filter</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">record</span><span class="p">):</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">record</span><span class="p">,</span> <span class="s1">'stack_patched'</span><span class="p">):</span>
+            <span class="n">record</span><span class="o">.</span><span class="n">msg</span> <span class="o">+=</span> <span class="s2">" -- Stack: </span><span class="se">\n</span><span class="s2">"</span> <span class="o">+</span> <span class="s1">''</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">format_stack</span><span class="p">(</span><span class="n">f</span><span class="o">=</span><span class="n">sys</span><span class="o">.</span><span class="n">_getframe</span><span class="p">(</span><span class="mi">1</span><span class="p">)))</span>
+            <span class="n">record</span><span class="o">.</span><span class="n">stack_patched</span> <span class="o">=</span> <span class="bp">True</span>
+        <span class="k">return</span> <span class="bp">True</span>
+</pre></div><p>You probably notice now the stacktrace can get rather long, and it includes useless frames from the logging module. We can fix that by blacklisting frames from logging or whatever we chose to ignore (like the <tt class="docutils literal">django.db</tt> package):</p><div class="highlight"><pre><span/><span class="kn">import</span> <span class="nn">sys</span>
+<span class="kn">from</span> <span class="nn">traceback</span> <span class="kn">import</span> <span class="n">format_stack</span>
+
+<span class="k">class</span> <span class="nc">WithStacktrace</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">skip</span><span class="o">=</span><span class="p">(),</span> <span class="n">limit</span><span class="o">=</span><span class="mi">5</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">skip</span> <span class="o">=</span> <span class="p">[</span><span class="n">__name__</span><span class="p">,</span> <span class="s1">'logging'</span><span class="p">]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">skip</span><span class="o">.</span><span class="n">extend</span><span class="p">(</span><span class="n">skip</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">limit</span> <span class="o">=</span> <span class="n">limit</span>
+
+    <span class="k">def</span> <span class="nf">filter</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">record</span><span class="p">):</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">record</span><span class="p">,</span> <span class="s1">'stack_patched'</span><span class="p">):</span>
+            <span class="n">frame</span> <span class="o">=</span> <span class="n">sys</span><span class="o">.</span><span class="n">_getframe</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">skip</span><span class="p">:</span>
+                <span class="k">while</span> <span class="n">frame</span><span class="o">.</span><span class="n">f_back</span> <span class="ow">and</span> <span class="p">[</span>
+                    <span class="n">skip</span> <span class="k">for</span> <span class="n">skip</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">skip</span>
+                    <span class="k">if</span> <span class="n">frame</span><span class="o">.</span><span class="n">f_globals</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'__name__'</span><span class="p">,</span> <span class="s1">''</span><span class="p">)</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="n">skip</span><span class="p">)</span>
+                <span class="p">]:</span>
+                    <span class="n">frame</span> <span class="o">=</span> <span class="n">frame</span><span class="o">.</span><span class="n">f_back</span>
+
+            <span class="n">record</span><span class="o">.</span><span class="n">msg</span> <span class="o">+=</span> <span class="s2">" -- Stack: </span><span class="se">\n</span><span class="s2">"</span> <span class="o">+</span> <span class="s1">''</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">format_stack</span><span class="p">(</span><span class="n">f</span><span class="o">=</span><span class="n">frame</span><span class="p">,</span> <span class="n">limit</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">limit</span><span class="p">))</span><span class="o">.</span><span class="n">rstrip</span><span class="p">()</span>
+            <span class="n">record</span><span class="o">.</span><span class="n">stack_patched</span> <span class="o">=</span> <span class="bp">True</span>
+        <span class="k">return</span> <span class="bp">True</span>
+</pre></div><p>This will "skip" frames till it finds a frame that's not from a blacklisted module.</p><p>If we're using Django we can just add this in the settings (assuming we import or define <tt class="docutils literal">WithStacktrace</tt> in the settings):</p><div class="highlight"><pre><span/><span class="n">LOGGING</span><span class="p">[</span><span class="s1">'loggers'</span><span class="p">][</span><span class="s1">'django.db.backends'</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s1">'level'</span><span class="p">:</span> <span class="s1">'DEBUG'</span><span class="p">,</span>
+    <span class="s1">'filters'</span><span class="p">:</span> <span class="p">[</span><span class="s1">'add_stack'</span><span class="p">],</span>
+<span class="p">}</span>
+<span class="n">LOGGING</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="s1">'filters'</span><span class="p">,</span> <span class="p">{})[</span><span class="s1">'add_stack'</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s1">'()'</span><span class="p">:</span> <span class="n">WithStacktrace</span><span class="p">,</span>
+    <span class="s1">'skip'</span><span class="p">:</span> <span class="p">(</span><span class="s2">"django.db"</span><span class="p">,</span> <span class="s2">"south."</span><span class="p">,</span> <span class="s2">"__main__"</span><span class="p">),</span>
+    <span class="s1">'limit'</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span> <span class="c1"># just one frame, increase this if not enough</span>
+<span class="p">}</span>
+</pre></div><p>It would look like this:</p><pre class="term">
+[2013-12-07 17:58:17,297] DEBUG - django.db.backends - (0.001) SELECT "auth_user"."id", "auth_user"."password", "auth_user"."last_login", "auth_user"."is_superuser", "auth_user"."username", "auth_user"."first_name", "auth_user"."last_name", "auth_user"."email", "auth_user"."is_staff", "auth_user"."is_active", "auth_user"."date_joined" FROM "auth_user" WHERE "auth_user"."username" = 'ionelmc' ; args=('ionelmc',) -- Stack:
+  File "foobar.py", line 2, in &lt;module&gt;
+    list(User.objects.filter(username='ionelmc'))
+[2013-12-07 17:58:18,819] DEBUG - django.db.backends - (1.522) select id, username, pg_sleep(0.01) from auth_user; args=() -- Stack:
+  File "foobar.py", line 3, in &lt;module&gt;
+    User.objects.raw('select id, username, pg_sleep(0.01) from auth_user')[0]
+</pre><p>I believe this is very dull, and since we're most probably running the app in the terminal (you would only want all this detail in development) we could use some colors. Let's spice it up with a better filter:</p><div class="highlight"><pre><span/><span class="kn">import</span> <span class="nn">sys</span>
+<span class="k">try</span><span class="p">:</span>
+    <span class="kn">from</span> <span class="nn">sqlparse</span> <span class="kn">import</span> <span class="n">format</span> <span class="k">as</span> <span class="n">sqlformat</span>
+<span class="k">except</span> <span class="ne">ImportError</span><span class="p">:</span>
+    <span class="n">sqlformat</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">s</span><span class="p">,</span> <span class="n">reindent</span><span class="o">=</span><span class="bp">None</span><span class="p">:</span> <span class="n">s</span>
+<span class="kn">from</span> <span class="nn">traceback</span> <span class="kn">import</span> <span class="n">format_stack</span>
+
+<span class="k">class</span> <span class="nc">WithStacktrace</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">skip</span><span class="o">=</span><span class="p">(),</span> <span class="n">limit</span><span class="o">=</span><span class="mi">5</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">skip</span> <span class="o">=</span> <span class="p">[</span><span class="n">__name__</span><span class="p">,</span> <span class="s1">'logging'</span><span class="p">]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">skip</span><span class="o">.</span><span class="n">extend</span><span class="p">(</span><span class="n">skip</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">limit</span> <span class="o">=</span> <span class="n">limit</span>
+
+    <span class="k">def</span> <span class="nf">filter</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">record</span><span class="p">):</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">record</span><span class="p">,</span> <span class="s1">'stack_patched'</span><span class="p">):</span>
+            <span class="n">frame</span> <span class="o">=</span> <span class="n">sys</span><span class="o">.</span><span class="n">_getframe</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">skip</span><span class="p">:</span>
+                <span class="k">while</span> <span class="p">[</span><span class="n">skip</span> <span class="k">for</span> <span class="n">skip</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">skip</span>
+                       <span class="k">if</span> <span class="n">frame</span><span class="o">.</span><span class="n">f_globals</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'__name__'</span><span class="p">,</span> <span class="s1">''</span><span class="p">)</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="n">skip</span><span class="p">)]:</span>
+                    <span class="n">frame</span> <span class="o">=</span> <span class="n">frame</span><span class="o">.</span><span class="n">f_back</span>
+            <span class="k">if</span> <span class="p">(</span>
+                <span class="nb">hasattr</span><span class="p">(</span><span class="n">record</span><span class="p">,</span> <span class="s1">'duration'</span><span class="p">)</span> <span class="ow">and</span>
+                <span class="nb">hasattr</span><span class="p">(</span><span class="n">record</span><span class="p">,</span> <span class="s1">'sql'</span><span class="p">)</span> <span class="ow">and</span>
+                <span class="nb">hasattr</span><span class="p">(</span><span class="n">record</span><span class="p">,</span> <span class="s1">'params'</span><span class="p">)</span>
+            <span class="p">):</span>
+                <span class="n">record</span><span class="o">.</span><span class="n">msg</span> <span class="o">=</span> <span class="p">(</span>
+                    <span class="s2">"</span><span class="se">\x1b</span><span class="s2">[31mduration: </span><span class="si">%s%.4f</span><span class="s2"> secs</span><span class="se">\x1b</span><span class="s2">[0m, "</span>
+                    <span class="s2">"</span><span class="se">\x1b</span><span class="s2">[33marguments: </span><span class="si">%s%s</span><span class="se">\x1b</span><span class="s2">[0m</span><span class="se">\n</span><span class="s2">  </span><span class="se">\x1b</span><span class="s2">[1;33m</span><span class="si">%s</span><span class="se">\x1b</span><span class="s2">[0m</span><span class="se">\n</span><span class="s2"> "</span>
+                    <span class="s2">"-- stack: </span><span class="se">\n\x1b</span><span class="s2">[32m</span><span class="si">%s</span><span class="se">\x1b</span><span class="s2">[0m"</span> <span class="o">%</span> <span class="p">(</span>
+                        <span class="s2">"</span><span class="se">\x1b</span><span class="s2">[31m"</span> <span class="k">if</span> <span class="n">record</span><span class="o">.</span><span class="n">duration</span> <span class="o">&lt;</span> <span class="mf">0.1</span> <span class="k">else</span> <span class="s2">"</span><span class="se">\x1b</span><span class="s2">[1;31m"</span><span class="p">,</span>
+                        <span class="n">record</span><span class="o">.</span><span class="n">duration</span><span class="p">,</span>
+                        <span class="s2">"</span><span class="se">\x1b</span><span class="s2">[1;33m"</span> <span class="k">if</span> <span class="n">record</span><span class="o">.</span><span class="n">params</span> <span class="k">else</span> <span class="s1">''</span><span class="p">,</span>
+                        <span class="n">record</span><span class="o">.</span><span class="n">params</span><span class="p">,</span>
+                        <span class="s1">'</span><span class="se">\n</span><span class="s1">  '</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">sqlformat</span><span class="p">(</span>
+                            <span class="n">record</span><span class="o">.</span><span class="n">sql</span><span class="p">,</span>
+                            <span class="n">reindent</span><span class="o">=</span><span class="bp">True</span>
+                        <span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span><span class="o">.</span><span class="n">splitlines</span><span class="p">()),</span>
+                        <span class="s1">''</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">format_stack</span><span class="p">(</span><span class="n">f</span><span class="o">=</span><span class="n">frame</span><span class="p">,</span> <span class="n">limit</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">limit</span><span class="p">))</span><span class="o">.</span><span class="n">rstrip</span><span class="p">()</span>
+                    <span class="p">)</span>
+                <span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">record</span><span class="o">.</span><span class="n">msg</span> <span class="o">+=</span> <span class="s2">"</span><span class="se">\n</span><span class="s2"> -- stack: </span><span class="se">\n\x1b</span><span class="s2">[32m</span><span class="si">%s</span><span class="se">\x1b</span><span class="s2">[0m"</span> <span class="o">%</span> <span class="p">(</span>
+                    <span class="s1">''</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">format_stack</span><span class="p">(</span><span class="n">f</span><span class="o">=</span><span class="n">frame</span><span class="p">,</span> <span class="n">limit</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">limit</span><span class="p">))</span><span class="o">.</span><span class="n">rstrip</span><span class="p">()</span>
+                <span class="p">)</span>
+            <span class="n">record</span><span class="o">.</span><span class="n">stack_patched</span> <span class="o">=</span> <span class="bp">True</span>
+        <span class="k">return</span> <span class="bp">True</span>
+</pre></div><p>Output would look like this:</p><pre class="term">
+[2013-12-07 18:12:48,382] DEBUG - django.db.backends - <span>duration: </span><span>0.0009 secs</span>, <span>arguments: </span><span>('ionelmc',)</span>
+  <span>SELECT "auth_user"."id",
+         "auth_user"."password",
+         "auth_user"."last_login",
+         "auth_user"."is_superuser",
+         "auth_user"."username",
+         "auth_user"."first_name",
+         "auth_user"."last_name",
+         "auth_user"."email",
+         "auth_user"."is_staff",
+         "auth_user"."is_active",
+         "auth_user"."date_joined"
+  FROM "auth_user"
+  WHERE "auth_user"."username" = 'ionelmc'</span>
+ -- stack:
+<span>  File "foobar.py", line 2, in &lt;module&gt;
+    list(User.objects.filter(username='ionelmc'))</span>
+[2013-12-07 18:12:49,911] DEBUG - django.db.backends - <span>duration: </span><span>1.5223 secs</span>, <span>arguments: ()</span>
+  <span>select id,
+         username,
+         pg_sleep(0.01)
+  from auth_user</span>
+ -- stack:
+<span>  File "foobar.py", line 3, in &lt;module&gt;
+    User.objects.raw('select id, username, pg_sleep(0.01) from auth_user')[0]</span>
+</pre><p>We can take it even further by coloring the SQL and tracebacks using pygments. It would look like this:</p><div class="highlight"><pre><span/><span class="kn">import</span> <span class="nn">sys</span>
+<span class="kn">import</span> <span class="nn">sqlparse</span>
+<span class="kn">from</span> <span class="nn">traceback</span> <span class="kn">import</span> <span class="n">format_stack</span>
+<span class="kn">from</span> <span class="nn">pygments</span> <span class="kn">import</span> <span class="n">highlight</span>
+<span class="kn">from</span> <span class="nn">pygments.lexers</span> <span class="kn">import</span> <span class="n">SqlLexer</span><span class="p">,</span> <span class="n">PythonTracebackLexer</span>
+<span class="kn">from</span> <span class="nn">pygments.formatters</span> <span class="kn">import</span> <span class="n">Terminal256Formatter</span><span class="p">,</span> <span class="n">TerminalFormatter</span>
+
+<span class="k">class</span> <span class="nc">WithStacktrace</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
+    <span class="n">_term_formatter</span> <span class="o">=</span> <span class="n">TerminalFormatter</span><span class="p">(</span><span class="n">bg</span><span class="o">=</span><span class="s1">'dark'</span><span class="p">)</span>
+    <span class="n">_sql_lexer</span> <span class="o">=</span> <span class="n">SqlLexer</span><span class="p">()</span>
+    <span class="n">_tb_lexer</span> <span class="o">=</span> <span class="n">PythonTracebackLexer</span><span class="p">()</span>
+
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">skip</span><span class="o">=</span><span class="p">(),</span> <span class="n">limit</span><span class="o">=</span><span class="mi">5</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">skip</span> <span class="o">=</span> <span class="p">[</span><span class="n">__name__</span><span class="p">,</span> <span class="s1">'logging'</span><span class="p">]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">skip</span><span class="o">.</span><span class="n">extend</span><span class="p">(</span><span class="n">skip</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">limit</span> <span class="o">=</span> <span class="n">limit</span>
+
+    <span class="k">def</span> <span class="nf">filter</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">record</span><span class="p">):</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">record</span><span class="p">,</span> <span class="s1">'stack_patched'</span><span class="p">):</span>
+            <span class="n">frame</span> <span class="o">=</span> <span class="n">sys</span><span class="o">.</span><span class="n">_getframe</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">skip</span><span class="p">:</span>
+                <span class="k">while</span> <span class="n">frame</span> <span class="ow">and</span> <span class="p">[</span>
+                    <span class="n">skip</span> <span class="k">for</span> <span class="n">skip</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">skip</span>
+                    <span class="k">if</span> <span class="n">frame</span><span class="o">.</span><span class="n">f_globals</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'__name__'</span><span class="p">,</span> <span class="s1">''</span><span class="p">)</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="n">skip</span><span class="p">)</span>
+                <span class="p">]:</span>
+                    <span class="n">frame</span> <span class="o">=</span> <span class="n">frame</span><span class="o">.</span><span class="n">f_back</span>
+            <span class="k">if</span> <span class="p">(</span>
+                <span class="nb">hasattr</span><span class="p">(</span><span class="n">record</span><span class="p">,</span> <span class="s1">'duration'</span><span class="p">)</span> <span class="ow">and</span>
+                <span class="nb">hasattr</span><span class="p">(</span><span class="n">record</span><span class="p">,</span> <span class="s1">'sql'</span><span class="p">)</span> <span class="ow">and</span>
+                <span class="nb">hasattr</span><span class="p">(</span><span class="n">record</span><span class="p">,</span> <span class="s1">'params'</span><span class="p">)</span>
+            <span class="p">):</span>
+                <span class="k">if</span> <span class="n">record</span><span class="o">.</span><span class="n">duration</span> <span class="o">&lt;</span> <span class="mf">0.1</span><span class="p">:</span>
+                    <span class="n">record</span><span class="o">.</span><span class="n">msg</span> <span class="o">=</span> <span class="s2">"</span><span class="se">\x1b</span><span class="s2">[31mduration: </span><span class="si">%.4f</span><span class="s2"> secs</span><span class="se">\x1b</span><span class="s2">[0m"</span> <span class="o">%</span> <span class="n">record</span><span class="o">.</span><span class="n">duration</span>
+                <span class="k">else</span><span class="p">:</span>
+                    <span class="n">record</span><span class="o">.</span><span class="n">msg</span> <span class="o">=</span> <span class="s2">"</span><span class="se">\x1b</span><span class="s2">[31mduration: </span><span class="se">\x1b</span><span class="s2">[1;31m</span><span class="si">%.4f</span><span class="s2"> secs</span><span class="se">\x1b</span><span class="s2">[0m"</span> <span class="o">%</span> \
+                        <span class="n">record</span><span class="o">.</span><span class="n">duration</span>
+                <span class="k">if</span> <span class="n">record</span><span class="o">.</span><span class="n">params</span><span class="p">:</span>
+                    <span class="n">record</span><span class="o">.</span><span class="n">msg</span> <span class="o">+=</span> <span class="s2">", </span><span class="se">\x1b</span><span class="s2">[33marguments: </span><span class="se">\x1b</span><span class="s2">[1;33m</span><span class="si">%s</span><span class="se">\x1b</span><span class="s2">[0m"</span> <span class="o">%</span> <span class="p">(</span>
+                        <span class="n">record</span><span class="o">.</span><span class="n">params</span><span class="p">,</span>
+                    <span class="p">)</span>
+                <span class="k">else</span><span class="p">:</span>
+                    <span class="n">record</span><span class="o">.</span><span class="n">msg</span> <span class="o">+=</span> <span class="s2">", </span><span class="se">\x1b</span><span class="s2">[33marguments: </span><span class="si">%s</span><span class="se">\x1b</span><span class="s2">[0m"</span> <span class="o">%</span> <span class="p">(</span><span class="n">record</span><span class="o">.</span><span class="n">params</span><span class="p">,</span> <span class="p">)</span>
+                <span class="n">sql</span> <span class="o">=</span> <span class="n">record</span><span class="o">.</span><span class="n">sql</span>
+                <span class="k">try</span><span class="p">:</span>
+                    <span class="n">sql</span> <span class="o">=</span> <span class="s1">'</span><span class="se">\n</span><span class="s1">  '</span><span class="o">.</span><span class="n">join</span><span class="p">(</span>
+                        <span class="n">sqlparse</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">sql</span><span class="p">,</span> <span class="n">reindent</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span><span class="o">.</span><span class="n">splitlines</span><span class="p">()</span>
+                    <span class="p">)</span>
+                    <span class="n">sql</span> <span class="o">=</span> <span class="n">highlight</span><span class="p">(</span><span class="n">sql</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_sql_lexer</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_term_formatter</span><span class="p">)</span>
+                <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">ex</span><span class="p">:</span>
+                    <span class="k">pass</span>
+                <span class="n">record</span><span class="o">.</span><span class="n">msg</span> <span class="o">+=</span> <span class="s2">"</span><span class="se">\n</span><span class="s2">  </span><span class="se">\x1b</span><span class="s2">[1;33m</span><span class="si">%s</span><span class="se">\x1b</span><span class="s2">[0m"</span> <span class="o">%</span> <span class="n">sql</span>
+                <span class="k">if</span> <span class="n">frame</span><span class="p">:</span>
+                    <span class="n">tb</span> <span class="o">=</span> <span class="s1">''</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">format_stack</span><span class="p">(</span><span class="n">f</span><span class="o">=</span><span class="n">frame</span><span class="p">,</span> <span class="n">limit</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">limit</span><span class="p">))</span>
+                    <span class="k">try</span><span class="p">:</span>
+                        <span class="n">record</span><span class="o">.</span><span class="n">msg</span> <span class="o">+=</span> <span class="s2">" -- stack: </span><span class="se">\n</span><span class="si">%s</span><span class="s2">"</span> <span class="o">%</span> <span class="n">highlight</span><span class="p">(</span>
+                            <span class="n">tb</span><span class="p">,</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_tb_lexer</span><span class="p">,</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_term_formatter</span>
+                        <span class="p">)</span><span class="o">.</span><span class="n">rstrip</span><span class="p">()</span>
+                    <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">ex</span><span class="p">:</span>
+                        <span class="n">record</span><span class="o">.</span><span class="n">msg</span> <span class="o">+=</span> <span class="s2">" -- stack: </span><span class="se">\n\x1b</span><span class="s2">[32m</span><span class="si">%s</span><span class="se">\x1b</span><span class="s2">[0m"</span> <span class="o">%</span> <span class="n">tb</span><span class="o">.</span><span class="n">rstrip</span><span class="p">()</span>
+
+            <span class="n">record</span><span class="o">.</span><span class="n">stack_patched</span> <span class="o">=</span> <span class="bp">True</span>
+        <span class="k">return</span> <span class="bp">True</span>
+</pre></div><p>The output would look like this:</p><pre class="term">
+[2013-12-07 18:10:56,766] DEBUG - django.db.backends - <span>duration: 0.0009 secs</span>, <span>arguments: </span><span>('ionelmc',)</span>
+  <span/><span>SELECT</span> <span>"auth_user"</span>.<span>"id"</span>,
+         <span>"auth_user"</span>.<span>"password"</span>,
+         <span>"auth_user"</span>.<span>"last_login"</span>,
+         <span>"auth_user"</span>.<span>"is_superuser"</span>,
+         <span>"auth_user"</span>.<span>"username"</span>,
+         <span>"auth_user"</span>.<span>"first_name"</span>,
+         <span>"auth_user"</span>.<span>"last_name"</span>,
+         <span>"auth_user"</span>.<span>"email"</span>,
+         <span>"auth_user"</span>.<span>"is_staff"</span>,
+         <span>"auth_user"</span>.<span>"is_active"</span>,
+         <span>"auth_user"</span>.<span>"date_joined"</span>
+  <span>FROM</span> <span>"auth_user"</span>
+  <span>WHERE</span> <span>"auth_user"</span>.<span>"username"</span> = <span>'ionelmc'</span>
+ -- stack:
+  File <span>"foobar.py"</span>, line <span>2</span>, in &lt;module&gt;
+    <span>list</span>(User.objects.filter(username=<span>'</span><span>ionelmc</span><span>'</span>))
+[2013-12-07 18:10:58,304] DEBUG - django.db.backends - <span>duration: </span><span>1.5201 secs</span>, <span>arguments: ()</span>
+  <span/><span>select</span> id,
+         username,
+         pg_sleep(<span>0</span>.<span>01</span>)
+  <span>from</span> auth_user
+ -- stack:
+  File <span>"foobar.py"</span>, line <span>3</span>, in &lt;module&gt;
+    User.objects.raw(<span>'</span><span>select id, username, pg_sleep(0.01) from auth_user</span><span>'</span>)[<span>0</span>]
+</pre><p>I think it doesn't look much better ...</p><p>Notes:</p><ul class="simple"><li>The output snippets are created with <a class="reference external" href="https://github.com/ralphbean/ansi2html">ansi2html</a>.</li><li>An astute reader will point out that there's <a class="reference external" href="https://github.com/django/django/blob/master/django/utils/termcolors.py">django.utils.termcolors</a> or some other handy library ... but I don't think it's really needed.</li></ul></div></div></body></html>

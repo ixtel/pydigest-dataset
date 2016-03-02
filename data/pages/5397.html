@@ -1,0 +1,180 @@
+<html><body><div><div class="entry-content">
+		<p><strong>tl;dr</strong></p>
+<p>Before you can optimise your slow code, you need to identify the bottlenecks: proper profiling will give you the right insights.</p>
+<p>This article discusses some profiling tools for Python.</p>
+<p><strong>Introduction</strong></p>
+<p>Python is a high-level programming language with an emphasis on readability. Some of its peculiarities, like the dynamic typing, or the (in)famous <a title="GIL" href="https://wiki.python.org/moin/GlobalInterpreterLock" target="_blank">GIL</a>, might have some trade-offs in terms of performance.</p>
+<p>Many open source packages often follow a readability-first approach: the algorithms are firstly implemented using pythonic, easy-to-read code, then the performance issues are identified and tackled, refactoring the code or employing solutions like <a title="Cython" href="http://cython.org/" target="_blank">Cython</a>. For example, this is the case of machine learning packages like <a title="scikit-learn" href="http://scikit-learn.org/" target="_blank">scikit-learn</a> or <a title="gensim" href="https://radimrehurek.com/gensim/" target="_blank">gensim</a>. The latter shows an implementation of the word2vec algorithm which is even faster than the <a title="word2vec by Google" href="https://code.google.com/p/word2vec/" target="_blank">original C implementation by Google</a>, quite impressive if we consider how Python is often seen as <em>slow</em>.</p>
+<p>Before we start to refactor our code, or to think about solutions like Cython, it is important to identify where the performance bottlenecks are, so we can make an informed decision regarding the course of action we want to follow. This is a fundamental step if we want to get to biggest benefit with<br/>
+the least amount of work. In fact, one of the biggest mistake in this context would be to make an educated guess, or to follow an intuition, and fix what we <em>believe</em> is the source of the problem.</p>
+<p>By profiling our code, we take this uncertainty away since we will know<br/>
+exactly where the problems are.</p>
+<p><strong>Sample code to profile</strong></p>
+<p>The following functions will be used for a simple proof of concept.</p>
+<p>Please notice that while it’s often reasonable to assume the pythonic code to be faster than the non-pythonic one, we don’t know it yet! So we actually need to verify if the slow() function is slower than pythonic():</p>
+<pre class="brush: python; title: ; notranslate" title="">
+# profile_test.py
+def slow(N=1000000):
+    total = 0
+    for i in range(N):
+        total += i
+    return total
+
+def pythonic(N=1000000):
+    total = sum(range(N))
+    return total
+</pre>
+<p>Both functions simply sum N integers, with N defaulted to one million.</p>
+<p><strong>You need to time it</strong></p>
+<p>Profiling involves measuring the resource you want to optimise for, whether<br/>
+it is memory usage or CPU time. In this article we are focusing on execution (CPU) time in general, so profiling mainly involves timing.</p>
+<p>The very basic approach for timing involves the unix shell. Given the profile_test.py code above, you can use the time command to verify the run time:</p>
+<pre>$ time python -c "import profile_test; profile_test.slow()"
+
+real    0m0.102s
+user    0m0.077s
+sys 0m0.023s
+
+$ time python -c "import profile_test; profile_test.pythonic()"
+
+real    0m0.071s
+user    0m0.043s
+sys 0m0.024s
+</pre>
+<p>Notice that this timing also includes the set-up cost of importing the profile_test module, which is not what we want to test. This first results tell us that the slow() function is actually slower than pythonic().</p>
+<p>This way of timing the Python code from the command line can become a bit awkward in the moment we want to time longer pieces of code. We can use the time module to include some timing feature within our code. The overall structure of our timing code will be:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+import time
+t0 = time.time()  # start time
+# the code to time goes here
+t1 = time.time() # end time
+print(t1 - t0)
+</pre>
+<p>Given the profile_test.py above, we can expand it by appending the following:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+if __name__ == '__main__':
+    import time
+    t0 = time.time()
+    result = slow()
+    t1 = time.time()
+    print("slow(): %f" % (t1 - t0))
+    t0 = time.time()
+    result = pythonic()
+    t1 = time.time()
+    print("pythonic(): %f" % (t1 - t0))
+</pre>
+<p>The script can now be executed:</p>
+<pre>$ python profile_test.py
+slow(): 0.077502
+pythonic(): 0.022454
+</pre>
+<p>We notice that the difference in timing is now more clear, as it was probably mitigated by the overhead introduced with the set-up cost of importing the module and calling the code from the external time facility.</p>
+<p>One more option is the timeit module, which shares some aspects with the time command: it can be easily called from the command line and it is particularly useful for quickly testing some small bits of Python code. It also offers the option to loop through the code for a number of times, in order to get some statistics like average or best run time.</p>
+<p><strong>The cProfile module</strong></p>
+<p>Part of the standard library, the cProfile module allows you to go a bit more into details analysing the most expensive functions.</p>
+<p>You can call the cProfile module from the command line without modifying your existing Python code:</p>
+<pre>$ python -m cProfile -o profiling_results profile_test.py
+</pre>
+<p>The above command will save the profiling results in the file specified after the -o flag, in this case profiling_results.</p>
+<p>We can analyse the results using the pstats module, either in a Python script or from an interactive session:</p>
+<pre>&gt;&gt;&gt; import pstats
+&gt;&gt;&gt; stats = pstats.Stats("profiling_results")
+&gt;&gt;&gt; stats.sort_stats("tottime")
+
+&gt;&gt;&gt; stats.print_stats(10)
+
+         12 function calls in 0.104 seconds
+
+   Ordered by: internal time
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1    0.083    0.083    0.083    0.083 profile_test.py:3(slow)
+        1    0.021    0.021    0.021    0.021 {built-in method sum}
+        2    0.000    0.000    0.000    0.000 {built-in method print}
+        1    0.000    0.000    0.104    0.104 profile_test.py:1()
+        4    0.000    0.000    0.000    0.000 {built-in method time}
+        1    0.000    0.000    0.021    0.021 profile_test.py:9(pythonic)
+        1    0.000    0.000    0.104    0.104 {built-in method exec}
+        1    0.000    0.000    0.000    0.000 {method 'disable' of '_lsprof.Profiler' objects}
+
+
+</pre>
+<p>In this example, the function calls are ordered by total time (tottime), the other option being the cumulative time (cumtime), and the top 10 functions are printed on the screen.</p>
+<p>Again, we can notice how the slow() function is slower than pythonic(). Given the simplicity of our code though, this profiling session doesn’t tell us much that we didn’t already know. It is anyway interesting to see how we have information about the number of times a function is call, and whether we are calling a built-in or a custom method.</p>
+<p><strong>Line by line with line_profiler</strong></p>
+<p>If we need a higher level of details, the options we might want to consider is the line_profiler. It’s not part of the standard library so we can install it with:</p>
+<pre>$ sudo pip install line_profiler
+</pre>
+<p>The line_profiler provides a decorator that we can use for the functions we want to analyse. In order to use it, we need to modify our code as follows.</p>
+<p>Firstly, import the module:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+import line_profiler
+</pre>
+<p>Secondly, decorate the functions with the @profile decorator:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+@profile
+def slow(N=1000000):
+# code of slow()
+
+@profile
+def pythonic(N=1000000):
+# code of pythonic
+</pre>
+<p>The line_profiler provides a command line utility to run it:</p>
+<pre>$ kernprof -v -l profile_test.py
+</pre>
+<p>This command will give the following output:</p>
+<pre>slow(): 1.347966
+pythonic(): 0.021008
+Wrote profile results to profile_test.py.lprof
+Timer unit: 1e-06 s
+
+Total time: 0.764091 s
+File: profile_test.py
+Function: slow at line 3
+
+Line #      Hits         Time  Per Hit   % Time  Line Contents
+==============================================================
+     3                                           @profile
+     4                                           def slow(N=1000000):
+     5         1            1      1.0      0.0      total = 0
+     6   1000001       362178      0.4     47.4      for i in range(N):
+     7   1000000       401912      0.4     52.6          total += i
+     8         1            0      0.0      0.0      return total
+
+Total time: 0.020996 s
+File: profile_test.py
+Function: pythonic at line 10
+
+Line #      Hits         Time  Per Hit   % Time  Line Contents
+==============================================================
+    10                                           @profile
+    11                                           def pythonic(N=1000000):
+    12         1        20995  20995.0    100.0      total = sum(range(N))
+    13         1            1      1.0      0.0      return total
+</pre>
+<p>The time is here measured in millionth of a second. We immediately notice how the slow() function is now much slower. In fact, the profiling introduces some overhead that is particularly prominent in this function. If we analyse the output, we can see how some lines of code are hit N times (1M in out case) in the slow() function: this is where the overhead is coming from. Analysing the output line by line, we can have a better insight of what is causing the difference in speed between the two functions.</p>
+<p><strong>A word on unit testing</strong></p>
+<p>Unit tests are important. Do not avoid testing just because it makes your profiling process easier. If your profiling approach breaks some tests, do not ignore it, but rather find a workaround to have both profiling and testing in place.</p>
+<p>Something I’ve heard in a recent <a title="PyData London" href="http://www.meetup.com/PyData-London-Meetup/">PyData London Meetup</a> (possibly I’m quoting <a title="Ian Oszcald" href="http://ianozsvald.com/">Ian Oszvald</a>?):</p>
+<p>“[without unit testing] my code was very fast and very wrong”.</p>
+<p>I think this conveys the message.</p>
+<p><strong>Summary</strong></p>
+<p>Long story short:</p>
+<ul>
+<ul>
+<li>If you need to make your code faster, you need to know where the performance bottlenecks are</li>
+<li>You can use some very basic functionality from the unix shell, e.g. the time command</li>
+<li>Python provides some basic facilities for timing, e.g. the time and timeit modules</li>
+<li>Python provides some more advanced facilities for profiling, e.g. the cProfile and line_profiler modules</li>
+<li>Do not forget to test your code, because you need it to be both fast and correct</li>
+</ul>
+</ul>
+<p> </p>
+<div id="jp-post-flair" class="sharedaddy sd-like-enabled sd-sharing-enabled"><div class="sharedaddy sd-block sd-like jetpack-likes-widget-wrapper jetpack-likes-widget-unloaded" id="like-post-wrapper-82018920-5-56d5aa2dcb3fa" data-src="//widgets.wp.com/likes/#blog_id=82018920&amp;post_id=5&amp;origin=marcobonzanini.wordpress.com&amp;obj_id=82018920-5-56d5aa2dcb3fa" data-name="like-post-frame-82018920-5-56d5aa2dcb3fa"><h3 class="sd-title">Like this:</h3><p class="likes-widget-placeholder post-likes-widget-placeholder"><span class="button"><span>Like</span></span> <span class="loading">Loading...</span></p><span class="sd-text-color"/><a class="sd-link-color"/></div>
+<p id="jp-relatedposts" class="jp-relatedposts">
+	<h3 class="jp-relatedposts-headline"><em>Related</em></h3>
+</p></div>	</div>
+
+	
+</div></body></html>

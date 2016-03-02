@@ -1,0 +1,195 @@
+<html><body><div><div class="fifteen columns">
+        
+<blockquote>
+    <h2>Solving the expression problem in Python (object algebras and mypy static types)</h2>
+    Posted on July 15, 2015
+    
+</blockquote>
+
+<p>Object algebras are a solution to the expression problem for any object oriented languages that supports generics. This post will introduce object algebras, the expression problem, and then implement a solution to the expression problem in Python with mypy, an optional static type checker for Python that’s inspired some standardisation on type hinting in the form of <a href="https://www.python.org/dev/peps/pep-0484/">PEP 0484</a>.</p>
+<h3 id="the-expression-problem">The expression problem</h3>
+<p>The <a href="https://en.wikipedia.org/wiki/Expression_problem">expression probem</a> is a “new name for an old problem”. It was originally described by Phillip Wadler <a href="http://homepages.inf.ed.ac.uk/wadler/papers/expression/expression.txt">in an email to a java genericity mailing list</a> on Nov 12, 1998:</p>
+<blockquote>
+<p>The goal is to define a datatype by cases, where one can add new cases to the datatype and new functions over the datatype, without recompiling existing code, and while retaining static type safety (e.g., no casts).</p>
+</blockquote>
+<p>The requirements to be able to say that you have solved the expression problem are more concretely described in the paper “<a href="https://www.cs.utexas.edu/~wcook/Drafts/2012/ecoop2012.pdf">Extensibility for the Masses</a>”:</p>
+<ol>
+<li><p><em>Extensibility in both dimensions</em>: A solution must allow the addition of new data variants and new operations and support extending existing operations.</p></li>
+<li><p><em>Strong static type safety</em>: A solution must prevent applying an operation to a data variant which it cannot handle using static checks.</p></li>
+<li><p><em>No modification or duplication</em>: Existing code must not be modified nor duplicated.</p></li>
+<li><p><em>Separate compilation and type-checking</em>: Safety checks or compilation steps must not be deferred until link or runtime.</p></li>
+<li><p><em>Independent extensibility</em>: It should be possible to combine independently developed extensions so that they can be used jointly.</p></li>
+</ol>
+<p>It’s a little hard to satisfy the static safety checks in Python without adding types that can be checked statically (without executing the code). To address this shortcoming, we will use the excellent <a href="http://mypy-lang.org/">mypy</a> type checker.</p>
+<h3 id="static-type-checking-with-mypy">Static type checking with <a href="http://mypy-lang.org/">mypy</a></h3>
+<p><a href="http://mypy-lang.org/">Mypy</a> is a static type checker for Python. It’s got support for generics and an analog of virtual methods. This will be enough to do some interesting things, as we will soon see.</p>
+<p>An important feature to note is that every <a href="http://mypy-lang.org/">mypy</a> program is still a valid python 3.x program. The types are entirely optional and you’re free to run the program if it doesn’t type check, it will probably just explode at runtime. Let’s look at an example, this is a normal python function:</p>
+<pre class="sourceCode python"><code class="sourceCode python"><span class="kw">def</span> greeting(name):
+    <span class="kw">return</span> <span class="st">'Hello, {}'</span>.<span class="dt">format</span>(name)</code></pre>
+<p>Below is the same example, but now we’re going to annotate it to say “this is a function that takes a string, and returns a string”. If we try to pass something that is not a string to this function, <a href="http://mypy-lang.org/">mypy</a> will be able to tell you that this won’t work <em>before</em> you run your program.</p>
+<pre class="sourceCode python"><code class="sourceCode python"><span class="kw">def</span> greeting(name: <span class="dt">str</span>) -&gt; <span class="dt">str</span>:
+    <span class="kw">return</span> <span class="st">'Hello, {}'</span>.<span class="dt">format</span>(name)</code></pre>
+<p>We can do more interesting things too, including checking subtyping relations. Here, we say “names is anything that is Iterable over, and produces a string on each iteration.”</p>
+<pre class="sourceCode python"><code class="sourceCode python"><span class="ch">from</span> typing <span class="ch">import</span> Iterable
+
+<span class="kw">def</span> greet_all(names: Iterable[<span class="dt">str</span>]) -&gt; <span class="ot">None</span>:
+    <span class="kw">for</span> name in names:
+        <span class="dt">print</span>(<span class="st">'Hello, {}'</span>.<span class="dt">format</span>(name))</code></pre>
+<p>“Iterable” here is an example of a higher kinded type, which you can think of as a function from a type to another type. Here we are giving it the str type and the result is a type that denotes things iterable over strings. More on this in a bit, when we define our own generics.</p>
+<h3 id="object-algebras">Object algebras</h3>
+<p>Object algebras are the solution to the expression problem chosen in the paper “<a href="https://www.cs.utexas.edu/~wcook/Drafts/2012/ecoop2012.pdf">Extensibility for the Masses</a>”. This is the recipe we will follow to try and solve the expression problem in Python.</p>
+<p>Interestingly, object algebras map more or less directly to the final tagless solution to the expression problem, which is another well-known solution popularised by the paper “<a href="http://okmij.org/ftp/tagless-final/">Finally Tagless, Partially Evaluated: Tagless Staged Interpreters for Simpler Typed Languages</a>”.</p>
+<p>This mapping is a desirable quality, and much of the “<a href="https://www.cs.utexas.edu/~wcook/Drafts/2012/ecoop2012.pdf">Extensibility for the Masses</a>” paper is centered around explaining the nice algebraic properties you are able to get from such an approach. Object algebras are essentially F-algebras, which have been very well studied in category theory and computer science.</p>
+<p>Object algebras are actually pretty simple, and best explained by example. If you know what the Visitor and AbstractFactory “patterns” are, you may begin to see some similarities.</p>
+<h3 id="abstract-base-classes-in-python">Abstract base classes in Python</h3>
+<p>For our working example, we’re going to implement a simple calculator. This recurring example is sometimes known as “Hutton’s Razor”. The calculator is capable of addition on literals, so we’re able to have “1+1”, “2+1+1”, but not anything non-sensical like “42++”.</p>
+<p>We are going to start by implementing the abstract base class (a Python 2.6 thing, <a href="https://www.python.org/dev/peps/pep-3119/">PEP 3119</a>. This base class will describe our calculator data type, and allow us to create multiple ways consuming the information therein.</p>
+<pre class="sourceCode python"><code class="sourceCode python"><span class="ch">from</span> abc <span class="ch">import</span> ABCMeta, abstractmethod
+
+<span class="kw">class</span> AddExpr(metaclass=ABCMeta):
+    <span class="ot">@abstractmethod</span>
+    <span class="kw">def</span> lit(<span class="ot">self</span>, lit):
+        <span class="kw">pass</span>
+
+    <span class="ot">@abstractmethod</span>
+    <span class="kw">def</span> add(<span class="ot">self</span>, e1, e2):
+        <span class="kw">pass</span></code></pre>
+<p>Now we will sprinkle some types on. Note that we introduce a type variable, this is where the “str” type lived in our earlier example with iterators.</p>
+<pre class="sourceCode python"><code class="sourceCode python"><span class="ch">from</span> abc <span class="ch">import</span> ABCMeta, abstractmethod
+<span class="ch">from</span> typing <span class="ch">import</span> TypeVar, Generic
+
+T = TypeVar(<span class="st">'T'</span>)
+
+<span class="kw">class</span> AddExpr(Generic[T], metaclass=ABCMeta):
+    <span class="ot">@abstractmethod</span>
+    <span class="kw">def</span> lit(<span class="ot">self</span>, lit: <span class="dt">int</span>) -&gt; T:
+        <span class="kw">pass</span>
+
+    <span class="ot">@abstractmethod</span>
+    <span class="kw">def</span> add(<span class="ot">self</span>, e1: T, e2: T) -&gt; T:
+        <span class="kw">pass</span></code></pre>
+<p>We now have an interface representing some data. This is equivalent in Haskell to:</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">class</span> <span class="dt">AddExpr</span> t <span class="kw">where</span>
+<span class="ot">    lit ::</span> <span class="dt">Int</span> <span class="ot">-&gt;</span> t
+<span class="ot">    add ::</span> t <span class="ot">-&gt;</span> t <span class="ot">-&gt;</span> t</code></pre>
+<p>We can now write a python expression that says “given a thing which looks like AddExpr, I’ll give you some kind of calculation”:</p>
+<pre class="sourceCode python"><code class="sourceCode python"><span class="kw">def</span> expression(t: AddExpr[T]) -&gt; T:
+    <span class="kw">return</span> t.add(t.lit(<span class="dv">1</span>), t.lit(<span class="dv">2</span>))</code></pre>
+<p>This little a pretty direct mapping to the final tagless approach in Haskell:</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">expression ::</span> <span class="dt">AddExpr</span> t <span class="ot">=&gt;</span> t
+expression <span class="fu">=</span> add (lit <span class="dv">1</span>) (lit <span class="dv">2</span>)</code></pre>
+<h3 id="doing-something-kind-of-usefull">Doing something (kind of) usefull</h3>
+<p>This is a contrived example, so let’s pretend that evaluating these abstract expressions to a resulting integer is something useful that we want to do. This is now as simple as implementing a subclass of AddExpr.</p>
+<pre class="sourceCode python"><code class="sourceCode python"><span class="kw">class</span> AddExprEval(AddExpr[<span class="dt">int</span>]):
+    <span class="kw">def</span> lit(<span class="ot">self</span>, lit: <span class="dt">int</span>) -&gt; <span class="dt">int</span>:
+        <span class="kw">return</span> lit
+
+    <span class="kw">def</span> add(<span class="ot">self</span>, e1: <span class="dt">int</span>, e2: <span class="dt">int</span>):
+        <span class="kw">return</span> e1 + e2</code></pre>
+<p>That’s actually pretty clean! Now we can see how the abstract base class is useful as we define <em>another</em> implementation, but this time for printing expressions as strings.</p>
+<pre class="sourceCode python"><code class="sourceCode python"><span class="kw">class</span> AddExprPrint(AddExpr[<span class="dt">str</span>]):
+    <span class="kw">def</span> lit(<span class="ot">self</span>, lit: <span class="dt">int</span>) -&gt; <span class="dt">str</span>:
+        <span class="kw">return</span> <span class="dt">str</span>(lit)
+
+    <span class="kw">def</span> add(<span class="ot">self</span>, e1: <span class="dt">str</span>, e2: <span class="dt">str</span>):
+        <span class="kw">return</span> <span class="st">"(</span><span class="ot">{0}</span><span class="st"> + </span><span class="ot">{1}</span><span class="st">)"</span>.<span class="dt">format</span>(e1, e2)</code></pre>
+<p>We can now put all of our pieces together and evaluate the same expression with two different implementations:</p>
+<pre class="sourceCode python"><code class="sourceCode python"><span class="dt">print</span>(expression(AddExprPrint()))
+<span class="dt">print</span>(expression(AddExprEval()))</code></pre>
+<pre><code>$ mypy object-alg.py
+$ python object-alg.py
+(1 + 2)
+3
+</code></pre>
+<h3 id="tick-in-the-static-safety-box">Tick in the static safety box</h3>
+<p>If you recall our prerequisites for solving the expression problem, along with extensibility we had some requirements for static safety. Let’s see if we satisfy those:</p>
+<ol start="2">
+<li><p><em>Strong static type safety</em>: A solution must prevent applying an operation to a data variant which it cannot handle using static checks.</p></li>
+<li><p><em>Separate compilation and type-checking</em>: Safety checks or compilation steps must not be deferred until link or runtime.</p></li>
+</ol>
+<p>Let’s try to run a program that passes an implementation which cannot handle a data variant, and see if we can catch that before running the program and failing at runtime.</p>
+<pre class="sourceCode python"><code class="sourceCode python"><span class="kw">class</span> AddExprIncomplete(AddExpr[<span class="dt">str</span>]):
+    <span class="kw">def</span> lit(<span class="ot">self</span>, lit: <span class="dt">int</span>) -&gt; <span class="dt">str</span>:
+        <span class="kw">return</span> <span class="dt">str</span>(lit)
+
+    <span class="co"># Missing an implementation for add</span>
+
+<span class="dt">print</span>(expression(AddExprIncomplete()))</code></pre>
+<pre><code>$ mypy object-alg.py 
+object-alg.py, line 38: Cannot instantiate abstract class 'AddExprIncomplete' with abstract method 'add</code></pre>
+<p>Excellent, it exploded. We’ll repeat this test when we do some extending.</p>
+<h3 id="extensibility">Extensibility</h3>
+<p>The whole point of the expression problem is to be able to “add new cases to the datatype and new functions over the datatype”. Let’s do that now by extending our calculator to handle multiplication. We will use inheritence and subtyping to get code re-use and satisfy requirements 1, 3 and 5.</p>
+<ol>
+<li><p><em>Extensibility in both dimensions</em>: A solution must allow the addition of new data variants and new operations and support extending existing operations.</p></li>
+<li><p><em>No modification or duplication</em>: Existing code must not be modified nor duplicated.</p></li>
+<li><p><em>Independent extensibility</em>: It should be possible to combine independently developed extensions so that they can be used jointly.</p></li>
+</ol>
+<pre class="sourceCode python"><code class="sourceCode python"><span class="kw">class</span> MultExpr(Generic[T], AddExpr[T], metaclass=ABCMeta):
+    <span class="ot">@abstractmethod</span>
+    <span class="kw">def</span> mult(<span class="ot">self</span>, e1: T, e2: T) -&gt; T:
+        <span class="kw">pass</span>
+
+    <span class="co"># We get lit and add for free from the AddExpr[T] super(meta)class</span></code></pre>
+<p>You’ll note that as the MultExpr implementations are a superset of the AddExpr ones, we’re able to use them on both types of expression, and even embed them in our extended data type.</p>
+<pre class="sourceCode python"><code class="sourceCode python"><span class="kw">class</span> MultExprPrint(AddExprPrint, MultExpr[<span class="dt">str</span>]):
+    <span class="kw">def</span> mult(<span class="ot">self</span>, e1: <span class="dt">str</span>, e2: <span class="dt">str</span>):
+        <span class="kw">return</span> <span class="st">"(</span><span class="ot">{0}</span><span class="st"> x </span><span class="ot">{1}</span><span class="st">)"</span>.<span class="dt">format</span>(e1, e2)
+ 
+<span class="kw">class</span> MultExprEval(AddExprEval, MultExpr[<span class="dt">int</span>]):
+    <span class="kw">def</span> mult(<span class="ot">self</span>, e1: <span class="dt">int</span>, e2: <span class="dt">int</span>):
+        <span class="kw">return</span> e1 * e2
+
+<span class="kw">def</span> add_expr(t: AddExpr[T]) -&gt; T:
+    <span class="kw">return</span> t.add(t.lit(<span class="dv">1</span>), t.lit(<span class="dv">2</span>))
+
+<span class="kw">def</span> mult_expr(t: MultExpr[T]) -&gt; T:
+    <span class="kw">return</span> t.mult(add_expr(t), t.lit(<span class="dv">2</span>))
+
+<span class="dt">print</span>(mult_expr(MultExprPrint()))
+<span class="dt">print</span>(mult_expr(MultExprEval()))</code></pre>
+<pre><code>$ mypy object-alg.py
+$ python object-alg.py
+((1 + 2) x 2)
+6</code></pre>
+<p>What about the static safety? Do we still get that? Let’s try evaluating a multiplication expression with something less powerful.</p>
+<pre class="sourceCode python"><code class="sourceCode python"><span class="dt">print</span>(mult_expr(AddExprEval()))</code></pre>
+<pre><code>$ mypy object-alg.py
+object-alg.py, line 61: Argument 1 to "mult_expr" has incompatible type
+"AddExprEval"; expected MultExpr[None]</code></pre>
+<p>This saved us from an ugly run time error:</p>
+<pre><code>$ python object-alg.py
+Traceback (most recent call last):
+  File "object-alg.py", line 61, in &lt;module&gt;
+    print(mult_expr(AddExprEval()))
+  File "object-alg.py", line 56, in mult_expr
+    return t.mult(add_expr(t), t.lit(2))
+AttributeError: 'AddExprEval' object has no attribute 'mult'</code></pre>
+<h3 id="maybe-a-little-mypy-bug">Maybe a little <a href="http://mypy-lang.org/">mypy</a> bug</h3>
+<p>I may have discovered a little bug whilst playing around with failure cases, I suspect either type variable unification is broken or doesn’t happen. The problem arises if we try to instantiate a subclass that should cause the metaclass’s type variables to fail to unify. This leads to being able to make a mistake that is not caught by <a href="http://mypy-lang.org/">mypy</a>:</p>
+<pre class="sourceCode python"><code class="sourceCode python">
+<span class="co"># The AddExprPrint super class will result in an incompatible type</span>
+<span class="co"># (mixing strings with ints)</span>
+<span class="kw">class</span> MultExprEvalBroken(AddExprPrint, MultExpr[<span class="dt">int</span>]):
+    <span class="kw">def</span> mult(<span class="ot">self</span>, e1: <span class="dt">int</span>, e2: <span class="dt">int</span>):
+        <span class="kw">return</span> e1 * e2</code></pre>
+<pre><code>$ mypy object-alg.py
+$ python object-alg.py
+Traceback (most recent call last):
+  File "object-alg.py", line 65, in &lt;module&gt;
+    print(mult_expr(MultExprEvalBroken()))
+  File "object-alg.py", line 56, in mult_expr
+    return t.mult(add_expr(t), t.lit(2))
+  File "object-alg.py", line 63, in mult
+    return e1 * e2
+TypeError: can't multiply sequence by non-int of type 'str'</code></pre>
+<p>I haven’t dug further into this.</p>
+<h3 id="conclusion">Conclusion</h3>
+<p>The expression problem, solved in python! Who’d a thunk it?</p>
+
+
+
+<noscript>Please enable JavaScript to view the <a href="http://disqus.com/?ref_noscript">comments powered by Disqus.</a></noscript>
+
+      </div>
+      </div></body></html>

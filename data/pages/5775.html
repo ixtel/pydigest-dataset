@@ -1,0 +1,108 @@
+<html><body><div><div class="content html_format"><p>
+      Когда возникает задача — по адресу посетителя получать его город и налоговый (автомобильный) код региона, кажется — да это же просто, в инете полно таких штук!</p><p>
+А потом смотришь: одни платные, другие нельзя у себя развернуть, третьи можно, но это ресурсозатратно, четвертые о регионах РФ ничего не знают…</p><p>
+И тут на помощь спешит больной мозг программиста с навязчивой идеей: </p><b>«Нет у других — сделай сам»</b>
+
+<a name="habracut"/>
+<p>
+Как только начинаешь мыслить в таком ключе — вот же, у nginx есть отличный модуль geoip, который «не только лишь быстрый, но и оптимизирован до невозможности». Но вот незадача, ни один из известных форматов баз (MaxMind, Sypex, ipgeobase) он не понимает.
+</p><p>
+Пара часов в обнимку с питоном и вот уже есть неплохой конвертер, выцепляющий всё что нам нужно с сайта ipgeobase.ru.</p><p>
+(Да, были слухи, что там всех поувольняли уж полгода как, но базы исправно обновляются, что не может не радовать)
+</p><p>
+И чтобы не было опасений, прокомментирую код ниже (если неинтересно, можно сразу листать к настройке)
+</p><h4>Код</h4>
+
+<div class="spoiler"><b class="spoiler_title">1. Скачиваем базы</b><div class="spoiler_text"><p>Тут ничего сложного, requests + zipfile:</p>
+<pre><code class="python">archive = requests.get("http://ipgeobase.ru/files/db/Main/geo_files.zip")
+if archive.status_code != 200:
+    error("IPGeobase no answer: %s" % archive.status_code)
+extracteddata = ZipFile(StringIO(archive.content))
+filelist = extracteddata.namelist()
+if "cities.txt" not in filelist:
+    error("cities.txt not downloaded")
+if "cidr_optim.txt" not in filelist:
+    error("cidr_optim.txt not downloaded")
+</code></pre>
+</div></div>
+
+<div class="spoiler"><b class="spoiler_title">2. Загружаем словарь регионов</b><div class="spoiler_text"><pre><code class="python">REGIONS = dict(l.decode("utf8").rstrip().split("\t")[::-1]
+               for l in open("regions.tsv").readlines())
+</code></pre><p>
+где regions.tsv — это список автомобильных/налоговых кодов регионов, вида:
+</p><code>66 Свердловская область<br/>
+77 Москва<br/>
+78 Санкт-Петербург<br/>
+</code>
+</div></div>
+
+<div class="spoiler"><b class="spoiler_title">3. Получаем словарь городов</b><div class="spoiler_text"><p>Для каждого города нам необходимо знать его id, название и код региона:</p>
+<pre><code class="python">CITIES = {}
+for line in extracteddata.open("cities.txt").readlines():
+    cid, city, region_name, _, _, _ = line.decode("cp1251").split("\t")
+    if region_name in REGIONS:
+        CITIES[cid] = {'city': b64encode(city.encode("utf8")),
+                       'reg_id': REGIONS[region_name]}
+        if cid == "1199":  # Zelenograd fix
+            CITIES[cid]['reg_id'] = "77"
+</code></pre>
+<p>
+Замечу, что здесь сразу, с оглядкой на будущее, utf-8 название города кодируется в base64, для расширения возможностей использования (например в логах nginx), без необходимости работы с транслитерацией.
+</p></div></div>
+
+<div class="spoiler"><b class="spoiler_title">4. Склеиваем диапазоны адресов и города</b><div class="spoiler_text"><pre><code class="python">for line in extracteddata.open("cidr_optim.txt").readlines():
+    _, _, ip_range, country, cid = line.decode("cp1251").rstrip().split("\t")
+    if country == "RU" and cid in CITIES:
+            database["".join(ip_range.split())] = CITIES[cid]
+</code></pre><p>
+Очевидно, что если страна не Россия, то в ipgeobase ни регионов, ни городов не найдётся, и нашим задачам такие диапазоны не нужны.
+</p></div></div>
+
+<div class="spoiler"><b class="spoiler_title">5. Генерируем файлы для geoip модуля</b><div class="spoiler_text"><pre><code class="python">with open("region.txt", "w") as reg, open("city.txt", "w") as city:
+    for ip_range in sorted(database):
+        info = database[ip_range]
+        city.write("%s %s;\n" % (ip_range, info['city']))
+        reg.write("%s %s;\n" % (ip_range, info['reg_id']))
+</code></pre>
+</div></div>
+
+<h4>Настройка nginx</h4>
+<p>
+Чтобы все работало, необходимо включить в nginx geo модуль </p><a href="http://nginx.org/ru/docs/http/ngx_http_geo_module.html">nginx.org/ru/docs/http/ngx_http_geo_module.html</a><p>,</p><p>
+положить в известное место сгенерированные файлики и добавить такой конфиг в секцию http:
+</p><pre><code class="nginx">geo $region {
+    ranges;
+    include geo/region.txt;
+}
+
+geo $city {
+    ranges;
+    include geo/city.txt;
+}
+</code></pre><p>
+После таких манипуляций в nginx появится две переменные $city и $region, которые можно использовать где угодно:
+
+</p><ul>
+<li>хоть в логе: <pre><code class="nginx">log_format long '$time_iso8601\t$msec\t$host\t$request_method\t$uri\t$args\t$http_referer\t$remote_addr\t$http_user_agent\t$status\t$request_time\t$request_length\t$upstream_addr\t$bytes_sent\t$upstream_response_time\t$city\t$region';
+</code></pre> </li>
+<li>хоть отправляя в хедерах приложению:<br/>
+<pre><code class="nginx">location / {
+    proxy_set_header  X-City     $city;
+    proxy_set_header  X-Region $region;
+    proxy_pass   http://backend;
+}
+</code></pre><br/>
+При этом, в модуле geo по умолчанию все ненайденные адреса будут возвращать пустую строку, то в таком случае хедер просто не будет устанавливаться<br/>
+ </li>
+</ul>
+<p>
+На деле, такой модуль работает просто моментально, не грузит nginx, и за счет легкой автоматизации обновления баз — довольно точен (все зависит от доверия базам ipgeobase.ru). В связи с чем, появилось ощущение, что он может быть полезен кому-то еще. Так что предлагаю пользоваться и, может быть, сделать конвертеры к другим поставщикам данных.
+</p><p>
+код как обычно на </p><a href="https://github.com/m-messiah/ipgeobase_importer">GitHub</a>
+
+      
+      <p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

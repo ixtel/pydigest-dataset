@@ -1,0 +1,502 @@
+<html><body><div><div class="entry-content clearfix"><p><em>The following is a collaboration piece between Cam Linke, co-founder of <a href="http://startupedmonton.com/">Startup Edmonton</a>, and the folks at Real Python.</em></p>
+
+<p><strong>Updated 02/22/2015:</strong> Added Python 3 support.</p>
+
+
+
+
+<p><strong>Welcome! Today we’re going to start building a Flask app that calculates word-frequency pairs based on the text from a given URL.</strong> This is a full-stack tutorial.</p>
+
+
+
+
+<ol>
+<li><strong>Part One: Setup a local development environment and then deploy both a staging environment and a production environment on Heroku. (current)</strong></li>
+<li><a href="http://www.realpython.com/blog/flask-by-example-part-2-postgres-sqlalchemy-and-alembic">Part Two</a>: Setup a PostgreSQL database along with SQLAlchemy and Alembic to handle migrations.</li>
+<li><a href="https://realpython.com/blog/python/flask-by-example-part-3-text-processing-with-requests-beautifulsoup-nltk/">Part Three</a>: Add in the back-end logic to scrape and then process the counting of words from a webpage using the requests, BeautifulSoup, and Natural Language Toolkit (NLTK) libraries.</li>
+<li><a href="https://realpython.com/blog/python/flask-by-example-implementing-a-redis-task-queue/">Part Four</a>: Implement a Redis task queue to handle the text processing.</li>
+<li><a href="https://realpython.com/blog/python/flask-by-example-integrating-flask-and-angularjs/">Part Five</a>: Setup Angular on the front-end to continuously poll the back-end to see if the request is done.</li>
+<li><a href="https://realpython.com/blog/python/updating-the-staging-environment/">Part Six</a>: Push to the staging server on Heroku – setting up Redis, detailing how to run two processes (web and worker) on a single Dyno.</li>
+<li><a href="https://realpython.com/blog/python/flask-by-example-updating-the-ui/">Part Seven</a>: Update the front-end to make it more user-friendly.</li>
+<li>Part Eight: Add the D3 library into the mix to graph a frequency distribution and histogram.</li>
+</ol>
+
+
+<blockquote><p>Need the code? Grab it from the <a href="https://github.com/realpython/flask-by-example/releases">repo</a>.</p></blockquote>
+
+<a name="Setup"/>
+<h2>Setup</h2>
+
+<p>We’ll start with a <em>basic “Hello World” app on Heroku with staging (or pre-production) and production environments</em>.</p>
+
+<p>For the initial setup, we’re going to use Virtualenv and Virtualenvwrapper. This will give us a few extra tools to help us silo our environment. I’m going to assume for this tutorial you’ve used the following tools before:</p>
+
+
+
+
+<p>First things first, let’s get a working directory set up:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>mkdir flask-by-example
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Initialize a new git repo within your working directory:</p>
+
+<figure class="code"><figcaption><span/></figcaption></figure>
+
+
+<p>Next, we’re going to use Virtualenvwrapper to set up a new virtual environment with Python 3.</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+<span class="line-number">14</span>
+<span class="line-number">15</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>which python3
+</span><span class="line">/usr/local/bin/python3
+</span><span class="line">
+</span><span class="line"><span class="nv">$ </span>mkvirtualenv --python<span class="o">=</span>/usr/local/bin/python3 wordcounts
+</span><span class="line">Running virtualenv with interpreter /usr/local/bin/python3
+</span><span class="line">Using base prefix <span class="s1">'/usr/local/Cellar/python3/3.4.2_1/Frameworks/Python.framework/Versions/3.4'</span>
+</span><span class="line">New python executable in wordcounts/bin/python3.4
+</span><span class="line">Also creating executable in wordcounts/bin/python
+</span><span class="line">Installing setuptools, pip...done.
+</span><span class="line">
+</span><span class="line"><span class="o">(</span>wordcounts<span class="o">)</span><span class="nv">$ </span>python
+</span><span class="line">Python 3.4.2 <span class="o">(</span>default, Feb 10 2015, 03:38:22<span class="o">)</span>
+</span><span class="line"><span class="o">[</span>GCC 4.2.1 Compatible Apple LLVM 6.0 <span class="o">(</span>clang-600.0.56<span class="o">)]</span> on darwin
+</span><span class="line">Type <span class="s2">"help"</span>, <span class="s2">"copyright"</span>, <span class="s2">"credits"</span> or <span class="s2">"license"</span> <span class="k">for </span>more information.
+</span><span class="line">&gt;&gt;&gt; <span class="nb">exit</span><span class="o">()</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>This creates a new virtualenv for us. Along with creating a new virtualenv, it creates some new options, including <em><a href="http://virtualenvwrapper.readthedocs.org/en/latest/scripts.html#scripts-postactivate">Postactivate</a></em>, after you run the <code>workon</code> command to start your virtual environment. This is going to help us later when we are setting up some environment variables – but for now we’re also going to use it to automatically jump to our project when we first start it.</p>
+
+<p>Open up the <em>postactivate</em> file. The easiest way to do this is with VIM:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>vi <span class="nv">$VIRTUAL_ENV</span>/bin/postactivate
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Add the following line to your project:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nb">cd</span> ~/path/to/your/project
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p><em>Make sure to alter the above command for your environment. For example, my working directory is within my “repos” directory, so my path is: <code>cd ~/repos/realpython/flask-by-example</code>.</em></p>
+
+<blockquote><p>Within VIM, press “i” to enter the INSERT mode. Paste the line in the file, then press “escape” to exit INSERT mode. Finally press “:”, then “w”, and finally “q” to save and exit VIM.</p></blockquote>
+
+<p>Now open a new terminal window and run the following command:</p>
+
+<figure class="code"><figcaption><span/></figcaption></figure>
+
+
+<p>If all is setup properly, it will activate your environment and move you directly to the project directory. A nice timesaver.</p>
+
+<blockquote><p>If you are having problems with virtualenvwrapper, just use virtualenv.</p></blockquote>
+
+<p>Next we’re going to get our basic structure for our app set up. Add the following files to your “flask-by-example” folder:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>touch app.py .gitignore README.md requirements.txt
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>This will give you the following structure:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line">├── .gitignore
+</span><span class="line">├── app.py
+</span><span class="line">├── README.md
+</span><span class="line">└── requirements.txt
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Be sure to update the <em>.gitignore</em> file from the <a href="https://github.com/realpython/flask-by-example">repo</a>.</p>
+
+<p>Next install Flask:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>pip install <span class="nv">Flask</span><span class="o">==</span>0.10.1
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Add the installed libraries to our <em>requirements.txt</em> file:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>pip freeze &gt; requirements.txt
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Open up <em>app.py</em> in your favorite editor and add the following code:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="kn">from</span> <span class="nn">flask</span> <span class="kn">import</span> <span class="n">Flask</span>
+</span><span class="line"><span class="n">app</span> <span class="o">=</span> <span class="n">Flask</span><span class="p">(</span><span class="n">__name__</span><span class="p">)</span>
+</span><span class="line">
+</span><span class="line">
+</span><span class="line"><span class="nd">@app.route</span><span class="p">(</span><span class="s">'/'</span><span class="p">)</span>
+</span><span class="line"><span class="k">def</span> <span class="nf">hello</span><span class="p">():</span>
+</span><span class="line">    <span class="k">return</span> <span class="s">"Hello World!"</span>
+</span><span class="line">
+</span><span class="line"><span class="k">if</span> <span class="n">__name__</span> <span class="o">==</span> <span class="s">'__main__'</span><span class="p">:</span>
+</span><span class="line">    <span class="n">app</span><span class="o">.</span><span class="n">run</span><span class="p">()</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Run the app:</p>
+
+<figure class="code"><figcaption><span/></figcaption></figure>
+
+
+<p>And you should see your basic Hello world app in action on <a href="http://localhost:5000/">http://localhost:5000/</a>. Kill the server.</p>
+
+<p>Next we’re going to set up our Heroku environments for both our production and staging app.</p>
+
+<a name="Setup.Heroku"/>
+<h2>Setup Heroku</h2>
+
+<p>I’m going to assume you have the Heroku <a href="https://toolbelt.heroku.com/">Toolbelt</a> installed. For more basic information about setting up your Heroku app for use with Python see the following <a href="https://devcenter.heroku.com/articles/getting-started-with-python">link</a>.</p>
+
+<p>After you have Heroku setup on your machine create a Procfile:</p>
+
+<figure class="code"><figcaption><span/></figcaption></figure>
+
+
+<p>Add the following line to your newly created file</p>
+
+<figure class="code"><figcaption><span/></figcaption></figure>
+
+
+<p>Make sure to add gunicorn to your <em>requirments.txt</em> file</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>pip install gunicorn
+</span><span class="line"><span class="nv">$ </span>pip freeze &gt; requirements.txt
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>We also need to specify a Python version so that Heroku uses the right one to run our app. Simply create a file called <em>runtime.txt</em> with the following code:</p>
+
+<figure class="code"><figcaption><span/></figcaption></figure>
+
+
+<p>Commit your changes in git and optionally PUSH to Github, then create two new Heroku apps.</p>
+
+<p>One for production:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>heroku create wordcounts-pro
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>And one for staging:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>heroku create wordcounts-stage
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Add your new apps to your git remotes. Make sure to name one remote <em>pro</em> (for “production”) and the other <em>stage</em> (for “staging”):</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>git remote add pro git@heroku.com:YOUR_APP_NAME.git
+</span><span class="line"><span class="nv">$ </span>git remote add stage git@heroku.com:YOUR_APP_NAME.git
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Now we can push both of our apps live to Heroku.</p>
+
+<ul>
+<li>For staging: <code>git push stage master</code></li>
+<li>For production: <code>git push pro master</code></li>
+</ul>
+
+
+<p>Once both of those have been pushed, open the URLs up in your web browser and see that your app is working.</p>
+
+<a name="Staging.Production.Workflow"/>
+<h2>Staging/Production Workflow</h2>
+
+<p>Let’s make a change to our app and push only to staging:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+<span class="line-number">14</span>
+<span class="line-number">15</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="kn">from</span> <span class="nn">flask</span> <span class="kn">import</span> <span class="n">Flask</span>
+</span><span class="line"><span class="n">app</span> <span class="o">=</span> <span class="n">Flask</span><span class="p">(</span><span class="n">__name__</span><span class="p">)</span>
+</span><span class="line">
+</span><span class="line">
+</span><span class="line"><span class="nd">@app.route</span><span class="p">(</span><span class="s">'/'</span><span class="p">)</span>
+</span><span class="line"><span class="k">def</span> <span class="nf">hello</span><span class="p">():</span>
+</span><span class="line">    <span class="k">return</span> <span class="s">"Hello World!"</span>
+</span><span class="line">
+</span><span class="line">
+</span><span class="line"><span class="nd">@app.route</span><span class="p">(</span><span class="s">'/&lt;name&gt;'</span><span class="p">)</span>
+</span><span class="line"><span class="k">def</span> <span class="nf">hello_name</span><span class="p">(</span><span class="n">name</span><span class="p">):</span>
+</span><span class="line">    <span class="k">return</span> <span class="s">"Hello {}!"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">name</span><span class="p">)</span>
+</span><span class="line">
+</span><span class="line"><span class="k">if</span> <span class="n">__name__</span> <span class="o">==</span> <span class="s">'__main__'</span><span class="p">:</span>
+</span><span class="line">    <span class="n">app</span><span class="o">.</span><span class="n">run</span><span class="p">()</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Run your app locally to make sure everything works – <code>python app.py</code></p>
+
+<p>Test it out by adding a name after the URL. For example: <a href="http://localhost:5000/mike">http://localhost:5000/mike</a>.</p>
+
+<p>Now let’s try out our changes on staging before we push them live to production. Make sure your changes are committed in git and then push your work up to staging – <code>git push stage master</code>.</p>
+
+<p>Now if you navigate to your staging environment, you’ll be able to use the new URL – i.e., “/mike” and get “Hello NAME” based on what you put into the URL as the output in the browser. However, if you try the same thing on the production site you will get an error. <strong>So we can build things and test them out on staging and then when we’re happy, push them live to production.</strong></p>
+
+<p>Let’s push our site to production now that we’re happy with it – <code>git push pro master</code></p>
+
+<p>Now we have the same functionality live on our production site.</p>
+
+<p><strong>This staging/production workflow allows us to make changes, show things to clients, etc., all within a sandboxed server without causing any changes to the live production site that users are, well, using.</strong></p>
+
+<a name="Config.Settings"/>
+<h2>Config Settings</h2>
+
+<p>The last thing that we’re going to do is set up different config environments for our app. Often there are things that are going to be different between your local, staging, and production setups. You’ll want to connect to different databases, have different AWS keys, etc. Let’s set up a config file to deal with the different environments.</p>
+
+<p>Add a <em>config.py</em> file to your project:</p>
+
+<figure class="code"><figcaption><span/></figcaption></figure>
+
+
+<p>With our config file we’re going to borrow a bit from how Django’s config is set up. We’ll have a base config class that the other config classes inherit from. Then we’ll import the appropriate config class as needed.</p>
+
+<p>Add the following to your newly created <em>config.py</em> file:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+<span class="line-number">14</span>
+<span class="line-number">15</span>
+<span class="line-number">16</span>
+<span class="line-number">17</span>
+<span class="line-number">18</span>
+<span class="line-number">19</span>
+<span class="line-number">20</span>
+<span class="line-number">21</span>
+<span class="line-number">22</span>
+<span class="line-number">23</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="k">class</span> <span class="nc">Config</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
+</span><span class="line">    <span class="n">DEBUG</span> <span class="o">=</span> <span class="bp">False</span>
+</span><span class="line">    <span class="n">TESTING</span> <span class="o">=</span> <span class="bp">False</span>
+</span><span class="line">    <span class="n">CSRF_ENABLED</span> <span class="o">=</span> <span class="bp">True</span>
+</span><span class="line">    <span class="n">SECRET_KEY</span> <span class="o">=</span> <span class="s">'this-really-needs-to-be-changed'</span>
+</span><span class="line">
+</span><span class="line">
+</span><span class="line"><span class="k">class</span> <span class="nc">ProductionConfig</span><span class="p">(</span><span class="n">Config</span><span class="p">):</span>
+</span><span class="line">    <span class="n">DEBUG</span> <span class="o">=</span> <span class="bp">False</span>
+</span><span class="line">
+</span><span class="line">
+</span><span class="line"><span class="k">class</span> <span class="nc">StagingConfig</span><span class="p">(</span><span class="n">Config</span><span class="p">):</span>
+</span><span class="line">    <span class="n">DEVELOPMENT</span> <span class="o">=</span> <span class="bp">True</span>
+</span><span class="line">    <span class="n">DEBUG</span> <span class="o">=</span> <span class="bp">True</span>
+</span><span class="line">
+</span><span class="line">
+</span><span class="line"><span class="k">class</span> <span class="nc">DevelopmentConfig</span><span class="p">(</span><span class="n">Config</span><span class="p">):</span>
+</span><span class="line">    <span class="n">DEVELOPMENT</span> <span class="o">=</span> <span class="bp">True</span>
+</span><span class="line">    <span class="n">DEBUG</span> <span class="o">=</span> <span class="bp">True</span>
+</span><span class="line">
+</span><span class="line">
+</span><span class="line"><span class="k">class</span> <span class="nc">TestingConfig</span><span class="p">(</span><span class="n">Config</span><span class="p">):</span>
+</span><span class="line">    <span class="n">TESTING</span> <span class="o">=</span> <span class="bp">True</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>We set up a base <code>Config</code> class with some basic setup that our other config classes inherit from. Now we’ll be able to import the appropriate config class based on the current environment. Thus, we can use environment variables to choose which settings we’re going to use based on the environment (e.g., local, staging, production).</p>
+
+<a name="Local.Settings"/>
+<h3>Local Settings</h3>
+
+<p>To set up our <code>APP_SETTINGS</code> variable locally, we can use our Virtualenvwrapper <em>postactivate</em> file again.</p>
+
+<p>Add the following line to your <em>postactivate</em> file:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nb">export </span><span class="nv">APP_SETTINGS</span><span class="o">=</span><span class="s2">"config.DevelopmentConfig"</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Reload your environment by running the <code>workon wordcounts</code> command again:</p>
+
+<figure class="code"><figcaption><span/></figcaption></figure>
+
+
+<p>Now when you run your app it will import the configuration that you set up in your <code>DevelopmentConfig</code> class.</p>
+
+<a name="Heroku.Settings"/>
+<h3>Heroku Settings</h3>
+
+<p>Similarly we’re going to set environment variables on Heroku.</p>
+
+<p>For staging run the following command:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>heroku config:set <span class="nv">APP_SETTINGS</span><span class="o">=</span>config.StagingConfig --remote stage
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>For production:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>heroku config:set <span class="nv">APP_SETTINGS</span><span class="o">=</span>config.ProductionConfig --remote pro
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>To make sure we use the right environment change <em>app.py</em>:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+<span class="line-number">14</span>
+<span class="line-number">15</span>
+<span class="line-number">16</span>
+<span class="line-number">17</span>
+<span class="line-number">18</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="kn">from</span> <span class="nn">flask</span> <span class="kn">import</span> <span class="n">Flask</span>
+</span><span class="line"><span class="kn">import</span> <span class="nn">os</span>
+</span><span class="line">
+</span><span class="line"><span class="n">app</span> <span class="o">=</span> <span class="n">Flask</span><span class="p">(</span><span class="n">__name__</span><span class="p">)</span>
+</span><span class="line"><span class="n">app</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">from_object</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s">'APP_SETTINGS'</span><span class="p">])</span>
+</span><span class="line">
+</span><span class="line">
+</span><span class="line"><span class="nd">@app.route</span><span class="p">(</span><span class="s">'/'</span><span class="p">)</span>
+</span><span class="line"><span class="k">def</span> <span class="nf">hello</span><span class="p">():</span>
+</span><span class="line">    <span class="k">return</span> <span class="s">"Hello World!"</span>
+</span><span class="line">
+</span><span class="line">
+</span><span class="line"><span class="nd">@app.route</span><span class="p">(</span><span class="s">'/&lt;name&gt;'</span><span class="p">)</span>
+</span><span class="line"><span class="k">def</span> <span class="nf">hello_name</span><span class="p">(</span><span class="n">name</span><span class="p">):</span>
+</span><span class="line">    <span class="k">return</span> <span class="s">"Hello {}!"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">name</span><span class="p">)</span>
+</span><span class="line">
+</span><span class="line"><span class="k">if</span> <span class="n">__name__</span> <span class="o">==</span> <span class="s">'__main__'</span><span class="p">:</span>
+</span><span class="line">    <span class="n">app</span><span class="o">.</span><span class="n">run</span><span class="p">()</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>We imported <code>os</code> and used the <code>os.environ</code> method to import the appropriate <code>APP_SETTINGS</code> variables, depending on our environment. We then set up the config in our app with the <code>app.config.from_object</code> method.</p>
+
+<p>Commit and push your changes to both staging and production (and Github if you have it setup).</p>
+
+<p>Want to test the environment variables out to make sure it’s detecting the right environment (sanity check!)? Add a print statement to <em>app.py</em>:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="k">print</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s">'APP_SETTINGS'</span><span class="p">])</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Now when you run the app, it will show which config settings it’s importing:</p>
+
+<p><strong>Local</strong>:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>python app.py
+</span><span class="line">config.DevelopmentConfig
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Commit and push again to staging and production. Now let’s test it out…</p>
+
+<p><strong>Staging</strong>:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>heroku run python app.py --app wordcounts-stage
+</span><span class="line">Running <span class="sb">`</span>python app.py<span class="sb">`</span> attached to terminal... up, run.2830
+</span><span class="line">config.StagingConfig
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p><strong>Production</strong>:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>heroku run python app.py --app wordcounts-pro
+</span><span class="line">Running <span class="sb">`</span>python app.py<span class="sb">`</span> attached to terminal... up, run.1360
+</span><span class="line">config.ProductionConfig
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Be sure to remove <code>print(os.environ['APP_SETTINGS'])</code> when done, commit, and push back up to your various environments.</p>
+
+<a name="Conclusion"/>
+<h2>Conclusion</h2>
+
+<p>With the setup out of the way, we’re going to start to build out the word counting functionality of this app. Along the way, we’ll add a request queue to set up background processing for the word count portion, as well dig further into our Heroku setup by setting up the configuration and migrations for our database (<a href="http://www.realpython.com/blog/flask-by-example-part-2-postgres-sqlalchemy-and-alembic">part2</a>) which we’ll use to store our word count results.</p>
+
+<p>Best!</p>
+
+<blockquote><p>Grab the code from the <a href="https://github.com/realpython/flask-by-example/releases">repo</a>.</p></blockquote>
+</div>
+
+
+      </div></body></html>

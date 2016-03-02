@@ -1,0 +1,292 @@
+<html><body><div><div id="article_text">
+    <p>Almost every single customer I've worked with has had a different way of capturing and analysing activity in their production systems. Researching and comparing offerings feels like an endless task and a source of endless debate. Regardless of the large number of choices, being able to centralise and analyse application server exceptions is an important step towards improving the reliability of code in production.</p>
+<p>I wanted to see how <a class="reference external" href="http://www.elasticsearch.org/overview/logstash/">Logstash</a> using <a class="reference external" href="http://www.elasticsearch.org/overview/elasticsearch/">Elasticsearch</a> as a data store and <a class="reference external" href="http://www.elasticsearch.org/overview/kibana/">Kibana</a> as an analysis tool could be used to monitor a Django application.</p>
+<p>To start, I created a small Django application that served random data, raised exceptions occasionally via a catch-all view and had a celery task which would randomly pick a log level to record to every time a new task was scheduled. With all these combinations it should make for a good set of example data to dig through and analyse.</p>
+<div class="section" id="one-django-project-many-response-types">
+<h2>One Django project, many response types</h2>
+<p>I installed <cite>Django</cite>, <cite>django-celery</cite>, <cite>SQLAlchemy</cite> (needed to record celery's results to an SQLite file), <cite>gunicorn</cite> and <cite>python-logstash</cite>. I then created a project called <cite>faulty</cite> and an app within it called <cite>example</cite>.</p>
+<div class="highlight"><pre><span class="nv">$ </span>pip install <span class="nv">Django</span><span class="o">==</span>1.7.1 <span class="se">\</span>
+              django-celery<span class="o">==</span>3.1.16 <span class="se">\</span>
+              <span class="nv">gunicorn</span><span class="o">==</span>19.1.1 <span class="se">\</span>
+              <span class="nv">SQLAlchemy</span><span class="o">==</span>0.9.8 <span class="se">\</span>
+              python-logstash<span class="o">==</span>0.4.2
+<span class="nv">$ </span>django-admin startproject faulty
+<span class="nv">$ </span><span class="nb">cd </span>faulty
+<span class="nv">$ </span>django-admin startapp example
+</pre></div>
+<p>I made the following changes to <cite>faulty/settings.py</cite>:</p>
+<div class="highlight"><pre><span class="kn">import</span> <span class="nn">djcelery</span>
+
+<span class="n">INSTALLED_APPS</span> <span class="o">=</span> <span class="p">(</span>
+    <span class="s">'django.contrib.admin'</span><span class="p">,</span>
+    <span class="s">'django.contrib.auth'</span><span class="p">,</span>
+    <span class="s">'django.contrib.contenttypes'</span><span class="p">,</span>
+    <span class="s">'django.contrib.sessions'</span><span class="p">,</span>
+    <span class="s">'django.contrib.messages'</span><span class="p">,</span>
+    <span class="s">'django.contrib.staticfiles'</span><span class="p">,</span>
+    <span class="s">'kombu.transport.django'</span><span class="p">,</span>
+    <span class="s">'djcelery'</span><span class="p">,</span>
+    <span class="s">'example'</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="n">BROKER_URL</span> <span class="o">=</span> <span class="s">'django://'</span>
+<span class="n">CELERY_RESULT_BACKEND</span> <span class="o">=</span> <span class="s">'db+sqlite:///results.db'</span>
+<span class="n">CELERY_SEND_EVENTS</span> <span class="o">=</span> <span class="bp">True</span>
+<span class="n">CELERY_TASK_RESULT_EXPIRES</span> <span class="o">=</span> <span class="mi">10</span>
+<span class="n">CELERY_TIMEZONE</span> <span class="o">=</span> <span class="s">'UTC'</span>
+<span class="n">CELERYBEAT_SCHEDULER</span> <span class="o">=</span> <span class="s">"djcelery.schedulers.DatabaseScheduler"</span>
+
+<span class="n">djcelery</span><span class="o">.</span><span class="n">setup_loader</span><span class="p">()</span>
+
+<span class="n">LOGGING</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s">'version'</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span>
+    <span class="s">'disable_existing_loggers'</span><span class="p">:</span> <span class="bp">False</span><span class="p">,</span>
+    <span class="s">'handlers'</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s">'logstash'</span><span class="p">:</span> <span class="p">{</span>
+            <span class="s">'level'</span><span class="p">:</span> <span class="s">'WARNING'</span><span class="p">,</span>
+            <span class="s">'class'</span><span class="p">:</span> <span class="s">'logstash.LogstashHandler'</span><span class="p">,</span>
+            <span class="s">'host'</span><span class="p">:</span> <span class="s">'localhost'</span><span class="p">,</span>
+            <span class="s">'port'</span><span class="p">:</span> <span class="mi">5000</span><span class="p">,</span>
+            <span class="s">'version'</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span>
+        <span class="p">},</span>
+    <span class="p">},</span>
+    <span class="s">'loggers'</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s">'django.request'</span><span class="p">:</span> <span class="p">{</span>
+            <span class="s">'handlers'</span><span class="p">:</span> <span class="p">[</span><span class="s">'logstash'</span><span class="p">],</span>
+            <span class="s">'level'</span><span class="p">:</span> <span class="s">'WARNING'</span><span class="p">,</span>
+            <span class="s">'propagate'</span><span class="p">:</span> <span class="bp">True</span><span class="p">,</span>
+        <span class="p">},</span>
+        <span class="s">'example.tasks'</span><span class="p">:</span> <span class="p">{</span>
+            <span class="s">'handlers'</span><span class="p">:</span> <span class="p">[</span><span class="s">'logstash'</span><span class="p">],</span>
+            <span class="s">'level'</span><span class="p">:</span> <span class="s">'WARNING'</span><span class="p">,</span>
+        <span class="p">},</span>
+    <span class="p">},</span>
+<span class="p">}</span>
+</pre></div>
+<p>I then created a task that would accept a randomly-generated content string, it's reported length and content type. It would create a sha1 hash of the content and output that hash, the reported content length and the content type to a random log level.</p>
+<p>The content length would be the length before the content was wrapped. I could have derived the length in the task itself or hashed the content in the view but the purpose of this exercise is to create noise.</p>
+<p>example/tasks.py:</p>
+<div class="highlight"><pre><span class="kn">import</span> <span class="nn">hashlib</span>
+<span class="kn">import</span> <span class="nn">logging</span>
+<span class="kn">from</span> <span class="nn">random</span> <span class="kn">import</span> <span class="n">choice</span>
+
+<span class="kn">from</span> <span class="nn">celery</span> <span class="kn">import</span> <span class="n">task</span>
+<span class="kn">from</span> <span class="nn">celery.utils.log</span> <span class="kn">import</span> <span class="n">get_task_logger</span>
+
+
+<span class="n">logger</span> <span class="o">=</span> <span class="n">get_task_logger</span><span class="p">(</span><span class="n">__name__</span><span class="p">)</span>
+
+
+<span class="nd">@task</span><span class="p">()</span>
+<span class="k">def</span> <span class="nf">log_response</span><span class="p">(</span><span class="n">content</span><span class="p">,</span> <span class="n">content_length</span><span class="p">,</span> <span class="n">content_type</span><span class="p">):</span>
+    <span class="n">log_method</span> <span class="o">=</span> <span class="n">choice</span><span class="p">((</span><span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">,</span>
+                         <span class="n">logger</span><span class="o">.</span><span class="n">warning</span><span class="p">,</span>
+                         <span class="n">logger</span><span class="o">.</span><span class="n">error</span><span class="p">,</span>
+                         <span class="n">logger</span><span class="o">.</span><span class="n">critical</span><span class="p">))</span>
+
+    <span class="n">hasher</span> <span class="o">=</span> <span class="n">hashlib</span><span class="o">.</span><span class="n">sha1</span><span class="p">()</span>
+    <span class="n">hasher</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">content</span><span class="p">)</span>
+    <span class="n">log_method</span><span class="p">(</span><span class="s">'{0} {1} {2}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">hasher</span><span class="o">.</span><span class="n">hexdigest</span><span class="p">(),</span>
+                                    <span class="n">content_length</span><span class="p">,</span>
+                                    <span class="n">content_type</span><span class="p">))</span>
+    <span class="k">return</span> <span class="bp">True</span>
+</pre></div>
+<p>I configured the project to direct all traffic to a single endpoint.</p>
+<p>faulty/urls.py:</p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">django.conf.urls</span> <span class="kn">import</span> <span class="n">patterns</span><span class="p">,</span> <span class="n">url</span>
+
+
+<span class="n">urlpatterns</span> <span class="o">=</span> <span class="n">patterns</span><span class="p">(</span><span class="s">''</span><span class="p">,</span>
+    <span class="n">url</span><span class="p">(</span><span class="s">r'^$'</span><span class="p">,</span> <span class="s">'example.views.endpoint'</span><span class="p">),</span>
+<span class="p">)</span>
+</pre></div>
+<p>I then created a view that has a 25% chance of raising an exception and if it doesn't, generates random content, sends that content to the celery task and serves the content.</p>
+<p>example/views.py:</p>
+<div class="highlight"><pre><span class="kn">import</span> <span class="nn">mimetypes</span>
+<span class="kn">from</span> <span class="nn">random</span> <span class="kn">import</span> <span class="n">choice</span><span class="p">,</span> <span class="n">randint</span>
+<span class="kn">from</span> <span class="nn">textwrap</span> <span class="kn">import</span> <span class="n">wrap</span>
+
+<span class="kn">from</span> <span class="nn">django.http</span> <span class="kn">import</span> <span class="n">HttpResponse</span>
+
+<span class="kn">from</span> <span class="nn">.tasks</span> <span class="kn">import</span> <span class="n">log_response</span>
+
+
+<span class="k">def</span> <span class="nf">endpoint</span><span class="p">(</span><span class="n">request</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">randint</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span> <span class="o">==</span> <span class="mi">3</span><span class="p">:</span> <span class="c"># 25% chance of raising an error</span>
+        <span class="k">raise</span> <span class="n">choice</span><span class="p">((</span><span class="ne">AssertionError</span><span class="p">,</span> <span class="ne">IndexError</span><span class="p">,</span> <span class="ne">KeyError</span><span class="p">))</span>
+
+    <span class="c"># Pick a random content type:</span>
+    <span class="n">content_type</span> <span class="o">=</span> <span class="n">choice</span><span class="p">(</span><span class="n">mimetypes</span><span class="o">.</span><span class="n">types_map</span><span class="o">.</span><span class="n">values</span><span class="p">())</span>
+    <span class="n">content_length</span> <span class="o">=</span> <span class="n">randint</span><span class="p">(</span><span class="mi">512</span><span class="p">,</span> <span class="mi">2048</span><span class="p">)</span>
+
+    <span class="c"># Create a random string between 512 and 2048 characters long</span>
+    <span class="c"># and line wrap it every 50 characters</span>
+    <span class="n">choices</span> <span class="o">=</span> <span class="s">'abcdefghijklmnopqrstuvwxyz0123456789!@#$%^&amp;*(-_=+)'</span>
+    <span class="n">content</span> <span class="o">=</span> <span class="s">''</span><span class="o">.</span><span class="n">join</span><span class="p">([</span><span class="n">choice</span><span class="p">(</span><span class="n">choices</span><span class="p">)</span>
+                       <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">content_length</span><span class="p">)])</span>
+    <span class="n">content</span> <span class="o">=</span> <span class="s">'</span><span class="se">\n</span><span class="s">'</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">wrap</span><span class="p">(</span><span class="n">content</span><span class="p">,</span> <span class="n">width</span><span class="o">=</span><span class="mi">50</span><span class="p">))</span>
+
+    <span class="c"># Send the content, it's length and type to this task</span>
+    <span class="n">log_response</span><span class="o">.</span><span class="n">delay</span><span class="p">(</span><span class="n">content</span><span class="p">,</span> <span class="n">content_length</span><span class="p">,</span> <span class="n">content_type</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">HttpResponse</span><span class="p">(</span><span class="n">content</span><span class="p">,</span> <span class="n">content_type</span><span class="o">=</span><span class="n">content_type</span><span class="p">)</span>
+</pre></div>
+</div>
+<div class="section" id="running-the-app-server-and-task-handler">
+<h2>Running the app server and task handler</h2>
+<p>I then setup the database (as celery needed it to keep track of it's tasks) and launched celeryd and gunicorn.</p>
+<div class="highlight"><pre><span class="nv">$ </span>python manage.py syncdb
+<span class="nv">$ </span>python manage.py migrate
+<span class="nv">$ </span>python manage.py celeryd <span class="p">&amp;</span>
+<span class="nv">$ </span>gunicorn faulty.wsgi:application -b 127.0.0.1:8050 <span class="p">&amp;</span>
+</pre></div>
+<p>I tested the endpoint a few times and never did the responses look alike. Here is one response I got back:</p>
+<div class="highlight"><pre>$ curl -v localhost:8050
+...
+&lt; HTTP/1.1 200 OK
+&lt; Server: gunicorn/19.1.1
+&lt; Date: Mon, 03 Nov 2014 09:53:34 GMT
+&lt; Connection: close
+&lt; Transfer-Encoding: chunked
+&lt; Vary: Cookie
+&lt; X-Frame-Options: SAMEORIGIN
+&lt; Content-Type: image/jpeg
+&lt;
+9h*mybxd!*+bf4%#hir+3w)kmp)%_vc%idx6qvz@7678=pkf-p
+4h%(d9=ip7snmb&amp;$s0@wrpj2*s_uif&amp;saam=_-%u50n0_4*vh#
+i9+n_c@!c1&amp;zi__9yxx$4#tfy0a1-mv+6oyl@-1(h4_fk^jm-o
+!7^ak(ih)q=q@@n0_0!$zy^a==-k99%%q8^20q$k4(_3qvt30e
+k=l(i4_2sxq^zt=5mncp!saue0b@&amp;$do-04%wrx4(#kn2pwzl+
+%@d50ib#rlz2av*wxjg47i&amp;m7da2ff^9g74-w$fd3_^34bzz%*
+945$woykwd4wot4*1l+lcca2+5%riudbxyy0d=jm-pkp123v@v
+xibyy0rc00!cwggfoa2k$q-qd)e%-f&amp;gbn2042@1(0bomv7%j4
+jk7llo7x6!oj($l-+mcncp$4k^uw-ldi=-$zyxq*0+9@y2)-62
+3^=nywszj3tlb@!1nk659r1jn_s6zk(sllfd9+3iqfqr(^-8da
+*ysw9s6huzt^n1r_0eg=ap&amp;mzgd#r(=0*5a^39lh!(%v0f-fv+
+@pxhpokbt(zum3s2i4*(@n_qszcfl+8kmi$d#ixi(&amp;!1l#f*@3
+c8o8lc)f@ts+mde4m))h9%lqaqqafh7(3@#=wli_veot7*1lwr
+kr#u!#pu7t_d34l^flqt$brxkh+4hd9e58na0)rz!8+0=+w9pr
+#ca0=dkk9na_9_hbammn==7hi3aflyr^$_1e$s+%!hrb7^6j*&amp;
+d5$wish65s1b3!q*^*f7bhuxfi!=tv^=$-#p5(m^-fzc_zpq@1
+8anr)2av*+pb$14lfz1_f-^n34n%3%9*y8^++ijun_e@zm=&amp;_0
+@5^rpf$c&amp;3&amp;zsofrqjeuz2i(b9k=6j_c%q##jc#j+7=&amp;iwa5t=
+aise&amp;^owl$iho0k(*33r-l-=s+3kdd2x)ee^$+8&amp;qk$nsk&amp;h&amp;h
+i2zxl7&amp;s^9zpbd+r3qp)d%ste9=)(hn5**&amp;kvi^(w(d^0bklrk
+4#_&amp;*
+</pre></div>
+<p>And another response, this time returning HTTP 404:</p>
+<div class="highlight"><pre><span class="nv">$ </span>curl -v localhost:8050
+...
+&lt; HTTP/1.1 <span class="m">404</span> NOT FOUND
+&lt; Server: gunicorn/19.1.1
+&lt; Date: Mon, <span class="m">03</span> Nov <span class="m">2014</span> 09:59:28 GMT
+&lt; Connection: close
+&lt; Transfer-Encoding: chunked
+&lt; Vary: Cookie
+&lt; X-Frame-Options: SAMEORIGIN
+&lt; Content-Type: text/html
+&lt;
+
+&lt;!DOCTYPE html&gt;
+&lt;html <span class="nv">lang</span><span class="o">=</span><span class="s2">"en"</span>&gt;
+&lt;head&gt;
+  &lt;meta http-equiv<span class="o">=</span><span class="s2">"content-type"</span> <span class="nv">content</span><span class="o">=</span><span class="s2">"text/html; charset=utf-8"</span>&gt;
+  &lt;title&gt;Page not found at /&lt;/title&gt;
+...
+</pre></div>
+</div>
+<div class="section" id="exception-archaeology">
+<h2>Exception archaeology</h2>
+<p>In this setup, Logstash will transport exceptions originating from Django, store them in Elasticsearch and Kibana will be used to view and analyse the exceptions.</p>
+<p>These are some condensed installation commands I ran on my Ubuntu 14 system:</p>
+<p>Install the Java runtime:</p>
+<div class="highlight"><pre><span class="nv">$ </span>sudo apt-get install default-jre
+</pre></div>
+<p>Install and start Elasticsearch:</p>
+<div class="highlight"><pre><span class="nv">$ </span>wget https://download.elasticsearch.org/elasticsearch/elasticsearch/elasticsearch-1.3.4.deb
+<span class="nv">$ </span>sudo dpkg -i elasticsearch-1.3.4.deb
+<span class="nv">$ </span>sudo /etc/init.d/elasticsearch start
+</pre></div>
+<p>Install Logstash:</p>
+<div class="highlight"><pre><span class="nv">$ </span>wget https://download.elasticsearch.org/logstash/logstash/packages/debian/logstash_1.4.2-1-2c0f5a1_all.deb
+<span class="nv">$ </span>sudo dpkg -i logstash_1.4.2-1-2c0f5a1_all.deb
+</pre></div>
+<p>Install Kibana and launch a web server serving it's static content on port 8000:</p>
+<div class="highlight"><pre><span class="nv">$ </span>wget https://download.elasticsearch.org/kibana/kibana/kibana-3.1.1.tar.gz
+<span class="nv">$ </span>tar xzf kibana-3.1.1.tar.gz
+<span class="nv">$ </span><span class="nb">cd </span>kibana-3.1.1/
+<span class="nv">$ </span>python -m SimpleHTTPServer <span class="p">&amp;</span>
+</pre></div>
+</div>
+<div class="section" id="capturing-exceptions">
+<h2>Capturing exceptions</h2>
+<p>With all our required packages installed and the web application and task handler already running, I created the following configuration for Logstash. It collects messages from syslog and <cite>tcp:5000</cite> (used by Django for reporting exceptions) and sends them both to Elasticsearch and prints them to stdout.</p>
+<div class="highlight"><pre><span class="nv">$ </span>cat logstash.conf
+input <span class="o">{</span>
+  tcp <span class="o">{</span> <span class="nv">port</span> <span class="o">=</span>&gt; <span class="m">5000</span> <span class="nv">codec</span> <span class="o">=</span>&gt; json <span class="o">}</span>
+  udp <span class="o">{</span> <span class="nv">port</span> <span class="o">=</span>&gt; <span class="m">5000</span> <span class="nb">type</span> <span class="o">=</span>&gt; syslog <span class="o">}</span>
+<span class="o">}</span>
+
+output <span class="o">{</span>
+  elasticsearch_http <span class="o">{</span>
+    <span class="nv">host</span> <span class="o">=</span>&gt; <span class="s2">"127.0.0.1"</span>
+    <span class="nv">port</span> <span class="o">=</span>&gt; 9200
+  <span class="o">}</span>
+  stdout <span class="o">{</span> <span class="nv">codec</span> <span class="o">=</span>&gt; rubydebug <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>I used this command to launch Logstash:</p>
+<div class="highlight"><pre><span class="nv">$ </span>/opt/logstash/bin/logstash agent -f logstash.conf
+</pre></div>
+</div>
+<div class="section" id="generating-traffic">
+<h2>Generating traffic</h2>
+<p>I used <a class="reference external" href="http://httpd.apache.org/docs/2.2/programs/ab.html">ab</a> to generate traffic for Django:</p>
+<div class="highlight"><pre><span class="nv">$ </span>ab -n <span class="m">200</span> -c <span class="m">10</span> http://127.0.0.1:8050/
+</pre></div>
+<p>With a decent amount of exceptions captured and sent to Elasticsearch, I looked to see what index name Logstash had picked, it turned out to be <cite>logstash-2014.11.04</cite>:</p>
+<div class="highlight"><pre><span class="nv">$ </span>curl --silent localhost:9200/_cat/indices?v
+health index               pri rep docs.count docs.deleted store.size pri.store.size
+yellow logstash-2014.11.04   <span class="m">5</span>   <span class="m">1</span>        <span class="m">848</span>            <span class="m">0</span>    453.8kb        453.8kb
+</pre></div>
+<p>I then open Kibana and loaded the default <cite>dashboard/file/logstash.json</cite> file with the URL below and saw an interface that looked <a class="reference external" href="http://i.imgur.com/7f3x0K6.png">like this</a>.</p>
+<div class="highlight"><pre>http://127.0.0.1:8000/index.html#/dashboard/file/logstash.json
+</pre></div>
+</div>
+<div class="section" id="further-efforts">
+<h2>Further efforts</h2>
+<p>I'm still looking at ways to tokenise the messages so their properties are easier to isolate, search and aggregate. At the moment messages are stored as a JSON blob rather than as separate keys in a dictionary:</p>
+<div class="highlight"><pre><span class="p">{</span>
+       <span class="s2">"message"</span> <span class="o">=&gt;</span> <span class="s2">"{\"host\": \"ubuntu\", \"logger\": \"example.tasks\", \"type\": \"logstash\", \"tags\": [], \"path\": \"/home/mark/faulty/example/tasks.py\", \"@timestamp\": \"2014-11-04T12:37:17.477207Z\", \"@version\": 1, \"message\": \"371679e24301dc140fbb7d0fd7957adb9ad32e41 1625 audio/mpeg\", \"levelname\": \"ERROR\"}"</span><span class="p">,</span>
+      <span class="s2">"@version"</span> <span class="o">=&gt;</span> <span class="s2">"1"</span><span class="p">,</span>
+    <span class="s2">"@timestamp"</span> <span class="o">=&gt;</span> <span class="s2">"2014-11-04T12:37:17.477Z"</span><span class="p">,</span>
+          <span class="s2">"type"</span> <span class="o">=&gt;</span> <span class="s2">"syslog"</span><span class="p">,</span>
+          <span class="s2">"host"</span> <span class="o">=&gt;</span> <span class="s2">"127.0.0.1"</span>
+<span class="p">}</span>
+<span class="p">{</span>
+       <span class="s2">"message"</span> <span class="o">=&gt;</span> <span class="s2">"{\"host\": \"ubuntu\", \"logger\": \"example.tasks\", \"type\": \"logstash\", \"tags\": [], \"path\": \"/home/mark/faulty/example/tasks.py\", \"@timestamp\": \"2014-11-04T12:37:17.567138Z\", \"@version\": 1, \"message\": \"9885e4c43c07e399a9a94d934e7f642a724e819b 1667 image/x-cmu-raster\", \"levelname\": \"CRITICAL\"}"</span><span class="p">,</span>
+      <span class="s2">"@version"</span> <span class="o">=&gt;</span> <span class="s2">"1"</span><span class="p">,</span>
+    <span class="s2">"@timestamp"</span> <span class="o">=&gt;</span> <span class="s2">"2014-11-04T12:37:17.567Z"</span><span class="p">,</span>
+          <span class="s2">"type"</span> <span class="o">=&gt;</span> <span class="s2">"syslog"</span><span class="p">,</span>
+          <span class="s2">"host"</span> <span class="o">=&gt;</span> <span class="s2">"127.0.0.1"</span>
+<span class="p">}</span>
+</pre></div>
+<p>The other task I want to look at is generating random data with distinctive distribution curves. With the way I use <tt class="docutils literal">random.choice</tt> at the moment each choice tends to get picked as often as any other choice but in a random order. When summarising statistics almost every exception happens an equal number of times so the pie charts slices are even and time series lines overlap one another quiet often.</p>
+<div class="highlight"><pre><span class="n">In</span> <span class="p">[</span><span class="mi">1</span><span class="p">]:</span> <span class="kn">from</span> <span class="nn">collections</span> <span class="kn">import</span> <span class="n">Counter</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">2</span><span class="p">]:</span> <span class="kn">from</span> <span class="nn">random</span> <span class="kn">import</span> <span class="n">randint</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">3</span><span class="p">]:</span> <span class="n">Counter</span><span class="p">([</span><span class="n">randint</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span> <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">200</span><span class="p">)])</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">3</span><span class="p">]:</span> <span class="n">Counter</span><span class="p">({</span><span class="mi">1</span><span class="p">:</span> <span class="mi">51</span><span class="p">,</span> <span class="mi">3</span><span class="p">:</span> <span class="mi">51</span><span class="p">,</span> <span class="mi">0</span><span class="p">:</span> <span class="mi">50</span><span class="p">,</span> <span class="mi">2</span><span class="p">:</span> <span class="mi">48</span><span class="p">})</span>
+</pre></div>
+</div>
+
+  </div>
+
+   <div id="support_text"><p>
+    Thank you for taking the time to read this post. If you're considering using </p><a href="https://www.digitalocean.com/?refcode=074ce6598105">Digital Ocean</a><p>, the hosting provider this blog is hosted on, please consider using </p><a href="https://www.digitalocean.com/?refcode=074ce6598105">this link to sign up</a><p>.
+  </p></div>
+
+
+  
+</div></body></html>

@@ -1,0 +1,493 @@
+<html><body><div><section class="post-content">
+                <p><em>tl;dr: with Go 1.5 you can build <code>.so</code> objects and import them as Python modules, running Go code (instead of C) directly from Python. <a href="#thecompletedemosource">Here's the code</a>.</em></p>
+
+<p>The Go 1.5 release brings <a href="https://golang.org/doc/go1.5">a number of nifty changes</a>. The one we will be playing with today is <strong>the ability of the standard toolchain to <a href="https://golang.org/doc/go1.5#link">build libraries (<code>.so</code>, <code>.a</code>) exporting a C ABI</a></strong>. (This is just one of an <a href="https://golang.org/s/execmodes">exciting series of new and planned buildmodes</a>.)</p>
+
+<p>The ABI is the low-level binary interface that functions employ to call each other. It standardizes things like where and how to pass arguments and return values, what happens to CPU registries, etc. It's needed so that for example shared libraries (<code>.so</code> objects) built by one compiler can be loaded by executables built by a different compiler.</p>
+
+<p>Various languages can be compiled to libraries exporting a C-compatible ABI: C (obviously), C++, Rust... and now Go. These libraries can all be used just like normal C libraries. <strong>This way we can package Go functions and then run them from software that might have never heard of Go</strong> just by linking against the <code>.so</code> or building against the <code>.a</code>.</p>
+
+<p>I got inspired by <a href="http://id-rsa.pub/post/go15-calling-go-shared-libs-from-firefox-addon/">this post</a> calling Go shared libraries from Firefox Add-ons and decided to try the same with another <code>.so</code> consuming interface: <strong>Python modules</strong>. In Python you can import a properly constructed <code>.so</code> <strong>just like you import a <code>.py</code> file</strong>. This way you can reuse your Go core or optimize hotspots without playing with <s>fire</s> C.</p>
+
+<p><em>In this post we'll go through building Go shared libraries, then C Python modules, and finally put the things together to build Go Python modules. Feel free to <a href="#thecompletedemosource">peek at the final result</a>.</em></p>
+
+<h2 id="runninggosharedlibrariesfromc">Running Go shared libraries from C</h2>
+
+<p>A first simple try: <strong>let's build a <code>.so</code> with Go and run it from a C binary</strong>.</p>
+
+<p>The release notes above point us to <code>go help buildmodes</code>:</p>
+
+<pre><code class="language-no-highlight">$ go help buildmode
+The 'go build' and 'go install' commands take a -buildmode argument which  
+indicates which kind of object file is to be built. Currently supported values  
+are:
+
+[...]
+
+-buildmode=c-shared
+    Build the listed main packages, plus all packages that they
+    import, into C shared libraries. The only callable symbols will
+    be those functions exported using a cgo //export comment.
+    Non-main packages are ignored.
+
+[...]
+</code></pre>
+
+<p>So what we need is <code>go build -buildmode=c-shared</code>, cgo and a main package, sounds good!</p>
+
+<p>The cgo export command is documented in <a href="https://golang.org/cmd/cgo/"><code>go doc cgo</code></a>, section <a href="https://golang.org/cmd/cgo/#hdr-C_references_to_Go">"C references to Go"</a>. Essentially, write <code>//export FUNCNAME</code> before the function definition.</p>
+
+<p>Here is how our <code>sum.go</code> looks (the empty <code>main</code> function is just there to make the compiler happy, it's ignored with <code>-buildmode=c-shared</code>):</p>
+
+<pre><code class="language-go">package main
+
+import "C"
+
+//export Sum
+func Sum(a, b int) int {  
+    return a + b
+}
+
+func main() {}
+</code></pre>
+
+<p>We build it into a shared library object:</p>
+
+<pre><code class="language-no-highlight">$ go build -buildmode=c-shared -o sum.so sum.go
+</code></pre>
+
+<p>And we get a handy (and interesting!) <a href="https://gist.github.com/FiloSottile/be4fbb27af9071a0d272">header file <code>sum.h</code></a> for free with the definitions of all Go standard types and obviously our Sum function declaration.</p>
+
+<p>Let's try it. Here's a banal <code>main.c</code> file:</p>
+
+<pre><code class="language-c">#include "sum.h"
+#include &lt;stdio.h&gt;
+
+int main(int argc, char const *argv[])  
+{
+    printf("%d\n", Sum(2, 40));
+    return 0;
+}
+</code></pre>
+
+<pre><code class="language-no-highlight">$ gcc -Wall -o main main.c ./sum.so
+$ ./main
+42  
+</code></pre>
+
+<p>Olè!</p>
+
+<p>As a more complex example, to play with types, here's a function that <strong>takes a C string and returns a Go string</strong>. The generated boilerplate cgo header is pretty self-explanatory, but the full docs are again at <code>go doc cgo</code>.</p>
+
+<pre><code class="language-go">package main
+
+import "C"
+
+//export AddDot
+func AddDot(s *C.char) string {  
+    return C.GoString(s) + "."
+}
+
+func main() {}  
+</code></pre>
+
+<pre><code class="language-c">#include "dot.h"
+#include &lt;stdio.h&gt;
+
+int main(int argc, char const *argv[])  
+{
+    GoString res = AddDot("Hello, world");
+    printf("%.*s\n", (int)res.n, res.p);
+    return 0;
+}
+</code></pre>
+
+<pre><code class="language-no-highlight">$ go build -buildmode=c-shared -o dot.so dot.go
+$ gcc -Wall -o main main.c ./dot.so
+$ ./main
+Hello, world.  
+</code></pre>
+
+<p>Note: you can also use <code>-buildmode=c-archive</code> to build <code>.a</code> objects which you can then link statically into your binaries. Also note that hardcoding the shared library path like <code>./dot.so</code> is the Wrong (But Easy) Way™ here.</p>
+
+<p>For more implementation details you might want to read <a href="https://golang.org/s/execmodes">the design document</a>.</p>
+
+<h2 id="cpythonextensions">C Python extensions</h2>
+
+<p><strong>CPython</strong>, the "main" implementation of the Python interpreter exposes an extensive <strong>C API</strong> to interact with it and for dealing with Python types. Moreover, <strong>it can load <code>.so</code> objects as modules which can then be called from Python code</strong>.</p>
+
+<p>You might already see where this is heading, but let's start by just making a regular C extension. We'll be using Python 3.4 because it's much more pleasant to work with<sup>[citation needed]</sup> and it has a <a href="https://docs.python.org/3.4/c-api/stable.html">stable ABI</a>, meaning that we can compile extensions that work with any version &gt;= 3.2 of CPython. Anyway all the linked docs have a version dropdown and it shouldn't be hard to adapt this guide to 2.7.</p>
+
+<p>Following the <a href="https://docs.python.org/3.4/extending/extending.html">official tutorial</a>, we write this short C file:</p>
+
+<pre><code class="language-c">#define Py_LIMITED_API
+#include &lt;Python.h&gt;
+
+static PyObject *  
+sum(PyObject *self, PyObject *args)  
+{
+    const long long a, b;
+
+    if (!PyArg_ParseTuple(args, "LL", &amp;a, &amp;b))
+        return NULL;
+
+    return PyLong_FromLongLong(a + b);
+}
+
+static PyMethodDef FooMethods[] = {  
+    {"sum", sum, METH_VARARGS, "Add two numbers."},
+    {NULL, NULL, 0, NULL}
+};
+
+static struct PyModuleDef foomodule = {  
+   PyModuleDef_HEAD_INIT, "foo", NULL, -1, FooMethods
+};
+
+PyMODINIT_FUNC  
+PyInit_foo(void)  
+{
+    return PyModule_Create(&amp;foomodule);
+}
+</code></pre>
+
+<pre><code class="language-no-highlight">$ gcc -Wall -fPIC -shared -o foo.so `pkg-config --cflags --libs python3` foo.c
+$ python3
+Python 3.4.3 (default, Jul 13 2015, 12:18:23)  
+[GCC 4.2.1 Compatible Apple LLVM 6.1.0 (clang-602.0.53)] on darwin
+Type "help", "copyright", "credits" or "license" for more information.  
+&gt;&gt;&gt; import foo
+&gt;&gt;&gt; foo.sum(40, 2)
+42  
+&gt;&gt;&gt;
+</code></pre>
+
+<p>Basically, all we need to expose is a <code>PyInit_foo</code> function, which calls <code>PyModule_Create</code> passing in a pointer to a <code>PyModuleDef</code> metadata object. The metadata eventually includes a <code>PyMethodDef</code> object with a pointer to our <code>PyObject * sum(PyObject *, PyObject *)</code> function, which is the actual code we want <code>foo.sum()</code> to run.</p>
+
+<h2 id="buildingagopythonmodule">Building a Go Python module</h2>
+
+<p>Nice! Now we just have to put the two pieces together: building a Go shared library and using a shared library as a Python module.</p>
+
+<p>Here the reference documentation is <strong><a href="https://golang.org/cmd/cgo/"><code>go doc cgo</code></a></strong>, give it a whole read, we'll use most of it anyway.</p>
+
+<p>A good starting point is just slapping the whole <code>foo.c</code> file in the cgo preamble (the comment block before <code>import "C"</code>) with a <code>#cgo pkg-config: python3</code> line and a empty <code>main</code> function.</p>
+
+<pre><code class="language-go">package main
+
+/*
+
+#cgo pkg-config: python3
+#define Py_LIMITED_API
+#include &lt;Python.h&gt;
+
+static PyObject *  
+sum(PyObject *self, PyObject *args)  
+{
+    const long long a, b;
+
+    if (!PyArg_ParseTuple(args, "LL", &amp;a, &amp;b))
+        return NULL;
+
+    return PyLong_FromLongLong(a + b);
+}
+
+static PyMethodDef FooMethods[] = {  
+    {"sum", sum, METH_VARARGS, "Add two numbers."},
+    {NULL, NULL, 0, NULL}
+};
+
+static struct PyModuleDef foomodule = {  
+   PyModuleDef_HEAD_INIT, "foo", NULL, -1, FooMethods
+};
+
+PyMODINIT_FUNC  
+PyInit_foo(void)  
+{
+    return PyModule_Create(&amp;foomodule);
+}
+
+*/
+import "C"
+
+func main() {}  
+</code></pre>
+
+<p>It works, but it has very little of a "Go module".</p>
+
+<pre><code class="language-no-highlight">$ go build -buildmode=c-shared -o foo.so foo.go
+$ python3 -c 'import foo; print(foo.sum(2, 40))'
+42  
+</code></pre>
+
+<p>What we want is to <strong>write the <code>sum</code> function as an exported Go function</strong>. Since we will need to reference it in <code>FooMethods</code> anyway, we replace its implementation in the preamble with a declaration:</p>
+
+<pre><code class="language-c">PyObject * sum(PyObject *, PyObject *);  
+</code></pre>
+
+<p>The docs tell us not to put definitions in the cgo preamble of files that include <code>//export</code> comments, because they will be included twice: in the header and in the cgo source</p>
+
+<blockquote>
+  <p>Using //export in a file places a restriction on the preamble: since it is copied into two different C output files, it must not contain any definitions, only declarations. If a file contains both definitions and declarations, then the two output files will produce duplicate symbols and the linker will fail. To avoid this, definitions must be placed in preambles in other files, or in C source files.</p>
+</blockquote>
+
+<p>So we create a new file <code>sum.go</code> and put the exported function there:</p>
+
+<pre><code class="language-go">package main
+
+// #cgo pkg-config: python3
+// #define Py_LIMITED_API
+// #include &lt;Python.h&gt;
+import "C"
+
+//export sum
+func sum(self, args *C.PyObject) *C.PyObject {  
+    return C.PyLong_FromLongLong(0)
+}
+</code></pre>
+
+<pre><code class="language-no-highlight">$ go build -buildmode=c-shared -o foo.so foo.go sum.go
+$ python3 -c 'import foo; print(foo.sum(2, 40))'
+0  
+</code></pre>
+
+<p>Our first proper Go code ran from Python!</p>
+
+<p>Now in a pure exercise of cgo, we need to actually implement the <code>sum</code> function. This <em>would</em> be easy, but the <code>PyArg_ParseTuple</code> function is variadic (it takes a variable number of arguments) and <a href="https://github.com/golang/go/issues/975">cgo does not support them</a>.</p>
+
+<p>To workaround this, we write a short ad-hoc wrapper in the <code>foo.go</code> preamble:</p>
+
+<pre><code class="language-c">// Workaround missing variadic function support
+// https://github.com/golang/go/issues/975
+int PyArg_ParseTuple_LL(PyObject * args, long long * a, long long * b) {  
+    return PyArg_ParseTuple(args, "LL", a, b);
+}
+</code></pre>
+
+<p>And put its declaration in <code>sum.go</code>:</p>
+
+<pre><code class="language-go">// int PyArg_ParseTuple_LL(PyObject *, long long *, long long *);
+import "C"  
+</code></pre>
+
+<p>We can now write a real <code>sum</code> function:</p>
+
+<pre><code class="language-go">//export sum
+func sum(self, args *C.PyObject) *C.PyObject {  
+    var a, b C.longlong
+    if C.PyArg_ParseTuple_LL(args, &amp;a, &amp;b) == 0 {
+        return nil
+    }
+    return C.PyLong_FromLongLong(a + b)
+}
+</code></pre>
+
+<p>✨🎉</p>
+
+<pre><code class="language-no-highlight">$ go build -buildmode=c-shared -o foo.so foo.go sum.go
+$ python3 -c 'import foo; print(foo.sum(2, 40))'
+42  
+</code></pre>
+
+<p>As a final touch, we realize that <code>foo.go</code> amounts to just the cgo preamble, which we can just put in a <code>.c</code> file that <code>go build</code> will compile with the rest of the package.</p>
+
+<blockquote>
+  <p>When the Go tool sees that one or more Go files use the special import "C", it will look for other non-Go files in the directory and compile them as part of the Go package. Any .c, .s, or .S files will be compiled with the C compiler.</p>
+</blockquote>
+
+<h3 id="thecompletedemosource">The complete demo source</h3>
+
+<pre><code class="language-no-highlight">$ go build -buildmode=c-shared -o foo.so
+$ python3 -c 'import foo; print(foo.sum(2, 40))'
+42  
+</code></pre>
+
+<h4 id="sumgo"><code>sum.go</code></h4>
+
+<pre><code class="language-go">package main
+
+// #cgo pkg-config: python3
+// #define Py_LIMITED_API
+// #include &lt;Python.h&gt;
+// int PyArg_ParseTuple_LL(PyObject *, long long *, long long *);
+import "C"
+
+//export sum
+func sum(self, args *C.PyObject) *C.PyObject {  
+    var a, b C.longlong
+    if C.PyArg_ParseTuple_LL(args, &amp;a, &amp;b) == 0 {
+        return nil
+    }
+    return C.PyLong_FromLongLong(a + b)
+}
+
+func main() {}  
+</code></pre>
+
+<h4 id="fooc"><code>foo.c</code></h4>
+
+<pre><code class="language-c">#define Py_LIMITED_API
+#include &lt;Python.h&gt;
+
+PyObject * sum(PyObject *, PyObject *);
+
+// Workaround missing variadic function support
+// https://github.com/golang/go/issues/975
+int PyArg_ParseTuple_LL(PyObject * args, long long * a, long long * b) {  
+    return PyArg_ParseTuple(args, "LL", a, b);
+}
+
+static PyMethodDef FooMethods[] = {  
+    {"sum", sum, METH_VARARGS, "Add two numbers."},
+    {NULL, NULL, 0, NULL}
+};
+
+static struct PyModuleDef foomodule = {  
+   PyModuleDef_HEAD_INIT, "foo", NULL, -1, FooMethods
+};
+
+PyMODINIT_FUNC  
+PyInit_foo(void)  
+{
+    return PyModule_Create(&amp;foomodule);
+}
+</code></pre>
+
+<h3 id="concurrency">Concurrency</h3>
+
+<p>The runtime behavior when loaded as a plugin is not widely documented. All I could find is the design document linked above, which tells us that <strong>the runtime is initialized once when the first Go plugin is loaded</strong>. Apparently a full fledged Go runtime runs alongside the main process.</p>
+
+<p>Empirically, goroutines work naturally, and they keep running after the entry function returns.</p>
+
+<pre><code class="language-go">//export tick
+func tick(self, args *C.PyObject) *C.PyObject {  
+    go func() {
+        for range time.NewTicker(time.Second).C {
+            log.Println("tick")
+        }
+    }()
+    return C.PyLong_FromLong(0)
+}
+</code></pre>
+
+<pre><code class="language-no-highlight">&gt;&gt;&gt; import foo
+&gt;&gt;&gt; foo.tick()
+0  
+&gt;&gt;&gt; 2015/08/25 22:50:16 tick
+2015/08/25 22:50:17 tick  
+2015/08/25 22:50:18 tick  
+</code></pre>
+
+<p>On the Python side, <strong>you <a href="https://docs.python.org/3.4/c-api/init.html#thread-state-and-the-global-interpreter-lock">manage the GIL</a> just like you do in C</strong>. You release it before blocking or going busy so that other Python threads can run (similarly to how <a href="http://dave.cheney.net/2015/08/08/performance-without-the-event-loop">the goroutines scheduler works</a>) and you don't interact with Python objects until you re-acquire it—which you can do even from a different goroutine.</p>
+
+<pre><code class="language-go">//export gil
+func gil(self, args *C.PyObject) *C.PyObject {  
+    var res *C.PyObject
+
+    tState := C.PyEval_SaveThread()
+
+    var mu sync.Mutex
+    mu.Lock()
+
+    go func() {
+        C.PyEval_RestoreThread(tState)
+        res = C.PyLong_FromLong(1)
+        mu.Unlock()
+    }()
+
+    mu.Lock()
+
+    return res
+}
+</code></pre>
+
+<pre><code class="language-python">&gt;&gt;&gt; import foo
+&gt;&gt;&gt; foo.gil()
+1  
+</code></pre>
+
+<h3 id="bonustheneedlesslyhardway">Bonus: the needlessly hard way</h3>
+
+<p>For the sake of "showing the process", I'm posting here the stupidly complex way I first got this working. (Don't you hate when blog posts look like the author got everything right at the first try?)</p>
+
+<p>I didn't realize I could just declare the <code>sum</code> function in the cgo preamble, put it in the <code>PyMethodDef</code> definition and then implement it in Go somewhere else. So I converted <em>the whole thing</em> in Go. It involved <em>a lot</em> of manual macro extension.</p>
+
+<pre><code class="language-go">package main
+
+/*
+
+#include &lt;Python.h&gt;
+
+// Workaround missing variadic function support
+// https://github.com/golang/go/issues/975
+
+int PyArg_ParseTuple_LL(PyObject * args, long long * a, long long * b) {  
+    return PyArg_ParseTuple(args, "LL", a, b);
+}
+
+*/
+import "C"
+</code></pre>
+
+<pre><code class="language-go">package main
+
+// #cgo pkg-config: python3
+// #include &lt;Python.h&gt;
+//
+// int PyArg_ParseTuple_LL(PyObject *, long long *, long long *);
+//
+// PyObject * sum(PyObject *, PyObject *);
+import "C"
+
+//export sum
+func sum(self, args *C.PyObject) *C.PyObject {  
+    var a, b C.longlong
+    if C.PyArg_ParseTuple_LL(args, &amp;a, &amp;b) == 0 {
+        return nil
+    }
+    return C.PyLong_FromLongLong(a + b)
+}
+
+var FooMethods = []C.PyMethodDef{  
+    {
+        C.CString("sum"),
+        C.PyCFunction(C.sum),
+        C.METH_VARARGS, [4]byte{},
+        C.CString("Add two numbers."),
+    },
+    {nil, nil, 0, [4]byte{}, nil},
+}
+
+var PyModuleDef_HEAD_INIT = C.PyModuleDef_Base{  
+    C.PyObject{1, nil}, nil, 0, nil,
+}
+var foomodule = C.PyModuleDef{  
+    PyModuleDef_HEAD_INIT,
+    C.CString("foo"), nil, -1, &amp;FooMethods[0],
+    nil, nil, nil, nil,
+}
+
+//export PyInit_foo
+func PyInit_foo() *C.PyObject {  
+    return C.PyModule_Create2(&amp;foomodule, 3)
+}
+
+func main() {}  
+</code></pre>
+
+<p>As you can see I ended up declaring <code>sum</code> in the preamble anyway and then referencing it as <code>C.PyCFunction(C.sum)</code>. It's actually nice to know that <strong>it's possible to craft all the needed C objects with cgo</strong>.</p>
+
+<h2 id="gopymoduleasmallhelperfunction">go-pymodule, a small helper function</h2>
+
+<p>I'm writing a thin helper library to build Go Python modules. It's not meant to offer comprehensive Python API bindings, calling <code>C.Py*</code> is fine, but it seeks to make those bits that are particularly annoying because of the C-Go bridge easier. It will support for example:</p>
+
+<ul>
+<li>initialization and method export, i.e. pass some <code>py.Config</code> object to a function and return that from an exported <code>PyInit_foo</code></li>
+<li>arguments parsing, to solve the <code>PyArg_ParseTuple</code> issue</li>
+<li>GIL acquisition and release with global state</li>
+</ul>
+
+<p>Ideally it will avoid you all the <code>foo.c</code> boilerplate and the second file hack. I'm still working on it (and I'm still technically on vacation), so I guess watch this space :)</p>
+
+<p>Anyway for this sort of things (whatever this is), you can <a href="https://twitter.com/FiloSottile">follow me on Twitter</a>.</p>
+            </section>
+
+            </div></body></html>

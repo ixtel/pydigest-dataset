@@ -1,0 +1,96 @@
+<html><body><div><div class="content html_format"><p>
+      При разработке большинства сервисов возникает потребность во внутреннем биллинге для аккаунтов сервиса. Так и в </p><a href="http://bitcalm.com/">нашем сервисе</a><p> возникла такая задача. Готовые пакеты для её решения мы так и не смогли найти, в итоге пришлось разрабатывать систему биллинга с нуля.</p><p>
+В статье хочу рассказать о нашем опыте и подводных камнях, с которыми пришлось столкнуться во время разработки.
+
+</p><h4>Задачи</h4><p>Задачи, которые нам предстояло решить были типичны для любой системы денежного учета: прием платежей, лог транзакций, оплата и повторяющиеся платежи (подписка).</p><a name="habracut"/>
+
+<h4>Транзакции</h4><p>Основной единицей системы, очевидно, была выбрана транзакция. Для транзакции была написана следующая простая модель:
+</p><pre><code class="python">class UserBalanceChange(models.Model):
+    user = models.ForeignKey('User', related_name='balance_changes')
+    reason = models.IntegerField(choices=REASON_CHOICES, default=NO_REASON)
+    amount = models.DecimalField(_('Amount'), default=0, max_digits=18, decimal_places=6)
+    datetime = models.DateTimeField(_('date'), default=timezone.now)
+</code></pre><p>Транзакция состоит из ссылки на пользователя, причины пополнения (или списания), суммы транзакции и времени совершения операции.
+
+</p><h4>Баланс</h4><p>Баланс пользователя очень легко посчитать при помощи функции </p><a href="https://docs.djangoproject.com/en/dev/topics/db/aggregation/">annotate</a><p> из ORM Django (считаем сумму значений одного столбца), но мы столкнулись с тем, что при большом количестве транзакций данная операция сильно нагружает БД. Поэтому было решено денормализовать БД, добавив поле “balance” в модель пользователя. Данное поле обновляется в методе “save” в модели “UserBalanceChange”, а для уверенности в актуальности данных в нем, мы каждую ночь его пересчитываем.</p><p>
+Правильнее, конечно же, хранить информацию о текущем балансе пользователя в кэше (например, в Redis) и инвалидировать при каждом изменении модели.
+
+</p><h4>Прием платежей</h4><p>Для самых популярных систем приема платежей есть готовые пакеты, поэтому проблем с их установкой и настройкой, как правило, не возникает. Достаточно выполнить несколько простых шагов: 
+</p><ul>
+<li>Регистрируемся в платежной системе;</li>
+<li>Получаем API ключи;</li>
+<li>Устанавливаем соответствующий пакет для Django;</li>
+<li>Реализовываем форму оплаты;</li>
+<li>Реализовываем функцию зачисления средств на баланс после оплаты.</li>
+</ul><p>Прием платежей реализуется очень гибко, например, для системы Robokassa (используемся приложение </p><a href="https://bitbucket.org/kmike/django-robokassa/">django-robokassa</a><p>) код выглядит так:</p><pre><code class="python">from robokassa.signals import result_received
+def payment_received(sender, **kwargs):
+    order = OrderForPayment.objects.get(id=kwargs['InvId'])
+    user = User.objects.get(id=order.user.id)
+    order.success=True
+    order.save()
+    try:
+        sum = float(order.payment)
+    except Exception, e:
+        pass
+    else:
+        balance_change = UserBalanceChange(user=user, amount=sum, reason=BALANCE_REASONS.ROBOKASSA)
+        balance_change.save()
+</code></pre><p>По аналогии можно подключить любую систему оплаты, например PayPal, Яндекс.Касса
+
+</p><h4>Списание средств</h4><p>Со списаниями чуть сложнее – перед операцией необходимо проверять, каким будет баланс счета после проведения операции, причем “по-честному” – при помощи annotate. Это необходимо делать для того, чтобы не обслуживать пользователя “в кредит”, что особенно важно, когда транзакции выполняются на большие суммы.
+</p><pre><code class="python">payment_sum = 8.32
+users = User.objects.filter(id__in=has_clients, balance__gt=payment_sum).select_related('tariff')
+</code></pre><p>Здесь мы написали без annotate, так как в данейшем есть дополнительные проверки. 
+
+</p><h4>Повторяющиеся списания</h4><p>Разобравшись с основами, переходим к самому интересному — повторяющимся списаниям. У нас есть потребность каждый час (назовет это “биллинг-период”) снимать с пользователя определенную сумму в соответствии с его тарифным планом. Для реализации этого механизма мы используем </p><a href="http://www.celeryproject.org/">celery</a><p> – написан task, который выполняется каждый час. Логика в этом моменте получилась сложная, так как необходимо учитывать много факторов:
+</p><ul>
+<li>между выполнениями задачи в celery никогда не пройдет ровно час (биллинг-период);</li>
+<li>пользователь пополняет свой баланс (он становится &gt;0) и получает доступ к услугам между биллинг-периодами, снимать за период было бы нечестно;</li>
+<li>пользователь может поменять тариф в любое время;</li>
+<li>celery может по каким-либо причинам перестать выполнять задачи</li>
+</ul><p>
+Мы пытались реализовать данный алгоритм без введения дополнительного поля, но получилось не красиво и не удобно. Поэтому нам пришлось в модель User добавить поле last_hourly_billing, где указываем время последней повторяющиеся операции. </p><p>
+Логика работы:
+</p><ul>
+<li>Каждый биллинг-период мы смотрим время last_hourly_billing и списываем сумму согласно тарифному плану, затем обновляем поле last_hourly_billing;</li>
+<li>При смене тарифного плана мы списываем сумму по прошлому тарифу и обновляем поле last_hourly_billing;</li>
+<li>При активации услуги мы обновляем поле last_hourly_billing.</li>
+</ul>
+<pre><code class="python">def charge_tariff_hour_rate(user):
+    now = datetime.now
+    second_rate = user.get_second_rate()
+    hour_rate = (now - user.last_hourly_billing).total_seconds() * second_rate
+    balance_change_reason = UserBalanceChange.objects.create(
+                user=user,
+                reason=UserBalanceChange.TARIFF_HOUR_CHARGE,
+                amount=-hour_rate,
+    )
+    balance_change_reason.save()
+    user.last_hourly_billing = now
+    user.save()
+</code></pre><p>
+Данная система, к сожалению, не является гибкой: если мы добавим еще один тип повторяющихся платежей — придется добавлять новое поле. Скорее всего, в процессе рефакторинга, мы напишем дополнительную модель. Примерно такую:
+</p><pre><code class="python">class UserBalanceSubscriptionLast(models.Model):
+    user = models.ForeignKey('User', related_name='balance_changes')
+    subscription = models.ForeignKey('Subscription', related_name='subscription_changes')
+    datetime = models.DateTimeField(_('date'), default=timezone.now)
+</code></pre><p>
+Эта модель позволит очень гибко реализовать повторяющиеся платежи. 
+
+</p><h4>Dashboard</h4><p>Мы используем </p><a href="https://bitbucket.org/izi/django-admin-tools/wiki/Home">django-admin-tools</a><p> для удобного dashboard в панели администрирования. Мы решили, что будем следить за следующими двумя важными показателями:
+</p><ul>
+<li>Последние 5 оплат и график платежей пользователей за последний месяц;</li>
+<li>Пользователи, у которых баланс приближается к 0 (из тех, кто уже платил);</li>
+</ul><p>
+Первый показатель для нас является своего рода показателем роста (traction) нашего стартапа, второй — это возвращаемость (retention) пользователей. </p><p>
+ О том, как мы реализовали dashboard и следим за метриками, мы расскажем в одной из следующих статей.</p><p>
+Желаю всем удачной настройки биллинг-системы и получения больших платежей! 
+</p><p>
+P.S. Уже в процессе написания статьи нашел готовый пакет </p><a href="https://pypi.python.org/pypi/django-account-balances">django-account-balances</a><p>, думаю, что можно обратить внимание, если вы делаете систему лояльности.
+
+      
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

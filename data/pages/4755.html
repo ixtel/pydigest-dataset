@@ -1,0 +1,189 @@
+<html><body><div><article itemprop="articleBody">
+    
+    
+    <p>With Django 1.7 we got built in migrations and a management command to squash a set of existing migrations into one optimized migration - for faster test database building and to remove some legacy code/history. Squashing works, but it still has some rough edges and requires some manual work to get the best of a squashed migration. Here are few tips for squashing and optimizing squashed migrations.</p>
+
+
+<a name="1" class="3" title="How to squash migrations"/>
+<p>To squash migrations in given application just use a <q>management command</q> called <strong>squashmigrations</strong> giving the application name and migration number to which you want to squash the migrations (usually latest migration). A squashed migrations file will be generated that will contain all the operations from existing migrations. Django will try to reduce the number of operations if possible - like moving add field operations into create model operation.</p>
+<p>Depending on the migrations complexity the squashed migration may require some code editing to work. If you have RunPython in migrations then you will have to copy the functions into the squashed migration. After that the squash may not have all the operations optimized and further optimization will require our assistance.</p>
+<p>Migrations should be squashed if it takes a lot of time to run them all (like during testing), or when they have some code (like during data migration) or legacy models history that we want to wipe out.</p>
+<p>Before we go with squash optimization let us take a look at the squashing procedure:</p>
+<ul>
+<li>Create a squashed migration and if needed edit it to work. Then commit the change.</li>
+<li>When every database is migrated to the state from migration squash we can remove the old migrations and remove <strong>replaces</strong> list from the squashed migration. In multiple applications projects you will also have to change the dependent migration names if you are deleting them (change the name to the migration squash filename). Commit that.</li>
+<li>Now we can play with the squash to limit the number of operations it has. In many cases squash will have some lefovers that it wasn't able to optimize on its own.</li>
+</ul>
+<p>Running <strong>migrate</strong> on an existing database should result with <q>FAKED</q> for the squash (recognized as a new initial migration and skipped). However in many cases I found that this doesn't work and Djang will try to apply squashed migration and fail due to tables already created. A solution is to run <q>migrate</q> with <strong>--fake</strong>. This will work, but for deployment process this will be a bad situation as you have to run it and be sure that there are no other migrations from other developers (look for fixes in Django releases as squashing is being polised a lot and new reported bugs help catch every buggy case).</p>
+<p>Before commiting a squash or optimized squash later one it's essential to test them. To test migrations just launch any test and Django will use a clean database and apply all migrations. If the migration passes it's good. If you don't want to use --fake for deployment check if migrate command will pass for an existing database.</p>
+
+
+<a name="2" class="3" title="Squashes and optimizations"/>
+<a name="3" class="4" title="Ideal case - simplest example"/>
+
+<p>Lets start with a simple example that will give a perfect squash on its own. Let's create a News model that will get new fields in subsequent migrations:</p>
+
+<div class="box"><div class="highlight"><pre><span class="k">class</span> <span class="nc">News</span><span class="p">(</span><span class="n">models</span><span class="o">.</span><span class="n">Model</span><span class="p">):</span>
+    <span class="n">title</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">CharField</span><span class="p">(</span><span class="n">max_length</span><span class="o">=</span><span class="mi">300</span><span class="p">)</span>
+
+<span class="k">class</span> <span class="nc">News</span><span class="p">(</span><span class="n">models</span><span class="o">.</span><span class="n">Model</span><span class="p">):</span>
+    <span class="n">title</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">CharField</span><span class="p">(</span><span class="n">max_length</span><span class="o">=</span><span class="mi">300</span><span class="p">)</span>
+    <span class="n">text</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">TextField</span><span class="p">()</span>
+
+<span class="k">class</span> <span class="nc">News</span><span class="p">(</span><span class="n">models</span><span class="o">.</span><span class="n">Model</span><span class="p">):</span>
+    <span class="n">title</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">CharField</span><span class="p">(</span><span class="n">max_length</span><span class="o">=</span><span class="mi">300</span><span class="p">)</span>
+    <span class="n">text</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">TextField</span><span class="p">()</span>
+    <span class="n">published_date</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">DateTimeField</span><span class="p">(</span><span class="n">auto_now_add</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>In first migration we create the model, in second we add text field and in last one we add published_date field. A squashed migration will give the best result - one CreateModel operation:</p>
+<div class="box"><div class="highlight"><pre><span class="k">class</span> <span class="nc">Migration</span><span class="p">(</span><span class="n">migrations</span><span class="o">.</span><span class="n">Migration</span><span class="p">):</span>
+
+    <span class="n">replaces</span> <span class="o">=</span> <span class="p">[(</span><span class="s">'vanilla'</span><span class="p">,</span> <span class="s">'0001_initial'</span><span class="p">),</span> <span class="p">(</span><span class="s">'vanilla'</span><span class="p">,</span> <span class="s">'0002_news_text'</span><span class="p">),</span> <span class="p">(</span><span class="s">'vanilla'</span><span class="p">,</span> <span class="s">'0003_news_published_date'</span><span class="p">)]</span>
+
+    <span class="n">dependencies</span> <span class="o">=</span> <span class="p">[</span>
+    <span class="p">]</span>
+
+    <span class="n">operations</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="n">migrations</span><span class="o">.</span><span class="n">CreateModel</span><span class="p">(</span>
+            <span class="n">name</span><span class="o">=</span><span class="s">'News'</span><span class="p">,</span>
+            <span class="n">fields</span><span class="o">=</span><span class="p">[</span>
+                <span class="p">(</span><span class="s">'id'</span><span class="p">,</span> <span class="n">models</span><span class="o">.</span><span class="n">AutoField</span><span class="p">(</span><span class="n">verbose_name</span><span class="o">=</span><span class="s">'ID'</span><span class="p">,</span> <span class="n">serialize</span><span class="o">=</span><span class="bp">False</span><span class="p">,</span> <span class="n">auto_created</span><span class="o">=</span><span class="bp">True</span><span class="p">,</span> <span class="n">primary_key</span><span class="o">=</span><span class="bp">True</span><span class="p">)),</span>
+                <span class="p">(</span><span class="s">'title'</span><span class="p">,</span> <span class="n">models</span><span class="o">.</span><span class="n">CharField</span><span class="p">(</span><span class="n">max_length</span><span class="o">=</span><span class="mi">300</span><span class="p">)),</span>
+                <span class="p">(</span><span class="s">'text'</span><span class="p">,</span> <span class="n">models</span><span class="o">.</span><span class="n">TextField</span><span class="p">(</span><span class="n">default</span><span class="o">=</span><span class="s">''</span><span class="p">)),</span>
+                <span class="p">(</span><span class="s">'published_date'</span><span class="p">,</span> <span class="n">models</span><span class="o">.</span><span class="n">DateTimeField</span><span class="p">(</span><span class="n">auto_now_add</span><span class="o">=</span><span class="bp">True</span><span class="p">,</span> <span class="n">default</span><span class="o">=</span><span class="n">datetime</span><span class="o">.</span><span class="n">datetime</span><span class="p">(</span><span class="mi">2015</span><span class="p">,</span> <span class="mi">5</span><span class="p">,</span> <span class="mi">24</span><span class="p">,</span> <span class="mi">17</span><span class="p">,</span> <span class="mi">26</span><span class="p">,</span> <span class="mi">25</span><span class="p">,</span> <span class="mi">326059</span><span class="p">,</span> <span class="n">tzinfo</span><span class="o">=</span><span class="n">utc</span><span class="p">))),</span>
+            <span class="p">],</span>
+        <span class="p">),</span>
+    <span class="p">]</span>
+</pre></div>
+</div>
+<p>If we have at least one test in our project then we can try to run it to test the squashed migration (<q>vanilla</q> is my test app name and -v=2 is needed to see the list of applied migrations):</p>
+<p class="box">python manage.py test vanilla -v=2</p>
+<p>According to the documentation now we can remove the old migrations and remove <q>replaces</q> list and it should work. In my case on Django 1.8.2 it tries to apply the squashed migration on an existing database and fails (that may be a bug, and I've already reported it on the Django trac). Migrating with --force would solve this.</p>
+
+<a name="4" class="4" title="Reordering operations"/>
+<p>Some operations like RunPython, RunSQL or indexes operations will stop the optimizer for looking for new operation to optimize. When we get the initial squash we can then play with the order of operations - move operations on given model just after CreateModel - and then create a squash of a squash just to get an optimized list of operations (i delete it, just copy the operations list to the initial squash).</p>
+<p>For example lets create a Person model and then add some fields to it:</p>
+<div class="box"><div class="highlight"><pre><span class="k">class</span> <span class="nc">Person</span><span class="p">(</span><span class="n">models</span><span class="o">.</span><span class="n">Model</span><span class="p">):</span>
+    <span class="n">first_name</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">CharField</span><span class="p">(</span><span class="n">max_length</span><span class="o">=</span><span class="mi">100</span><span class="p">)</span>
+    <span class="n">last_name</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">CharField</span><span class="p">(</span><span class="n">max_length</span><span class="o">=</span><span class="mi">100</span><span class="p">)</span>
+
+    <span class="k">class</span> <span class="nc">Meta</span><span class="p">:</span>
+        <span class="n">unique_together</span> <span class="o">=</span> <span class="p">(</span><span class="s">'first_name'</span><span class="p">,</span> <span class="s">'last_name'</span><span class="p">)</span>
+
+
+<span class="k">class</span> <span class="nc">Person</span><span class="p">(</span><span class="n">models</span><span class="o">.</span><span class="n">Model</span><span class="p">):</span>
+    <span class="n">first_name</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">CharField</span><span class="p">(</span><span class="n">max_length</span><span class="o">=</span><span class="mi">100</span><span class="p">)</span>
+    <span class="n">last_name</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">CharField</span><span class="p">(</span><span class="n">max_length</span><span class="o">=</span><span class="mi">100</span><span class="p">)</span>
+    <span class="n">age</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">IntegerField</span><span class="p">(</span><span class="n">default</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+    <span class="n">gender</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">CharField</span><span class="p">(</span><span class="n">choices</span><span class="o">=</span><span class="p">((</span><span class="s">'m'</span><span class="p">,</span> <span class="s">'m'</span><span class="p">),</span> <span class="p">(</span><span class="s">'f'</span><span class="p">,</span> <span class="s">'f'</span><span class="p">)),</span> <span class="n">default</span><span class="o">=</span><span class="s">'m'</span><span class="p">,</span> <span class="n">max_length</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+
+    <span class="k">class</span> <span class="nc">Meta</span><span class="p">:</span>
+        <span class="n">unique_together</span> <span class="o">=</span> <span class="p">(</span><span class="s">'first_name'</span><span class="p">,</span> <span class="s">'last_name'</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>We have two migrations and a squash will result in:</p>
+<div class="box"><div class="highlight"><pre>    <span class="n">operations</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="n">migrations</span><span class="o">.</span><span class="n">CreateModel</span><span class="p">(</span>
+            <span class="n">name</span><span class="o">=</span><span class="s">'Person'</span><span class="p">,</span>
+            <span class="n">fields</span><span class="o">=</span><span class="p">[</span>
+                <span class="p">(</span><span class="s">'id'</span><span class="p">,</span> <span class="n">models</span><span class="o">.</span><span class="n">AutoField</span><span class="p">(</span><span class="n">primary_key</span><span class="o">=</span><span class="bp">True</span><span class="p">,</span> <span class="n">serialize</span><span class="o">=</span><span class="bp">False</span><span class="p">,</span> <span class="n">auto_created</span><span class="o">=</span><span class="bp">True</span><span class="p">,</span> <span class="n">verbose_name</span><span class="o">=</span><span class="s">'ID'</span><span class="p">)),</span>
+                <span class="p">(</span><span class="s">'first_name'</span><span class="p">,</span> <span class="n">models</span><span class="o">.</span><span class="n">CharField</span><span class="p">(</span><span class="n">max_length</span><span class="o">=</span><span class="mi">100</span><span class="p">)),</span>
+                <span class="p">(</span><span class="s">'last_name'</span><span class="p">,</span> <span class="n">models</span><span class="o">.</span><span class="n">CharField</span><span class="p">(</span><span class="n">max_length</span><span class="o">=</span><span class="mi">100</span><span class="p">)),</span>
+            <span class="p">],</span>
+        <span class="p">),</span>
+        <span class="n">migrations</span><span class="o">.</span><span class="n">AlterUniqueTogether</span><span class="p">(</span>
+            <span class="n">name</span><span class="o">=</span><span class="s">'person'</span><span class="p">,</span>
+            <span class="n">unique_together</span><span class="o">=</span><span class="nb">set</span><span class="p">([(</span><span class="s">'first_name'</span><span class="p">,</span> <span class="s">'last_name'</span><span class="p">)]),</span>
+        <span class="p">),</span>
+        <span class="n">migrations</span><span class="o">.</span><span class="n">AddField</span><span class="p">(</span>
+            <span class="n">model_name</span><span class="o">=</span><span class="s">'person'</span><span class="p">,</span>
+            <span class="n">name</span><span class="o">=</span><span class="s">'age'</span><span class="p">,</span>
+            <span class="n">field</span><span class="o">=</span><span class="n">models</span><span class="o">.</span><span class="n">IntegerField</span><span class="p">(</span><span class="n">default</span><span class="o">=</span><span class="mi">0</span><span class="p">),</span>
+        <span class="p">),</span>
+        <span class="n">migrations</span><span class="o">.</span><span class="n">AddField</span><span class="p">(</span>
+            <span class="n">model_name</span><span class="o">=</span><span class="s">'person'</span><span class="p">,</span>
+            <span class="n">name</span><span class="o">=</span><span class="s">'gender'</span><span class="p">,</span>
+            <span class="n">field</span><span class="o">=</span><span class="n">models</span><span class="o">.</span><span class="n">CharField</span><span class="p">(</span><span class="n">choices</span><span class="o">=</span><span class="p">[(</span><span class="s">'m'</span><span class="p">,</span> <span class="s">'m'</span><span class="p">),</span> <span class="p">(</span><span class="s">'f'</span><span class="p">,</span> <span class="s">'f'</span><span class="p">)],</span> <span class="n">max_length</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">default</span><span class="o">=</span><span class="s">'m'</span><span class="p">),</span>
+        <span class="p">),</span>
+    <span class="p">]</span>
+</pre></div>
+</div>
+<p>As you can see there are two AddField operations that haven't been merged with CreateModel due to AlterUniqueTogether operation. This may be <a href="https://code.djangoproject.com/ticket/24828">fixed in future</a> but now the solution is to move those operations up and then generate a squash of a squash to get an optimized version:</p>
+<div class="box"><pre>Optimizing...
+  Optimized from 4 operations to 2 operations.
+</pre></div>
+<p>When we do it we get a perfect squash:</p>
+<div class="box"><div class="highlight"><pre>    <span class="n">operations</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="n">migrations</span><span class="o">.</span><span class="n">CreateModel</span><span class="p">(</span>
+            <span class="n">name</span><span class="o">=</span><span class="s">'Person'</span><span class="p">,</span>
+            <span class="n">fields</span><span class="o">=</span><span class="p">[</span>
+                <span class="p">(</span><span class="s">'id'</span><span class="p">,</span> <span class="n">models</span><span class="o">.</span><span class="n">AutoField</span><span class="p">(</span><span class="n">serialize</span><span class="o">=</span><span class="bp">False</span><span class="p">,</span> <span class="n">verbose_name</span><span class="o">=</span><span class="s">'ID'</span><span class="p">,</span> <span class="n">auto_created</span><span class="o">=</span><span class="bp">True</span><span class="p">,</span> <span class="n">primary_key</span><span class="o">=</span><span class="bp">True</span><span class="p">)),</span>
+                <span class="p">(</span><span class="s">'first_name'</span><span class="p">,</span> <span class="n">models</span><span class="o">.</span><span class="n">CharField</span><span class="p">(</span><span class="n">max_length</span><span class="o">=</span><span class="mi">100</span><span class="p">)),</span>
+                <span class="p">(</span><span class="s">'last_name'</span><span class="p">,</span> <span class="n">models</span><span class="o">.</span><span class="n">CharField</span><span class="p">(</span><span class="n">max_length</span><span class="o">=</span><span class="mi">100</span><span class="p">)),</span>
+                <span class="p">(</span><span class="s">'age'</span><span class="p">,</span> <span class="n">models</span><span class="o">.</span><span class="n">IntegerField</span><span class="p">(</span><span class="n">default</span><span class="o">=</span><span class="mi">0</span><span class="p">)),</span>
+                <span class="p">(</span><span class="s">'gender'</span><span class="p">,</span> <span class="n">models</span><span class="o">.</span><span class="n">CharField</span><span class="p">(</span><span class="n">default</span><span class="o">=</span><span class="s">'m'</span><span class="p">,</span> <span class="n">choices</span><span class="o">=</span><span class="p">[(</span><span class="s">'m'</span><span class="p">,</span> <span class="s">'m'</span><span class="p">),</span> <span class="p">(</span><span class="s">'f'</span><span class="p">,</span> <span class="s">'f'</span><span class="p">)],</span> <span class="n">max_length</span><span class="o">=</span><span class="mi">1</span><span class="p">)),</span>
+            <span class="p">],</span>
+        <span class="p">),</span>
+        <span class="n">migrations</span><span class="o">.</span><span class="n">AlterUniqueTogether</span><span class="p">(</span>
+            <span class="n">name</span><span class="o">=</span><span class="s">'person'</span><span class="p">,</span>
+            <span class="n">unique_together</span><span class="o">=</span><span class="nb">set</span><span class="p">([(</span><span class="s">'first_name'</span><span class="p">,</span> <span class="s">'last_name'</span><span class="p">)]),</span>
+        <span class="p">),</span>
+    <span class="p">]</span>
+</pre></div>
+</div>
+<p>When we have multiple models in the squash then operations for every model move just after it CreateModel operation. In case of relations you must preserve the correct order. Sometimes a model to which relations are created will be placed after operations on models to which relations are created afterwards. A solution would be to move CreateModel before all of them, and the AddField relation operations just after every model CreateModel operation so that only CreateModel operations will be present after optimization.</p>
+
+<a name="5" class="4" title="Removing operations"/>
+<p>Next case - we create a <q>Person</q> model, in second migration we create <q>NewPerson</q> model, in third we use RunPython operation (for data migration), and in fourth we remove the <q>Person</q> model.</p>
+<p>When squashing RunPython operations we will get a notice:</p>
+<p class="box">
+Manual porting required
+  Your migrations contained functions that must be manually copied over,
+  as we could not safely copy their implementation.
+  See the comment at the top of the squashed migration for details.
+</p>
+<p>You have to copy the function to the squash and fix the path in the RunPython operation for it to work. Original squash will look like so (notice the RunPython operation - the path needs to be fixed):</p>
+
+<div class="box"><div class="highlight"><pre><span class="n">operations</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="n">migrations</span><span class="o">.</span><span class="n">CreateModel</span><span class="p">(</span>
+            <span class="n">name</span><span class="o">=</span><span class="s">'Person'</span><span class="p">,</span>
+            <span class="n">fields</span><span class="o">=</span><span class="p">[</span>
+                <span class="p">(</span><span class="s">'id'</span><span class="p">,</span> <span class="n">models</span><span class="o">.</span><span class="n">AutoField</span><span class="p">(</span><span class="n">primary_key</span><span class="o">=</span><span class="bp">True</span><span class="p">,</span> <span class="n">serialize</span><span class="o">=</span><span class="bp">False</span><span class="p">,</span> <span class="n">verbose_name</span><span class="o">=</span><span class="s">'ID'</span><span class="p">,</span> <span class="n">auto_created</span><span class="o">=</span><span class="bp">True</span><span class="p">)),</span>
+                <span class="p">(</span><span class="s">'first_name'</span><span class="p">,</span> <span class="n">models</span><span class="o">.</span><span class="n">CharField</span><span class="p">(</span><span class="n">max_length</span><span class="o">=</span><span class="mi">100</span><span class="p">)),</span>
+                <span class="p">(</span><span class="s">'last_name'</span><span class="p">,</span> <span class="n">models</span><span class="o">.</span><span class="n">CharField</span><span class="p">(</span><span class="n">max_length</span><span class="o">=</span><span class="mi">100</span><span class="p">)),</span>
+            <span class="p">],</span>
+        <span class="p">),</span>
+        <span class="n">migrations</span><span class="o">.</span><span class="n">AlterUniqueTogether</span><span class="p">(</span>
+            <span class="n">name</span><span class="o">=</span><span class="s">'person'</span><span class="p">,</span>
+            <span class="n">unique_together</span><span class="o">=</span><span class="nb">set</span><span class="p">([(</span><span class="s">'first_name'</span><span class="p">,</span> <span class="s">'last_name'</span><span class="p">)]),</span>
+        <span class="p">),</span>
+        <span class="n">migrations</span><span class="o">.</span><span class="n">CreateModel</span><span class="p">(</span>
+            <span class="n">name</span><span class="o">=</span><span class="s">'NewPerson'</span><span class="p">,</span>
+            <span class="n">fields</span><span class="o">=</span><span class="p">[</span>
+                <span class="p">(</span><span class="s">'id'</span><span class="p">,</span> <span class="n">models</span><span class="o">.</span><span class="n">AutoField</span><span class="p">(</span><span class="n">primary_key</span><span class="o">=</span><span class="bp">True</span><span class="p">,</span> <span class="n">serialize</span><span class="o">=</span><span class="bp">False</span><span class="p">,</span> <span class="n">verbose_name</span><span class="o">=</span><span class="s">'ID'</span><span class="p">,</span> <span class="n">auto_created</span><span class="o">=</span><span class="bp">True</span><span class="p">)),</span>
+                <span class="p">(</span><span class="s">'first_name'</span><span class="p">,</span> <span class="n">models</span><span class="o">.</span><span class="n">CharField</span><span class="p">(</span><span class="n">max_length</span><span class="o">=</span><span class="mi">100</span><span class="p">)),</span>
+                <span class="p">(</span><span class="s">'last_name'</span><span class="p">,</span> <span class="n">models</span><span class="o">.</span><span class="n">CharField</span><span class="p">(</span><span class="n">max_length</span><span class="o">=</span><span class="mi">100</span><span class="p">)),</span>
+            <span class="p">],</span>
+        <span class="p">),</span>
+        <span class="n">migrations</span><span class="o">.</span><span class="n">AlterUniqueTogether</span><span class="p">(</span>
+            <span class="n">name</span><span class="o">=</span><span class="s">'newperson'</span><span class="p">,</span>
+            <span class="n">unique_together</span><span class="o">=</span><span class="nb">set</span><span class="p">([(</span><span class="s">'first_name'</span><span class="p">,</span> <span class="s">'last_name'</span><span class="p">)]),</span>
+        <span class="p">),</span>
+        <span class="n">migrations</span><span class="o">.</span><span class="n">RunPython</span><span class="p">(</span>
+            <span class="n">code</span><span class="o">=</span><span class="n">removing</span><span class="o">.</span><span class="n">migrations</span><span class="o">.</span><span class="mo">0003</span><span class="n">_auto_20150524_1933</span><span class="o">.</span><span class="n">foo</span><span class="p">,</span>
+        <span class="p">),</span>
+        <span class="n">migrations</span><span class="o">.</span><span class="n">DeleteModel</span><span class="p">(</span>
+            <span class="n">name</span><span class="o">=</span><span class="s">'Person'</span><span class="p">,</span>
+        <span class="p">),</span>
+    <span class="p">]</span>
+</pre></div>
+</div>
+<p>Data migrations can be removed from a squash - if every database have migrated data from old to new state then we don't need it any more (if we don't plan to rollback it that is). So remove RunPython and function that was used with it. Next we can optimize the model deletion - either delete all operations on the old model or move DeleteModel model operation just after it AlterUniqueTogether operation and resquash - you will get a clean squashed migration with no redundant operations.</p>
+<p>At some buggy cases when the deleted model had relations to the squashed migration may not work (as of Django 1.8.2) as during migration on a clean database some operation will try to run on a model that does not exist. This may be fixed in a future version of Django (<a href="https://code.djangoproject.com/ticket/24849">#24849</a>). A solution for this now is to manually remove operations on the deleted model.</p>
+
+<a name="6" class="3" title="The end"/>
+<p>Migrations squashing becomes essential with the new migration system. It's not yet a cool and polished feature but with constant improvements it should shine in close future. Try squashing your migrations, try catching bugs if any and report them on the Django trac.</p>
+    
+</article>
+</div></body></html>

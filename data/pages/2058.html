@@ -1,0 +1,153 @@
+<html><body><div><article class="post-content">
+    <p>This post will describe how to use virtualenv's tricks to run python
+inside Docker container extending concept of python virtual environment,
+without changing any current habits.</p>
+
+<p>If you develop in python you've probably heard about <code>pip</code> and <code>virtualenv</code>,
+if not... go read about <a href="http://www.dabapps.com/blog/introduction-to-pip-and-virtualenv-python/">them</a>
+now. They're pretty standard way of managing dependencies
+in python.</p>
+
+<h1>Virtualenv &amp; pip workflow</h1>
+
+<p>Typical workflow with virtualenv and pip looks as follows:</p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">$ virtualenv .
+$ source /bin/activate
+</code></pre></div>
+<p>In the above steps we create a virtual environment and <code>activate</code> it.</p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">(docker-virtualenv)
+# att at lapunov in ~/Projects/docker-virtualenv on git:master x [8:05:05]
+</code></pre></div>
+<p>With virtualenv we can start using pip without worrying that it will pollute
+our global space.</p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">$ pip install -r requirements.txt
+$ pip install my_new_dependency
+</code></pre></div>
+<p>When we no more want to use a virtualenv, we can get rid of it by:</p>
+
+<p>Simple, right? </p>
+
+<h1>All dependencies are in docker now...</h1>
+
+<p>Pip and virtualenv work well and you get used to them,
+but here comes <a href="https://www.docker.com/whatisdocker/">Docker</a> and lots of things change. Now, you install
+all dependencies inside a container instead of virtualenv </p>
+
+<p>Installing dependencies in docker has it's advantages
+over using just virtualenv
+- because thanks to containers - you don't have to worry about system's dependencies,
+and your app is now better isolated.</p>
+
+<p>However running
+python becomes a bit cumbersome, because you don't have dependencies
+installed on your machine, and you would have to get into docker container
+to run python there.</p>
+
+<p>For example you work with <a href="https://www.djangoproject.com/">Django</a> and
+want to run <code>./manage.py shell_plus</code>, as you always did,
+in a current directory?</p>
+
+<p>Or run <code>./manage.py collect_static</code>, or just play around
+with packages you've just installed using IPython?</p>
+
+<p>You first have to enter a docker container. And depending on your
+<a href="http://docs.docker.com/reference/builder/">Dockerfile</a>
+you can have few things wrong - default directory, user,
+environment variables...</p>
+
+<p>It isn't the nicest developer experience ever. The best thing would be
+to not change our habits at all.</p>
+
+<h1>Virtualenv's <code>bin/activate</code></h1>
+
+<p>What if we have something like virtualenv which would change our python
+so it runs inside the Docker?</p>
+
+<p>All we have to do this is to change how python is executed.</p>
+
+<p>Instead of running a <code>python</code> binary we can run a <code>python</code> bash script,
+which will run <code>python</code> inside a Docker container containing all our
+installed dependencies.</p>
+
+<p>Do you remember what virtualenv does? It creates a bunch of directories:</p>
+
+<p>And stores a new <code>python</code>, <code>pip</code> and so on in <code>bin</code> directory as well as magical
+<code>activate</code> file which shouldn't be run but sourced.</p>
+
+<p>When we do:</p>
+
+<p>We change python to the local one. <code>activate</code> is quite simple and it uses the
+fact that python looks for python executable on using the <code>PATH</code> environment variable,
+and uses the first <code>python</code> executable it finds. So <code>activate</code> prepends
+virtualenv bin path to <code>$PATH</code>.</p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">$ echo $PATH         
+/home/att/Projects/docker-virtualenv/bin:/usr/local/sbin:/usr/local/bin
+(docker-virtualenv)
+$ echo $VIRTUAL_ENV 
+/home/att/Projects/docker-virtualenv
+</code></pre></div>
+<h1>Fake your python</h1>
+
+<p>We can do a similar thing as virtualenv does. Let's create a bin directory:</p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">$ mkdir bin
+$ cp ../my_other_project_with_virtualenv/bin/activate bin/activate
+</code></pre></div>
+<p>and change: <code>VIRTUAL_ENV</code> environment variable to <code>pwd</code>:</p>
+
+<p>Now we only have to create a fake python executable.</p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">$ echo "echo 'hello'" &gt; bin/python  # create a dummy python
+$ chmod +x bin/python  # make script executable
+</code></pre></div>
+<p>So we should have now a structure like this:</p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">$ tree bin
+bin
+├── activate
+└── python
+</code></pre></div>
+<p>To use our new <code>python</code> ;), we have to source <code>activate</code> again.</p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">$ source bin/activate
+$ python             
+hello
+</code></pre></div>
+<p>Hurray! It means that we have dummy python in place, and it's a default python now.
+We only have to make it a little bit more useful and run a python inside a Docker
+container.</p>
+
+<p>This is an example content of <code>bin/python</code>:</p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">$ cat bin/python
+#!/bin/bash
+docker run -it docker_image_name python "$@"
+</code></pre></div>
+<p>If you rewrite a <code>bin/python</code> to the version above and reload activate,
+you run python in Docker just like always:</p>
+
+<p>But it will be little slower to start...</p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">$ time python -c "print('hello')"
+hello
+python -c "print('hello')"  0,02s user 0,01s system 10% cpu 0,318 total
+</code></pre></div>
+<p>However - it works!</p>
+
+<p>If you work with <a href="http://www.fig.sh/">fig</a> - tool for isolated Docker 
+development environments, you probably should use
+a <code>fig run</code> instead of <code>docker run</code> - because it will setup also
+a rest of containers for you with proper links, volumes and environment
+variables. Running with root privileges without a good reason is a bad practice
+so it should be avoided. I use a <a href="http://phusion.github.io/baseimage-docker/">docker/baseimage</a>
+as base for some of my
+Docker images, so I have a <code>/sbin/setuser command</code> which I use to run
+commands as a different user.</p>
+
+<p>After the changes mentioned above (assuming using <code>fig</code> and <code>baseimage</code>)
+<code>bin/python</code> might look as follows:</p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">#!/bin/bash
+cd /home/att/Projects/docker-virtualenv  # fig has to find `fig.yml`
+fig run docker_image /sbin/setuser virtualenv python "$@"
+</code></pre></div>
+<p>Now you don't have to remember that your python app is in Docker. Just use
+python as you always do :).</p>
+
+<p>And to restore normal python, just run</p>
+
+  </article>
+</div></body></html>

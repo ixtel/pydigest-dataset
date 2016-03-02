@@ -1,0 +1,214 @@
+<html><body><div><div class="content">
+      
+        <h1 class="content-title">Meet Scout, a Search Server Powered by SQLite</h1>
+      
+      
+      
+  
+  
+  
+    <p><a href="http://media.charlesleifer.com/blog/photos/scout.png" title="photos/scout.png"><img alt="photos/scout.png" class="img-responsive" src="http://m.charlesleifer.com/t/800x-/blog/photos/scout.png?key=sAseOVf_T2ZHEaBe5Eneiw"/></a></p>
+<p>In my continuing adventures with SQLite, I had the idea of writing a RESTful search server utilizing SQLite's <a href="http://sqlite.org/fts3.html">full-text search extension</a>. You might think of it as a poor man's ElasticSearch – a very, very poor man.</p>
+<p>So what is this project? Well, the idea I had was that instead of building out separate search implementations for my various projects, I would build a single lightweight search service I could use everywhere. I <a href="/blog/sqlite-small-fast-reliable-choose-any-three-/">really like SQLite</a> (and have previously blogged about <a href="/blog/using-sqlite-full-text-search-with-python/">using SQLite's full-text search with Python</a>), and the full-text search extension is quite good, so it didn't require much imagination to take the next leap and expose it as a web-service.</p>
+<p><a href="http://scout.readthedocs.org/en/latest/">Scout</a> is the resulting project, and I hope you find it interesting! Scout is written in Python and uses the <a href="http://flask.pocoo.org">Flask</a> framework to expose the web-service. Scout has a few simple concepts:</p>
+<ul>
+<li>Indexes</li>
+<li>Documents</li>
+<li>Metadata</li>
+</ul>
+<p>Indexes and documents are related to each-other in a many-to-many configuration, so a particular document can belong to multiple indexes. An index is simply a logical grouping of documents, for instance blog posts, wiki pages or recipes. A document is just a blob of text content you want to be able to search. For a blog entry, the content might be the paragraphs of text, for a recipe it might be the title and ingredients. Documents can also have arbitrary metadata stored as key/value pairs. As a bonus, you can even perform simple filter operations on the metadata in addition to the full-text search over the content!</p>
+<h2>Checking out Scout</h2>
+<p>What follows is a brief introduction to Scout and a tour of the features. If you want to follow along, you can install scout using <code>pip</code> or manually via <a href="https://github.com/coleifer/scout">GitHub</a>. If you install from <code>pip</code>, the <a href="https://github.com/coleifer/scout/#dependencies">dependencies</a> will also be installed automatically:</p>
+<div class="highlight"><pre><span class="gp">$</span> pip install scout
+<span class="go">... lots of output ...</span>
+<span class="go">Successfully installed scout flask peewee Werkzeug Jinja2 itsdangerous markupsafe</span>
+<span class="go">Cleaning up...</span>
+</pre></div>
+<p>The Scout server runs as its own process, so I'll start it up in one terminal, specifying a new database file to use as the search index:</p>
+<div class="highlight"><pre><span class="gp">$</span> scout.py search_index.db
+<span class="go"> * Running on http://127.0.0.1:8000/ (Press CTRL+C to quit)</span>
+</pre></div>
+<p>If I request this URL or pull it up in a browser I get a response indicating that no indexes exist yet:</p>
+<div class="highlight"><pre><span class="gp">$</span> curl localhost:8000/
+<span class="go">{</span>
+<span class="go">  "indexes": []</span>
+<span class="go">}</span>
+</pre></div>
+<h2>Scout client</h2>
+<p>To make things easier for Python developers, Scout also comes with a lightweight client. I'll open up a Python interpreter, import the client, and we'll go over how to index (the verb, not the noun) content and perform searches.</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">scout_client</span> <span class="kn">import</span> <span class="n">Scout</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">client</span> <span class="o">=</span> <span class="n">Scout</span><span class="p">(</span><span class="s1">'http://localhost:8000/'</span><span class="p">)</span>
+</pre></div>
+<p>If we look over the methods available on the client, you can get a feel for the type of operations Scout supports:</p>
+<ul>
+<li><code>create_index</code></li>
+<li><code>delete_index</code></li>
+<li><code>rename_index</code></li>
+<li><code>store_document</code></li>
+<li><code>update_document</code></li>
+<li><code>delete_document</code></li>
+<li><code>get_documents</code></li>
+<li><code>search</code></li>
+</ul>
+<h3>Storing some documents</h3>
+<p>To get started we first need to create an index, which we can do by calling <code>create_index()</code> and passing in a name:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">client</span><span class="o">.</span><span class="n">create_index</span><span class="p">(</span><span class="s1">'thoughts'</span><span class="p">)</span>
+<span class="go">{'documents': [],</span>
+<span class="go"> 'id': 1,</span>
+<span class="go"> 'name': 'thoughts',</span>
+<span class="go"> 'page': 1,</span>
+<span class="go"> 'pages': 0}</span>
+</pre></div>
+<p>We get a nice dictionary confirming our index was created and telling us that there are currently no documents stored there. Let's take care of that by storing some <em>thoughts</em>.</p>
+<p>I've been <a href="http://www.amazon.com/UFOs-Generals-Pilots-Government-Officials/dp/0307717089">thinking about UFOs</a> a lot recently, and I also like to think about <a href="http://m.charlesleifer.com/t/800x800/blog/photos/p1427560536.08.jpg?key=jRW7-m2QlWfWkErt0qSt4A">my cat, Huey</a>.</p>
+<p>The <code>store_document</code> method accepts the following parameters:</p>
+<ul>
+<li><code>content</code>, the content we wish to store.</li>
+<li><code>indexes</code>, the name or names of the index(es) to add this document to.</li>
+<li><code>metadata</code> (optional), key/value pairs.</li>
+</ul>
+<p>When we store a new document, we'll get a nice dictionary back indicating what was stored and giving us the <code>id</code> of the new Document:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">client</span><span class="o">.</span><span class="n">store_document</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="p">(</span><span class="s1">'The Rendlesham forest incident is one of the '</span>
+<span class="gp">... </span>     <span class="s1">'most interesting UFO accounts.'</span><span class="p">),</span>
+<span class="gp">... </span>    <span class="p">[</span><span class="s1">'thoughts'</span><span class="p">],</span>
+<span class="gp">... </span>    <span class="nb">type</span><span class="o">=</span><span class="s1">'ufo'</span><span class="p">)</span>
+
+<span class="go">{u'content': u'The Rendlesham forest incident is one of the most interesting UFO accounts.',</span>
+<span class="go"> u'id': 1,</span>
+<span class="go"> u'indexes': [u'thoughts'],</span>
+<span class="go"> u'metadata': {u'type': u'ufo'}}</span>
+</pre></div>
+<p>Let's store a few more thoughts. I've added the following to my search index:</p>
+<ul>
+<li><em>Huey is not very interested in UFOs.</em>, <code>type='huey'</code>.</li>
+<li><em>Sometimes I wonder if huey is an alien.</em>, <code>type='huey'</code>.</li>
+<li><em>The Chicago O'Hare UFO incident is also intriguing.</em>, <code>type='ufo'</code>.</li>
+<li><em>The evidence points to UFOs being a physical phenomenon.</em>, <code>type='ufo'</code>.</li>
+</ul>
+<p>Now that we have five documents in the index, let's perform some searches on the content.</p>
+<h3>Searching for UFOs</h3>
+<p>Let's see what happens when we search for all documents containing the word <em>UFO</em>:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">client</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="s1">'thoughts'</span><span class="p">,</span> <span class="s1">'ufo'</span><span class="p">)</span>
+
+<span class="go">{u'documents': [</span>
+<span class="go">  {u'content': u'The Rendlesham forest incident is one of the most interesting UFO accounts.',</span>
+<span class="go">   u'id': 1,</span>
+<span class="go">   u'indexes': [u'thoughts'],</span>
+<span class="go">   u'metadata': {u'type': u'ufo'},</span>
+<span class="go">   u'score': 0.25},</span>
+<span class="go">  {u'content': u'Huey is not very interested in UFOs.',</span>
+<span class="go">   u'id': 2,</span>
+<span class="go">   u'indexes': [u'thoughts'],</span>
+<span class="go">   u'metadata': {u'type': u'huey'},</span>
+<span class="go">   u'score': 0.25},</span>
+<span class="go">  {u'content': u"The Chicago O'Hare UFO incident is also intriguing.",</span>
+<span class="go">   u'id': 4,</span>
+<span class="go">   u'indexes': [u'thoughts'],</span>
+<span class="go">   u'metadata': {u'type': u'ufo'},</span>
+<span class="go">   u'score': 0.25},</span>
+<span class="go">  {u'content': u'The evidence points to UFOs being a physical phenomenon.',</span>
+<span class="go">   u'id': 5,</span>
+<span class="go">   u'indexes': [u'thoughts'],</span>
+<span class="go">   u'metadata': {u'type': u'ufo'},</span>
+<span class="go">   u'score': 0.25}</span>
+<span class="go"> ],</span>
+<span class="go"> u'page': 1,</span>
+<span class="go"> u'pages': 1}</span>
+</pre></div>
+<p>Scout returns a paginated list of matching documents (50 results per-page, by default). Each search result contains the document's content, id, index(es), metadata, and a score field ranking the quality of the match.</p>
+<p>It is also possible to perform additional filtering based on metadata values. In the following example we will again query for <em>ufo</em>, but this time we'll also restrict the results to documents whose <code>type='ufo'</code>:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">client</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="s1">'thoughts'</span><span class="p">,</span> <span class="s1">'ufo'</span><span class="p">,</span> <span class="nb">type</span><span class="o">=</span><span class="s1">'ufo'</span><span class="p">)[</span><span class="s1">'documents'</span><span class="p">]</span>
+
+<span class="go">[{u'content': u'The Rendlesham forest incident is one of the most interesting UFO accounts.',</span>
+<span class="go">  u'id': 1,</span>
+<span class="go">  u'indexes': [u'thoughts'],</span>
+<span class="go">  u'metadata': {u'type': u'ufo'},</span>
+<span class="go">  u'score': 0.25},</span>
+<span class="go"> {u'content': u"The Chicago O'Hare UFO incident is also intriguing.",</span>
+<span class="go">  u'id': 4,</span>
+<span class="go">  u'indexes': [u'thoughts'],</span>
+<span class="go">  u'metadata': {u'type': u'ufo'},</span>
+<span class="go">  u'score': 0.25},</span>
+<span class="go"> {u'content': u'The evidence points to UFOs being a physical phenomenon.',</span>
+<span class="go">  u'id': 5,</span>
+<span class="go">  u'indexes': [u'thoughts'],</span>
+<span class="go">  u'metadata': {u'type': u'ufo'},</span>
+<span class="go">  u'score': 0.25}]</span>
+</pre></div>
+<h4>Stemming</h4>
+<p>Scout configures the search index to use the <em>Porter</em> stemming algorithm by default. This means that words are truncated to their simpler root, so even though we indexed the words <em>interesting</em> and <em>interested</em>, look what happens when we search for <em>interest</em>:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">results</span> <span class="o">=</span> <span class="n">client</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="s1">'thoughts'</span><span class="p">,</span> <span class="s1">'interest'</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="k">print</span> <span class="n">results</span><span class="p">[</span><span class="s1">'documents'</span><span class="p">]</span>
+
+<span class="go">[{u'content': u'The Rendlesham forest incident is one of the most interesting UFO accounts.',</span>
+<span class="go">  u'id': 1,</span>
+<span class="go">  u'indexes': [u'thoughts'],</span>
+<span class="go">  u'metadata': {u'type': u'ufo'},</span>
+<span class="go">  u'score': 0.5},</span>
+<span class="go"> {u'content': u'Huey is not very interested in UFOs.',</span>
+<span class="go">  u'id': 2,</span>
+<span class="go">  u'indexes': [u'thoughts'],</span>
+<span class="go">  u'metadata': {u'type': u'huey'},</span>
+<span class="go">  u'score': 0.5}]</span>
+</pre></div>
+<h4>Scoring</h4>
+<p>Note that the score is <code>0.5</code> for both documents. One of the interesting limitations of the FTS extension is that it does not provide an algorithm for ranking by relevance. Happily, SQLite allows us to define our own functions in Python, so Scout comes with two ranking algorithms: simple (described <a href="http://sqlite.org/fts3.html#appendix_a">here</a>) and <a href="http://en.wikipedia.org/wiki/Okapi_BM25">bm25</a>.</p>
+<p>By default Scout will use the <em>simple</em> ranking algorithm, but you can specify the <em>bm25</em> algorithm, which gives slightly different results:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">results</span> <span class="o">=</span> <span class="n">client</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="s1">'thoughts'</span><span class="p">,</span> <span class="s1">'interest'</span><span class="p">,</span> <span class="n">ranking</span><span class="o">=</span><span class="s1">'bm25'</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="k">for</span> <span class="n">document</span> <span class="ow">in</span> <span class="n">results</span><span class="p">[</span><span class="s1">'documents'</span><span class="p">]:</span>
+<span class="gp">... </span>    <span class="k">print</span> <span class="n">document</span><span class="p">[</span><span class="s1">'content'</span><span class="p">][:</span><span class="mi">20</span><span class="p">],</span> <span class="n">document</span><span class="p">[</span><span class="s1">'score'</span><span class="p">]</span>
+<span class="gp">...</span>
+
+<span class="go">Huey is not very int 0.370119460283</span>
+<span class="go">The Rendlesham fores 0.296095568227</span>
+</pre></div>
+<h4>SQLite search queries</h4>
+<p>SQLite's full-text search engine supports an impressive <a href="http://sqlite.org/fts3.html#section_3">variety of query types</a>, which can be used when querying Scout:</p>
+<ul>
+<li>Prefix searches: <code>doc*</code> would match both <em>document</em> and <em>doctor</em>.</li>
+<li>First token search (FTS4 only): <code>^peewee</code> would match documents that begin with the token <em>peewee</em>.</li>
+<li>Quoted phrases: <code>"sql* data*"</code> would match both <em>sqlite database</em> and <em>sql datatype</em>.</li>
+<li>NEAR queries: <code>sqlite NEAR/5 search</code> would match documents where the tokens <em>sqlite</em> and <em>search</em> are within 5 words of eachother.</li>
+<li>Set operations using <code>AND</code>, <code>OR</code> and <code>NOT</code>: <code>huey OR ufos</code> would match documents containing either <em>huey</em> or <em>ufo</em>.</li>
+</ul>
+<h3>A quick note on the name of the project</h3>
+<p><a href="http://media.charlesleifer.com/blog/photos/p1427558861.16.JPG" title="photos/p1427558861.16.JPG"><img alt="photos/p1427558861.16.JPG" class="img-responsive" src="http://m.charlesleifer.com/t/800x-/blog/photos/p1427558861.16.JPG?key=T8GAaHJd8jA7LyLH97x9DQ"/></a></p>
+<p>As folks who follow my blog may have noticed, I like naming my projects after my pets. <a href="http://media.charlesleifer.com/blog/photos/IMG_20110402_150132.jpg">Scout</a> was our family dog and he was the best dog I've ever known (sorry, <a href="http://media.charlesleifer.com/blog/photos/IMG_20110402_150132.jpg">Mickey</a>). He was very clever and got into a lot of mischief. One time he ate a bar of decorative soap. Scout was named for the character in <em>To Kill a Mockingbird</em>.</p>
+<h3>Thanks for reading</h3>
+<p>Thanks for taking the time to read this post, I hope you found it interesting. SQLite is an amazing library and the full-text search extension works very well. A neat bonus of using SQLite is that our search index is stored in a single, easily transportable file.</p>
+<p>If you'd like to learn more about Scout, check out the <a href="http://scout.readthedocs.org/en/latest/">documentation</a>. The code is <a href="https://github.com/coleifer/scout">available on GitHub</a> and can also be installed using <code>pip</code>.</p>
+<p>If you found this post interesting, you might also enjoy these:</p>
+
+  
+  
+
+  
+  
+  
+
+  
+  
+  
+
+  
+  
+  
+
+  
+  
+  
+
+  
+  
+  
+
+
+<hr/>
+
+  <p>Commenting has been closed, but please feel free to <a href="/contact/">contact me</a></p>
+
+
+    </div>
+
+    </div></body></html>

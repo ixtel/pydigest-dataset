@@ -1,0 +1,55 @@
+<html><body><div><div class="entry-content">
+		<p>For some reason I decided one night I wanted to get a bunch of fonts. A lot of them. An hour later I had a bunch of <a href="http://scrapy.org/">scrapy</a> scripts pulling down fonts and a few days later I had more than 50k fonts on my computer.</p>
+<p>I then decided to convert it to bitmaps. It turns out this is a bit trickier than it might seem like. You need to crop in such a way that each character of a font is vertically aligned, and scale everything to fit the bitmap. I started with 512 * 512 bitmaps of all character. For every font you find the max y and min y of the bounding box, and the same thing for each individual letter. After some more number juggling I was able to scale all characters down to 64 * 64.</p>
+<p>The result is a tensor of size 56443 * 62 * 64 * 64. Exercise for the reader: where does the number 62 come from? I stored it as a tiny little (13GB) HDF5 file that you can download here: <a href="'https://s3.amazonaws.com/erikbern/fonts.hdf5">fonts.hdf5.</a></p>
+<p>If you take the average of all fonts, here’s what you get:</p>
+<p><a href="http://erikbern.com/wp-content/uploads/2016/01/avg.png"><img class=" size-full wp-image-1722 aligncenter" src="http://erikbern.com/wp-content/uploads/2016/01/avg.png" alt="avg"/></a>Hopefully by now it should be clear where the number 62 came from. <span>The median is a lot less blurry than the average:</span></p>
+<p><a href="http://erikbern.com/wp-content/uploads/2016/01/median.png"><img class="aligncenter size-full wp-image-1738" src="http://erikbern.com/wp-content/uploads/2016/01/median.png" alt="median"/></a></p>
+<p>Both mean and median are well-formed and legible! However individual fonts are all over the place:</p>
+<p><a href="http://erikbern.com/wp-content/uploads/2016/01/alphabet.png"><img class="aligncenter size-full wp-image-1729" src="http://erikbern.com/wp-content/uploads/2016/01/alphabet.png" alt="alphabet"/></a></p>
+<p>I guess I practically begged for it, stealing fonts from various sketchy places all over the web.In particular most of the fonts don’t even have lower case versions of the letters. A minority of fonts miss certain characters and will just output rectangles instead. And look at the ridiculous Power Ranger figure for the lower case “c”!</p>
+<p><strong>Training a neural network</strong></p>
+<p>Now, let’s train a neural network that generates characters! Specifically what I wanted to do is to create a “font vector” that is a vector in latent space that “defines” a certain font. That way we embed all fonts in a space where similar fonts have similar vectors.</p>
+<p>I built a simple neural network using Lasagne/Theano — <a href="https://github.com/erikbern/deep-fonts/blob/master/model.py">check out the code here</a>. It took an insane amount of time to converge, probably because there’s so much data and parameters. After <em>weeks</em> of running, the model converges to something that looks decent.</p>
+<p>Some notes on the model</p>
+<ul>
+<li>4 hidden layers of fully connected layers of width 1024.</li>
+<li>The final layer is a 4096 layer (64 * 64) with sigmoid nonlinearity so that the output is between 0 (white) and 1 (black).</li>
+<li>L1 loss between predictions and target. This works much better than L2 which generates very “gray” images — you can see qualitatively in the pictures above.</li>
+<li>Pretty strong L2 regularization of all parameters.</li>
+<li>Leaky rectified units (alpha=0.01) of nonlinearity on each layer.</li>
+<li>The first layer is 102D — each font is a 40D vector joined with a 62D binary one-hot vector of what is the character.</li>
+<li>Learning rate is 1.0 which is shockingly high — seemed to work well. Decrease by 3x when no improvements on the 10% test set is achieved in any epoch.</li>
+<li>Minibatch size is 512 — seemed like larger minibatches gave faster convergence for some weird reason.</li>
+<li>No dropout, didn’t seem to help. I did add some moderate Gaussian noise (of sigma 0.03) to the font vector and qualitatively it seemed to help a bit.</li>
+<li>Very simple data augmentation by blurring the input randomly with sigma sampled from [0, 1]. My theory was that this would help fitting charactersÂ that have thin lines.</li>
+</ul>
+<p>All of the code is available in the <a href="https://github.com/erikbern/deep-fonts">erikbern/deep-fonts</a> repo on Github.</p>
+<p>After convergence, we end up having a nice 40D embedding of all 50k fonts. LooksÂ like it ends up being roughly a multivariate normal — here’s the distribution of each of the 40 dimensions:</p>
+<p><a href="http://erikbern.com/wp-content/uploads/2016/01/pairplot_cropped.png"><img class="aligncenter size-full wp-image-1788" src="http://erikbern.com/wp-content/uploads/2016/01/pairplot_cropped.png" alt="pairplot_cropped"/></a></p>
+<p> </p>
+<p><strong>Playing around with the model</strong></p>
+<p>To start with, let’s recreate real font characters with characters generated from the network. Let’s plot the real character together with the model outputs. For each pair below, the real character is on the left, the model output on the right.</p>
+<p><a href="http://erikbern.com/wp-content/uploads/2016/01/real_vs_pred.png"><img class=" size-full wp-image-1721 aligncenter" src="http://erikbern.com/wp-content/uploads/2016/01/real_vs_pred.png" alt="real_vs_pred"/></a></p>
+<p>These are all characters drawn from the <em>test set</em>, so the network hasn’t seen any of them during training. All we’re telling the network is (a) what font it is (b) what character it is. The model has seen other characters of the same font during training, so what it does is to infer from those training examples to the unseen test examples.</p>
+<p>The network does a decent job at most of the characters, but gives up on some of the more difficult ones. For instance, characters with thin black lines are very hard to predict for the model, since if it renders the line just a few pixel to the side, that’s twice the loss of just rendering whitespace.</p>
+<p>We can also interpolate between different fonts in continuous space. Since every font is a vector, we can create arbitrary font vectors and generate output from it. Let’s sample four fonts and put them in the corners of a square, then interpolate between them!</p>
+<p><img class="aligncenter size-full wp-image-1751" src="http://erikbern.com/wp-content/uploads/2016/01/grid2.png" alt="grid"/></p>
+<p>Certain characters have multiple forms that we can interpolate between, eg. lowercase <em>g:</em></p>
+<p><a href="http://erikbern.com/wp-content/uploads/2016/01/grid3.png"><img class="aligncenter size-full wp-image-1752" src="http://erikbern.com/wp-content/uploads/2016/01/grid3.png" alt="grid"/></a></p>
+<p>We can also pick a font vector and generate new fonts from random perturbations:</p>
+<p><a href="https://raw.githubusercontent.com/erikbern/deep-fonts/master/noisy_font_2.gif"><img class="aligncenter wp-image-1770 size-full" src="https://raw.githubusercontent.com/erikbern/deep-fonts/master/noisy_font_2.gif" alt="noisy_font_2"/></a></p>
+<p>(btw internet god — please forgive me for wasting bandwidth on all the animated gifs in this blog post!)</p>
+<p>We can also generate completely new fonts. If we model the distribution of font vectors as a multivariate normal, we can sample random vectors from it and look at the fonts they generate. I’m interpolating between a few of thoseÂ vectors in the picture below:</p>
+<p><a href="https://raw.githubusercontent.com/erikbern/deep-fonts/master/animated_font.gif"><img class="aligncenter wp-image-1724 size-full" src="https://raw.githubusercontent.com/erikbern/deep-fonts/master/animated_font.gif" alt="animated_font"/></a></p>
+<p>An interesting thing here is that the model has learned that many fonts use upper case characters for the lower case range — the network interpolates between Q and q seamlessly. Here’s an example of the network interpolating very slowly between two fonts where this is the main difference:</p>
+<p><a href="https://raw.githubusercontent.com/erikbern/deep-fonts/master/font_pair.gif"><img class="aligncenter size-full wp-image-1767" src="https://raw.githubusercontent.com/erikbern/deep-fonts/master/font_pair.gif" alt="font_pair"/></a></p>
+<p>Another cool thing we can do since we have all fonts in a continuous space is to run t-SNE on them and embed all fonts into the 2D plane. Here’s a small excerpt of such an embedding:</p>
+<p><a href="https://raw.githubusercontent.com/erikbern/deep-fonts/master/tsne_cropped.png"><img class="aligncenter size-full wp-image-1761" src="https://raw.githubusercontent.com/erikbern/deep-fonts/master/tsne_cropped.png" alt="tsne"/></a></p>
+<p><strong>Final remarks</strong></p>
+<p>There are many other fun things you can do. It’s clear that there’s some room for improvement here. In particular, if I had more time, I would definitely explore generative adversarial models, which seems better at generating pictures. Another few things should be relatively easy to implement, such as batch normalization and parametric leaky rectifications. And finally the network architecture itself could probably benefit from doing deconvolutions instead of fully connected layers</p>
+<p>Feel free to <a href="https://s3.amazonaws.com/erikbern/fonts.hdf5">download the data</a> and play around with it if you’re interested!</p>
+	</div>
+
+	
+	</div></body></html>

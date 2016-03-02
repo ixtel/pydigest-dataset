@@ -1,0 +1,262 @@
+<html><body><div><div class="content html_format"><p>
+      В исследовательском проекте мне потребовался прототип медицинского браслета. Устройство должно было периодически измерять пульс, предупреждая об этом пациента, и отправлять результаты вместе с уровнем заряда батареи в облачный сервис. Таким устройством вполне мог стать и фитнес-браслет со стационарным ретранслятором вместо смартфона. Поэтому, прежде чем попытаться собрать прототип своими руками, я решил поэкспериментировать с чем-нибудь готовым. Так у меня появился новый Xiaomi mi band 1S Pulse (</p><a href="https://geektimes.ru/company/madrobots/blog/265886/">обзор</a><p> на Geektimes) с оптическим датчиком частоты сердечного ритма.
+</p><a name="habracut"/><p>
+Выбор браслета был связан с его относительно невысокой ценой, хорошим аккумулятором и тем, что измерение пульса инициируется именно со смартфона, а не запускается нажатием кнопки. 
+</p><p>
+Эксперименты я начал с изучения набора сервисов и характеристик, доступных через Bluetooth 4.0 (или Bluetooth Low Energy, далее — BLE). Кое-что нетрудно было найти в </p><a href="http://allmydroids.blogspot.ru/2014/12/xiaomi-mi-band-ble-protocol-reverse.html">сети</a><p>, и эта информация мне очень помогла, но она касалась предыдущей версии, без нужного мне датчика. Поэтому я начал с BLE-сканера. 
+</p><p>
+Оказалось, что подходящий и, признаться, очень удобный инструмент есть у Nordic Semiconductor. Это Master Control Panel или </p><a href="https://www.nordicsemi.com/eng/Products/Nordic-mobile-Apps/nRF-Master-Control-Panel-application">nRF MCP</a><p> для Android 4.3+. Установив приложение на планшет и запустив “SCAN”, я без труда обнаружили mi band и записал его физический адрес – C8:0F:10:11:1B:6E:
+
+</p><img src="https://habrastorage.org/files/a9c/cf5/e90/a9ccf5e90e4e454780fb3c17f04e41ad.jpg"/>
+<p>
+Нажав на “OPEN TAB” и затем на “CONNECT”, получил набор сервисов:
+
+</p><img src="https://habrastorage.org/files/318/05c/55d/31805c55d2744086a370c5f20784c299.jpg"/>
+<p>
+Идентификатор измерителя пульса оказался стандартным для подобных устройств — </p><a href="https://developer.bluetooth.org/gatt/services/Pages/ServicesHome.aspx">0x180D</a><p>. Забегая вперед, скажу, что обрадовался я рано.
+</p><p>
+В качестве ретранслятора я использовал </p><a href="https://en.wikipedia.org/wiki/Raspberry_Pi">Raspberry Pi</a><p> (модель B) и BLE-usb-адаптер BT400 от ASUS. Также потребовались </p><a href="http://www.bluez.org/">BlueZ</a><p> – настоящий швейцарский нож для работы с Bluetooth под Linux и пара дополнительных модулей для Python.
+
+</p><div class="spoiler"><b class="spoiler_title">Подготовка Raspberry Pi</b><div class="spoiler_text"><p>Для Raspberry Pi использовался образ </p><a href="https://www.raspberrypi.org/downloads">Raspbian</a><p>. После apt-get update и apt-get upgrade проверил адаптер:
+</p><pre><code class="bash">pi@raspberrypi:~ $ lsusb
+Bus 001 Device 006: ID 0b05:17cb ASUSTek Computer, Inc. 
+Bus 001 Device 005: ID 046d:c077 Logitech, Inc. 
+Bus 001 Device 004: ID 04d9:1602 Holtek Semiconductor, Inc.
+</code></pre><p>
+Отлично, мой адаптер — в первой строке. Установил BlueZ. Рекомендуется скачать последний архив кода, на момент подготовки статьи это был BlueZ 5.37, распаковать и скомпилировать. Я же удовлетворился версией 5.23, которая устанавливается через apt-get. Корректность установки можно проверить, выполнив команду gatttool –help. </p><p>
+Gatttool — это инструмент BlueZ для работы с </p><a href="https://developer.bluetooth.org/TechnologyOverview/Pages/GATT.aspx">GATT</a><p>, общим профилем атрибутов BLE устройств. В старых версиях gatttool по умолчанию не устанавливался, нужно было «прикручивать» руками, но здесь help был доступен и значит, у меня есть почти всё необходимое для работы с браслетом. Через pip установил </p><a href="https://pexpect.readthedocs.org/en/stable/">Pexpect</a><p> для работы с BlueZ из Python. Перезагрузил Raspberry и включил адаптер. Статус адаптера проверил командой hciconfig:
+</p><pre><code class="bash">pi@raspberrypi:~ $ hciconfig
+hci0:	Type: BR/EDR  Bus: USB
+	BD Address: 5C:F3:70:71:7E:F5  ACL MTU: 1021:8  SCO MTU: 64:1
+	DOWN 
+	RX bytes:616 acl:0 sco:0 events:34 errors:0
+	TX bytes:380 acl:0 sco:0 commands:34 errors:0
+</code></pre><p>
+Флаг DOWN показал, что адаптер выключен, включил его командой:</p><p>
+sudo hciconfig hci0 up
+</p></div></div><p>
+Прежде чем писать код для Raspberry, мне нужно было убедиться, что все необходимые мне сервисы (частота пульса, уровень заряда аккумулятора и виброзвонок) доступны в терминальном режиме из BlueZ.</p><p>
+Просканировал BLE окружение и без проблем нашел браслет:
+
+</p><pre><code class="bash">pi@raspberrypi:~ $ sudo hcitool -i hci0 lescan
+LE Scan ...
+C8:0F:10:11:1B:6E (unknown)
+C8:0F:10:11:1B:6E MI1S
+</code></pre><p>
+Подключился к браслету командой connect, запустив gatttool в интерактивном режиме (ключ I):
+
+</p><pre><code class="bash">pi@raspberrypi:~ $ sudo gatttool -i hci0 -b C8:0F:10:11:1B:6E -I
+[C8:0F:10:11:1B:6E][LE]&gt; connect
+Attempting to connect to C8:0F:10:11:1B:6E
+Connection successful
+[C8:0F:10:11:1B:6E][LE]&gt;
+</code></pre>
+<p>
+Соединение в интерактивном режиме без спаривания обычно длится секунд 20. Это так называемый низкий уровень секретности, он используется по умолчанию. Список доступных сервисов выводится командой primary:
+
+</p><pre><code class="bash">[C8:0F:10:11:1B:6E][LE]&gt; primary
+attr handle: 0x0001, end grp handle: 0x0009 uuid: 00001800-0000-1000-8000-00805f9b34fb
+attr handle: 0x000c, end grp handle: 0x000f uuid: 00001801-0000-1000-8000-00805f9b34fb
+attr handle: 0x0010, end grp handle: 0x0039 uuid: 0000fee0-0000-1000-8000-00805f9b34fb
+attr handle: 0x003a, end grp handle: 0x0048 uuid: 0000fee1-0000-1000-8000-00805f9b34fb
+attr handle: 0x0049, end grp handle: 0x004e uuid: 0000180d-0000-1000-8000-00805f9b34fb
+attr handle: 0x004f, end grp handle: 0x0051 uuid: 00001802-0000-1000-8000-00805f9b34fb
+</code></pre><p>
+Определить, что за сервис можно по четырем цифрам после uuid. Получилось два общих сервиса (generic), два сервиса, заданных производителем (fee0 и fee1), HRM сервис (180d) и алертинг (1802). </p><p>
+Перечень характеристик браслета выводится командой char-desc в порядке возрастания указателей (handles). Нашел в списке характеристику с идентификатором ff0c:</p><p>
+handle: 0x002c, uuid: 0000ff0c-0000-1000-8000-00805f9b34fb,</p><p>
+Указатель 0x002c для уровня заряда аккумулятора был уже определен для предыдущей версии браслета. Попробовал считать данные командой char-read-hnd (прочитать данные по указателю):
+
+</p><img src="https://habrastorage.org/files/b16/daf/c3a/b16dafc3a3324adf96aa02cd0d63fc8b.png"/>
+<p>
+Батарейка «сдалась» первой. В ответе не только уровень заряда, это первый байт в hex (смартфон накануне показывал 70%), но и полная информация о зарядке: количество циклов, дата последней зарядки, статус аккумулятора. По условиям задачи мне нужен был только уровень.
+</p><p>
+Вторым «покорился» виброзвонок. По данным из MCP я предположил, что это Immediate Alert, а Alert Level это команда, которую нужно послать на идентификатор 0x2A06:
+
+</p><img src="https://habrastorage.org/files/542/b2a/8b1/542b2a8b1ce044dea41ab0bd2250c6fe.jpg"/>
+<p>
+В списке характеристик, этому идентификатору соответствует строка:</p><p>
+handle: 0x0051, uuid: 00002a06-0000-1000-8000-00805f9b34fb</p><p>
+Отправил команду на указатель 0x0051 со значением 01:
+
+</p><pre><code class="bash">[C8:0F:10:11:1B:6E][LE]&gt; char-write-cmd 0x0051 01
+</code></pre>
+<p>
+Браслет отозвался двумя слабыми жужжаниями, значение 02 это два раза по 01, т.е. четыре сигнала, а 03 — два, но более сильных. С частотой пульса оказалось всё значительно сложнее. MCP показал следующее:
+
+</p><img src="https://habrastorage.org/files/8be/1a3/628/8be1a3628f6b4f1d8e84e73e25232869.jpg"/>
+<p>
+Связанные с этим сервисом характеристики:
+
+</p><pre><code class="bash">handle: 0x004b, uuid: 00002a37-0000-1000-8000-00805f9b34fb
+handle: 0x004c, uuid: 00002902-0000-1000-8000-00805f9b34fb
+handle: 0x004d, uuid: 00002803-0000-1000-8000-00805f9b34fb
+handle: 0x004e, uuid: 00002a39-0000-1000-8000-00805f9b34fb
+</code></pre><p>
+Частота пульса передается в смартфон в режиме нотификации или push-уведомления, её нельзя считать как уровень заряда аккумулятора. Нужно разрешить нотификацию, записав в CCC (Client Characteristic Configuration) с указателем 0x004с (идентификатор у CCC всегда 2902) значение 0100 и ждать уведомления. 
+</p><p>
+Ничего не вышло, значение успешно записывалось, но никаких уведомлений не поступало, браслет просто отключался через несколько секунд. Запуск gatttool в консольном режиме с ключом –listen также не дал результатов, gatttool просто «зависал» в ожидании. Загадка, одним словом.
+</p><p>
+Для прояснения ситуации пришлось использовать BLE-сниффер (на ноутбуке с Windows 8). В основе был перепрошитый BLE-usb-донгл на чипе СС2540 от Texas Instruments и программа </p><a href="http://processors.wiki.ti.com/index.php/BLE_sniffer_guide">Smart Packet Sniffer</a><p> того же производителя. Всё необходимое, включая программатор, можно без труда найти в виде набора для разработчика, а программу и прошивку я свободно скачал с сайта </p><a href="http://www.ti.com/tool/packet-sniffer">TI</a><p>.
+</p><p>
+Важно! Запускать сниффер следует, когда браслет находится в режиме презентации (advertising mode), т.е. до соединения со смартфоном. Иначе он будет невидим. Также неплохо убрать все лишние BLE-устройства подальше от сниффера, а еще лучше экранировать, это очень помогает потом разобраться в логе.
+</p><p>
+Так выглядят пакеты в сниффере в режиме презентации:
+
+</p><img src="https://habrastorage.org/files/0a8/1af/2f5/0a81af2f5bc74ea6ad6deb68c668e805.png"/>
+<p>
+Определил, что это именно мой браслет по полю AdvA (Advertising Address). После установления связи со смартфоном, в режиме GATT-соединения, картина изменилась:
+
+</p><img src="https://habrastorage.org/files/57b/ea2/3fb/57bea23fbc644a6b9581465c0f713733.png"/>
+<p>
+Здесь как раз видно, как значение 0100 записывается в CCC с указателем 0x004C, разрешая уведомления о частоте пульса.
+</p><p>
+Один из исследователей предыдущей версии браслета в своем блоге </p><a href="http://0110.be/posts/Access_Mi_Band_from_Android_-_Notes_on_the_Bluetooth_LE_Protocol">написал</a><p>, что не все сервисы могут быть доступны анонимному устройству. Насколько я смог разобраться, в ряде случаев устройство, взаимодействующее с браслетом, должно передать в браслет корректную информацию о пользователе, которая частично хешируется при спаривании со смартфоном. 
+</p><p>
+Эти данные длиной в 20 байт, как и в предыдущей версии, записываются в характеристику с указателем 0x0019 и не изменяются при каждом новом соединении. Первые четыре байта – это uid смартфона, далее, в открытом виде байты пола, возраста, роста, веса, байт разрешения перезаписи (должен быть 00) и 10 байт последовательности, похожей на хеш. Считать user info из браслета у меня не получилось. 
+</p><p>
+При анализе пакетов удалось выяснить следующее:
+</p><ol>
+<li>Каждый раз при соединении в браслет отправляются все разрешения уведомлений (CCC с идентификатором 2902)</li>
+<li>Далее происходит передача информации о пользователе</li>
+<li>Затем, по указателю 0x0028 записываются дата и время</li>
+<li>После этого считываются данные об уровне заряда батареи и количество пройденных за день шагов</li>
+<li>Перед тем как получить уведомление о частоте пульса по указателю 0x004E, соответствующему характеристике «точка контроля пульса» записывается последовательность 0x15 0x00 0x00 (предположу, что это сброс)</li>
+<li>Затем туда же записывается 0x15 0x02 0x01, что в моем случае соответствует левой руке</li>
+<li>После этого, через 15-20 секунд, приходит уведомление с частотой пульса в двух байтах, например 06 40. Второй байт и есть частота пульса в hex</li>
+</ol><p>
+В теории, для того чтобы получить частоту пульса, нужно было повторить все эти транзакции, возможно исключив 3-й и 4-й пункты. Как оказалось, можно обойтись и без сброса. Вручную это сделать невозможно, браслет отключился бы раньше чем я бы успел ввести все команды. Поэтому я подготовил Python-скрипт:
+
+</p><pre><code class="python">import sys, pexpect
+from time import sleep
+gatt=pexpect.spawn('gatttool -I')
+gatt.logfile = open("pylog.txt", "w")
+gatt.sendline('connect C8:0F:10:11:1B:6E')
+gatt.expect('Connection successful')
+# Check battery level
+gatt.sendline('char-read-hnd 0x002c')
+gatt.expect('Characteristic value.*')
+batt = gatt.after
+batt = int(batt.split()[2],16)
+print 'Battery level:', batt, '%'
+# Send alert
+gatt.sendline('char-write-cmd 0x0051 01')
+sleep(5)
+# Allow notification
+gatt.sendline('char-write-req 0x004c 0100')
+gatt.expect('Characteristic value.*')
+# Send user data
+gatt.sendline('char-write-req 0x0019 F8663A5F0126B45500040049676F7200000000DC')
+gatt.expect('Characteristic value.*')
+# Set control point
+gatt.sendline('char-write-req 0x004e 150201')
+# Waiting for notification
+try:
+    gatt.expect('Notification handle.*')
+    hrm = gatt.after
+    hrm = int(hrm.split()[6], 16)
+    print 'HRM:', hrm
+except:
+    print 'Bad control point or timeout'
+sys.exit(0)
+</code></pre><p>
+Кстати, количество пройденных шагов можно прочитать анонимно, оно доступно для чтения по указателю 0x001D. Ответ – четыре байта, читать нужно слева направо. 
+</p><p>
+Скрипт выводит уровень заряда батареи, отправляет уведомление, ждет и печатает частоту пульса. Загадка решена, осталось научиться отправлять данные в облачный сервис, в качестве которого я решил использовать </p><a href="https://thingspeak.com/">Thingspeak</a><p>. Это бесплатный сервис с простым API и готовой визуализацией.
+</p><p>
+Настройка Thingspeak заняла не более пяти минут. Необходимо зарегистрироваться и войти в персональное пространство. Далее, создать новый канал, в настройках канала указать название, количество и метки полей. Сохранить настройки и перейти на вкладку API Keys. Там скопировать API-ключ для записи (Write API Key):
+
+</p><img src="https://habrastorage.org/files/178/cb8/fe6/178cb8fe65854ea9884c21f5b67b715f.png"/>
+<p>
+После этого — переключиться на вкладку Private View (если при настройке канала не было указано “Make Public”).
+</p><p>
+За отправку данных в Thingspeak отвечает вот такая конструкция на Python:
+
+</p><pre><code class="python">baseURL = 'https://api.thingspeak.com/update?api_key=%s'%YOUR_API_KEY
+f = urllib2.urlopen(baseURL + "&amp;field1=%s&amp;field2=%s" % (batt, hrm))
+print f.read()
+f.close()
+</code></pre>
+<div class="spoiler"><b class="spoiler_title">Код полностью</b><div class="spoiler_text"><pre><code class="python">import sys, pexpect
+from time import sleep
+import urllib2
+
+sample_interval = 180 #sec
+sample_qty = 8
+api_key = 'YOUR_API_KEY'
+baseURL = 'https://api.thingspeak.com/update?api_key=%s'%api_key
+
+def getData():
+    try:
+        gatt=pexpect.spawn('gatttool -I')
+        # gatt.logfile = open("pylog.txt", "w") # for debug only
+
+        gatt.sendline('connect C8:0F:10:11:1B:6E')
+        gatt.expect('Connection successful', timeout=60)
+
+        # Get battery level
+        gatt.sendline('char-read-hnd 0x002c')
+        gatt.expect('Characteristic value.*')
+        batt = gatt.after
+        batt = int(batt.split()[2],16)
+
+        # Send alert
+        gatt.sendline('char-write-cmd 0x0051 01')
+        sleep(5)
+
+        # Allow notification
+        gatt.sendline('char-write-req 0x004c 0100')
+        gatt.expect('Characteristic value.*')
+
+        # Send user data
+        gatt.sendline('char-write-req 0x0019 F8663A5F0126B45500040049676F7200000000DC')
+        gatt.expect('Characteristic value.*')
+
+        # Set control point
+        gatt.sendline('char-write-req 0x004e 150201')
+
+        # Waiting for notification
+        gatt.expect('Notification handle.*', timeout=60)
+        hrm = gatt.after
+        hrm = int(hrm.split()[6], 16)
+    except:
+        hrm = 0
+        batt = 0
+    return (str(batt), str(hrm))
+
+def main():
+    sample_count = 0
+    while True:
+        try:
+            batt, hrm = getData()
+            f = urllib2.urlopen(baseURL + "&amp;field1=%s&amp;field2=%s" % (batt, hrm))
+            print f.read()
+            f.close()
+            sample_count = sample_count + 1
+            if (sample_count &gt;= sample_qty): break
+            sleep(sample_interval)
+        except:
+            print 'Connection error'
+            break
+
+if __name__ == '__main__':
+    main()
+    sys.exit(0)
+</code></pre>
+</div></div><p>
+В штатном режиме работы в консоль выводится номер отправки данных, начиная с единицы. Радиус действия ретранслятора 3-4 метра в прямой видимости, что нормально для медицинской палаты. Однако браслет на таком расстоянии легко экранируется ладонью.
+</p><p>
+Тестировал получившуюся систему в процессе тренировки на велотренажере, 20 минут. Интервал между измерениями – 3 минуты, количество измерений – 8. Браслет склонен завышать частоту пульса при неплотном контакте с кожей, для большей точности поместил датчик с тыльной стороны запястья. Результат на Thingspeak:
+
+</p><img src="https://habrastorage.org/files/0db/bd4/198/0dbbd419847e4f4a8eaa165bb87e6ba9.png"/><p>
+Как видно из графика, 8 измерений никак не повлияли на заряд аккумулятора. Думаю, эксперимент можно считать вполне успешным и полученный опыт использовать для проектирования собственного устройства или, например, поискать ОЕМ.
+
+</p><h4>Полезные ссылки:</h4>
+
+
+      
+      <p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

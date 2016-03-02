@@ -1,0 +1,98 @@
+<html><body><div><article class="post">
+    
+
+    <time datetime="2015-01-22T00:00:00+00:00" class="post-date">22 Jan 2015</time>
+
+    
+<p>The IPython project does not only provide cool tools
+like the <code>ipython</code> command-line console or the
+awesome literate programming environment <code>ipython notebook</code>,
+but also defines a protocol for interactions between
+language kernels (e.g. python) and arbitrary front-ends
+(e.g. repl, …).</p>
+
+<p>Let’s explore some of the most basic interactions with
+a language kernel.</p>
+
+<h2 id="running-the-console">Running the console</h2>
+<p>First we need our kernel, so we fire up <code>ipython console</code>.
+While superficially similar to running just <code>ipython</code> the
+console actually starts two processes, the kernel and the
+console frontend separately.</p>
+
+<pre><code>ipython console -f ./config.json
+</code></pre>
+
+<p>The <code>-f</code> flag tells it to store the connection information
+to a file. This what <code>config.json</code> looks like:</p>
+
+<pre><code>{
+  "control_port": 56093,
+  "signature_scheme": "hmac-sha256",
+  "stdin_port": 49827,
+  "ip": "127.0.0.1",
+  "hb_port": 54955,
+  "shell_port": 63395,
+  "key": "e38ba435-aa60-476b-b0dc-9ec1d37c937a",
+  "transport": "tcp",
+  "iopub_port": 59844
+}
+</code></pre>
+
+<h1 id="listening-carefully">Listening carefully</h1>
+
+<p>The IPython kernel broadcasts all IO-events on the
+<code>iopub_port</code> socket using the <code>zmq</code> library.
+Let’s find out what the kernel has to say.</p>
+
+<p>Lets open a <strong>different</strong> ipython session with
+<code>ipython</code>. First we import our config file</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="kn">import</span> <span class="nn">json</span>
+<span class="kn">import</span> <span class="nn">sys</span>
+
+<span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s">'config.json'</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+	<span class="n">config</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">f</span><span class="p">)</span></code></pre></div>
+
+<p>Now we connect our <code>socket</code> to the kernel by
+‘subscribing’ to the port specified in the config.</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="kn">import</span> <span class="nn">zmq</span>
+<span class="n">context</span> <span class="o">=</span> <span class="n">zmq</span><span class="o">.</span><span class="n">Context</span><span class="p">()</span>
+<span class="n">socket</span> <span class="o">=</span> <span class="n">context</span><span class="o">.</span><span class="n">socket</span><span class="p">(</span><span class="n">zmq</span><span class="o">.</span><span class="n">SUB</span><span class="p">)</span>
+<span class="n">socket</span><span class="o">.</span><span class="n">connect</span><span class="p">(</span><span class="s">'{protocol}://{ip}:{port}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span>
+	<span class="n">ip</span> <span class="o">=</span> <span class="n">config</span><span class="p">[</span><span class="s">'ip'</span><span class="p">],</span>
+	<span class="n">port</span> <span class="o">=</span> <span class="n">config</span><span class="p">[</span><span class="s">'iopub_port'</span><span class="p">],</span>
+	<span class="n">protocol</span> <span class="o">=</span> <span class="n">config</span><span class="p">[</span><span class="s">'transport'</span><span class="p">]))</span>
+<span class="n">socket</span><span class="o">.</span><span class="n">setsockopt_string</span><span class="p">(</span><span class="n">zmq</span><span class="o">.</span><span class="n">SUBSCRIBE</span><span class="p">,</span> <span class="s">''</span><span class="p">)</span></code></pre></div>
+
+<p>After connecting we still ned to tell our socket to recieve data.
+We can use the <code>Session</code> class to handle the internals of the
+‘on-wire’ IPython message protocol like de-/serialization and
+signing/verification of messages.</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="kn">from</span> <span class="nn">IPython.kernel.zmq.session</span> <span class="kn">import</span> <span class="n">Session</span>
+<span class="n">session</span> <span class="o">=</span> <span class="n">Session</span><span class="p">(</span><span class="n">debug</span><span class="o">=</span><span class="bp">True</span><span class="p">,</span> <span class="n">key</span><span class="o">=</span><span class="n">config</span><span class="p">[</span><span class="s">'key'</span><span class="p">]</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="n">sys</span><span class="o">.</span><span class="n">getdefaultencoding</span><span class="p">()))</span></code></pre></div>
+
+<p>The only thing that is left to do now is listen</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="k">while</span> <span class="bp">True</span><span class="p">:</span>
+	<span class="k">print</span><span class="p">(</span><span class="n">session</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="n">socket</span><span class="p">,</span> <span class="bp">False</span><span class="p">))</span> <span class="c"># blocking</span></code></pre></div>
+
+<p>If we go back to our first console and run some commands like <code>print("hello world!")</code>
+we can see the broadcasts reaching our socket.</p>
+
+<h1 id="next-up">Next up</h1>
+
+<p>While listening to <code>iopub_port</code> is nice, next we are going to
+utilize the other channels to the kernel for code execution.
+Stay tuned.</p>
+
+<h2 id="references">References</h2>
+
+
+
+
+  </article>
+  
+</div></body></html>

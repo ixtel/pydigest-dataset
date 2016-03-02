@@ -1,0 +1,196 @@
+<html><body><div><div>
+<p>Yesterday I released <a class="reference external" href="http://morepath.readthedocs.org">Morepath</a> 0.9 (<a class="reference external" href="http://morepath.readthedocs.org/en/0.9/changes.html">CHANGES</a>)!</p>
+<p>What is Morepath? Morepath is a Python web framework. It tries to be
+especially good at implementing modern, RESTful backends. It is very
+good at creating hyperlinks. It is easy to use, but still lets you
+write flexible, maintainable and reusable code. Morepath is very
+extensively documented.</p>
+<p>This release doesn't involve earth-shaking changes like the 0.7 and
+0.8 releases did, but it still has an interesting change I'd like to
+discuss.</p>
+<div class="section" id="fully-qualified-links">
+<h2>Fully qualified links</h2>
+<p>Morepath from the beginning generated path-based links that look like
+this:</p>
+<pre class="literal-block">
+/foo
+</pre>
+<p>In Morepath 0.9 this changed. Now we generate the fully qualified URL,
+like this:</p>
+<pre class="literal-block">
+http://example.com/foo
+</pre>
+<p>That's what most other web frameworks do.</p>
+<p>The path-based links have advantages: they are shorter, you don't have
+to worry about the URL scheme, and they have less chance to be
+exploited by <a class="reference external" href="http://www.skeletonscribe.net/2013/05/practical-http-host-header-attacks.html">HTTP Host header attacks</a>. But they do make the life of
+REST clients slightly harder, as custom client code has to be written
+that adds the base URL to path-based links. Since Morepath wants to be
+a good framework for writing RESTful applications, we decided to
+change the default behavior to full links.</p>
+<p>Morepath wouldn't be Morepath if you couldn't do a few more
+interesting things.</p>
+</div>
+<div class="section" id="just-path-based-links-please">
+<h2>Just path-based links, please</h2>
+<p>Want the old behavior back for an application? That's easy:</p>
+<pre class="code python literal-block">
+<span class="k">class</span> <span class="nc">MyApp</span><span class="p">(</span><span class="n">morepath</span><span class="o">.</span><span class="n">App</span><span class="p">):</span>
+     <span class="k">pass</span>
+
+<span class="nd">@MyApp.link_prefix</span><span class="p">()</span>
+<span class="k">def</span> <span class="nf">myapp_link_prefix</span><span class="p">(</span><span class="n">request</span><span class="p">):</span>
+     <span class="k">return</span> <span class="s">''</span>
+</pre>
+<p>Now your application generates path based links again like before.</p>
+<p>(thanks <a class="reference external" href="https://github.com/href">Denis Krienbühl</a> for contributing this directive to Morepath!)</p>
+</div>
+<div class="section" id="proxy-support">
+<h2>Proxy support</h2>
+<p>Morepath by default doesn't obey the <cite>HTTP Forwarded header</cite> in link
+generation, which is a good thing, as it would allow various link
+hijacking attacks if it did. But if you're behind a trusted proxy that
+generates the <tt class="docutils literal">Forwarded</tt> header you <em>do</em> want Morepath to take it
+into account. To do so, you install the <a class="reference external" href="http://morepath.readthedocs.org/en/latest/paths_and_linking.html#proxy-support">more.forwarded</a> extension
+and subclass your (root) application from it:</p>
+<pre class="code python literal-block">
+<span class="kn">from</span> <span class="nn">more.forwarded</span> <span class="kn">import</span> <span class="n">ForwardedApp</span>
+
+<span class="k">class</span> <span class="nc">MyApp</span><span class="p">(</span><span class="n">ForwardedApp</span><span class="p">):</span>
+     <span class="k">pass</span>
+</pre>
+<p>We don't have support yet for the old-style <tt class="docutils literal">X_FORWARDED_HOST</tt> and
+<tt class="docutils literal">X_FORWARDED_PROTO</tt> that the <tt class="docutils literal">Forwarded</tt> header replaces; we're
+open to contributions to <tt class="docutils literal">more.forwarded</tt>!</p>
+</div>
+<div class="section" id="linking-to-external-applications">
+<h2>Linking to external applications</h2>
+<p>Now we come to a very interesting capability of Morepath: the ability
+to model and link to <em>external</em> applications.</p>
+<p>Let's consider a hypothetical external application. It's hosted on the
+ubiquitous <tt class="docutils literal"><span class="pre">http://example.com</span></tt>. It has documents listed on URLs
+like this:</p>
+<pre class="literal-block">
+http://example.com/documents/foo
+</pre>
+<p>We could of course simply create links to it by concatenating
+<tt class="docutils literal"><span class="pre">http://example.com/documents</span></tt> and the document <tt class="docutils literal">id</tt>, <tt class="docutils literal">foo</tt>. For
+such a simple external application that is probably the best way to
+go. So what I'm going to describe next is total overkill for such a
+simple example, but I have to use a simple example to make it
+comprehensible at all.</p>
+<p>Here's how we'd go about modeling the external site:</p>
+<pre class="code python literal-block">
+<span class="k">class</span> <span class="nc">ExternalDocumentApp</span><span class="p">(</span><span class="n">morepath</span><span class="o">.</span><span class="n">App</span><span class="p">):</span>
+    <span class="k">pass</span>
+
+<span class="k">class</span> <span class="nc">ExternalDocument</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">_init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="nb">id</span><span class="p">):</span>
+       <span class="bp">self</span><span class="o">.</span><span class="n">id</span> <span class="o">=</span> <span class="nb">id</span>
+
+<span class="nd">@ExternalDocumentApp.path</span><span class="p">(</span><span class="n">model</span><span class="o">=</span><span class="n">ExternalDocument</span><span class="p">,</span> <span class="n">path</span><span class="o">=</span><span class="s">'/documents/{id}'</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">get_external_document</span><span class="p">(</span><span class="nb">id</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">ExternalDocument</span><span class="p">(</span><span class="nb">id</span><span class="p">)</span>
+</pre>
+<p>We don't declare any views for <tt class="docutils literal">ExternalDocument</tt> as our code is not
+going to create representations for the external document, just create
+links to it. We need to mount it into our actual applicatino code so
+that we can use it:</p>
+<pre class="code python literal-block">
+<span class="nd">@App.mount</span><span class="p">(</span><span class="n">path</span><span class="o">=</span><span class="s">'external_documents'</span><span class="p">,</span> <span class="n">app</span><span class="o">=</span><span class="n">ExternalDocumentApp</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">mount_external_document_app</span><span class="p">():</span>
+    <span class="k">return</span> <span class="n">ExternalDocumentApp</span><span class="p">()</span>
+</pre>
+<p>Now we set up the <tt class="docutils literal">link_prefix</tt> for <tt class="docutils literal">ExternalDocumentApp</tt> to point
+to <tt class="docutils literal"><span class="pre">http://example.com</span></tt>:</p>
+<pre class="code python literal-block">
+<span class="nd">@ExternalDocumentApp.link_prefix</span><span class="p">()</span>
+<span class="k">def</span> <span class="nf">external_link_prefix</span><span class="p">(</span><span class="n">request</span><span class="p">):</span>
+    <span class="k">return</span> <span class="s">'http://example.com'</span>
+</pre>
+<p>As you can see, we've hardcoded <tt class="docutils literal"><span class="pre">http://example.com</span></tt> in it. Now if
+you're in some view code for your <tt class="docutils literal">App</tt>, you can create a link to an
+<tt class="docutils literal">ExternalDocument</tt> like this:</p>
+<pre class="code python literal-block">
+<span class="nd">@App.json</span><span class="p">(</span><span class="n">model</span><span class="o">=</span><span class="n">SomeModel</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">some_model_default</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">request</span><span class="p">):</span>
+   <span class="k">return</span> <span class="p">{</span>
+     <span class="s">'link'</span><span class="p">:</span> <span class="n">request</span><span class="o">.</span><span class="n">link</span><span class="p">(</span>
+          <span class="n">ExternalDocument</span><span class="p">(</span><span class="s">'foo'</span><span class="p">),</span>
+          <span class="n">app</span><span class="o">=</span><span class="n">request</span><span class="o">.</span><span class="n">app</span><span class="o">.</span><span class="n">child</span><span class="p">(</span><span class="s">'external_documents'</span><span class="p">))</span>
+   <span class="p">}</span>
+</pre>
+<p>This will generate the correct <tt class="docutils literal">link</tt> to the external document <tt class="docutils literal">foo</tt>:</p>
+<pre class="literal-block">
+http://example.com/documents/foo
+</pre>
+<div class="section" id="simplification">
+<h3>Simplification</h3>
+<p>You can make this simpler by using a <tt class="docutils literal">defer_links</tt> directive for your
+<tt class="docutils literal">App</tt> (introduced in Morepath 0.7):</p>
+<pre class="code python literal-block">
+<span class="nd">@App.defer_links</span><span class="p">(</span><span class="n">model</span><span class="o">=</span><span class="n">ExternalDocument</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">defer_document</span><span class="p">(</span><span class="n">app</span><span class="p">,</span> <span class="n">obj</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">app</span><span class="o">.</span><span class="n">child</span><span class="p">(</span><span class="s">'external_documents'</span><span class="p">)</span>
+</pre>
+<p>We've now told Morepath that any <tt class="docutils literal">ExternalDocument</tt> objects need to
+have their link generated by the mounted <tt class="docutils literal">external_documents</tt>
+app. This allows you to write link generation code that's a lot simpler:</p>
+<pre class="code python literal-block">
+<span class="nd">@App.json</span><span class="p">(</span><span class="n">model</span><span class="o">=</span><span class="n">SomeModel</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">some_model_default</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">request</span><span class="p">):</span>
+   <span class="k">return</span> <span class="p">{</span>
+     <span class="s">'link'</span><span class="p">:</span> <span class="n">request</span><span class="o">.</span><span class="n">link</span><span class="p">(</span><span class="n">ExternalDocument</span><span class="p">(</span><span class="s">'foo'</span><span class="p">))</span>
+   <span class="p">}</span>
+</pre>
+</div>
+<div class="section" id="in-review">
+<h3>In review</h3>
+<p>As I said previously, this is total overkill for an external application
+as simple as the hypothetical one I described. But this technique of
+modeling an external application can be very useful in specific
+circumstances:</p>
+<ul>
+<li>
+<p class="first">This is declarative code. If you are dealing with a lot of different
+kind of links to an external application, it can be worthwhile to
+properly model it in your application, instead of spreading more
+failure-prone link construction code all over the place.</p>
+</li>
+<li>
+<p class="first">If you have to deal with an external application that for some
+reason is expected to change its structure (or hostname) in the
+future. By explicitly modeling what you link to, you can easily
+adjust all the outgoing links in your application when that change
+happens.</p>
+</li>
+<li>
+<p class="first">Consider a Morepath application that has a sub-application, mounted
+into it in the same process. You now decide to run this
+sub-application in a separate process, with a separate hostname. To
+do this you break out the code out into its own project so you can
+run it separately.</p>
+<p>In this case you <em>already</em> have declarative link generation to it.
+In the original project, you create a hollowed-out version of the
+sub-application that just has the <tt class="docutils literal">path</tt> directives that describe
+the link structure. You then hardcode the new hostname using
+<tt class="docutils literal">link_prefix</tt>.</p>
+<p>The code that links to it in the original application will now
+automatically update to point to the sub-application on the new
+host.</p>
+<p>This way you can break a larger application into multiple separate
+pieces pretty easily!</p>
+</li>
+</ul>
+</div>
+</div>
+<div class="section" id="conclusion">
+<h2>Conclusion</h2>
+<p>If you've read all the way to the end, I hope you've enjoyed that and
+aren't completely overwhelmed by these options! Just remember: these
+are advanced use cases. Morepath grows with your application. It is
+simple for simple things, but is there for you when you <em>do</em> have more
+complex requirements.</p>
+</div>
+</div>
+    </div></body></html>

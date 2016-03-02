@@ -1,0 +1,48 @@
+<html><body><div><div class="text post">
+	
+                        
+                            <h2>Custom Tastypie Nested (Model) Resources For Dealing with Django ORM Relations </h2>
+                        
+
+                        <p><strong>Background</strong></p>
+<p>So I spent 6pm Saturday night, till 9:30am Sunday morning in a hackathon where I worked on, you guessed it, tastypie; specifically, on work concerning an open source project I’m involved with, <a title="Concert's Blog" target="_blank" href="http://t.umblr.com/redirect?z=http%3A%2F%2Fblog.concertsoundorganizer.com&amp;t=MzRiMzM0NDUwM2E5NDM3NzA4MjFkZWE4OTE4YzVjOTQ4ODY2ZThkZCx5OWVnWEVZQw%3D%3D">Concert</a>.</p>
+<p>Long story short, Concert had an issue. It’s a very javascript heavy app, which handles a lot of state information client-side. Because of this, we’re using a MVC-like javascript framework called Backbone.js, which abstracts away a lot of the interaction between our server-side django app and the client-side code.  </p>
+<p>Traditionally, django apps end up being their own flavored instances of the <strong>M</strong>odel/<strong>V</strong>iew/<strong>C</strong>ontroller paradigm, but there’s an issue with such an approach when you’re dealing with the situation described above; state-manipulating client side code and state-manipulating server side code have no enforced methods of communication when said communication is handled by django views - at least not out of the box. Luckily, this exact situation is perfectly handled if we choose to stick to a RESTful style architecture, which is where tasty-pie comes into play.</p>
+<p><em>(*Note: there’s nothing saying that you can’t implement a RESTfully compliant interface using plain django views - i.e., implementing RESTful interfaces on a per case basis for all the django model classes your app has - but this has to be all done manually for each class instance, and there’s nothing forcing you to stick to the standard’s definition. It’s also, in my opinion, a waste of time when there are so many comprehensive options out there - e.g., django-tastypie, </em><em>django-</em><em>piston, etc.)</em></p>
+<p><em><br/></em></p>
+<p><strong>The Problem</strong></p>
+<p>The specific issue we ran into when getting tastypie to work was how to deal with many-to-many model relationships RESTfully and intelligently (<a title="Concert REST Issue" target="_blank" href="http://t.umblr.com/redirect?z=http%3A%2F%2Fblog.concertsoundorganizer.com%2Fpost%2F3219354057%2Fdealing-with-rest-api-issues&amp;t=MTNiMjgyMWEzMjk0ODE5YzQxYTAxMmExMGQwYzkwNWUzYjM3MzViNyx5OWVnWEVZQw%3D%3D">blog post</a>).</p>
+<p>Say you’ve got a couple of related models that look like this:</p>
+<p>and say we’ve got two tastypie resources that map to each model.</p>
+<p>Out of the box, tastypie will give you a handful of URLs and all the basic CRUD operations you’d expect.</p>
+<p>A url like this “/api/audiosegment/&lt;optional_primary_key&gt;" can be sent POST, PUT, GET, and DELETE requests, each of which does exactly what it’s supposed to: create, update, retrieve, and remove states (objects), respectively. So let’s say we send a PUT request to ”/api/tag/1" with the intention of updating what’s in the segments attribute of the already instantiated tag with primary key 1.</p>
+<p>The PUT request itself is going to have to contain, as an argument, the new state of tag #1; it’s going to send a name, creator, collection, and a new list of segments, including all the segments previously contained by that tag and the new one.</p>
+<p>Where this becomes an issue for us is when we try to determine what a specific request is doing, in detail. During the time the request is made, dealt with, and responded to, all any component of our app knows is that a model is being updated - whether or not a relation was was added, removed, (or any combination) from our model instance is a mystery (e.g., whether or not a segment was added or removed from Tag #1 is unknown).  Not usually a big deal, unless you have actions that are dependent on knowing such information, like if you have an notification system that informs users when audio segments get tagged.  Not knowing when relationships are being generated means not having anywhere for our notification methods to hook into.</p>
+<p><em><br/></em></p>
+<p><strong>The Solution</strong> </p>
+<p>The way I went around solving this was by cooking up my own recipe for nested resources.  The tastypie documentation mentions them here (<a title="Tastypie Cookbook" target="_blank" href="http://t.umblr.com/redirect?z=http%3A%2F%2Ftoastdriven.github.com%2Fdjango-tastypie%2Fcookbook.html%23using-non-pk-data-for-your-urls&amp;t=YmE0MWU4MTg0OWNmNjQxODEyYzlhY2IxNDg0OTExMmYxNzA0MjAwZSx5OWVnWEVZQw%3D%3D">Tastypie Cookbook</a>), but the specifics are left kind of vague, which is why I’m writing this.  Perhaps I ended up reinventing the wheel, but at the time I couldn’t find anything already out there that was (significantly) helpful.</p>
+<p>What I wanted (and got) was the ability to hit resource urls that looked something like this:</p>
+<blockquote>
+<p><strong>/api/&lt;nested_name&gt;/&lt;nested_primary_key&gt;/&lt;resource_name&gt;/&lt;resource_pk&gt;</strong></p>
+</blockquote>
+<p>or in terms of my project:</p>
+<blockquote>
+<p><strong>/api/audio_segment/1/tag/</strong></p>
+</blockquote>
+<p>POSTing to the above resource URL creates a tag, and then relates it to the specified audio_segment.  This gives me a hook for my notification creation methods, and solves all my headaches.</p>
+<p>I also ended up implementing a slightly less RESTful shortcut which allowed you to POST to /api/audio_segment/1/tag/1/ with no data.  This would expect for both resources to already exist and then simply create the relation between the two.</p>
+<p>DELETE works in a similar way.</p>
+<p>GET and PUT were left unimplemented since in those cases you could just manipulate the non-nested resources and deal with them as you wish.</p>
+<p>The code is generic, so you can include it and have your nested resources inherit from it.</p>
+<p>It’s all GPL, as it’s being released under the original project’s name. You can look at the in use version here: <a title="Repo peak" target="_blank" href="http://t.umblr.com/redirect?z=https%3A%2F%2Fgithub.com%2Fjoshelser%2FConcert%2Fblob%2Fmaster%2Fconcertapp%2Flib%2Fapi.py%23L114-291&amp;t=MWU0NjQwYzYyYTExNWM0OTk0ZWYxZDQ2MTYxMTBmYjdmNTY2NWEwMCx5OWVnWEVZQw%3D%3D">GitHub</a>.</p>
+<p>I should mention that this isn’t perfectly RESTful. If I were to implement a purely RESTful solution it would mean creating custom resources for each model-relation itself (e.g., have a resource URI that looked like this: /api/audiosegment_tag_relation/), but for the limited number of use cases I need to meet, this is a little easier, and as far as I’m concerned, it’s probably still useful information to have in the public domain.  </p>
+<p>Some might argue that by veering away from the RESTful model in my solution I’m actually moving back to the ad hoc approach which I argued against when discussing plain django views, but I disagree.  With standalone django views, you’d have to opt into following a standard method of communication, whereas with this implementation, you have to opt out; in the end it keeps me as a developer a little more honest.</p>
+<p>A slightly more reusable version of the code is embedded bellow.  Another issue, which isn’t so impossible, and is more of a modularity concern than a dead-in-the-water problem, is the fact that my implementation only works for one nested resource per regular resource.  It’s feasible to consider an edition which allowed for unlimited nested resources, but that’s not necessary for Concert right now.  Maybe in the future…</p>
+
+						
+						
+
+                    </div>
+					
+					
+						</div></body></html>

@@ -1,0 +1,1002 @@
+<html><body><div><li id="2">
+    <a href="/articles/2-understanding-python-execution-tracer.html"><h1>Understanding Python execution from inside: A Python assembly tracer
+</h1></a>
+    <div class="infos"><p>Written by <a href="/authors/hakril/index.html">Hakril</a><br/>2015-05-07 13:58:40</p></div>
+    <p>
+
+</p><p>Lately, I have been looking at the Python's execution model. I was curious about the implementation of some opcodes like <code>YIELD_VALUE</code> and <code>YIELD_FROM</code>, how were compiled list comprehensions, generator expressions and other fun Python features, and what happens at the bytecode level when exceptions were raised.
+Reading the <code>CPython</code> code is really instructive, but I was feeling like something was missing to fully understand the bytecode execution and the stack evolution. Yeah, <code>GDB</code> is cool but I'm a lazy guy who wanted a high-level interface and code some Python.</p>
+<p>So my goal was to create a bytecode-level tracing API like the one offered by <a href="https://docs.python.org/2/library/sys.html#sys.settrace">sys.settrace</a> but with a finer granularity. This exercise was perfect to practice my C-into-Python coding.</p>
+<p>What we are going to need is:</p>
+<ul>
+<li>A new opcode in the <code>CPython</code> interpreter</li>
+<li>A way to inject the opcode in Python bytecode</li>
+<li>Some Python code to handle the opcode on the Python side</li>
+</ul>
+<p><em>In this article everything is based on Python3.5</em>.</p>
+<h2>A new opcode for CPython</h2>
+<h3>Our new opcode: <code>DEBUG_OP</code></h3>
+<p>This new opcode, that I will call <code>DEBUG_OP</code>, is my first try at writing C code for CPython. I tried to keep it as simple as I could.</p>
+<p>What we want is a way to call some Python code whenever our opcode is executed.
+We also want to be able to retrieve some data about our execution context. Our opcode will pass it as parameters to our callback.
+The useful information I identified is:</p>
+<ul>
+<li>The content of the stack</li>
+<li>The frame object that executed <code>DEBUG_OP</code></li>
+</ul>
+<p>So all our <code>DEBUG_OP</code> needs to do is:</p>
+<ul>
+<li>Find the callback</li>
+<li>Create a list with the content of the stack</li>
+<li>Call the callback with that list and the current frame as parameters</li>
+</ul>
+<p>Sounds easy! So let's go!</p>
+<p><strong>Disclaimer</strong>: the following explanations and code are the result of a LOT of segfaults.</p>
+<p>First thing to do is to give a name and a value to our opcode. For that, we need to go into <code>Include/opcode.h</code></p>
+<table class="codehilitetable"><tr><td class="linenos"><div class="linenodiv"><pre> 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12</pre></div></td><td class="code"><div class="codehilite"><pre><span class="cm">/** My own comments begin by '**' **/</span>
+<span class="cm">/** From: Includes/opcode.h **/</span>
+
+<span class="cm">/* Instruction opcodes for compiled code */</span>
+
+<span class="cm">/** We just have to define our opcode with a free value</span>
+<span class="cm">    0 was the first one I found **/</span>
+<span class="cp">#define DEBUG_OP                0</span>
+
+<span class="cp">#define POP_TOP                 1</span>
+<span class="cp">#define ROT_TWO                 2</span>
+<span class="cp">#define ROT_THREE               3</span>
+</pre></div>
+</td></tr></table>
+
+<p>The easy part is done. Now we have to actually code our opcode behaviour.</p>
+<h3>Implementing <code>DEBUG_OP</code></h3>
+<p>First question we need to ask ourself before even thinking about the implementation of <code>DEBUG_OP</code> is "<em>What my interface is going to be?</em>".</p>
+<p>It's cool to have a shiny new opcode that calls some code but what code is it going to call exactly? How will it retrieve the callback function?
+I chose what looked like the simplest solution: a fixed name function in the frame globals.</p>
+<p>The question is: "<em>how do I look for a fixed C-string in a dict?</em>"</p>
+<p>To answer this question we can look at some fixed identifiers used in the Python main loop: the ones associated with context managers <code>__enter__</code> and <code>__exit__</code>.</p>
+<p>We see that it's used in the <code>SETUP_WITH</code> opcode:</p>
+<table class="codehilitetable"><tr><td class="linenos"/><td class="code"><div class="codehilite"><pre><span class="cm">/** From: Python/ceval.c **/</span>
+<span class="n">TARGET</span><span class="p">(</span><span class="n">SETUP_WITH</span><span class="p">)</span> <span class="p">{</span>
+<span class="n">_Py_IDENTIFIER</span><span class="p">(</span><span class="n">__exit__</span><span class="p">);</span>
+<span class="n">_Py_IDENTIFIER</span><span class="p">(</span><span class="n">__enter__</span><span class="p">);</span>
+<span class="n">PyObject</span> <span class="o">*</span><span class="n">mgr</span> <span class="o">=</span> <span class="n">TOP</span><span class="p">();</span>
+<span class="n">PyObject</span> <span class="o">*</span><span class="n">exit</span> <span class="o">=</span> <span class="n">special_lookup</span><span class="p">(</span><span class="n">mgr</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">PyId___exit__</span><span class="p">),</span> <span class="o">*</span><span class="n">enter</span><span class="p">;</span>
+<span class="n">PyObject</span> <span class="o">*</span><span class="n">res</span><span class="p">;</span>
+</pre></div>
+</td></tr></table>
+
+<p>Now, a look at the <code>_Py_IDENTIFIER</code> macro:</p>
+<table class="codehilitetable"><tr><td class="linenos"><div class="linenodiv"><pre> 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31</pre></div></td><td class="code"><div class="codehilite"><pre><span class="cm">/** From: Include/object.h **/</span>
+
+<span class="cm">/********************* String Literals ****************************************/</span>
+<span class="cm">/* This structure helps managing static strings. The basic usage goes like this:</span>
+<span class="cm">   Instead of doing</span>
+
+<span class="cm">       r = PyObject_CallMethod(o, "foo", "args", ...);</span>
+
+<span class="cm">   do</span>
+
+<span class="cm">       _Py_IDENTIFIER(foo);</span>
+<span class="cm">       ...</span>
+<span class="cm">       r = _PyObject_CallMethodId(o, &amp;PyId_foo, "args", ...);</span>
+
+<span class="cm">   PyId_foo is a static variable, either on block level or file level. On first</span>
+<span class="cm">   usage, the string "foo" is interned, and the structures are linked. On interpreter</span>
+<span class="cm">   shutdown, all strings are released (through _PyUnicode_ClearStaticStrings).</span>
+
+<span class="cm">   Alternatively, _Py_static_string allows to choose the variable name.</span>
+<span class="cm">   _PyUnicode_FromId returns a borrowed reference to the interned string.</span>
+<span class="cm">   _PyObject_{Get,Set,Has}AttrId are __getattr__ versions using _Py_Identifier*.</span>
+<span class="cm">*/</span>
+<span class="k">typedef</span> <span class="k">struct</span> <span class="n">_Py_Identifier</span> <span class="p">{</span>
+    <span class="k">struct</span> <span class="n">_Py_Identifier</span> <span class="o">*</span><span class="n">next</span><span class="p">;</span>
+    <span class="k">const</span> <span class="kt">char</span><span class="o">*</span> <span class="n">string</span><span class="p">;</span>
+    <span class="n">PyObject</span> <span class="o">*</span><span class="n">object</span><span class="p">;</span>
+<span class="p">}</span> <span class="n">_Py_Identifier</span><span class="p">;</span>
+
+<span class="cp">#define _Py_static_string_init(value) { 0, value, 0 }</span>
+<span class="cp">#define _Py_static_string(varname, value)  static _Py_Identifier varname = _Py_static_string_init(value)</span>
+<span class="cp">#define _Py_IDENTIFIER(varname) _Py_static_string(PyId_##varname, #varname)</span>
+</pre></div>
+</td></tr></table>
+
+<p>Well, at least the documentation is explicit! With a little more research we can find the <code>dict</code> function we were looking for: <code>_PyDict_GetItemId</code>.</p>
+<p>So the lookup part of our opcode will look like:</p>
+<table class="codehilitetable"><tr><td class="linenos"/><td class="code"><div class="codehilite"><pre> <span class="cm">/** Our callback function will be named op_target **/</span>
+<span class="n">PyObject</span> <span class="o">*</span><span class="n">target</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+<span class="n">_Py_IDENTIFIER</span><span class="p">(</span><span class="n">op_target</span><span class="p">);</span>
+<span class="n">target</span> <span class="o">=</span> <span class="n">_PyDict_GetItemId</span><span class="p">(</span><span class="n">f</span><span class="o">-&gt;</span><span class="n">f_globals</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">PyId_op_target</span><span class="p">);</span>
+<span class="k">if</span> <span class="p">(</span><span class="n">target</span> <span class="o">==</span> <span class="nb">NULL</span> <span class="o">&amp;&amp;</span> <span class="n">_PyErr_OCCURRED</span><span class="p">())</span> <span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">PyErr_ExceptionMatches</span><span class="p">(</span><span class="n">PyExc_KeyError</span><span class="p">))</span>
+        <span class="k">goto</span> <span class="n">error</span><span class="p">;</span>
+    <span class="n">PyErr_Clear</span><span class="p">();</span>
+    <span class="n">DISPATCH</span><span class="p">();</span>
+<span class="p">}</span>
+</pre></div>
+</td></tr></table>
+
+<p>To be completely explicit, this code needs a few explanations:</p>
+<ul>
+<li><code>f</code> is our current frame and <code>f-&gt;f_globals</code> is its globals</li>
+<li>If we don't find <code>op_target</code>, we check if the exception is a <code>KeyError</code></li>
+<li><code>goto error;</code> is the main-loop's way of raising the exception</li>
+<li><code>PyErr_Clear()</code> suppresses the current exception and <code>DISPATCH()</code> launches the evaluation of the next opcode</li>
+</ul>
+<p>The next step is to gather the information we want (the stack):</p>
+<table class="codehilitetable"><tr><td class="linenos"/><td class="code"><div class="codehilite"><pre> <span class="cm">/** This code create a list with all the values on the current stack **/</span>
+<span class="n">PyObject</span> <span class="o">*</span><span class="n">value</span> <span class="o">=</span> <span class="n">PyList_New</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+<span class="k">for</span> <span class="p">(</span><span class="n">i</span> <span class="o">=</span> <span class="mi">1</span> <span class="p">;</span> <span class="n">i</span> <span class="o">&lt;=</span> <span class="n">STACK_LEVEL</span><span class="p">();</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">tmp</span> <span class="o">=</span> <span class="n">PEEK</span><span class="p">(</span><span class="n">i</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">tmp</span> <span class="o">==</span> <span class="nb">NULL</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">tmp</span> <span class="o">=</span> <span class="n">Py_None</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="n">PyList_Append</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">tmp</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+</td></tr></table>
+
+<p>The last step is actually calling our callback!
+For that, we will use <code>call_function</code> and learn how to use it by looking at the opcode <code>CALL_FUNCTION</code>:</p>
+<table class="codehilitetable"><tr><td class="linenos"><div class="linenodiv"><pre> 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15</pre></div></td><td class="code"><div class="codehilite"><pre><span class="cm">/** From: Python/ceval.c **/</span>
+<span class="n">TARGET</span><span class="p">(</span><span class="n">CALL_FUNCTION</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">PyObject</span> <span class="o">**</span><span class="n">sp</span><span class="p">,</span> <span class="o">*</span><span class="n">res</span><span class="p">;</span>
+    <span class="cm">/** stack_pointer is a local of the main loop.</span>
+<span class="cm">        It's the pointer to the stacktop of our frame **/</span>
+    <span class="n">sp</span> <span class="o">=</span> <span class="n">stack_pointer</span><span class="p">;</span>
+    <span class="n">res</span> <span class="o">=</span> <span class="n">call_function</span><span class="p">(</span><span class="o">&amp;</span><span class="n">sp</span><span class="p">,</span> <span class="n">oparg</span><span class="p">);</span>
+    <span class="cm">/** call_function handles the args it consummed on the stack for us **/</span>
+    <span class="n">stack_pointer</span> <span class="o">=</span> <span class="n">sp</span><span class="p">;</span>
+    <span class="n">PUSH</span><span class="p">(</span><span class="n">res</span><span class="p">);</span>
+    <span class="cm">/** Standard exception handling **/</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">res</span> <span class="o">==</span> <span class="nb">NULL</span><span class="p">)</span>
+        <span class="k">goto</span> <span class="n">error</span><span class="p">;</span>
+    <span class="n">DISPATCH</span><span class="p">();</span>
+<span class="p">}</span>
+</pre></div>
+</td></tr></table>
+
+<p>With all that information, we are able to craft our <code>DEBUG_OP</code>:</p>
+<table class="codehilitetable"><tr><td class="linenos"><div class="linenodiv"><pre> 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37</pre></div></td><td class="code"><div class="codehilite"><pre><span class="n">TARGET</span><span class="p">(</span><span class="n">DEBUG_OP</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">PyObject</span> <span class="o">*</span><span class="n">value</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+    <span class="n">PyObject</span> <span class="o">*</span><span class="n">target</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+    <span class="n">PyObject</span> <span class="o">*</span><span class="n">res</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+    <span class="n">PyObject</span> <span class="o">**</span><span class="n">sp</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+    <span class="n">PyObject</span> <span class="o">*</span><span class="n">tmp</span><span class="p">;</span>
+    <span class="kt">int</span> <span class="n">i</span><span class="p">;</span>
+    <span class="n">_Py_IDENTIFIER</span><span class="p">(</span><span class="n">op_target</span><span class="p">);</span>
+
+    <span class="n">target</span> <span class="o">=</span> <span class="n">_PyDict_GetItemId</span><span class="p">(</span><span class="n">f</span><span class="o">-&gt;</span><span class="n">f_globals</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">PyId_op_target</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">target</span> <span class="o">==</span> <span class="nb">NULL</span> <span class="o">&amp;&amp;</span> <span class="n">_PyErr_OCCURRED</span><span class="p">())</span> <span class="p">{</span>
+        <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">PyErr_ExceptionMatches</span><span class="p">(</span><span class="n">PyExc_KeyError</span><span class="p">))</span>
+            <span class="k">goto</span> <span class="n">error</span><span class="p">;</span>
+        <span class="n">PyErr_Clear</span><span class="p">();</span>
+        <span class="n">DISPATCH</span><span class="p">();</span>
+    <span class="p">}</span>
+    <span class="n">value</span> <span class="o">=</span> <span class="n">PyList_New</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+    <span class="n">Py_INCREF</span><span class="p">(</span><span class="n">target</span><span class="p">);</span>
+    <span class="k">for</span> <span class="p">(</span><span class="n">i</span> <span class="o">=</span> <span class="mi">1</span> <span class="p">;</span> <span class="n">i</span> <span class="o">&lt;=</span> <span class="n">STACK_LEVEL</span><span class="p">();</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">tmp</span> <span class="o">=</span> <span class="n">PEEK</span><span class="p">(</span><span class="n">i</span><span class="p">);</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">tmp</span> <span class="o">==</span> <span class="nb">NULL</span><span class="p">)</span>
+            <span class="n">tmp</span> <span class="o">=</span> <span class="n">Py_None</span><span class="p">;</span>
+        <span class="n">PyList_Append</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">tmp</span><span class="p">);</span>
+    <span class="p">}</span>
+
+    <span class="n">PUSH</span><span class="p">(</span><span class="n">target</span><span class="p">);</span>
+    <span class="n">PUSH</span><span class="p">(</span><span class="n">value</span><span class="p">);</span>
+    <span class="n">Py_INCREF</span><span class="p">(</span><span class="n">f</span><span class="p">);</span>
+    <span class="n">PUSH</span><span class="p">(</span><span class="n">f</span><span class="p">);</span>
+    <span class="n">sp</span> <span class="o">=</span> <span class="n">stack_pointer</span><span class="p">;</span>
+    <span class="n">res</span> <span class="o">=</span> <span class="n">call_function</span><span class="p">(</span><span class="o">&amp;</span><span class="n">sp</span><span class="p">,</span> <span class="mi">2</span><span class="p">);</span>
+    <span class="n">stack_pointer</span> <span class="o">=</span> <span class="n">sp</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">res</span> <span class="o">==</span> <span class="nb">NULL</span><span class="p">)</span>
+        <span class="k">goto</span> <span class="n">error</span><span class="p">;</span>
+    <span class="n">Py_DECREF</span><span class="p">(</span><span class="n">res</span><span class="p">);</span>
+    <span class="n">DISPATCH</span><span class="p">();</span>
+<span class="p">}</span>
+</pre></div>
+</td></tr></table>
+
+<p>As I didnât had that much experience with the C code in CPython, I might have missed something (I am looking at you refcounting). Feel free to correct me in this case. ;)</p>
+<p>It compiles! So it works!</p>
+<p>Well not really... It might seem good but this code will fail when we will try to execute our first <code>DEBUG_OP</code>.
+Since 2008, <a href="http://bugs.python.org/issue4753">Python use computed goto</a> (you can read more about computed goto in Python <a href="http://eli.thegreenplace.net/2012/07/12/computed-goto-for-efficient-dispatch-tables">here</a>).
+So we need to update the goto jump table: we just need to go into <code>Python/opcode_targets.h</code> and do the following change:</p>
+<table class="codehilitetable"><tr><td class="linenos"/><td class="code"><div class="codehilite"><pre><span class="cm">/** From: Python/opcode_targets.h **/</span>
+<span class="cm">/** Easy change since DEBUG_OP is the opcode number 1 **/</span>
+<span class="k">static</span> <span class="kt">void</span> <span class="o">*</span><span class="n">opcode_targets</span><span class="p">[</span><span class="mi">256</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="c1">//&amp;&amp;_unknown_opcode,</span>
+    <span class="o">&amp;&amp;</span><span class="n">TARGET_DEBUG_OP</span><span class="p">,</span>
+    <span class="o">&amp;&amp;</span><span class="n">TARGET_POP_TOP</span><span class="p">,</span>
+    <span class="cm">/** ... **/</span>
+</pre></div>
+</td></tr></table>
+
+<p>And that's all! We now have a fully working new opcode. The only problem is that our opcode is never called as it is inexistent in the compiled bytecode.
+Now we need to inject <code>DEBUG_OP</code> in the bytecode of some functions.</p>
+<h2>Injecting opcode <code>DEBUG_OP</code> into Python bytecode</h2>
+<p>There are many ways to insert a new opcode into the Python bytecode:</p>
+<ul>
+<li>We can use the peephole optimizer just like <a href="http://blog.quarkslab.com/building-an-obfuscated-python-interpreter-we-need-more-opcodes.html">Quarkslab did</a></li>
+<li>We can do some changes in the bytecode generation code</li>
+<li>We can (and we will) just modify the bytecode of some functions at runtime!</li>
+</ul>
+<p>Yep, coding that new opcode was enough C for today, let's get back to the source of <code>Understanding Python</code>: some hacky, strange (somewhat magical) Python!</p>
+<p>So, what we are going to do is:</p>
+<ul>
+<li>Take the code object of the function we want to trace</li>
+<li>Rewrite the bytecode to inject some <code>DEBUG_OP</code></li>
+<li>Put the new code object in place</li>
+</ul>
+<h3>Reminder about code object</h3>
+<p>If you have never heard of <code>code object</code>, there was a little introduction <a href="http://blog.hakril.net/articles/0-understanding-python-by-breaking-it.html">somewhere in my first article</a>. There are also some good documentation on the net and the <a href="https://docs.python.org/3.4/reference/datamodel.html">doc page as always</a> (Ctrl+F "code objects").</p>
+<p>One thing to note in the context of this article is that <em>code objects are not mutable</em>:</p>
+<table class="codehilitetable"><tr><td class="linenos"><div class="linenodiv"><pre> 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+16</pre></div></td><td class="code"><div class="codehilite"><pre><span class="n">Python</span> <span class="mf">3.4</span><span class="o">.</span><span class="mi">2</span> <span class="p">(</span><span class="n">default</span><span class="p">,</span> <span class="n">Oct</span>  <span class="mi">8</span> <span class="mi">2014</span><span class="p">,</span> <span class="mi">10</span><span class="p">:</span><span class="mi">45</span><span class="p">:</span><span class="mi">20</span><span class="p">)</span>
+<span class="p">[</span><span class="n">GCC</span> <span class="mf">4.9</span><span class="o">.</span><span class="mi">1</span><span class="p">]</span> <span class="n">on</span> <span class="n">linux</span>
+<span class="n">Type</span> <span class="s">"help"</span><span class="p">,</span> <span class="s">"copyright"</span><span class="p">,</span> <span class="s">"credits"</span> <span class="ow">or</span> <span class="s">"license"</span> <span class="k">for</span> <span class="n">more</span> <span class="n">information</span><span class="o">.</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">x</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">y</span> <span class="p">:</span> <span class="mi">2</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">x</span><span class="o">.</span><span class="n">__code__</span>
+<span class="o">&lt;</span><span class="n">code</span> <span class="nb">object</span> <span class="o">&lt;</span><span class="k">lambda</span><span class="o">&gt;</span> <span class="n">at</span> <span class="mh">0x7f481fd88390</span><span class="p">,</span> <span class="nb">file</span> <span class="s">"&lt;stdin&gt;"</span><span class="p">,</span> <span class="n">line</span> <span class="mi">1</span><span class="o">&gt;</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">x</span><span class="o">.</span><span class="n">__code__</span><span class="o">.</span><span class="n">co_name</span>
+<span class="s">'&lt;lambda&gt;'</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">x</span><span class="o">.</span><span class="n">__code__</span><span class="o">.</span><span class="n">co_name</span> <span class="o">=</span> <span class="s">'truc'</span>
+<span class="n">Traceback</span> <span class="p">(</span><span class="n">most</span> <span class="n">recent</span> <span class="n">call</span> <span class="n">last</span><span class="p">):</span>
+  <span class="n">File</span> <span class="s">"&lt;stdin&gt;"</span><span class="p">,</span> <span class="n">line</span> <span class="mi">1</span><span class="p">,</span> <span class="ow">in</span> <span class="o">&lt;</span><span class="n">module</span><span class="o">&gt;</span>
+<span class="ne">AttributeError</span><span class="p">:</span> <span class="n">readonly</span> <span class="n">attribute</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">x</span><span class="o">.</span><span class="n">__code__</span><span class="o">.</span><span class="n">co_consts</span> <span class="o">=</span> <span class="p">(</span><span class="s">'truc'</span><span class="p">,)</span>
+<span class="n">Traceback</span> <span class="p">(</span><span class="n">most</span> <span class="n">recent</span> <span class="n">call</span> <span class="n">last</span><span class="p">):</span>
+  <span class="n">File</span> <span class="s">"&lt;stdin&gt;"</span><span class="p">,</span> <span class="n">line</span> <span class="mi">1</span><span class="p">,</span> <span class="ow">in</span> <span class="o">&lt;</span><span class="n">module</span><span class="o">&gt;</span>
+<span class="ne">AttributeError</span><span class="p">:</span> <span class="n">readonly</span> <span class="n">attribute</span>
+</pre></div>
+</td></tr></table>
+
+<p>But don't worry, we will find a way to get around.</p>
+<h3>Our tools</h3>
+<p>To do these bytecode modifications we are going to need few tools:</p>
+<ul>
+<li>The <a href="https://docs.python.org/3.4/library/dis.html"><code>dis</code> module</a>, used to disassemble and analyse bytecode</li>
+<li><code>dis.Bytecode</code>, a new feature from <code>Python3.4</code> that is super useful for disassembly and bytecode analysis!</li>
+<li>A way to easily modify code object</li>
+</ul>
+<p><code>dis.Bytecode</code> disassembles a code object and give us useful information about the opcode, argument and context:</p>
+<table class="codehilitetable"><tr><td class="linenos"/><td class="code"><div class="codehilite"><pre><span class="c"># Python3.4</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="kn">import</span> <span class="nn">dis</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">f</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">x</span><span class="p">:</span> <span class="n">x</span> <span class="o">+</span> <span class="mi">3</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">dis</span><span class="o">.</span><span class="n">Bytecode</span><span class="p">(</span><span class="n">f</span><span class="o">.</span><span class="n">__code__</span><span class="p">):</span> <span class="k">print</span> <span class="p">(</span><span class="n">i</span><span class="p">)</span>
+<span class="o">...</span>
+<span class="n">Instruction</span><span class="p">(</span><span class="n">opname</span><span class="o">=</span><span class="s">'LOAD_FAST'</span><span class="p">,</span> <span class="n">opcode</span><span class="o">=</span><span class="mi">124</span><span class="p">,</span> <span class="n">arg</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="n">argval</span><span class="o">=</span><span class="s">'x'</span><span class="p">,</span> <span class="n">argrepr</span><span class="o">=</span><span class="s">'x'</span><span class="p">,</span> <span class="n">offset</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="n">starts_line</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">is_jump_target</span><span class="o">=</span><span class="bp">False</span><span class="p">)</span>
+<span class="n">Instruction</span><span class="p">(</span><span class="n">opname</span><span class="o">=</span><span class="s">'LOAD_CONST'</span><span class="p">,</span> <span class="n">opcode</span><span class="o">=</span><span class="mi">100</span><span class="p">,</span> <span class="n">arg</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">argval</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span> <span class="n">argrepr</span><span class="o">=</span><span class="s">'3'</span><span class="p">,</span> <span class="n">offset</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span> <span class="n">starts_line</span><span class="o">=</span><span class="bp">None</span><span class="p">,</span> <span class="n">is_jump_target</span><span class="o">=</span><span class="bp">False</span><span class="p">)</span>
+<span class="n">Instruction</span><span class="p">(</span><span class="n">opname</span><span class="o">=</span><span class="s">'BINARY_ADD'</span><span class="p">,</span> <span class="n">opcode</span><span class="o">=</span><span class="mi">23</span><span class="p">,</span> <span class="n">arg</span><span class="o">=</span><span class="bp">None</span><span class="p">,</span> <span class="n">argval</span><span class="o">=</span><span class="bp">None</span><span class="p">,</span> <span class="n">argrepr</span><span class="o">=</span><span class="s">''</span><span class="p">,</span> <span class="n">offset</span><span class="o">=</span><span class="mi">6</span><span class="p">,</span> <span class="n">starts_line</span><span class="o">=</span><span class="bp">None</span><span class="p">,</span> <span class="n">is_jump_target</span><span class="o">=</span><span class="bp">False</span><span class="p">)</span>
+<span class="n">Instruction</span><span class="p">(</span><span class="n">opname</span><span class="o">=</span><span class="s">'RETURN_VALUE'</span><span class="p">,</span> <span class="n">opcode</span><span class="o">=</span><span class="mi">83</span><span class="p">,</span> <span class="n">arg</span><span class="o">=</span><span class="bp">None</span><span class="p">,</span> <span class="n">argval</span><span class="o">=</span><span class="bp">None</span><span class="p">,</span> <span class="n">argrepr</span><span class="o">=</span><span class="s">''</span><span class="p">,</span> <span class="n">offset</span><span class="o">=</span><span class="mi">7</span><span class="p">,</span> <span class="n">starts_line</span><span class="o">=</span><span class="bp">None</span><span class="p">,</span> <span class="n">is_jump_target</span><span class="o">=</span><span class="bp">False</span><span class="p">)</span>
+</pre></div>
+</td></tr></table>
+
+<p>To be able to modify code objects, I just created a small class that clones a code object, allows to modify the values we want and generates a new code object.</p>
+<table class="codehilitetable"><tr><td class="linenos"><div class="linenodiv"><pre> 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21</pre></div></td><td class="code"><div class="codehilite"><pre><span class="k">class</span> <span class="nc">MutableCodeObject</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
+    <span class="n">args_name</span> <span class="o">=</span> <span class="p">(</span><span class="s">"co_argcount"</span><span class="p">,</span> <span class="s">"co_kwonlyargcount"</span><span class="p">,</span> <span class="s">"co_nlocals"</span><span class="p">,</span> <span class="s">"co_stacksize"</span><span class="p">,</span> <span class="s">"co_flags"</span><span class="p">,</span> <span class="s">"co_code"</span><span class="p">,</span>
+                  <span class="s">"co_consts"</span><span class="p">,</span> <span class="s">"co_names"</span><span class="p">,</span> <span class="s">"co_varnames"</span><span class="p">,</span> <span class="s">"co_filename"</span><span class="p">,</span> <span class="s">"co_name"</span><span class="p">,</span> <span class="s">"co_firstlineno"</span><span class="p">,</span>
+                   <span class="s">"co_lnotab"</span><span class="p">,</span> <span class="s">"co_freevars"</span><span class="p">,</span> <span class="s">"co_cellvars"</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">initial_code</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">initial_code</span> <span class="o">=</span> <span class="n">initial_code</span>
+        <span class="k">for</span> <span class="n">attr_name</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">args_name</span><span class="p">:</span>
+            <span class="n">attr</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">initial_code</span><span class="p">,</span> <span class="n">attr_name</span><span class="p">)</span>
+            <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">attr</span><span class="p">,</span> <span class="nb">tuple</span><span class="p">):</span>
+                <span class="n">attr</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">attr</span><span class="p">)</span>
+            <span class="nb">setattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">attr_name</span><span class="p">,</span> <span class="n">attr</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">get_code</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">args</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="k">for</span> <span class="n">attr_name</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">args_name</span><span class="p">:</span>
+            <span class="n">attr</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">attr_name</span><span class="p">)</span>
+            <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">attr</span><span class="p">,</span> <span class="nb">list</span><span class="p">):</span>
+                <span class="n">attr</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">attr</span><span class="p">)</span>
+            <span class="n">args</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">attr</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">initial_code</span><span class="o">.</span><span class="n">__class__</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">)</span>
+</pre></div>
+</td></tr></table>
+
+<p>Easy to use, that's one problem solved!</p>
+<table class="codehilitetable"><tr><td class="linenos"/><td class="code"><div class="codehilite"><pre><span class="o">&gt;&gt;&gt;</span> <span class="n">x</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">y</span> <span class="p">:</span> <span class="mi">2</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">m</span> <span class="o">=</span> <span class="n">MutableCodeObject</span><span class="p">(</span><span class="n">x</span><span class="o">.</span><span class="n">__code__</span><span class="p">)</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">m</span>
+<span class="o">&lt;</span><span class="n">new_code</span><span class="o">.</span><span class="n">MutableCodeObject</span> <span class="nb">object</span> <span class="n">at</span> <span class="mh">0x7f3f0ea546a0</span><span class="o">&gt;</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">m</span><span class="o">.</span><span class="n">co_consts</span>
+<span class="p">[</span><span class="bp">None</span><span class="p">,</span> <span class="mi">2</span><span class="p">]</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">m</span><span class="o">.</span><span class="n">co_consts</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">=</span> <span class="s">'3'</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">m</span><span class="o">.</span><span class="n">co_name</span> <span class="o">=</span> <span class="s">'truc'</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">m</span><span class="o">.</span><span class="n">get_code</span><span class="p">()</span>
+<span class="o">&lt;</span><span class="n">code</span> <span class="nb">object</span> <span class="n">truc</span> <span class="n">at</span> <span class="mh">0x7f3f0ea2bc90</span><span class="p">,</span> <span class="nb">file</span> <span class="s">"&lt;stdin&gt;"</span><span class="p">,</span> <span class="n">line</span> <span class="mi">1</span><span class="o">&gt;</span>
+</pre></div>
+</td></tr></table>
+
+<h3>Testing our new opcode</h3>
+<p>Now that we have the basic tools to inject some <code>DEBUG_OP</code>, we should be able to verify if our implementation is usable.</p>
+<p>For that, we are just going to add our opcode in the simplest function ever.</p>
+<table class="codehilitetable"><tr><td class="linenos"><div class="linenodiv"><pre> 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30</pre></div></td><td class="code"><div class="codehilite"><pre><span class="kn">from</span> <span class="nn">new_code</span> <span class="kn">import</span> <span class="n">MutableCodeObject</span>
+
+<span class="k">def</span> <span class="nf">op_target</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">):</span>
+    <span class="k">print</span><span class="p">(</span><span class="s">"WOOT"</span><span class="p">)</span>
+    <span class="k">print</span><span class="p">(</span><span class="s">"op_target called with args &lt;{0}&gt;"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">args</span><span class="p">))</span>
+
+<span class="k">def</span> <span class="nf">nop</span><span class="p">():</span>
+    <span class="k">pass</span>
+
+<span class="n">new_nop_code</span> <span class="o">=</span> <span class="n">MutableCodeObject</span><span class="p">(</span><span class="n">nop</span><span class="o">.</span><span class="n">__code__</span><span class="p">)</span>
+<span class="n">new_nop_code</span><span class="o">.</span><span class="n">co_code</span> <span class="o">=</span> <span class="n">b</span><span class="s">"</span><span class="se">\x00</span><span class="s">"</span> <span class="o">+</span> <span class="n">new_nop_code</span><span class="o">.</span><span class="n">co_code</span><span class="p">[</span><span class="mi">0</span><span class="p">:</span><span class="mi">3</span><span class="p">]</span> <span class="o">+</span> <span class="n">b</span><span class="s">"</span><span class="se">\x00</span><span class="s">"</span> <span class="o">+</span> <span class="n">new_nop_code</span><span class="o">.</span><span class="n">co_code</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">:]</span>
+<span class="n">new_nop_code</span><span class="o">.</span><span class="n">co_stacksize</span> <span class="o">+=</span> <span class="mi">3</span>
+
+<span class="n">nop</span><span class="o">.</span><span class="n">__code__</span> <span class="o">=</span> <span class="n">new_nop_code</span><span class="o">.</span><span class="n">get_code</span><span class="p">()</span>
+
+<span class="kn">import</span> <span class="nn">dis</span>
+<span class="n">dis</span><span class="o">.</span><span class="n">dis</span><span class="p">(</span><span class="n">nop</span><span class="p">)</span>
+<span class="n">nop</span><span class="p">()</span>
+
+
+<span class="c"># Don't forget that ./python is our custom Python implementing DEBUG_OP</span>
+<span class="n">hakril</span><span class="nd">@computer</span> <span class="o">~/</span><span class="n">python</span><span class="o">/</span><span class="n">CPython3</span><span class="o">.</span><span class="mi">5</span> <span class="o">%</span> <span class="o">./</span><span class="n">python</span> <span class="n">proof</span><span class="o">.</span><span class="n">py</span>
+  <span class="mi">8</span>           <span class="mi">0</span> <span class="o">&lt;</span><span class="mi">0</span><span class="o">&gt;</span>
+              <span class="mi">1</span> <span class="n">LOAD_CONST</span>               <span class="mi">0</span> <span class="p">(</span><span class="bp">None</span><span class="p">)</span>
+              <span class="mi">4</span> <span class="o">&lt;</span><span class="mi">0</span><span class="o">&gt;</span>
+              <span class="mi">5</span> <span class="n">RETURN_VALUE</span>
+<span class="n">WOOT</span>
+<span class="n">op_target</span> <span class="n">called</span> <span class="k">with</span> <span class="n">args</span> <span class="o">&lt;</span><span class="p">([],</span> <span class="o">&lt;</span><span class="n">frame</span> <span class="nb">object</span> <span class="n">at</span> <span class="mh">0x7fde9eaebdb0</span><span class="o">&gt;</span><span class="p">)</span><span class="o">&gt;</span>
+<span class="n">WOOT</span>
+<span class="n">op_target</span> <span class="n">called</span> <span class="k">with</span> <span class="n">args</span> <span class="o">&lt;</span><span class="p">([</span><span class="bp">None</span><span class="p">],</span> <span class="o">&lt;</span><span class="n">frame</span> <span class="nb">object</span> <span class="n">at</span> <span class="mh">0x7fde9eaebdb0</span><span class="o">&gt;</span><span class="p">)</span><span class="o">&gt;</span>
+</pre></div>
+</td></tr></table>
+
+<p>Sounds like it works!
+One line might need some explanations: <code>new_nop_code.co_stacksize += 3</code>:</p>
+<ul>
+<li><code>co_stacksize</code> represents the stack size needed by the code object</li>
+<li>Our <code>DEBUG_OP</code> push 3 values to the stack, so we need to reserve space for it</li>
+</ul>
+<p>Now we need to be able to inject our opcode in every Python functions! Be brave!</p>
+<h3>Rewriting bytecode</h3>
+<p>As we have seen in the last example, rewriting Python bytecode sounds easy!
+To inject our <code>DEBUG_OP</code> between every opcode, all we have to do is to get the offset of every opcode (injecting our opcode into arguments would be harmful) and inject our opcode at these offsets. The offsets will be easy to get, using <code>dis.Bytecode</code>.</p>
+<p>Something like that:</p>
+<table class="codehilitetable"><tr><td class="linenos"><div class="linenodiv"><pre> 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15</pre></div></td><td class="code"><div class="codehilite"><pre><span class="k">def</span> <span class="nf">add_debug_op_everywhere</span><span class="p">(</span><span class="n">code_obj</span><span class="p">):</span>
+    <span class="c"># We get every instruction offset in the code object</span>
+    <span class="n">offsets</span> <span class="o">=</span> <span class="p">[</span><span class="n">instr</span><span class="o">.</span><span class="n">offset</span> <span class="k">for</span> <span class="n">instr</span> <span class="ow">in</span> <span class="n">dis</span><span class="o">.</span><span class="n">Bytecode</span><span class="p">(</span><span class="n">code_obj</span><span class="p">)]</span>
+    <span class="c"># And insert a DEBUG_OP at every offset</span>
+    <span class="k">return</span> <span class="n">insert_op_debug_list</span><span class="p">(</span><span class="n">code_obj</span><span class="p">,</span> <span class="n">offsets</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">insert_op_debug_list</span><span class="p">(</span><span class="n">code</span><span class="p">,</span> <span class="n">offsets</span><span class="p">):</span>
+    <span class="c"># We insert the DEBUG_OP one by one</span>
+    <span class="k">for</span> <span class="n">nb</span><span class="p">,</span> <span class="n">off</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="nb">sorted</span><span class="p">(</span><span class="n">offsets</span><span class="p">)):</span>
+        <span class="c"># Need to ajust the offsets by the number of opcodes already inserted before</span>
+        <span class="c"># That's why we sort our offsets!</span>
+        <span class="n">code</span> <span class="o">=</span> <span class="n">insert_op_debug</span><span class="p">(</span><span class="n">code</span><span class="p">,</span> <span class="n">off</span> <span class="o">+</span> <span class="n">nb</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">code</span>
+
+<span class="c"># Last problem: what does insert_op_debug looks like?</span>
+</pre></div>
+</td></tr></table>
+
+<p>One might think (based on the previous example) that our <code>insert_op_debug</code> will just add a <code>"\x00"</code> at the specified offset, but there is a TRAP!
+Our first example of <code>DEBUG_OP</code> insertion was a simple code without any branch. To have a fully functioning <code>insert_op_debug</code>, we need to take care of such branching opcodes.</p>
+<p>Python branches are really simple, there are two types of branches:</p>
+<ul>
+<li>Absolute branches: the branch will look like <code>Instruction_Pointer = argument(instruction)</code></li>
+<li>Relative branches: the branch will look like <code>Instruction_Pointer += argument(instruction)</code><ul>
+<li>Relative branches are always forward</li>
+</ul>
+</li>
+</ul>
+<p>As we want those branches to be still valid after our <code>DEBUG_OP</code> insertions, we will need to rewrite those instructions arguments.
+So here is the logic I used:</p>
+
+<p>Here is the implementation:</p>
+<table class="codehilitetable"><tr><td class="linenos"><div class="linenodiv"><pre> 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33</pre></div></td><td class="code"><div class="codehilite"><pre><span class="c"># Helper</span>
+<span class="k">def</span> <span class="nf">bytecode_to_string</span><span class="p">(</span><span class="n">bytecode</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">bytecode</span><span class="o">.</span><span class="n">arg</span> <span class="ow">is</span> <span class="ow">not</span> <span class="bp">None</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">struct</span><span class="o">.</span><span class="n">pack</span><span class="p">(</span><span class="s">"&lt;Bh"</span><span class="p">,</span> <span class="n">bytecode</span><span class="o">.</span><span class="n">opcode</span><span class="p">,</span> <span class="n">bytecode</span><span class="o">.</span><span class="n">arg</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">struct</span><span class="o">.</span><span class="n">pack</span><span class="p">(</span><span class="s">"&lt;B"</span><span class="p">,</span> <span class="n">bytecode</span><span class="o">.</span><span class="n">opcode</span><span class="p">)</span>
+
+<span class="c"># Dummy class for bytecode_to_string</span>
+<span class="k">class</span> <span class="nc">DummyInstr</span><span class="p">:</span>
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">opcode</span><span class="p">,</span> <span class="n">arg</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">opcode</span> <span class="o">=</span> <span class="n">opcode</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">arg</span> <span class="o">=</span> <span class="n">arg</span>
+
+<span class="k">def</span> <span class="nf">insert_op_debug</span><span class="p">(</span><span class="n">code</span><span class="p">,</span> <span class="n">offset</span><span class="p">):</span>
+    <span class="n">opcode_jump_rel</span> <span class="o">=</span> <span class="p">[</span><span class="s">'FOR_ITER'</span><span class="p">,</span> <span class="s">'JUMP_FORWARD'</span><span class="p">,</span> <span class="s">'SETUP_LOOP'</span><span class="p">,</span> <span class="s">'SETUP_WITH'</span><span class="p">,</span> <span class="s">'SETUP_EXCEPT'</span><span class="p">,</span> <span class="s">'SETUP_FINALLY'</span><span class="p">]</span>
+    <span class="n">opcode_jump_abs</span> <span class="o">=</span> <span class="p">[</span><span class="s">'POP_JUMP_IF_TRUE'</span><span class="p">,</span> <span class="s">'POP_JUMP_IF_FALSE'</span><span class="p">,</span> <span class="s">'JUMP_ABSOLUTE'</span><span class="p">]</span>
+    <span class="n">res_codestring</span> <span class="o">=</span> <span class="n">b</span><span class="s">""</span>
+    <span class="n">inserted</span> <span class="o">=</span> <span class="bp">False</span>
+    <span class="k">for</span> <span class="n">instr</span> <span class="ow">in</span> <span class="n">dis</span><span class="o">.</span><span class="n">Bytecode</span><span class="p">(</span><span class="n">code</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">instr</span><span class="o">.</span><span class="n">offset</span> <span class="o">==</span> <span class="n">offset</span><span class="p">:</span>
+            <span class="n">res_codestring</span> <span class="o">+=</span> <span class="n">b</span><span class="s">"</span><span class="se">\x00</span><span class="s">"</span>
+            <span class="n">inserted</span> <span class="o">=</span> <span class="bp">True</span>
+        <span class="k">if</span> <span class="n">instr</span><span class="o">.</span><span class="n">opname</span> <span class="ow">in</span> <span class="n">opcode_jump_rel</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">inserted</span><span class="p">:</span> <span class="c">#relative jump are always forward</span>
+            <span class="k">if</span> <span class="n">offset</span> <span class="o">&lt;</span> <span class="n">instr</span><span class="o">.</span><span class="n">offset</span> <span class="o">+</span> <span class="mi">3</span> <span class="o">+</span> <span class="n">instr</span><span class="o">.</span><span class="n">arg</span><span class="p">:</span> <span class="c"># inserted beetwen jump and dest: add 1 to dest (3 for size)</span>
+                <span class="c">#If equal: jump on DEBUG_OP to get info before exec instr</span>
+                <span class="n">res_codestring</span> <span class="o">+=</span> <span class="n">bytecode_to_string</span><span class="p">(</span><span class="n">DummyInstr</span><span class="p">(</span><span class="n">instr</span><span class="o">.</span><span class="n">opcode</span><span class="p">,</span> <span class="n">instr</span><span class="o">.</span><span class="n">arg</span> <span class="o">+</span> <span class="mi">1</span><span class="p">))</span>
+                <span class="k">continue</span>
+        <span class="k">if</span> <span class="n">instr</span><span class="o">.</span><span class="n">opname</span> <span class="ow">in</span> <span class="n">opcode_jump_abs</span><span class="p">:</span>
+            <span class="k">if</span> <span class="n">instr</span><span class="o">.</span><span class="n">arg</span> <span class="o">&gt;</span> <span class="n">offset</span><span class="p">:</span>
+                <span class="n">res_codestring</span> <span class="o">+=</span> <span class="n">bytecode_to_string</span><span class="p">(</span><span class="n">DummyInstr</span><span class="p">(</span><span class="n">instr</span><span class="o">.</span><span class="n">opcode</span><span class="p">,</span> <span class="n">instr</span><span class="o">.</span><span class="n">arg</span> <span class="o">+</span> <span class="mi">1</span><span class="p">))</span>
+                <span class="k">continue</span>
+        <span class="n">res_codestring</span> <span class="o">+=</span> <span class="n">bytecode_to_string</span><span class="p">(</span><span class="n">instr</span><span class="p">)</span>
+    <span class="c"># replace_bytecode just replaces the original code co_code</span>
+    <span class="k">return</span> <span class="n">replace_bytecode</span><span class="p">(</span><span class="n">code</span><span class="p">,</span> <span class="n">res_codestring</span><span class="p">)</span>
+</pre></div>
+</td></tr></table>
+
+<p>We can look at the result:</p>
+<table class="codehilitetable"><tr><td class="linenos"><div class="linenodiv"><pre> 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41
+42
+43
+44
+45
+46
+47
+48
+49
+50
+51
+52
+53
+54
+55
+56
+57
+58
+59
+60
+61
+62
+63
+64
+65
+66
+67
+68
+69
+70
+71
+72
+73
+74
+75
+76
+77
+78
+79
+80
+81
+82
+83
+84
+85
+86
+87
+88
+89
+90
+91
+92
+93
+94
+95
+96
+97
+98</pre></div></td><td class="code"><div class="codehilite"><pre><span class="o">&gt;&gt;&gt;</span> <span class="k">def</span> <span class="nf">lol</span><span class="p">(</span><span class="n">x</span><span class="p">):</span>
+<span class="o">...</span>     <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">10</span><span class="p">):</span>
+<span class="o">...</span>         <span class="k">if</span> <span class="n">x</span> <span class="o">==</span> <span class="n">i</span><span class="p">:</span>
+<span class="o">...</span>             <span class="k">break</span>
+
+<span class="o">&gt;&gt;&gt;</span> <span class="n">dis</span><span class="o">.</span><span class="n">dis</span><span class="p">(</span><span class="n">lol</span><span class="p">)</span>
+<span class="mi">101</span>           <span class="mi">0</span> <span class="n">SETUP_LOOP</span>              <span class="mi">36</span> <span class="p">(</span><span class="n">to</span> <span class="mi">39</span><span class="p">)</span>
+              <span class="mi">3</span> <span class="n">LOAD_GLOBAL</span>              <span class="mi">0</span> <span class="p">(</span><span class="nb">range</span><span class="p">)</span>
+              <span class="mi">6</span> <span class="n">LOAD_CONST</span>               <span class="mi">1</span> <span class="p">(</span><span class="mi">10</span><span class="p">)</span>
+              <span class="mi">9</span> <span class="n">CALL_FUNCTION</span>            <span class="mi">1</span> <span class="p">(</span><span class="mi">1</span> <span class="n">positional</span><span class="p">,</span> <span class="mi">0</span> <span class="n">keyword</span> <span class="n">pair</span><span class="p">)</span>
+             <span class="mi">12</span> <span class="n">GET_ITER</span>
+        <span class="o">&gt;&gt;</span>   <span class="mi">13</span> <span class="n">FOR_ITER</span>                <span class="mi">22</span> <span class="p">(</span><span class="n">to</span> <span class="mi">38</span><span class="p">)</span>
+             <span class="mi">16</span> <span class="n">STORE_FAST</span>               <span class="mi">1</span> <span class="p">(</span><span class="n">i</span><span class="p">)</span>
+
+<span class="mi">102</span>          <span class="mi">19</span> <span class="n">LOAD_FAST</span>                <span class="mi">0</span> <span class="p">(</span><span class="n">x</span><span class="p">)</span>
+             <span class="mi">22</span> <span class="n">LOAD_FAST</span>                <span class="mi">1</span> <span class="p">(</span><span class="n">i</span><span class="p">)</span>
+             <span class="mi">25</span> <span class="n">COMPARE_OP</span>               <span class="mi">2</span> <span class="p">(</span><span class="o">==</span><span class="p">)</span>
+             <span class="mi">28</span> <span class="n">POP_JUMP_IF_FALSE</span>       <span class="mi">13</span>
+
+<span class="mi">103</span>          <span class="mi">31</span> <span class="n">BREAK_LOOP</span>
+             <span class="mi">32</span> <span class="n">JUMP_ABSOLUTE</span>           <span class="mi">13</span>
+             <span class="mi">35</span> <span class="n">JUMP_ABSOLUTE</span>           <span class="mi">13</span>
+        <span class="o">&gt;&gt;</span>   <span class="mi">38</span> <span class="n">POP_BLOCK</span>
+        <span class="o">&gt;&gt;</span>   <span class="mi">39</span> <span class="n">LOAD_CONST</span>               <span class="mi">0</span> <span class="p">(</span><span class="bp">None</span><span class="p">)</span>
+             <span class="mi">42</span> <span class="n">RETURN_VALUE</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">lol</span><span class="o">.</span><span class="n">__code__</span> <span class="o">=</span> <span class="n">transform_code</span><span class="p">(</span><span class="n">lol</span><span class="o">.</span><span class="n">__code__</span><span class="p">,</span> <span class="n">add_debug_op_everywhere</span><span class="p">,</span> <span class="n">add_stacksize</span><span class="o">=</span><span class="mi">3</span><span class="p">)</span>
+
+
+<span class="o">&gt;&gt;&gt;</span> <span class="n">dis</span><span class="o">.</span><span class="n">dis</span><span class="p">(</span><span class="n">lol</span><span class="p">)</span>
+<span class="mi">101</span>           <span class="mi">0</span> <span class="o">&lt;</span><span class="mi">0</span><span class="o">&gt;</span>
+              <span class="mi">1</span> <span class="n">SETUP_LOOP</span>              <span class="mi">50</span> <span class="p">(</span><span class="n">to</span> <span class="mi">54</span><span class="p">)</span>
+              <span class="mi">4</span> <span class="o">&lt;</span><span class="mi">0</span><span class="o">&gt;</span>
+              <span class="mi">5</span> <span class="n">LOAD_GLOBAL</span>              <span class="mi">0</span> <span class="p">(</span><span class="nb">range</span><span class="p">)</span>
+              <span class="mi">8</span> <span class="o">&lt;</span><span class="mi">0</span><span class="o">&gt;</span>
+              <span class="mi">9</span> <span class="n">LOAD_CONST</span>               <span class="mi">1</span> <span class="p">(</span><span class="mi">10</span><span class="p">)</span>
+             <span class="mi">12</span> <span class="o">&lt;</span><span class="mi">0</span><span class="o">&gt;</span>
+             <span class="mi">13</span> <span class="n">CALL_FUNCTION</span>            <span class="mi">1</span> <span class="p">(</span><span class="mi">1</span> <span class="n">positional</span><span class="p">,</span> <span class="mi">0</span> <span class="n">keyword</span> <span class="n">pair</span><span class="p">)</span>
+             <span class="mi">16</span> <span class="o">&lt;</span><span class="mi">0</span><span class="o">&gt;</span>
+             <span class="mi">17</span> <span class="n">GET_ITER</span>
+        <span class="o">&gt;&gt;</span>   <span class="mi">18</span> <span class="o">&lt;</span><span class="mi">0</span><span class="o">&gt;</span>
+
+<span class="mi">102</span>          <span class="mi">19</span> <span class="n">FOR_ITER</span>                <span class="mi">30</span> <span class="p">(</span><span class="n">to</span> <span class="mi">52</span><span class="p">)</span>
+             <span class="mi">22</span> <span class="o">&lt;</span><span class="mi">0</span><span class="o">&gt;</span>
+             <span class="mi">23</span> <span class="n">STORE_FAST</span>               <span class="mi">1</span> <span class="p">(</span><span class="n">i</span><span class="p">)</span>
+             <span class="mi">26</span> <span class="o">&lt;</span><span class="mi">0</span><span class="o">&gt;</span>
+             <span class="mi">27</span> <span class="n">LOAD_FAST</span>                <span class="mi">0</span> <span class="p">(</span><span class="n">x</span><span class="p">)</span>
+             <span class="mi">30</span> <span class="o">&lt;</span><span class="mi">0</span><span class="o">&gt;</span>
+
+<span class="mi">103</span>          <span class="mi">31</span> <span class="n">LOAD_FAST</span>                <span class="mi">1</span> <span class="p">(</span><span class="n">i</span><span class="p">)</span>
+             <span class="mi">34</span> <span class="o">&lt;</span><span class="mi">0</span><span class="o">&gt;</span>
+             <span class="mi">35</span> <span class="n">COMPARE_OP</span>               <span class="mi">2</span> <span class="p">(</span><span class="o">==</span><span class="p">)</span>
+             <span class="mi">38</span> <span class="o">&lt;</span><span class="mi">0</span><span class="o">&gt;</span>
+             <span class="mi">39</span> <span class="n">POP_JUMP_IF_FALSE</span>       <span class="mi">18</span>
+             <span class="mi">42</span> <span class="o">&lt;</span><span class="mi">0</span><span class="o">&gt;</span>
+             <span class="mi">43</span> <span class="n">BREAK_LOOP</span>
+             <span class="mi">44</span> <span class="o">&lt;</span><span class="mi">0</span><span class="o">&gt;</span>
+             <span class="mi">45</span> <span class="n">JUMP_ABSOLUTE</span>           <span class="mi">18</span>
+             <span class="mi">48</span> <span class="o">&lt;</span><span class="mi">0</span><span class="o">&gt;</span>
+             <span class="mi">49</span> <span class="n">JUMP_ABSOLUTE</span>           <span class="mi">18</span>
+        <span class="o">&gt;&gt;</span>   <span class="mi">52</span> <span class="o">&lt;</span><span class="mi">0</span><span class="o">&gt;</span>
+             <span class="mi">53</span> <span class="n">POP_BLOCK</span>
+        <span class="o">&gt;&gt;</span>   <span class="mi">54</span> <span class="o">&lt;</span><span class="mi">0</span><span class="o">&gt;</span>
+             <span class="mi">55</span> <span class="n">LOAD_CONST</span>               <span class="mi">0</span> <span class="p">(</span><span class="bp">None</span><span class="p">)</span>
+             <span class="mi">58</span> <span class="o">&lt;</span><span class="mi">0</span><span class="o">&gt;</span>
+             <span class="mi">59</span> <span class="n">RETURN_VALUE</span>
+
+<span class="c"># Setup the simplest handler EVER</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="k">def</span> <span class="nf">op_target</span><span class="p">(</span><span class="n">stack</span><span class="p">,</span> <span class="n">frame</span><span class="p">):</span>
+<span class="o">...</span>     <span class="k">print</span> <span class="p">(</span><span class="n">stack</span><span class="p">)</span>
+
+<span class="c"># GO</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">lol</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+<span class="p">[]</span>
+<span class="p">[]</span>
+<span class="p">[</span><span class="o">&lt;</span><span class="k">class</span> <span class="err">'</span><span class="nc">range</span><span class="s">'&gt;]</span>
+<span class="p">[</span><span class="mi">10</span><span class="p">,</span> <span class="o">&lt;</span><span class="k">class</span> <span class="err">'</span><span class="nc">range</span><span class="s">'&gt;]</span>
+<span class="p">[</span><span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">10</span><span class="p">)]</span>
+<span class="p">[</span><span class="o">&lt;</span><span class="n">range_iterator</span> <span class="nb">object</span> <span class="n">at</span> <span class="mh">0x7f1349afab80</span><span class="o">&gt;</span><span class="p">]</span>
+<span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="o">&lt;</span><span class="n">range_iterator</span> <span class="nb">object</span> <span class="n">at</span> <span class="mh">0x7f1349afab80</span><span class="o">&gt;</span><span class="p">]</span>
+<span class="p">[</span><span class="o">&lt;</span><span class="n">range_iterator</span> <span class="nb">object</span> <span class="n">at</span> <span class="mh">0x7f1349afab80</span><span class="o">&gt;</span><span class="p">]</span>
+<span class="p">[</span><span class="mi">2</span><span class="p">,</span> <span class="o">&lt;</span><span class="n">range_iterator</span> <span class="nb">object</span> <span class="n">at</span> <span class="mh">0x7f1349afab80</span><span class="o">&gt;</span><span class="p">]</span>
+<span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="o">&lt;</span><span class="n">range_iterator</span> <span class="nb">object</span> <span class="n">at</span> <span class="mh">0x7f1349afab80</span><span class="o">&gt;</span><span class="p">]</span>
+<span class="p">[</span><span class="bp">False</span><span class="p">,</span> <span class="o">&lt;</span><span class="n">range_iterator</span> <span class="nb">object</span> <span class="n">at</span> <span class="mh">0x7f1349afab80</span><span class="o">&gt;</span><span class="p">]</span>
+<span class="p">[</span><span class="o">&lt;</span><span class="n">range_iterator</span> <span class="nb">object</span> <span class="n">at</span> <span class="mh">0x7f1349afab80</span><span class="o">&gt;</span><span class="p">]</span>
+<span class="p">[</span><span class="mi">1</span><span class="p">,</span> <span class="o">&lt;</span><span class="n">range_iterator</span> <span class="nb">object</span> <span class="n">at</span> <span class="mh">0x7f1349afab80</span><span class="o">&gt;</span><span class="p">]</span>
+<span class="p">[</span><span class="o">&lt;</span><span class="n">range_iterator</span> <span class="nb">object</span> <span class="n">at</span> <span class="mh">0x7f1349afab80</span><span class="o">&gt;</span><span class="p">]</span>
+<span class="p">[</span><span class="mi">2</span><span class="p">,</span> <span class="o">&lt;</span><span class="n">range_iterator</span> <span class="nb">object</span> <span class="n">at</span> <span class="mh">0x7f1349afab80</span><span class="o">&gt;</span><span class="p">]</span>
+<span class="p">[</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="o">&lt;</span><span class="n">range_iterator</span> <span class="nb">object</span> <span class="n">at</span> <span class="mh">0x7f1349afab80</span><span class="o">&gt;</span><span class="p">]</span>
+<span class="p">[</span><span class="bp">False</span><span class="p">,</span> <span class="o">&lt;</span><span class="n">range_iterator</span> <span class="nb">object</span> <span class="n">at</span> <span class="mh">0x7f1349afab80</span><span class="o">&gt;</span><span class="p">]</span>
+<span class="p">[</span><span class="o">&lt;</span><span class="n">range_iterator</span> <span class="nb">object</span> <span class="n">at</span> <span class="mh">0x7f1349afab80</span><span class="o">&gt;</span><span class="p">]</span>
+<span class="p">[</span><span class="mi">2</span><span class="p">,</span> <span class="o">&lt;</span><span class="n">range_iterator</span> <span class="nb">object</span> <span class="n">at</span> <span class="mh">0x7f1349afab80</span><span class="o">&gt;</span><span class="p">]</span>
+<span class="p">[</span><span class="o">&lt;</span><span class="n">range_iterator</span> <span class="nb">object</span> <span class="n">at</span> <span class="mh">0x7f1349afab80</span><span class="o">&gt;</span><span class="p">]</span>
+<span class="p">[</span><span class="mi">2</span><span class="p">,</span> <span class="o">&lt;</span><span class="n">range_iterator</span> <span class="nb">object</span> <span class="n">at</span> <span class="mh">0x7f1349afab80</span><span class="o">&gt;</span><span class="p">]</span>
+<span class="p">[</span><span class="mi">2</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="o">&lt;</span><span class="n">range_iterator</span> <span class="nb">object</span> <span class="n">at</span> <span class="mh">0x7f1349afab80</span><span class="o">&gt;</span><span class="p">]</span>
+<span class="p">[</span><span class="bp">True</span><span class="p">,</span> <span class="o">&lt;</span><span class="n">range_iterator</span> <span class="nb">object</span> <span class="n">at</span> <span class="mh">0x7f1349afab80</span><span class="o">&gt;</span><span class="p">]</span>
+<span class="p">[</span><span class="o">&lt;</span><span class="n">range_iterator</span> <span class="nb">object</span> <span class="n">at</span> <span class="mh">0x7f1349afab80</span><span class="o">&gt;</span><span class="p">]</span>
+<span class="p">[]</span>
+<span class="p">[</span><span class="bp">None</span><span class="p">]</span>
+</pre></div>
+</td></tr></table>
+
+<p>Wonderful! We now have a way to get the state of our stack and our frame at every Python instruction.
+The rendering of the results is not quite usable in the current state. Let's add some wrapper in the last section!</p>
+<h2>Adding some Python wrapping</h2>
+<p>As you can see, all of the low level interface works. Our last mission is to make our <code>op_target</code> useful.
+(This part might be a little empty: it's not the funniest part of this project in my eyes)</p>
+<p>The first thing that we want to do is to exploit the information given by the frame parameter.
+If we look at the informations stored in a frame we can see this:</p>
+<ul>
+<li><code>f_code</code>: the code object being executed in this frame</li>
+<li><code>f_lasti</code>: gives the current instruction (this is an index into the bytecode string of the code object)</li>
+</ul>
+<p>Now our handle is able to know which opcode will be executed just after our <code>DEBUG_OP</code>. This will be useful to aggregate the data and do some nice display.</p>
+<p>We can create a class that will setup the tracing mechanism for a function:</p>
+<ul>
+<li>Change its <code>co_code</code></li>
+<li>Setup a callback as the target function <code>op_debug</code></li>
+</ul>
+<p>As we know the next instruction, we can analyse it and modify its arguments. For example, we can add an <code>auto-follow-called-functions</code> feature:</p>
+<table class="codehilitetable"><tr><td class="linenos"><div class="linenodiv"><pre> 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37</pre></div></td><td class="code"><div class="codehilite"><pre><span class="k">def</span> <span class="nf">op_target</span><span class="p">(</span><span class="n">l</span><span class="p">,</span> <span class="n">f</span><span class="p">,</span> <span class="n">exc</span><span class="o">=</span><span class="bp">None</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">op_target</span><span class="o">.</span><span class="n">callback</span> <span class="ow">is</span> <span class="ow">not</span> <span class="bp">None</span><span class="p">:</span>
+        <span class="n">op_target</span><span class="o">.</span><span class="n">callback</span><span class="p">(</span><span class="n">l</span><span class="p">,</span> <span class="n">f</span><span class="p">,</span> <span class="n">exc</span><span class="p">)</span>
+
+<span class="k">class</span> <span class="nc">Trace</span><span class="p">:</span>
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">func</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">func</span> <span class="o">=</span> <span class="n">func</span>
+
+    <span class="k">def</span> <span class="nf">call</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">add_func_to_trace</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">func</span><span class="p">)</span>
+        <span class="c"># Activate Trace callback for the func call</span>
+        <span class="n">op_target</span><span class="o">.</span><span class="n">callback</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">callback</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">res</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">func</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+        <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+            <span class="n">res</span> <span class="o">=</span> <span class="n">e</span>
+        <span class="n">op_target</span><span class="o">.</span><span class="n">callback</span> <span class="o">=</span> <span class="bp">None</span>
+        <span class="k">return</span> <span class="n">res</span>
+
+    <span class="k">def</span> <span class="nf">add_func_to_trace</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">f</span><span class="p">):</span>
+        <span class="c"># Is it code? is it already transformed?</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">f</span> <span class="p">,</span><span class="s">"op_debug"</span><span class="p">)</span> <span class="ow">and</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">f</span><span class="p">,</span> <span class="s">"__code__"</span><span class="p">):</span>
+            <span class="n">f</span><span class="o">.</span><span class="n">__code__</span> <span class="o">=</span> <span class="n">transform_code</span><span class="p">(</span><span class="n">f</span><span class="o">.</span><span class="n">__code__</span><span class="p">,</span> <span class="n">transform</span><span class="o">=</span><span class="n">add_everywhere</span><span class="p">,</span> <span class="n">add_stacksize</span><span class="o">=</span><span class="n">ADD_STACK</span><span class="p">)</span>
+            <span class="n">f</span><span class="o">.</span><span class="n">__globals__</span><span class="p">[</span><span class="s">'op_target'</span><span class="p">]</span> <span class="o">=</span> <span class="n">op_target</span>
+            <span class="n">f</span><span class="o">.</span><span class="n">op_debug</span> <span class="o">=</span> <span class="bp">True</span>
+
+    <span class="k">def</span> <span class="nf">do_auto_follow</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">stack</span><span class="p">,</span> <span class="n">frame</span><span class="p">):</span>
+        <span class="c"># Nothing fancy: FrameAnalyser is just the wrapper that gives the next executed instruction</span>
+        <span class="n">next_instr</span> <span class="o">=</span> <span class="n">FrameAnalyser</span><span class="p">(</span><span class="n">frame</span><span class="p">)</span><span class="o">.</span><span class="n">next_instr</span><span class="p">()</span>
+        <span class="k">if</span> <span class="s">"CALL"</span> <span class="ow">in</span> <span class="n">next_instr</span><span class="o">.</span><span class="n">opname</span><span class="p">:</span>
+            <span class="n">arg</span> <span class="o">=</span> <span class="n">next_instr</span><span class="o">.</span><span class="n">arg</span>
+            <span class="n">f_index</span> <span class="o">=</span> <span class="p">(</span><span class="n">arg</span> <span class="o">&amp;</span> <span class="mh">0xff</span><span class="p">)</span> <span class="o">+</span> <span class="p">(</span><span class="mi">2</span> <span class="o">*</span> <span class="p">(</span><span class="n">arg</span> <span class="o">&gt;&gt;</span> <span class="mi">8</span><span class="p">))</span>
+            <span class="n">called_func</span> <span class="o">=</span> <span class="n">stack</span><span class="p">[</span><span class="n">f_index</span><span class="p">]</span>
+
+            <span class="c"># If call target is not traced yet: do it</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">called_func</span><span class="p">,</span> <span class="s">"op_debug"</span><span class="p">):</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">add_func_to_trace</span><span class="p">(</span><span class="n">called_func</span><span class="p">)</span>
+</pre></div>
+</td></tr></table>
+
+<p>Now, all we have to do is to implement sub-classes with the method <code>callback</code> which will be called every instruction and the method <code>do_report</code> that will print the gathered information.</p>
+<p>Here is an example of a dummy tracer that follows function calls:</p>
+<table class="codehilitetable"><tr><td class="linenos"><div class="linenodiv"><pre> 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27</pre></div></td><td class="code"><div class="codehilite"><pre><span class="k">class</span> <span class="nc">DummyTrace</span><span class="p">(</span><span class="n">Trace</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">func</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">func</span> <span class="o">=</span> <span class="n">func</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">data</span> <span class="o">=</span> <span class="n">collections</span><span class="o">.</span><span class="n">OrderedDict</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">last_frame</span> <span class="o">=</span> <span class="bp">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">known_frame</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">report</span> <span class="o">=</span> <span class="p">[]</span>
+
+    <span class="k">def</span> <span class="nf">callback</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">stack</span><span class="p">,</span> <span class="n">frame</span><span class="p">,</span> <span class="n">exc</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">frame</span> <span class="ow">not</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">known_frame</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">known_frame</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">frame</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">report</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="s">" === Entering New Frame {0} ({1}) ==="</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">frame</span><span class="o">.</span><span class="n">f_code</span><span class="o">.</span><span class="n">co_name</span><span class="p">,</span> <span class="nb">id</span><span class="p">(</span><span class="n">frame</span><span class="p">)))</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">last_frame</span> <span class="o">=</span> <span class="n">frame</span>
+        <span class="k">if</span> <span class="n">frame</span> <span class="o">!=</span> <span class="bp">self</span><span class="o">.</span><span class="n">last_frame</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">report</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="s">" === Returning to Frame {0} {1}==="</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">frame</span><span class="o">.</span><span class="n">f_code</span><span class="o">.</span><span class="n">co_name</span><span class="p">,</span> <span class="nb">id</span><span class="p">(</span><span class="n">frame</span><span class="p">)))</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">last_frame</span> <span class="o">=</span> <span class="n">frame</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">report</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">stack</span><span class="p">))</span>
+        <span class="n">instr</span> <span class="o">=</span> <span class="n">FrameAnalyser</span><span class="p">(</span><span class="n">frame</span><span class="p">)</span><span class="o">.</span><span class="n">next_instr</span><span class="p">()</span>
+        <span class="n">offset</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">instr</span><span class="o">.</span><span class="n">offset</span><span class="p">)</span><span class="o">.</span><span class="n">rjust</span><span class="p">(</span><span class="mi">8</span><span class="p">)</span>
+        <span class="n">opname</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">instr</span><span class="o">.</span><span class="n">opname</span><span class="p">)</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span>
+        <span class="n">arg</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">instr</span><span class="o">.</span><span class="n">arg</span><span class="p">)</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">10</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">report</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="s">"{0}  {1} {2} {3}"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">offset</span><span class="p">,</span> <span class="n">opname</span><span class="p">,</span> <span class="n">arg</span><span class="p">,</span> <span class="n">instr</span><span class="o">.</span><span class="n">argval</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">do_auto_follow</span><span class="p">(</span><span class="n">stack</span><span class="p">,</span> <span class="n">frame</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">do_report</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">print</span><span class="p">(</span><span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">report</span><span class="p">))</span>
+</pre></div>
+</td></tr></table>
+
+<p>Here are some examples of implementation and uses. The format may be hard to read, I am not good at user-friendly reporting...</p>
+<p><a href="http://hakril.net/python/article/example_dummy_trace.html">Example 1</a>: auto-tracing with dummy dump of stack and executed instructions</p>
+<p><a href="http://hakril.net/python/article/example_dummy_contextmanager.html">Example 2</a>: context manager at work</p>
+<p>And, at last, a demo of how list comprehensions work:</p>
+<p><a href="http://hakril.net/python/article/example_list_comp_dummy.html">Example 3</a>: output of dummy tracer</p>
+<p><a href="http://hakril.net/python/article/example_list_comp_stacktrace.html">Example 4</a>: output of Stack aggregation tracer</p>
+<h2>Conclusion</h2>
+<p>This little project was a good way to have an introduction to some low-level Python, the interpreter's main loop, Python C-coding and Python bytecode. Also, the resulting tool is a good way to have a quick look at the bytecode-behavior of some fun Python constructions like generators, context managers or list comprehensions.</p>
+<p>Here is the <a href="http://hakril.net/blog_data/assembly_tracer_code.zip">complete code</a> of this experimentation.</p>
+<p>Another thing that could be done is adding a way to modify the stack of the function we are tracing. I am not sure what it could be used for, but that would be fun!</p>
+    
+
+    
+    <p id="disqus_thread"/>
+    
+    <noscript>Please enable JavaScript to view the <a href="http://disqus.com/?ref_noscript">comments powered by Disqus.</a></noscript>
+    <a href="http://disqus.com" class="dsq-brlink">blog comments powered by <span class="logo-disqus">Disqus</span></a>
+    
+</li>
+
+
+    
+    </div></body></html>

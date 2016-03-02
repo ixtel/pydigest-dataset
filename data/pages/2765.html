@@ -1,0 +1,648 @@
+<html><body><div><article class="post-content">
+    <div><p>If you are interested in using the <code>EnsembleClassifier</code>, please note that it is now also available through scikit learn (&gt;0.17) as <a href="http://scikit-learn.org/stable/modules/generated/sklearn.ensemble.VotingClassifier.html"><code>VotingClassifier</code></a>.</p></div>
+
+<p><br/></p>
+
+<p>Here, I want to present a simple and conservative approach of implementing a weighted majority rule ensemble classifier in <a href="http://scikit-learn.org/stable/">scikit-learn</a> that yielded remarkably good results when I tried it in a <a href="http://www.kaggle.com">kaggle</a> competition. For me personally, kaggle competitions are just a nice way to try out and compare different approaches and ideas – basically an opportunity to learn in a controlled environment with nice datasets.</p>
+
+<p>Of course, there are other implementations of more sophisticated <a href="http://scikit-learn.org/stable/modules/ensemble.html">ensemble methods</a> in scikit-learn, such as <a href="http://scikit-learn.org/stable/modules/generated/sklearn.ensemble.BaggingClassifier.html">bagging classifiers</a>, <a href="http://scikit-learn.org/stable/modules/generated/sklearn.ensemble.RandomForestClassifier.html">random forests</a>, or the famous <a href="http://scikit-learn.org/stable/modules/generated/sklearn.ensemble.AdaBoostClassifier.html">AdaBoost</a> algorithm. However, as far as I am concerned, they all require the usage of a common “base classifier.”</p>
+
+<p>In contrast, my motivation for the following approach was to combine conceptually different machine learning classifiers and use a majority vote rule. The reason for this was that I had trained a set of equally well performing models, and I wanted to balance out their individual weaknesses.</p>
+
+<p><br/>
+<br/></p>
+
+<h3 id="sections">Sections</h3>
+
+
+
+<h2 id="classifying-iris-flowers-using-different-classification-models">Classifying Iris Flowers Using Different Classification Models</h2>
+
+<p>For a simple example, let us use three different classification models to classify the samples in the <a href="http://en.wikipedia.org/wiki/Iris_flower_data_set">Iris dataset</a>: Logistic regression, a naive Bayes classifier with a Gaussian kernel, and a random forest classifier – an ensemble method itself. At this point, let’s not worry about preprocessing the data and training and test sets. Also, we will only use 2 feature columns (sepal width and petal height) to make the classification problem harder.</p>
+
+<div class="highlighter-rouge"><pre class="highlight"><code><span class="kn">from</span> <span class="nn">sklearn</span> <span class="kn">import</span> <span class="n">datasets</span>
+
+<span class="n">iris</span> <span class="o">=</span> <span class="n">datasets</span><span class="o">.</span><span class="n">load_iris</span><span class="p">()</span>
+<span class="n">X</span><span class="p">,</span> <span class="n">y</span> <span class="o">=</span> <span class="n">iris</span><span class="o">.</span><span class="n">data</span><span class="p">[:,</span> <span class="mi">1</span><span class="p">:</span><span class="mi">3</span><span class="p">],</span> <span class="n">iris</span><span class="o">.</span><span class="n">target</span>
+</code></pre>
+</div>
+
+<div class="highlighter-rouge"><pre class="highlight"><code><span class="kn">from</span> <span class="nn">sklearn</span> <span class="kn">import</span> <span class="n">cross_validation</span>
+<span class="kn">from</span> <span class="nn">sklearn.linear_model</span> <span class="kn">import</span> <span class="n">LogisticRegression</span>
+<span class="kn">from</span> <span class="nn">sklearn.naive_bayes</span> <span class="kn">import</span> <span class="n">GaussianNB</span>
+<span class="kn">from</span> <span class="nn">sklearn.ensemble</span> <span class="kn">import</span> <span class="n">RandomForestClassifier</span>
+<span class="kn">import</span> <span class="nn">numpy</span> <span class="kn">as</span> <span class="nn">np</span>
+
+<span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">seed</span><span class="p">(</span><span class="mi">123</span><span class="p">)</span>
+
+<span class="n">clf1</span> <span class="o">=</span> <span class="n">LogisticRegression</span><span class="p">()</span>
+<span class="n">clf2</span> <span class="o">=</span> <span class="n">RandomForestClassifier</span><span class="p">()</span>
+<span class="n">clf3</span> <span class="o">=</span> <span class="n">GaussianNB</span><span class="p">()</span>
+
+<span class="k">print</span><span class="p">(</span><span class="s">'5-fold cross validation:</span><span class="se">\n</span><span class="s">'</span><span class="p">)</span>
+
+<span class="k">for</span> <span class="n">clf</span><span class="p">,</span> <span class="n">label</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">([</span><span class="n">clf1</span><span class="p">,</span> <span class="n">clf2</span><span class="p">,</span> <span class="n">clf3</span><span class="p">],</span> <span class="p">[</span><span class="s">'Logistic Regression'</span><span class="p">,</span> <span class="s">'Random Forest'</span><span class="p">,</span> <span class="s">'naive Bayes'</span><span class="p">]):</span>
+
+    <span class="n">scores</span> <span class="o">=</span> <span class="n">cross_validation</span><span class="o">.</span><span class="n">cross_val_score</span><span class="p">(</span><span class="n">clf</span><span class="p">,</span> <span class="n">X</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="n">cv</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span> <span class="n">scoring</span><span class="o">=</span><span class="s">'accuracy'</span><span class="p">)</span>
+    <span class="k">print</span><span class="p">(</span><span class="s">"Accuracy: </span><span class="si">%0.2</span><span class="s">f (+/- </span><span class="si">%0.2</span><span class="s">f) [</span><span class="si">%</span><span class="s">s]"</span> <span class="o">%</span> <span class="p">(</span><span class="n">scores</span><span class="o">.</span><span class="n">mean</span><span class="p">(),</span> <span class="n">scores</span><span class="o">.</span><span class="n">std</span><span class="p">(),</span> <span class="n">label</span><span class="p">))</span>
+
+</code></pre>
+</div>
+
+<div class="highlighter-rouge"><pre class="highlight"><code>5-fold cross validation:
+
+Accuracy: 0.90 (+/- 0.05) [Logistic Regression]
+Accuracy: 0.92 (+/- 0.05) [Random Forest]
+Accuracy: 0.91 (+/- 0.04) [naive Bayes]
+</code></pre>
+</div>
+
+<p>As we can see from the cross-validation results above, the performance of the three models is almost equal.</p>
+
+<h2 id="implementing-the-majority-voting-rule-ensemble-classifier">Implementing the Majority Voting Rule Ensemble Classifier</h2>
+
+<p>Now, we will implement a simple <code class="highlighter-rouge">EnsembleClassifier</code> class that allows us to combine the three different classifiers. We define a <code class="highlighter-rouge">predict</code> method that let’s us simply take the majority rule of the predictions by the classifiers.
+E.g., if the prediction for a sample is</p>
+
+<ul>
+  <li>classifier 1 -&gt; class 1</li>
+  <li>classifier 2 -&gt; class 1</li>
+  <li>classifier 3 -&gt; class 2</li>
+</ul>
+
+<p>we would classify the sample as “class 1.”</p>
+
+<p>Furthermore, we add a <code class="highlighter-rouge">weights</code> parameter, which let’s us assign a specific weight to each classifier. In order to work with the weights, we collect the predicted class probabilities for each classifier, multiply it by the classifier weight, and take the average. Based on these weighted average probabilties, we can then assign the class label.</p>
+
+<p>To illustrate this with a simple example, let’s assume we have 3 classifiers and a 3-class classification problems where we assign equal weights to all classifiers (the default): w1=1, w2=1, w3=1.</p>
+
+<p>The weighted average probabilities for a sample would then be calculated as follows:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>classifier</th>
+      <th>class 1</th>
+      <th>class 2</th>
+      <th>class 3</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>classifier 1</td>
+      <td>w1 * 0.2</td>
+      <td>w1 * 0.5</td>
+      <td>w1 * 0.3</td>
+    </tr>
+    <tr>
+      <td>classifier 2</td>
+      <td>w2 * 0.6</td>
+      <td>w2 * 0.3</td>
+      <td>w2 * 0.1</td>
+    </tr>
+    <tr>
+      <td>classifier 3</td>
+      <td>w3 * 0.3</td>
+      <td>w3 * 0.4</td>
+      <td>w3 * 0.3</td>
+    </tr>
+    <tr>
+      <td>weighted average</td>
+      <td>0.37</td>
+      <td>0.4</td>
+      <td>0.3</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>We can see in the table above that class 2 has the highest weighted average probability, thus we classify the sample as class 2.</p>
+
+<p>Now, let’s put it into code and apply it to our Iris classification.</p>
+
+<div class="highlighter-rouge"><pre class="highlight"><code><span class="kn">from</span> <span class="nn">sklearn.base</span> <span class="kn">import</span> <span class="n">BaseEstimator</span>
+<span class="kn">from</span> <span class="nn">sklearn.base</span> <span class="kn">import</span> <span class="n">ClassifierMixin</span>
+<span class="kn">import</span> <span class="nn">numpy</span> <span class="kn">as</span> <span class="nn">np</span>
+<span class="kn">import</span> <span class="nn">operator</span>
+
+<span class="k">class</span> <span class="nc">EnsembleClassifier</span><span class="p">(</span><span class="n">BaseEstimator</span><span class="p">,</span> <span class="n">ClassifierMixin</span><span class="p">):</span>
+    <span class="s">"""
+    Ensemble classifier for scikit-learn estimators.
+
+    Parameters
+    ----------
+
+    clf : `iterable`
+      A list of scikit-learn classifier objects.
+    weights : `list` (default: `None`)
+      If `None`, the majority rule voting will be applied to the predicted class labels.
+        If a list of weights (`float` or `int`) is provided, the averaged raw probabilities (via `predict_proba`)
+        will be used to determine the most confident class label.
+
+    """</span>
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">clfs</span><span class="p">,</span> <span class="n">weights</span><span class="o">=</span><span class="bp">None</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">clfs</span> <span class="o">=</span> <span class="n">clfs</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">weights</span> <span class="o">=</span> <span class="n">weights</span>
+
+    <span class="k">def</span> <span class="nf">fit</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">X</span><span class="p">,</span> <span class="n">y</span><span class="p">):</span>
+        <span class="s">"""
+        Fit the scikit-learn estimators.
+
+        Parameters
+        ----------
+
+        X : numpy array, shape = [n_samples, n_features]
+            Training data
+        y : list or numpy array, shape = [n_samples]
+            Class labels
+
+        """</span>
+        <span class="k">for</span> <span class="n">clf</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">clfs</span><span class="p">:</span>
+            <span class="n">clf</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span><span class="n">X</span><span class="p">,</span> <span class="n">y</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">predict</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">X</span><span class="p">):</span>
+        <span class="s">"""
+        Parameters
+        ----------
+
+        X : numpy array, shape = [n_samples, n_features]
+
+        Returns
+        ----------
+
+        maj : list or numpy array, shape = [n_samples]
+            Predicted class labels by majority rule
+
+        """</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">classes_</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">([</span><span class="n">clf</span><span class="o">.</span><span class="n">predict</span><span class="p">(</span><span class="n">X</span><span class="p">)</span> <span class="k">for</span> <span class="n">clf</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">clfs</span><span class="p">])</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">weights</span><span class="p">:</span>
+            <span class="n">avg</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">predict_proba</span><span class="p">(</span><span class="n">X</span><span class="p">)</span>
+
+            <span class="n">maj</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">apply_along_axis</span><span class="p">(</span><span class="k">lambda</span> <span class="n">x</span><span class="p">:</span> <span class="nb">max</span><span class="p">(</span><span class="nb">enumerate</span><span class="p">(</span><span class="n">x</span><span class="p">),</span> <span class="n">key</span><span class="o">=</span><span class="n">operator</span><span class="o">.</span><span class="n">itemgetter</span><span class="p">(</span><span class="mi">1</span><span class="p">))[</span><span class="mi">0</span><span class="p">],</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">arr</span><span class="o">=</span><span class="n">avg</span><span class="p">)</span>
+
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">maj</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">([</span><span class="n">np</span><span class="o">.</span><span class="n">argmax</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">bincount</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">classes_</span><span class="p">[:,</span><span class="n">c</span><span class="p">]))</span> <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">classes_</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">])])</span>
+
+        <span class="k">return</span> <span class="n">maj</span>
+
+    <span class="k">def</span> <span class="nf">predict_proba</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">X</span><span class="p">):</span>
+
+        <span class="s">"""
+        Parameters
+        ----------
+
+        X : numpy array, shape = [n_samples, n_features]
+
+        Returns
+        ----------
+
+        avg : list or numpy array, shape = [n_samples, n_probabilities]
+            Weighted average probability for each class per sample.
+
+        """</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">probas_</span> <span class="o">=</span> <span class="p">[</span><span class="n">clf</span><span class="o">.</span><span class="n">predict_proba</span><span class="p">(</span><span class="n">X</span><span class="p">)</span> <span class="k">for</span> <span class="n">clf</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">clfs</span><span class="p">]</span>
+        <span class="n">avg</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">average</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">probas_</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="n">weights</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">weights</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">avg</span>
+</code></pre>
+</div>
+
+<div class="highlighter-rouge"><pre class="highlight"><code><span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">seed</span><span class="p">(</span><span class="mi">123</span><span class="p">)</span>
+<span class="n">eclf</span> <span class="o">=</span> <span class="n">EnsembleClassifier</span><span class="p">(</span><span class="n">clfs</span><span class="o">=</span><span class="p">[</span><span class="n">clf1</span><span class="p">,</span> <span class="n">clf2</span><span class="p">,</span> <span class="n">clf3</span><span class="p">],</span> <span class="n">weights</span><span class="o">=</span><span class="p">[</span><span class="mi">1</span><span class="p">,</span><span class="mi">1</span><span class="p">,</span><span class="mi">1</span><span class="p">])</span>
+
+<span class="k">for</span> <span class="n">clf</span><span class="p">,</span> <span class="n">label</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">([</span><span class="n">clf1</span><span class="p">,</span> <span class="n">clf2</span><span class="p">,</span> <span class="n">clf3</span><span class="p">,</span> <span class="n">eclf</span><span class="p">],</span> <span class="p">[</span><span class="s">'Logistic Regression'</span><span class="p">,</span> <span class="s">'Random Forest'</span><span class="p">,</span> <span class="s">'naive Bayes'</span><span class="p">,</span> <span class="s">'Ensemble'</span><span class="p">]):</span>
+
+    <span class="n">scores</span> <span class="o">=</span> <span class="n">cross_validation</span><span class="o">.</span><span class="n">cross_val_score</span><span class="p">(</span><span class="n">clf</span><span class="p">,</span> <span class="n">X</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="n">cv</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span> <span class="n">scoring</span><span class="o">=</span><span class="s">'accuracy'</span><span class="p">)</span>
+    <span class="k">print</span><span class="p">(</span><span class="s">"Accuracy: </span><span class="si">%0.2</span><span class="s">f (+/- </span><span class="si">%0.2</span><span class="s">f) [</span><span class="si">%</span><span class="s">s]"</span> <span class="o">%</span> <span class="p">(</span><span class="n">scores</span><span class="o">.</span><span class="n">mean</span><span class="p">(),</span> <span class="n">scores</span><span class="o">.</span><span class="n">std</span><span class="p">(),</span> <span class="n">label</span><span class="p">))</span>
+
+
+</code></pre>
+</div>
+
+<div class="highlighter-rouge"><pre class="highlight"><code>Accuracy: 0.90 (+/- 0.05) [Logistic Regression]
+Accuracy: 0.92 (+/- 0.05) [Random Forest]
+Accuracy: 0.91 (+/- 0.04) [naive Bayes]
+Accuracy: 0.95 (+/- 0.03) [Ensemble]
+</code></pre>
+</div>
+
+<h2 id="additional-note-about-the-ensembleclassifier-implementation-class-labels-vs-probabilities">Additional Note About the EnsembleClassifier Implementation: Class Labels vs. Probabilities</h2>
+
+<p>You might be wondering why I implemented the <code class="highlighter-rouge">EnsembleClassifier</code> class so that it applies the majority voting purely on the class labels if no weights are provided and is the predicted probability values otherwise.</p>
+
+<p>Let’s consider the following scenario:</p>
+
+<h4 id="prediction-based-on-majority-class-labels">1) Prediction based on majority class labels:</h4>
+
+<table>
+  <thead>
+    <tr>
+      <th>classifier</th>
+      <th>class 1</th>
+      <th>class 2</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>classifier 1</td>
+      <td>1</td>
+      <td>0</td>
+    </tr>
+    <tr>
+      <td>classifier 2</td>
+      <td>0</td>
+      <td>1</td>
+    </tr>
+    <tr>
+      <td>classifier 3</td>
+      <td>0</td>
+      <td>1</td>
+    </tr>
+    <tr>
+      <td>prediction</td>
+      <td>-</td>
+      <td>1</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>To achieve this behavior, initialize the <code class="highlighter-rouge">EnsembleClassifier</code> like this:</p>
+
+<div class="highlighter-rouge"><pre class="highlight"><code>eclf = EnsembleClassifier(clfs=[clf1, clf2, clf3])
+</code></pre>
+</div>
+
+<h4 id="prediction-based-on-predicted-probabilities-equal-weights-weights111">2) Prediction based on predicted probabilities (equal weights, <code class="highlighter-rouge">weights=[1,1,1]</code>)</h4>
+
+<table>
+  <thead>
+    <tr>
+      <th>classifier</th>
+      <th>class 1</th>
+      <th>class 2</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>classifier 1</td>
+      <td>0.99</td>
+      <td>0.01</td>
+    </tr>
+    <tr>
+      <td>classifier 2</td>
+      <td>0.49</td>
+      <td>0.51</td>
+    </tr>
+    <tr>
+      <td>classifier 3</td>
+      <td>0.49</td>
+      <td>0.51</td>
+    </tr>
+    <tr>
+      <td>weighted average</td>
+      <td>0.66</td>
+      <td>0.18</td>
+    </tr>
+    <tr>
+      <td>prediction</td>
+      <td>1</td>
+      <td>-</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>To achieve this behavior, initialize the <code class="highlighter-rouge">EnsembleClassifier</code> like this:</p>
+
+<div class="highlighter-rouge"><pre class="highlight"><code>eclf = EnsembleClassifier(clfs=[clf1, clf2, clf3], weights=[1,1,1])
+</code></pre>
+</div>
+
+<p><br/>
+<br/></p>
+
+<p>As we can see, the results are different depending on whether we apply a majority vote based on the class labels or take the average of the predicted probabilities. In general, I think it makes more sense to use the predicted probabilities (scenario 2). Here, the “very confident” classifier 1 overules the very unconfident classifiers 2 and 3.</p>
+
+<p>The reason for the different behaviors is that not all classifiers in scikit-learn support the <code class="highlighter-rouge">predict_proba</code> method. In this case, the <code class="highlighter-rouge">EnsembleClassifier</code> can still be used just based on the class labels if no weights are provided as parameter.</p>
+
+<h2 id="ensembleclassifier---tuning-weights">EnsembleClassifier - Tuning Weights</h2>
+
+<p>Let’s get back to our <code class="highlighter-rouge">weights</code> parameter. Here, we will use a naive brute-force approach to find the optimal weights for each classifier to increase the prediction accuracy.</p>
+
+<div class="highlighter-rouge"><pre class="highlight"><code><span class="kn">import</span> <span class="nn">pandas</span> <span class="kn">as</span> <span class="nn">pd</span>
+
+<span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">seed</span><span class="p">(</span><span class="mi">123</span><span class="p">)</span>
+
+<span class="n">df</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">(</span><span class="n">columns</span><span class="o">=</span><span class="p">(</span><span class="s">'w1'</span><span class="p">,</span> <span class="s">'w2'</span><span class="p">,</span> <span class="s">'w3'</span><span class="p">,</span> <span class="s">'mean'</span><span class="p">,</span> <span class="s">'std'</span><span class="p">))</span>
+
+<span class="n">i</span> <span class="o">=</span> <span class="mi">0</span>
+<span class="k">for</span> <span class="n">w1</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span><span class="mi">4</span><span class="p">):</span>
+    <span class="k">for</span> <span class="n">w2</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span><span class="mi">4</span><span class="p">):</span>
+        <span class="k">for</span> <span class="n">w3</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span><span class="mi">4</span><span class="p">):</span>
+
+            <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="nb">set</span><span class="p">((</span><span class="n">w1</span><span class="p">,</span><span class="n">w2</span><span class="p">,</span><span class="n">w3</span><span class="p">)))</span> <span class="o">==</span> <span class="mi">1</span><span class="p">:</span> <span class="c"># skip if all weights are equal</span>
+                <span class="k">continue</span>
+
+            <span class="n">eclf</span> <span class="o">=</span> <span class="n">EnsembleClassifier</span><span class="p">(</span><span class="n">clfs</span><span class="o">=</span><span class="p">[</span><span class="n">clf1</span><span class="p">,</span> <span class="n">clf2</span><span class="p">,</span> <span class="n">clf3</span><span class="p">],</span> <span class="n">weights</span><span class="o">=</span><span class="p">[</span><span class="n">w1</span><span class="p">,</span><span class="n">w2</span><span class="p">,</span><span class="n">w3</span><span class="p">])</span>
+            <span class="n">scores</span> <span class="o">=</span> <span class="n">cross_validation</span><span class="o">.</span><span class="n">cross_val_score</span><span class="p">(</span>
+                                            <span class="n">estimator</span><span class="o">=</span><span class="n">eclf</span><span class="p">,</span>
+                                            <span class="n">X</span><span class="o">=</span><span class="n">X</span><span class="p">,</span>
+                                            <span class="n">y</span><span class="o">=</span><span class="n">y</span><span class="p">,</span>
+                                            <span class="n">cv</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span>
+                                            <span class="n">scoring</span><span class="o">=</span><span class="s">'accuracy'</span><span class="p">,</span>
+                                            <span class="n">n_jobs</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+
+            <span class="n">df</span><span class="o">.</span><span class="n">loc</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="p">[</span><span class="n">w1</span><span class="p">,</span> <span class="n">w2</span><span class="p">,</span> <span class="n">w3</span><span class="p">,</span> <span class="n">scores</span><span class="o">.</span><span class="n">mean</span><span class="p">(),</span> <span class="n">scores</span><span class="o">.</span><span class="n">std</span><span class="p">()]</span>
+            <span class="n">i</span> <span class="o">+=</span> <span class="mi">1</span>
+
+<span class="n">df</span><span class="o">.</span><span class="n">sort</span><span class="p">(</span><span class="n">columns</span><span class="o">=</span><span class="p">[</span><span class="s">'mean'</span><span class="p">,</span> <span class="s">'std'</span><span class="p">],</span> <span class="n">ascending</span><span class="o">=</span><span class="bp">False</span><span class="p">)</span>
+</code></pre>
+</div>
+
+<div>
+<table border="1" class="dataframe">
+  <thead>
+    <tr>
+      <th/>
+      <th>w1</th>
+      <th>w2</th>
+      <th>w3</th>
+      <th>mean</th>
+      <th>std</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th>2 </th>
+      <td> 1</td>
+      <td> 2</td>
+      <td> 1</td>
+      <td> 0.953333</td>
+      <td> 0.033993</td>
+    </tr>
+    <tr>
+      <th>17</th>
+      <td> 3</td>
+      <td> 1</td>
+      <td> 2</td>
+      <td> 0.953333</td>
+      <td> 0.033993</td>
+    </tr>
+    <tr>
+      <th>16</th>
+      <td> 3</td>
+      <td> 1</td>
+      <td> 1</td>
+      <td> 0.946667</td>
+      <td> 0.045216</td>
+    </tr>
+    <tr>
+      <th>20</th>
+      <td> 3</td>
+      <td> 2</td>
+      <td> 2</td>
+      <td> 0.946667</td>
+      <td> 0.045216</td>
+    </tr>
+    <tr>
+      <th>1 </th>
+      <td> 1</td>
+      <td> 1</td>
+      <td> 3</td>
+      <td> 0.946667</td>
+      <td> 0.040000</td>
+    </tr>
+    <tr>
+      <th>6 </th>
+      <td> 1</td>
+      <td> 3</td>
+      <td> 2</td>
+      <td> 0.946667</td>
+      <td> 0.033993</td>
+    </tr>
+    <tr>
+      <th>7 </th>
+      <td> 1</td>
+      <td> 3</td>
+      <td> 3</td>
+      <td> 0.946667</td>
+      <td> 0.033993</td>
+    </tr>
+    <tr>
+      <th>11</th>
+      <td> 2</td>
+      <td> 2</td>
+      <td> 1</td>
+      <td> 0.946667</td>
+      <td> 0.033993</td>
+    </tr>
+    <tr>
+      <th>13</th>
+      <td> 2</td>
+      <td> 3</td>
+      <td> 1</td>
+      <td> 0.946667</td>
+      <td> 0.033993</td>
+    </tr>
+    <tr>
+      <th>14</th>
+      <td> 2</td>
+      <td> 3</td>
+      <td> 2</td>
+      <td> 0.946667</td>
+      <td> 0.033993</td>
+    </tr>
+    <tr>
+      <th>18</th>
+      <td> 3</td>
+      <td> 1</td>
+      <td> 3</td>
+      <td> 0.946667</td>
+      <td> 0.033993</td>
+    </tr>
+    <tr>
+      <th>22</th>
+      <td> 3</td>
+      <td> 3</td>
+      <td> 1</td>
+      <td> 0.946667</td>
+      <td> 0.033993</td>
+    </tr>
+    <tr>
+      <th>23</th>
+      <td> 3</td>
+      <td> 3</td>
+      <td> 2</td>
+      <td> 0.946667</td>
+      <td> 0.033993</td>
+    </tr>
+    <tr>
+      <th>19</th>
+      <td> 3</td>
+      <td> 2</td>
+      <td> 1</td>
+      <td> 0.940000</td>
+      <td> 0.057349</td>
+    </tr>
+    <tr>
+      <th>5 </th>
+      <td> 1</td>
+      <td> 3</td>
+      <td> 1</td>
+      <td> 0.940000</td>
+      <td> 0.044222</td>
+    </tr>
+    <tr>
+      <th>8 </th>
+      <td> 2</td>
+      <td> 1</td>
+      <td> 1</td>
+      <td> 0.940000</td>
+      <td> 0.044222</td>
+    </tr>
+    <tr>
+      <th>9 </th>
+      <td> 2</td>
+      <td> 1</td>
+      <td> 2</td>
+      <td> 0.940000</td>
+      <td> 0.044222</td>
+    </tr>
+    <tr>
+      <th>12</th>
+      <td> 2</td>
+      <td> 2</td>
+      <td> 3</td>
+      <td> 0.940000</td>
+      <td> 0.044222</td>
+    </tr>
+    <tr>
+      <th>21</th>
+      <td> 3</td>
+      <td> 2</td>
+      <td> 3</td>
+      <td> 0.940000</td>
+      <td> 0.044222</td>
+    </tr>
+    <tr>
+      <th>4 </th>
+      <td> 1</td>
+      <td> 2</td>
+      <td> 3</td>
+      <td> 0.940000</td>
+      <td> 0.038873</td>
+    </tr>
+    <tr>
+      <th>3 </th>
+      <td> 1</td>
+      <td> 2</td>
+      <td> 2</td>
+      <td> 0.940000</td>
+      <td> 0.032660</td>
+    </tr>
+    <tr>
+      <th>10</th>
+      <td> 2</td>
+      <td> 1</td>
+      <td> 3</td>
+      <td> 0.940000</td>
+      <td> 0.032660</td>
+    </tr>
+    <tr>
+      <th>0 </th>
+      <td> 1</td>
+      <td> 1</td>
+      <td> 2</td>
+      <td> 0.933333</td>
+      <td> 0.047140</td>
+    </tr>
+    <tr>
+      <th>15</th>
+      <td> 2</td>
+      <td> 3</td>
+      <td> 3</td>
+      <td> 0.933333</td>
+      <td> 0.047140</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<p><br/>
+<br/></p>
+
+<h2 id="ensembleclassifier---pipelines">EnsembleClassifier - Pipelines</h2>
+
+<p>Of course, we can also use the <code class="highlighter-rouge">EnsembleClassifier</code> in <code class="highlighter-rouge">Pipelines</code>. This is especially useful if a certain classifier does a pretty good job on a certain feature subset or requires different <code class="highlighter-rouge">preprocessing</code> steps. For demonstration purposes, let us implement a simple <code class="highlighter-rouge">ColumnSelector</code> class.</p>
+
+<div class="highlighter-rouge"><pre class="highlight"><code><span class="k">class</span> <span class="nc">ColumnSelector</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
+    <span class="s">"""
+    A feature selector for scikit-learn's Pipeline class that returns
+    specified columns from a numpy array.
+
+    """</span>
+
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">cols</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">cols</span> <span class="o">=</span> <span class="n">cols</span>
+
+    <span class="k">def</span> <span class="nf">transform</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">X</span><span class="p">,</span> <span class="n">y</span><span class="o">=</span><span class="bp">None</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">X</span><span class="p">[:,</span> <span class="bp">self</span><span class="o">.</span><span class="n">cols</span><span class="p">]</span>
+
+    <span class="k">def</span> <span class="nf">fit</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">X</span><span class="p">,</span> <span class="n">y</span><span class="o">=</span><span class="bp">None</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span>
+</code></pre>
+</div>
+
+<div class="highlighter-rouge"><pre class="highlight"><code><span class="kn">from</span> <span class="nn">sklearn.pipeline</span> <span class="kn">import</span> <span class="n">Pipeline</span>
+<span class="kn">from</span> <span class="nn">sklearn.lda</span> <span class="kn">import</span> <span class="n">LDA</span>
+
+<span class="n">pipe1</span> <span class="o">=</span> <span class="n">Pipeline</span><span class="p">([</span>
+               <span class="p">(</span><span class="s">'sel'</span><span class="p">,</span> <span class="n">ColumnSelector</span><span class="p">([</span><span class="mi">1</span><span class="p">])),</span>    <span class="c"># use only the 1st feature</span>
+               <span class="p">(</span><span class="s">'clf'</span><span class="p">,</span> <span class="n">GaussianNB</span><span class="p">())])</span>
+
+<span class="n">pipe2</span> <span class="o">=</span> <span class="n">Pipeline</span><span class="p">([</span>
+               <span class="p">(</span><span class="s">'sel'</span><span class="p">,</span> <span class="n">ColumnSelector</span><span class="p">([</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">])),</span> <span class="c"># use the 1st and 2nd feature</span>
+               <span class="p">(</span><span class="s">'dim'</span><span class="p">,</span> <span class="n">LDA</span><span class="p">(</span><span class="n">n_components</span><span class="o">=</span><span class="mi">1</span><span class="p">)),</span>    <span class="c"># Dimensionality reduction via LDA</span>
+               <span class="p">(</span><span class="s">'clf'</span><span class="p">,</span> <span class="n">LogisticRegression</span><span class="p">())])</span>
+
+<span class="n">eclf</span> <span class="o">=</span> <span class="n">EnsembleClassifier</span><span class="p">([</span><span class="n">pipe1</span><span class="p">,</span> <span class="n">pipe2</span><span class="p">])</span>
+<span class="n">scores</span> <span class="o">=</span> <span class="n">cross_validation</span><span class="o">.</span><span class="n">cross_val_score</span><span class="p">(</span><span class="n">eclf</span><span class="p">,</span> <span class="n">X</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="n">cv</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span> <span class="n">scoring</span><span class="o">=</span><span class="s">'accuracy'</span><span class="p">)</span>
+<span class="k">print</span><span class="p">(</span><span class="s">"Accuracy: </span><span class="si">%0.2</span><span class="s">f (+/- </span><span class="si">%0.2</span><span class="s">f) [</span><span class="si">%</span><span class="s">s]"</span> <span class="o">%</span> <span class="p">(</span><span class="n">scores</span><span class="o">.</span><span class="n">mean</span><span class="p">(),</span> <span class="n">scores</span><span class="o">.</span><span class="n">std</span><span class="p">(),</span> <span class="n">label</span><span class="p">))</span>
+</code></pre>
+</div>
+
+<div class="highlighter-rouge"><pre class="highlight"><code>Accuracy: 0.95 (+/- 0.03) [Ensemble]
+</code></pre>
+</div>
+
+<div class="highlighter-rouge"><pre class="highlight"><code><span class="n">pipe1</span> <span class="o">=</span> <span class="n">Pipeline</span><span class="p">([</span>
+               <span class="p">(</span><span class="s">'sel'</span><span class="p">,</span> <span class="n">ColumnSelector</span><span class="p">([</span><span class="mi">1</span><span class="p">])),</span> <span class="c"># use only the 1st feature</span>
+               <span class="p">(</span><span class="s">'clf'</span><span class="p">,</span> <span class="n">RandomForestClassifier</span><span class="p">())])</span>
+
+<span class="n">pipe2</span> <span class="o">=</span> <span class="n">Pipeline</span><span class="p">([</span>
+               <span class="p">(</span><span class="s">'sel'</span><span class="p">,</span> <span class="n">ColumnSelector</span><span class="p">([</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">])),</span> <span class="c"># use the 1st and 2nd feature</span>
+               <span class="p">(</span><span class="s">'dim'</span><span class="p">,</span> <span class="n">LDA</span><span class="p">(</span><span class="n">n_components</span><span class="o">=</span><span class="mi">1</span><span class="p">)),</span> <span class="c"># Dimensionality reduction via LDA</span>
+               <span class="p">(</span><span class="s">'clf'</span><span class="p">,</span> <span class="n">LogisticRegression</span><span class="p">())])</span>
+
+<span class="n">pipe3</span> <span class="o">=</span> <span class="n">Pipeline</span><span class="p">([</span>
+               <span class="p">(</span><span class="s">'eclf'</span><span class="p">,</span> <span class="n">EnsembleClassifier</span><span class="p">([</span><span class="n">pipe1</span><span class="p">,</span> <span class="n">pipe2</span><span class="p">])),</span>
+<span class="p">])</span>
+<span class="n">parameters</span> <span class="o">=</span> <span class="p">{</span>
+<span class="s">'eclf__clfs__dim__n_components'</span><span class="p">:(</span><span class="mi">1</span><span class="p">,</span><span class="mi">1</span><span class="p">),</span>
+<span class="p">}</span>
+<span class="n">grid_search</span> <span class="o">=</span> <span class="n">GridSearchCV</span><span class="p">(</span><span class="n">pipe3</span><span class="p">,</span> <span class="n">parameters</span><span class="p">,</span> <span class="n">n_jobs</span><span class="o">=-</span><span class="mi">1</span><span class="p">,</span> <span class="n">cv</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span> <span class="n">verbose</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span> <span class="n">refit</span><span class="o">=</span><span class="bp">True</span><span class="p">,</span> <span class="n">scoring</span><span class="o">=</span><span class="bp">None</span><span class="p">)</span>
+<span class="n">grid_search</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span><span class="n">X</span><span class="p">,</span> <span class="n">y</span><span class="p">)</span>
+</code></pre>
+</div>
+
+<h2 id="some-final-words">Some Final Words</h2>
+
+<p>When we applied the <code class="highlighter-rouge">EnsembleClassifier</code> to the iris example above, the results surely looked nice. But we have to keep in mind that this is just a toy example. The majority rule voting approach might not always work so well in practice, especially if the ensemble consists of more “weak” than “strong” classification models. Also, although we used a cross-validation approach to overcome the overfitting challenge, please always keep a spare validation dataset to evaluate the results.</p>
+
+<p>Anyway, if you are interested in those approaches, I added them to my <a href="http://rasbt.github.io/mlxtend/"><code class="highlighter-rouge">mlxtend</code></a> Python module; in <code class="highlighter-rouge">mlxtend</code> (short for “machine learning library extensions”), I collect certain things that I personally find useful but are not available in other packages yet.</p>
+
+<p>You can find the most up to date documentation at <a href="http://rasbt.github.io/mlxtend/">http://rasbt.github.io/mlxtend/</a>.</p>
+
+  </article>
+
+
+</div></body></html>

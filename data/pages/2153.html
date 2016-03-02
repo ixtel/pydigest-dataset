@@ -1,0 +1,339 @@
+<html><body><div><div class="content">
+      
+        <h1 class="content-title">Querying Tree Structures in SQLite using Python and the Transitive Closure Extension</h1>
+      
+      
+      
+  <div class="post-info"><p>
+    
+    
+      November 22, 2014 20:52
+      </p><span class="separator">/</span>
+      <a href="#comments">0 comments</a>
+      <span class="separator">/</span>
+      
+        <a href="/blog/tags/peewee/">peewee</a>
+      
+        <a href="/blog/tags/python/">python</a>
+      
+        <a href="/blog/tags/sqlite/">sqlite</a>
+      
+    
+  </div>
+  
+  
+    <p><a href="http://media.charlesleifer.com/blog/photos/fall-foliage.jpg" title="photos/fall-foliage.jpg"><img alt="photos/fall-foliage.jpg" class="img-responsive" src="http://m.charlesleifer.com/t/800x-/blog/photos/fall-foliage.jpg?key=7xfWr56xV-hWsA-M6pHTLA"/></a></p>
+<p>I recently read a good write-up on <a href="http://woss.name/articles/representing-trees-in-postgresql/">tree structures in PostgreSQL</a>. Hierarchical data is notoriously tricky to model in a relational database, and a variety of techniques have grown out of developers' attempts to optimize for certain types of queries.</p>
+<p>In his post, Graeme describes several approaches to modeling trees, including:</p>
+<ul>
+<li>Adjancency models, in which each node in the tree contains a foreign key to its parent row.</li>
+<li>Materialized path model, in which each node stores its ancestral path in a denormalized column. Typically the path is stored as a string separated by a delimiter, e.g. "{root id}.{child id}.{grandchild id}".</li>
+<li>Nested sets, in which each node defines an interval that encompasses a range of child nodes.</li>
+<li>PostgreSQL arrays, in which the materialized path is stored in an array, and general inverted indexes are used to efficiently query the path.</li>
+</ul>
+<p>In the comments, some users pointed out that the <a href="http://www.postgresql.org/docs/9.3/static/ltree.html">ltree extension</a> could also be used to efficiently store and query materialized paths. LTrees support two powerful query languages (<em>lquery</em> and <em>ltxtquery</em>) for pattern-matching LTree labels and performing full-text searches on labels.</p>
+<p>One technique that was not discussed in Graeme's post was the use of <em>closure tables</em>. A closure table is a many-to-many junction table storing all relationships between nodes in a tree. It is related to the adjacency model, in that each database row still stores a reference to its parent row. The closure table gets its name from the additional table, which stores each combination of ancestor/child nodes.</p>
+<p>Here's a simple category hierarchy you might see on an e-commerce site. Like the adjacency model, each category stores a reference to its immediate parent category:</p>
+<ul>
+<li>Category<ul>
+<li>id</li>
+<li>name</li>
+<li>parent_id (self-referential foreign key)</li>
+</ul>
+</li>
+</ul>
+<p>The closure table stores references between all ancestors and their descendants, and the relative depth of the relationship.</p>
+<ul>
+<li>Category Closure<ul>
+<li>ancestor_id</li>
+<li>descendant_id</li>
+<li>depth</li>
+</ul>
+</li>
+</ul>
+<p>To further illustrate these relationships, let's pretend our online bookstore database has the following categories:</p>
+<ul>
+<li>Books (id=1)<ul>
+<li>Fiction (id=2)<ul>
+<li>Sci-fi (id=3)</li>
+<li>Westerns (id=4)</li>
+</ul>
+</li>
+<li>Non-fiction (id=5)</li>
+</ul>
+</li>
+</ul>
+<p>Here is an outline of the data stored in the closure table:</p>
+<table class="table table-striped table-condensed">
+<thead>
+<tr>
+<th>Ancestor</th>
+<th>Descendant</th>
+<th>Depth</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr><td>1</td><td>1</td><td>0</td><td>Self-reference</td></tr>
+<tr><td>2</td><td>2</td><td>0</td><td>Self-reference</td></tr>
+<tr><td>3</td><td>3</td><td>0</td><td>Self-reference</td></tr>
+<tr><td>4</td><td>4</td><td>0</td><td>Self-reference</td></tr>
+<tr><td>5</td><td>5</td><td>0</td><td>Self-reference</td></tr>
+<tr><td>1</td><td>2</td><td>1</td><td>Books - Fiction</td></tr>
+<tr><td>1</td><td>5</td><td>1</td><td>Books - Nonfiction</td></tr>
+<tr><td>1</td><td>3</td><td>2</td><td>Books - Fiction - Sci-Fi</td></tr>
+<tr><td>1</td><td>4</td><td>2</td><td>Books - Fiction - Westerns</td></tr>
+<tr><td>2</td><td>3</td><td>1</td><td>Fiction - Sci-Fi</td></tr>
+<tr><td>2</td><td>4</td><td>1</td><td>Fiction - Westerns</td></tr>
+</tbody>
+</table>
+<p>As you can see, the full ancestry of every category is included in the table, including a denormalized depth value. This can lead to some very efficient queries at the cost of extra storage (O(n^2) worst).</p>
+<p>While there are numerous benefits to this approach, it is more complex than a simple materialized path or adjacency model. Luckily, for SQLite users, there is a C extension which will manage the maintenance of the closure table for you!</p>
+<h2>Transitive Closure Extension</h2>
+<p>Buried deep within the <a href="http://www.sqlite.org/cgi/src/tree?ci=trunk&amp;name=ext/misc">SQLite source tree</a> is an extension module named <em>closure.c</em>. I was browsing the SQLite source a while back and decided to give this module a try, and was pleasantly surprised by how seamlessly it worked.</p>
+<p>Here's how it works. You create your adjacency-model table as usual, then create a <a href="https://www.sqlite.org/vtab.html">virtual table</a> using the <code>transitive_closure</code> extension. The virtual table needs to be initialized with the following parameters:</p>
+<ul>
+<li><code>tablename</code>: the name of the table storing the nodes in the tree.</li>
+<li><code>idcolumn</code>: the primary key column of the table.</li>
+<li><code>parentcolumn</code>: the column containing the self-referential foreign-key.</li>
+</ul>
+<p>Once the extension is initialized, you can perform queries using the closure table without having to worry about updating or otherwise managing the denormalized data. The <code>transitive_closure</code> extension maintains an AVL tree behind-the-scenes.</p>
+<h2>Building the Extension</h2>
+<p>In order to get started, we will need to retrieve and compile the extension. The extension can be found online in SQLite's <a href="http://www.sqlite.org/cgi/src/tree?ci=trunk&amp;name=ext/misc">version control repo</a>. To just retrieve the relevant C file, you can clone this private Gist:</p>
+<div class="highlight"><pre><span class="gp">$</span> git clone https://gist.github.com/coleifer/7f3593c5c2a645913b92 closure
+</pre></div>
+<p>Once you have the source file <code>closure.c</code>, compile a shared library:</p>
+<div class="highlight"><pre><span class="gp">$</span> gcc -g -fPIC -shared closure.c -o closure.so
+</pre></div>
+<p>Congratulations! Now we're ready to start using the extension.</p>
+<h2>Basic queries</h2>
+<p>In the same directory as the shared library, fire up the SQLite shell and load the extension using the <code>.load</code> command:</p>
+<div class="highlight"><pre><span class="go">$ sqlite3</span>
+<span class="go">SQLite version 3.8.7.1 2014-10-29 13:59:56</span>
+<span class="go">Enter ".help" for usage hints.</span>
+<span class="go">Connected to a transient in-memory database.</span>
+<span class="go">Use ".open FILENAME" to reopen on a persistent database.</span>
+
+<span class="gp">sqlite&gt; </span><span class="p">.</span><span class="k">load</span> <span class="p">.</span><span class="o">/</span><span class="n">closure</span>
+</pre></div>
+<p>We'll create the categories table and data from the bookstore example presented earlier in the post. The following statements create a normal <em>adjacency-model</em> table, and a <em>transitive closure</em> virtual table:</p>
+<div class="highlight"><pre><span class="k">CREATE</span> <span class="k">TABLE</span> <span class="n">category</span> <span class="p">(</span>
+  <span class="n">id</span> <span class="nb">INTEGER</span> <span class="k">NOT</span> <span class="k">NULL</span> <span class="k">PRIMARY</span> <span class="k">KEY</span><span class="p">,</span>
+  <span class="n">name</span> <span class="nb">VARCHAR</span><span class="p">(</span><span class="mi">255</span><span class="p">),</span>
+  <span class="n">parent_id</span> <span class="nb">INTEGER</span><span class="p">,</span>
+  <span class="k">FOREIGN</span> <span class="k">KEY</span> <span class="p">(</span><span class="n">parent_id</span><span class="p">)</span> <span class="k">REFERENCES</span> <span class="n">category</span> <span class="p">(</span><span class="n">id</span><span class="p">));</span>
+
+<span class="k">CREATE</span> <span class="n">VIRTUAL</span> <span class="k">TABLE</span> <span class="n">category_closure</span> <span class="k">USING</span> <span class="n">transitive_closure</span> <span class="p">(</span>
+  <span class="n">tablename</span><span class="o">=</span><span class="ss">"category"</span><span class="p">,</span>
+  <span class="n">idcolumn</span><span class="o">=</span><span class="ss">"id"</span><span class="p">,</span>
+  <span class="n">parentcolumn</span><span class="o">=</span><span class="ss">"parent_id"</span><span class="p">);</span>
+</pre></div>
+<p>Next we will insert the data into the <em>category</em> table. There is nothing special about these statements, they are normal <em>INSERT</em> queries:</p>
+<div class="highlight"><pre><span class="k">INSERT</span> <span class="k">INTO</span> <span class="n">category</span> <span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="n">parent_id</span><span class="p">)</span> <span class="k">VALUES</span> <span class="p">(</span><span class="s1">'Books'</span><span class="p">,</span> <span class="k">NULL</span><span class="p">);</span>
+<span class="k">INSERT</span> <span class="k">INTO</span> <span class="n">category</span> <span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="n">parent_id</span><span class="p">)</span> <span class="k">VALUES</span> <span class="p">(</span><span class="s1">'Fiction'</span><span class="p">,</span> <span class="mi">1</span><span class="p">);</span>
+<span class="k">INSERT</span> <span class="k">INTO</span> <span class="n">category</span> <span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="n">parent_id</span><span class="p">)</span> <span class="k">VALUES</span> <span class="p">(</span><span class="s1">'Sci-fi'</span><span class="p">,</span> <span class="mi">2</span><span class="p">);</span>
+<span class="k">INSERT</span> <span class="k">INTO</span> <span class="n">category</span> <span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="n">parent_id</span><span class="p">)</span> <span class="k">VALUES</span> <span class="p">(</span><span class="s1">'Western'</span><span class="p">,</span> <span class="mi">2</span><span class="p">);</span>
+<span class="k">INSERT</span> <span class="k">INTO</span> <span class="n">category</span> <span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="n">parent_id</span><span class="p">)</span> <span class="k">VALUES</span> <span class="p">(</span><span class="s1">'Non-fiction'</span><span class="p">,</span> <span class="mi">1</span><span class="p">);</span>
+</pre></div>
+<p>Note that we are not inserting any values into the <code>category_closure</code> table. The <code>category_closure</code> table will automatically populate based on the values stored in the <code>category</code> table.</p>
+<p>No additional steps are necessary in order to start using the closure table. We can simply query <code>category_closure</code>, specifying a combination of the <code>root</code> or <code>depth</code> we are interested in.</p>
+<p>To query the direct descendants of a given category, we will query the closure table for nodes rooted at the given category with a relative depth of 1:</p>
+<div class="highlight"><pre><span class="gp">sqlite&gt; </span><span class="k">SELECT</span> <span class="n">name</span> <span class="k">FROM</span> <span class="n">category</span> <span class="k">WHERE</span> <span class="n">id</span> <span class="k">IN</span> <span class="p">(</span>
+<span class="gp">   ...&gt; </span>  <span class="k">SELECT</span> <span class="n">cc</span><span class="p">.</span><span class="n">id</span>
+<span class="gp">   ...&gt; </span>  <span class="k">FROM</span> <span class="n">category_closure</span> <span class="k">AS</span> <span class="n">cc</span>
+<span class="gp">   ...&gt; </span>  <span class="k">WHERE</span> <span class="n">cc</span><span class="p">.</span><span class="n">root</span> <span class="o">=</span> <span class="mi">1</span> <span class="k">AND</span> <span class="n">cc</span><span class="p">.</span><span class="n">depth</span> <span class="o">=</span> <span class="mi">1</span><span class="p">);</span>
+
+<span class="go">name</span>
+<span class="go">-----------</span>
+<span class="go">Fiction</span>
+<span class="go">Non-fiction</span>
+</pre></div>
+<p>To query <em>all</em> descendants of a given category, simply leave off the depth filter:</p>
+<div class="highlight"><pre><span class="gp">sqlite&gt; </span><span class="k">SELECT</span> <span class="n">name</span> <span class="k">FROM</span> <span class="n">category</span> <span class="k">WHERE</span> <span class="n">id</span> <span class="k">IN</span> <span class="p">(</span>
+<span class="gp">   ...&gt; </span>  <span class="k">SELECT</span> <span class="n">cc</span><span class="p">.</span><span class="n">id</span>
+<span class="gp">   ...&gt; </span>  <span class="k">FROM</span> <span class="n">category_closure</span> <span class="k">AS</span> <span class="n">cc</span>
+<span class="gp">   ...&gt; </span>  <span class="k">WHERE</span> <span class="n">cc</span><span class="p">.</span><span class="n">root</span> <span class="o">=</span> <span class="mi">1</span><span class="p">);</span>
+
+<span class="go">name</span>
+<span class="go">-----------</span>
+<span class="go">Books</span>
+<span class="go">Fiction</span>
+<span class="go">Sci-fi</span>
+<span class="go">Western</span>
+<span class="go">Non-fiction</span>
+</pre></div>
+<p>An interesting aspect of closure tables is that self-references are stored with a depth of zero. That is why we see the <em>Books</em> category itself included as a descendant.</p>
+<h2>Using Transitive Closure with Peewee ORM</h2>
+<p>In the latest release of <a href="http://docs.peewee-orm.com">peewee ORM</a> (2.4.3), I've added a factory function for creating virtual models suitable for working with the closure table extension. I've also added <a href="http://docs.peewee-orm.com/en/latest/peewee/playhouse.html#ClosureTable">documentation</a> for working with closure tables in peewee.</p>
+<p>If you're new to peewee, it's a lightweight ORM that aims to provide an expressive, Pythonic interface for executing SQL queries. Here is how you would define the category relationships using peewee and the <code>transitive-closure</code> extension:</p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">peewee</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="kn">from</span> <span class="nn">playhouse.sqlite_ext</span> <span class="kn">import</span> <span class="o">*</span>
+
+<span class="n">db</span> <span class="o">=</span> <span class="n">SqliteExtDatabase</span><span class="p">(</span><span class="s1">'categories.db'</span><span class="p">)</span>
+<span class="n">db</span><span class="o">.</span><span class="n">load_extension</span><span class="p">(</span><span class="s1">'/path/to/closure'</span><span class="p">)</span>  <span class="c1"># Note we do not include the ".so".</span>
+
+<span class="k">class</span> <span class="nc">Category</span><span class="p">(</span><span class="n">Model</span><span class="p">):</span>
+    <span class="n">name</span> <span class="o">=</span> <span class="n">CharField</span><span class="p">()</span>
+    <span class="n">parent</span> <span class="o">=</span> <span class="n">ForeignKeyField</span><span class="p">(</span><span class="s1">'self'</span><span class="p">,</span> <span class="n">null</span><span class="o">=</span><span class="bp">True</span><span class="p">,</span> <span class="n">related_name</span><span class="o">=</span><span class="s1">'children'</span><span class="p">)</span>
+
+    <span class="k">class</span> <span class="nc">Meta</span><span class="p">:</span>
+        <span class="n">database</span> <span class="o">=</span> <span class="n">db</span>
+
+<span class="n">CategoryClosure</span> <span class="o">=</span> <span class="n">ClosureTable</span><span class="p">(</span><span class="n">Category</span><span class="p">)</span>
+
+<span class="c1"># Create the tables if they do not exist already.</span>
+<span class="n">Category</span><span class="o">.</span><span class="n">create_table</span><span class="p">(</span><span class="bp">True</span><span class="p">)</span>
+<span class="n">CategoryClosure</span><span class="o">.</span><span class="n">create_table</span><span class="p">(</span><span class="bp">True</span><span class="p">)</span>
+</pre></div>
+<p>To populate the database with our bookstore data, we can create a handful of <em>Category</em> model instances:</p>
+<div class="highlight"><pre><span class="n">books</span> <span class="o">=</span> <span class="n">Category</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s1">'Books'</span><span class="p">)</span>
+<span class="n">fiction</span> <span class="o">=</span> <span class="n">Category</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s1">'Fiction'</span><span class="p">,</span> <span class="n">parent</span><span class="o">=</span><span class="n">books</span><span class="p">)</span>
+<span class="n">Category</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s1">'Sci-fi'</span><span class="p">,</span> <span class="n">parent</span><span class="o">=</span><span class="n">fiction</span><span class="p">)</span>
+<span class="n">Category</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s1">'Westerns'</span><span class="p">,</span> <span class="n">parent</span><span class="o">=</span><span class="n">fiction</span><span class="p">)</span>
+<span class="n">Category</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s1">'Non-fiction'</span><span class="p">,</span> <span class="n">parent</span><span class="o">=</span><span class="n">books</span><span class="p">)</span>
+</pre></div>
+<p>Let's run a query on the sample data using our model classes. The process is very similar to executing queries with the SQLite shell. The following query retrieves all the nodes which are descendants of the <em>Books</em> category at any depth:</p>
+<div class="highlight"><pre><span class="n">subquery</span> <span class="o">=</span> <span class="p">(</span><span class="n">CategoryClosure</span>
+            <span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">CategoryClosure</span><span class="o">.</span><span class="n">id</span><span class="p">)</span>
+            <span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">CategoryClosure</span><span class="o">.</span><span class="n">root</span> <span class="o">==</span> <span class="n">books</span><span class="p">))</span>
+<span class="k">for</span> <span class="n">descendant</span> <span class="ow">in</span> <span class="n">Category</span><span class="o">.</span><span class="n">select</span><span class="p">()</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">Category</span><span class="o">.</span><span class="n">id</span> <span class="o">&lt;&lt;</span> <span class="n">subquery</span><span class="p">):</span>
+    <span class="k">print</span> <span class="n">descendant</span><span class="o">.</span><span class="n">name</span>
+</pre></div>
+<h3>Common queries</h3>
+<p>In this section I'll show some common queries and how they can be expressed using the closure table. In some cases these queries can be implemented without the use of the closure table, so where that's the case I'll show both options. We'll assume that the node we're interested in is named <code>source_node</code>.</p>
+<h4>Get all descendant nodes</h4>
+<p>Given a node, retrieve all nodes below it in the tree at any depth.</p>
+<div class="highlight"><pre><span class="n">descendants</span> <span class="o">=</span> <span class="p">(</span><span class="n">Category</span>
+               <span class="o">.</span><span class="n">select</span><span class="p">()</span>
+               <span class="o">.</span><span class="n">join</span><span class="p">(</span>
+                   <span class="n">CategoryClosure</span><span class="p">,</span>
+                   <span class="n">on</span><span class="o">=</span><span class="p">(</span><span class="n">Category</span><span class="o">.</span><span class="n">id</span> <span class="o">==</span> <span class="n">CategoryClosure</span><span class="o">.</span><span class="n">id</span><span class="p">))</span>
+               <span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">CategoryClosure</span><span class="o">.</span><span class="n">root</span> <span class="o">==</span> <span class="n">source_node</span><span class="p">))</span>
+
+<span class="c1"># Using a subquery instead. "&lt;&lt;" translates to "IN".</span>
+<span class="n">subquery</span> <span class="o">=</span> <span class="p">(</span><span class="n">CategoryClosure</span>
+            <span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">CategoryClosure</span><span class="o">.</span><span class="n">id</span><span class="p">)</span>
+            <span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">CategoryClosure</span><span class="o">.</span><span class="n">root</span> <span class="o">==</span> <span class="n">source_node</span><span class="p">))</span>
+<span class="n">all_descendants</span> <span class="o">=</span> <span class="n">Category</span><span class="o">.</span><span class="n">select</span><span class="p">()</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">Category</span><span class="o">.</span><span class="n">id</span> <span class="o">&lt;&lt;</span> <span class="n">subquery</span><span class="p">)</span>
+
+<span class="c1"># Using the helper method.</span>
+<span class="n">all_descendants</span> <span class="o">=</span> <span class="n">CategoryClosure</span><span class="o">.</span><span class="n">descendants</span><span class="p">(</span>
+    <span class="n">source_node</span><span class="p">,</span> <span class="n">include_node</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+</pre></div>
+<p>To exclude <code>source_node</code> in the list of child nodes, add a <code>depth &gt; 0</code> clause to the where clause or subquery:</p>
+<div class="highlight"><pre><span class="n">descendants</span> <span class="o">=</span> <span class="p">(</span><span class="n">Category</span>
+               <span class="o">.</span><span class="n">select</span><span class="p">()</span>
+               <span class="o">.</span><span class="n">join</span><span class="p">(</span>
+                   <span class="n">CategoryClosure</span><span class="p">,</span>
+                   <span class="n">on</span><span class="o">=</span><span class="p">(</span><span class="n">Category</span><span class="o">.</span><span class="n">id</span> <span class="o">==</span> <span class="n">CategoryClosure</span><span class="o">.</span><span class="n">id</span><span class="p">))</span>
+               <span class="o">.</span><span class="n">where</span><span class="p">(</span>
+                   <span class="p">(</span><span class="n">CategoryClosure</span><span class="o">.</span><span class="n">root</span> <span class="o">==</span> <span class="n">source_node</span><span class="p">)</span> <span class="o">&amp;</span>
+                   <span class="p">(</span><span class="n">CategoryClosure</span><span class="o">.</span><span class="n">depth</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">)))</span>
+
+<span class="c1"># Using helper method.</span>
+<span class="n">descendants</span> <span class="o">=</span> <span class="n">CategoryClosure</span><span class="o">.</span><span class="n">descendants</span><span class="p">(</span><span class="n">source_node</span><span class="p">,</span> <span class="n">include_node</span><span class="o">=</span><span class="bp">False</span><span class="p">)</span>
+</pre></div>
+<h4>Get all direct descendant nodes</h4>
+<p>Given a node, retrieve its child nodes.</p>
+<div class="highlight"><pre><span class="c1"># We can use just the Category table in this case.</span>
+<span class="n">direct_descendants</span> <span class="o">=</span> <span class="n">Category</span><span class="o">.</span><span class="n">select</span><span class="p">()</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">Category</span><span class="o">.</span><span class="n">parent</span> <span class="o">==</span> <span class="n">source_node</span><span class="p">)</span>
+
+<span class="c1"># We can join on the closure table.</span>
+<span class="n">direct_descendants</span> <span class="o">=</span> <span class="p">(</span><span class="n">Category</span>
+                      <span class="o">.</span><span class="n">select</span><span class="p">()</span>
+                      <span class="o">.</span><span class="n">join</span><span class="p">(</span>
+                          <span class="n">CategoryClosure</span><span class="p">,</span>
+                          <span class="n">on</span><span class="o">=</span><span class="p">(</span><span class="n">Category</span><span class="o">.</span><span class="n">id</span> <span class="o">==</span> <span class="n">CategoryClosure</span><span class="o">.</span><span class="n">id</span><span class="p">))</span>
+                      <span class="o">.</span><span class="n">where</span><span class="p">(</span>
+                          <span class="p">(</span><span class="n">CategoryClosure</span><span class="o">.</span><span class="n">root</span> <span class="o">==</span> <span class="n">source_node</span><span class="p">)</span> <span class="o">&amp;</span>
+                          <span class="p">(</span><span class="n">CategoryClosure</span><span class="o">.</span><span class="n">depth</span> <span class="o">==</span> <span class="mi">1</span><span class="p">)))</span>
+
+<span class="c1"># We can use a subquery.</span>
+<span class="n">subquery</span> <span class="o">=</span> <span class="p">(</span><span class="n">CategoryClosure</span>
+            <span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">CategoryClosure</span><span class="o">.</span><span class="n">id</span><span class="p">)</span>
+            <span class="o">.</span><span class="n">where</span><span class="p">(</span>
+                <span class="p">(</span><span class="n">CategoryClosure</span><span class="o">.</span><span class="n">root</span> <span class="o">==</span> <span class="n">source_node</span><span class="p">)</span> <span class="o">&amp;</span>
+                <span class="p">(</span><span class="n">CategoryClosure</span><span class="o">.</span><span class="n">depth</span> <span class="o">==</span> <span class="mi">1</span><span class="p">)))</span>
+<span class="n">direct_descendants</span> <span class="o">=</span> <span class="n">Category</span><span class="o">.</span><span class="n">select</span><span class="p">()</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">Category</span><span class="o">.</span><span class="n">id</span> <span class="o">&lt;&lt;</span> <span class="n">subquery</span><span class="p">)</span>
+
+<span class="c1"># Using helper method.</span>
+<span class="n">direct_descendants</span> <span class="o">=</span> <span class="n">CategoryClosure</span><span class="o">.</span><span class="n">descendants</span><span class="p">(</span><span class="n">source_node</span><span class="p">,</span> <span class="n">depth</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+</pre></div>
+<p>Note that this technique can be used to retrieve descendant nodes at any depth. Thus you could specify <code>depth == 2</code> to retrieve all grandchildren.</p>
+<h4>Get all sibling nodes</h4>
+<p>Given a node, retrieve all nodes at the same depth, with the same parent.</p>
+<div class="highlight"><pre><span class="c1"># We can use just the Category table.</span>
+<span class="n">siblings</span> <span class="o">=</span> <span class="n">Category</span><span class="o">.</span><span class="n">select</span><span class="p">()</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">Category</span><span class="o">.</span><span class="n">parent</span> <span class="o">==</span> <span class="n">source_node</span><span class="o">.</span><span class="n">parent</span><span class="p">)</span>
+
+<span class="c1"># Or use the closure table.</span>
+<span class="n">siblings</span> <span class="o">=</span> <span class="p">(</span><span class="n">Category</span>
+            <span class="o">.</span><span class="n">select</span><span class="p">()</span>
+            <span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">CategoryClosure</span><span class="p">,</span> <span class="n">on</span><span class="o">=</span><span class="p">(</span><span class="n">Category</span><span class="o">.</span><span class="n">id</span> <span class="o">==</span> <span class="n">CategoryClosure</span><span class="o">.</span><span class="n">id</span><span class="p">))</span>
+            <span class="o">.</span><span class="n">where</span><span class="p">(</span>
+                <span class="p">(</span><span class="n">CategoryClosure</span><span class="o">.</span><span class="n">root</span> <span class="o">==</span> <span class="n">source_node</span><span class="o">.</span><span class="n">parent</span><span class="p">)</span> <span class="o">&amp;</span>
+                <span class="p">(</span><span class="n">CategoryClosure</span><span class="o">.</span><span class="n">depth</span> <span class="o">==</span> <span class="mi">1</span><span class="p">)))</span>
+
+<span class="c1"># Using helper method.</span>
+<span class="n">siblings</span> <span class="o">=</span> <span class="n">CategoryClosure</span><span class="o">.</span><span class="n">siblings</span><span class="p">(</span><span class="n">source_node</span><span class="p">)</span>
+</pre></div>
+<h4>Get all ancestors</h4>
+<p>Given a node, retrieve all nodes from which it is descended.</p>
+<div class="highlight"><pre><span class="c1"># Using a JOIN.</span>
+<span class="n">ancestors</span> <span class="o">=</span> <span class="p">(</span><span class="n">Category</span>
+             <span class="o">.</span><span class="n">select</span><span class="p">()</span>
+             <span class="o">.</span><span class="n">join</span><span class="p">(</span>
+                 <span class="n">CategoryClosure</span><span class="p">,</span>
+                 <span class="n">on</span><span class="o">=</span><span class="p">(</span><span class="n">Category</span><span class="o">.</span><span class="n">id</span> <span class="o">==</span> <span class="n">CategoryClosure</span><span class="o">.</span><span class="n">root</span><span class="p">))</span>
+             <span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">CategoryClosure</span><span class="o">.</span><span class="n">id</span> <span class="o">==</span> <span class="n">source_node</span><span class="p">))</span>
+
+<span class="c1"># Using multiple tables in the FROM clause.</span>
+<span class="n">ancestors</span> <span class="o">=</span> <span class="p">(</span><span class="n">Category</span>
+             <span class="o">.</span><span class="n">select</span><span class="p">()</span>
+             <span class="o">.</span><span class="n">from_</span><span class="p">(</span><span class="n">Category</span><span class="p">,</span> <span class="n">CategoryClosure</span><span class="p">)</span>
+             <span class="o">.</span><span class="n">where</span><span class="p">(</span>
+                 <span class="p">(</span><span class="n">Category</span><span class="o">.</span><span class="n">id</span> <span class="o">==</span> <span class="n">CategoryClosure</span><span class="o">.</span><span class="n">root</span><span class="p">)</span> <span class="o">&amp;</span>
+                 <span class="p">(</span><span class="n">CategoryClosure</span><span class="o">.</span><span class="n">id</span> <span class="o">==</span> <span class="n">source_node</span><span class="p">)))</span>
+
+<span class="c1"># Using helper method.</span>
+<span class="n">ancestors</span> <span class="o">=</span> <span class="n">CategoryClosure</span><span class="o">.</span><span class="n">ancestors</span><span class="p">(</span><span class="n">source_node</span><span class="p">)</span>
+</pre></div>
+<h3>IPython Notebook</h3>
+<p>If you'd like to explore this code in more detail, I've put together an IPython notebook containing these examples and a bit more code. You can view the notebook here:</p>
+<p><a href="http://nbviewer.ipython.org/gist/coleifer/692c69724f08dc1dc8cc">http://nbviewer.ipython.org/gist/coleifer/692c69724f08dc1dc8cc</a></p>
+<p>I also included some <strong>basic benchmarks</strong> of the extension compared with a simple materialized path model. The benchmarks test the time it takes to build a tree using both the closure table and an indexed materialized path. Then, the benchmark will execute a series of <em>SELECT</em> queries at various depths in the tree to retrieve direct descendants and all descendants. I tried various tree structures, such as very deep trees, broad trees, and uniform trees. In my testing, the closure table performed better in every case, but these benchmarks are far from scientific -- rather they're there if you'd like to poke at the code and test it yourself.</p>
+<h3>Quick note on recursion</h3>
+<p>I thought I would quickly mention that it is also possible to use recursion and <a href="http://www.sqlite.org/lang_with.html">recursive CTEs</a> to query hierarchical data-structures. Here is an example of how you might retrieve the tree structure, including the depth:</p>
+<div class="highlight"><pre><span class="k">WITH</span> <span class="k">RECURSIVE</span> <span class="n">cte_categories</span> <span class="p">(</span><span class="n">id</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">parent_id</span><span class="p">,</span> <span class="n">depth</span><span class="p">)</span> <span class="k">AS</span> <span class="p">(</span>
+    <span class="k">SELECT</span> <span class="n">id</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">parent_id</span><span class="p">,</span> <span class="mi">1</span>
+    <span class="k">FROM</span> <span class="n">category</span>
+    <span class="k">WHERE</span> <span class="n">parent_id</span> <span class="k">IS</span> <span class="k">NULL</span> <span class="c1">-- get root nodes</span>
+    <span class="k">UNION</span> <span class="k">ALL</span>
+    <span class="k">SELECT</span> <span class="k">c</span><span class="p">.</span><span class="n">id</span><span class="p">,</span> <span class="k">c</span><span class="p">.</span><span class="n">name</span><span class="p">,</span> <span class="k">c</span><span class="p">.</span><span class="n">parent_id</span><span class="p">,</span> <span class="n">r</span><span class="p">.</span><span class="n">depth</span> <span class="o">+</span> <span class="mi">1</span>
+    <span class="k">FROM</span> <span class="n">category</span> <span class="k">AS</span> <span class="k">c</span>
+    <span class="k">INNER</span> <span class="k">JOIN</span> <span class="n">cte_categories</span> <span class="k">AS</span> <span class="n">r</span> <span class="k">ON</span> <span class="p">(</span><span class="k">c</span><span class="p">.</span><span class="n">parent_id</span> <span class="o">=</span> <span class="n">r</span><span class="p">.</span><span class="n">id</span><span class="p">)</span>
+<span class="p">)</span>
+<span class="k">SELECT</span> <span class="n">name</span><span class="p">,</span> <span class="n">depth</span><span class="p">,</span> <span class="n">parent_id</span>
+<span class="k">FROM</span> <span class="n">cte_categories</span> <span class="k">ORDER</span> <span class="k">BY</span> <span class="n">depth</span><span class="p">,</span> <span class="n">name</span><span class="p">;</span>
+</pre></div>
+<p>If you're interested in learning more about recursive SQL queries, <a href="http://www.sqlite.org/lang_with.html">the SQLite documentation</a> provides some good examples.</p>
+<h3>Thanks for reading</h3>
+<p>Thanks for taking the time to read this post, I hope you found it interesting. The <code>transitive-closure</code> extension is a pretty cool library and could definitely be useful if you're doing some serious hierarchical modeling with SQLite. If you have any questions or comments, please feel free to <a href="#comments">leave a comment</a> or <a href="/contact/">contact me</a>.</p>
+<h3>Links</h3>
+<p>Here are some links which you may find helpful:</p>
+
+<p>Here are some blog posts on related topics:</p>
+
+<p><a href="http://media.charlesleifer.com/blog/photos/tree-squirrel.jpg" title="photos/tree-squirrel.jpg"><img alt="photos/tree-squirrel.jpg" class="img-responsive" src="http://m.charlesleifer.com/t/800x-/blog/photos/tree-squirrel.jpg?key=X4xeiVYuxOKyp51h0PSetw"/></a></p>
+<p><small>Do you see the little friend perched on the branch?</small></p>
+  
+  
+
+
+<hr/>
+
+  <p>Commenting has been closed, but please feel free to <a href="/contact/">contact me</a></p>
+
+
+    </div>
+
+    </div></body></html>

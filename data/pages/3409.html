@@ -1,0 +1,270 @@
+<html><body><div><div class="spoiler_text"><pre><code class="python">#!/usr/bin/env python
+# -*- coding: utf-8 -*- 
+
+import max7219.led as led
+import max7219.font as font
+import threading, sys, time
+import digits
+import urllib2
+import json
+import xml.etree.ElementTree as ET
+
+debug=0
+
+def log(message):
+  if debug==1:
+    print(message)
+
+device = led.matrix(cascaded=1)
+
+device.brightness(0)
+
+hourglass = [
+        [0,1,1,1,1,1,1,0],
+        [0,1,0,0,0,0,1,0],
+        [0,0,1,0,0,1,0,0],
+        [0,0,0,1,1,0,0,0],
+        [0,0,0,1,1,0,0,0],
+        [0,0,1,0,0,1,0,0],
+        [0,1,0,0,0,0,1,0],
+        [0,1,1,1,1,1,1,0],
+  ]
+
+jopa = [
+        [0,0,1,1,1,1,1,0],
+        [0,1,1,1,1,1,1,1],
+        [0,1,0,0,1,0,0,1],
+        [0,1,1,1,1,1,1,1],
+        [0,0,1,1,0,1,1,0],
+        [0,0,1,1,1,1,1,0],
+        [0,0,1,1,1,1,1,0],
+        [0,0,1,0,1,0,1,0],
+  ]
+
+sad = [
+        [0,0,1,1,1,1,0,0],
+        [0,1,0,0,0,0,1,0],
+        [1,0,1,0,0,1,0,1],
+        [1,0,0,0,0,0,0,1],
+        [1,0,0,1,1,0,0,1],
+        [1,0,1,0,0,1,0,1],
+        [0,1,0,0,0,0,1,0],
+        [0,0,1,1,1,1,0,0],
+  ]
+
+#Thread with wait animation
+class TAnimationThread (threading.Thread):
+  def __init__(self, threadID):
+    threading.Thread.__init__(self)
+    self.threadID = threadID
+    self.Continue=True
+  def run(self):
+    log("Starting animation")
+    counter=0
+    while (self.Continue):
+      DrawAnimation(counter)
+      counter+=1
+      if counter==7:
+        counter=0
+      time.sleep(0.8)
+  def stop(self):
+    self.Continue = False
+    log("Stopping animation")
+def DrawAnimation(counter):
+  #draw
+  log("Drawing animation"+str(counter))
+  if counter==0:
+    for j in range(8):
+      for i in range(8):
+        if hourglass[j][i] == 1:
+          device.pixel(i, 7-j, 1, redraw=False)
+  elif counter&gt;0 and counter&lt;5:
+    device.pixel(1+counter, 1, 1, redraw=False)
+  elif counter==5 or counter==6:
+    device.pixel(counter-2, 2, 1, redraw=False)
+  else:
+    device.clear()
+  device.flush()
+  
+
+def fetch_traffic(url):
+  global TrafficData
+  try:
+    response = urllib2.urlopen(url)
+    TrafficData = int(response.read())
+    log("Traffic fetched")
+  except BaseException:
+    TrafficData=-100
+  log(TrafficData)
+def fetch_currrate(url):
+  global CurrencyData
+  try:
+    response = urllib2.urlopen(url)
+    root = ET.fromstring(response.read())
+    CurrencyData=float(root[16][5].text)/100
+    log("Currency fetched")
+  except BaseException:
+    CurrencyData=-100
+  log(CurrencyData)
+  
+#Let's begin  
+log("Starting animation thread")
+AnimationThread = TAnimationThread(1)
+AnimationThread.start()
+
+log("Starting traffic thread")
+TrafficThread = threading.Thread(target=fetch_traffic, args=("http://tarasius.name/@/probki.txt",))
+TrafficThread.start()
+
+CurrencyThread = threading.Thread(target=fetch_currrate, args=("http://tarasius.name/@/currrate.xml",))
+CurrencyThread.start()
+
+# Get and show temperature
+log("Starting weather fetch")
+try:
+  response = urllib2.urlopen("http://tarasius.name/@/weather.json")
+  data = json.loads(response.read())
+  response.close()
+  temp = int(data["data"]["current_condition"][0]["temp_C"])
+  precip = float(data["data"]["current_condition"][0]["precipMM"])
+  temp1 = abs(temp)/10
+  temp2 = abs(temp)%10
+except BaseException:
+  temp=-100
+  precip=-100
+  temp1=-100
+  temp2=-100
+log("Stopping animation thread")
+AnimationThread.stop()
+device.clear()
+device.flush()
+
+m = [[0 for x in range(8)] for x in range(64)]
+if precip==-100:
+#cloudcover was unavailable
+  for j in range(8):
+    for i in range(8):
+      if sad[i][j] == 1:
+	     m[j][7-i]=1
+#draw cloudcover
+elif precip&gt;1.5:
+  m[0][7] = 1
+  m[2][7] = 1
+  m[4][7] = 1
+elif precip&lt;=1.5 and precip&gt;0.5:
+  m[1][7] = 1
+  m[3][7] = 1
+elif precip&lt;=0.5 and precip&gt;0.1:
+  m[2][7] = 1
+
+if temp&gt;-100:
+  if temp&lt;0:
+    #Draw minus
+    m[0][3] = 1
+    if temp1==0:
+      m[1][3]=1
+      m[2][3]=1
+      m[3][3]=1    
+  if temp1&lt;&gt;0:
+    #Draw first digit
+    for j in range(digits.rows):
+      for i in range(digits.columns):
+        if digits.symbol[temp1][j][i] == 1:
+          m[i+1][5-j] = 1
+  #draw second digit
+  for j in range(digits.rows):
+    for i in range(digits.columns):
+      if digits.symbol[temp2][j][i] == 1:
+        m[i+5][5-j] = 1
+  #draw celsium sign
+  m[7][7] = 1
+
+log("Drawing temperature")
+for i in range(8):
+  for j in range(8):
+    if m[j][i]==1:
+	  device.pixel(j, i, 1, redraw=False)
+
+device.flush()
+time.sleep(5)
+
+#Show traffic
+#Draw first digit
+TrafficThread.join()
+if TrafficData==10:
+  for j in range(8):
+    for i in range(8):
+      if jopa[j][i] == 1:
+	     m[10+i][j]=1
+elif TrafficData==-100:
+  for j in range(8):
+    for i in range(8):
+      if sad[j][i] == 1:
+	     m[10+i][7-j]=1
+else:
+  #draw car
+  m[10][6]=1
+  m[10][3]=1
+  m[11][7]=1
+  m[11][6]=1
+  m[11][5]=1
+  m[11][4]=1
+  m[11][3]=1
+  m[11][2]=1
+  m[12][5]=1
+  m[12][4]=1
+  
+  TrafficData = TrafficData%10
+  #draw second digit
+  for j in range(digits.rows):
+    for i in range(digits.columns):
+      if digits.symbol[TrafficData][j][i] == 1:
+        m[i+15][5-j]=1
+
+log("Drawing traffic")
+for step in range(9):
+  device.clear()
+  for i in range(8):
+    for j in range(8):
+      if m[i+step+2][j]==1:
+        device.pixel(i, j, 1, redraw=False)
+  device.flush()
+  time.sleep(0.2)
+
+time.sleep(5)
+
+#Show currency  
+CurrencyThread.join()
+if CurrencyData==-100:
+  for j in range(8):
+    for i in range(8):
+      if sad[j][i] == 1:
+	     m[22+i][7-j]=1 
+else:
+  cur=str(CurrencyData)
+  for d in range(5):
+    if cur[d]==".":
+      digit=-1
+    else:
+      digit=int(cur[d])   
+    if digit==-1:
+      m[22+d*5][0]=1
+    else:
+      for j in range(digits.rows):
+        for i in range(digits.columns):
+          if digits.symbol[digit][j][i] == 1:
+            m[i+21+d*5][5-j]=1
+log("Drawing currency")
+for step in range(36):
+  device.clear()
+  for i in range(8):
+    for j in range(8):
+      if m[i+step+11][j]==1:
+        device.pixel(i, j, 1, redraw=False)
+  device.flush()
+  time.sleep(0.2)
+
+device.clear()
+device.flush()
+sys.exit()
+</code></pre></div></div></body></html>

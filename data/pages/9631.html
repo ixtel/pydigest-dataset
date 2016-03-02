@@ -1,0 +1,155 @@
+<html><body><div><div itemprop="articleBody" class="article-body"><p>I've been programming with <a href="http://celery.readthedocs.org/">celery</a> for the last three years, and <a href="https://denibertovic.com/pages/about-me/">Deni BertoviÄ</a>'s article about <a href="https://denibertovic.com/posts/celery-best-practices/">Celery best practices</a> has truly been invaluable to me. In time, I've also come up with my set of best practices, and I guess this blog is as good a place as any to write them down.</p>
+<h2>Write short tasks</h2>
+<p>I think that a task should be as concise as possible, in order to be able to understand what it does and how it handles corner cases as quickly as possible. I personally try to follow these rules:</p>
+<ul>
+<li>wrap the main task logic in an object method or a function</li>
+<li>make this method/function raise identified exceptions for identified corner cases and decide what is the logic for each of them</li>
+<li>implement a retry mechanism only where appropriate</li>
+</ul>
+<p>Let's illustrate these rules with a simple example: sending an email using a 3rd party API (eg: <a href="https://mailgun.com">Mailgun</a>, <a href="https://en.mailjet.com/">Mailjet</a>, etc). Anyone having spent enough time using third party infrastructure and systems knows they should never totally rely on them: the network can fail, they can be unavailable, etc. We thus need to handle some expectable error cases and have a fallback strategy in case of an unexpected error.</p>
+<p>Let's say that we have a function  <code>api_send_mail</code> that does the actual API call, raising a <code>myapp.exceptions.InvalidUserInput</code> exception, in case of an HTTP client error. This exception constitutes our set of expectable exceptions, that we need to plan for. Any other exception (connection error, server HTTP error, etc) will be sent to some crash report backend, like <a href="http://getsentry.com">Sentry</a> and trigger a retry.</p>
+<p>My task implementation would look something like this:</p>
+<div class="highlight"><pre><span class="kn">import</span> <span class="nn">requests</span>
+
+<span class="kn">from</span> <span class="nn">myproject.tasks</span> <span class="kn">import</span> <span class="n">app</span>  <span class="c"># app is your celery application</span>
+<span class="kn">from</span> <span class="nn">myproject.exceptions</span> <span class="kn">import</span> <span class="n">InvalidUserInput</span>
+
+<span class="kn">from</span> <span class="nn">utils.mail</span> <span class="kn">import</span> <span class="n">api_send_mail</span>
+
+<span class="nd">@app.task</span><span class="p">(</span><span class="n">bind</span><span class="o">=</span><span class="bp">True</span><span class="p">,</span> <span class="n">max_retries</span><span class="o">=</span><span class="mi">3</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">send_mail</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">recipients</span><span class="p">,</span> <span class="n">sender_email</span><span class="p">,</span> <span class="n">subject</span><span class="p">,</span> <span class="n">body</span><span class="p">):</span>
+    <span class="sd">"""Send a plaintext email with argument subject, sender and body to a list of recipients."""</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">data</span> <span class="o">=</span> <span class="n">api_send_mail</span><span class="p">(</span><span class="n">recipients</span><span class="p">,</span> <span class="n">sender_email</span><span class="p">,</span> <span class="n">subject</span><span class="p">,</span> <span class="n">body</span><span class="p">)</span>
+    <span class="k">except</span> <span class="n">InvalidUserInput</span><span class="p">:</span>
+        <span class="c"># No need to retry as the user provided an invalid input</span>
+        <span class="k">raise</span>
+    <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+        <span class="c"># Any other exception. Log the exception to sentry and retry in 10s.</span>
+        <span class="n">sentrycli</span><span class="o">.</span><span class="n">captureException</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">retry</span><span class="p">(</span><span class="n">countdown</span><span class="o">=</span><span class="mi">10</span><span class="p">,</span> <span class="n">exc</span><span class="o">=</span><span class="n">exc</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">data</span>
+</pre></div>
+
+
+<p>What the task actually does is abstracted one layer down, and almost all the rest of the task body is handling errors. I feel that it's easier to grasp the bigger picture, and that the task is easier to maintain this way.</p>
+<h2>Retry gracefully</h2>
+<p>Setting fixed countdowns for retries may not be what you want. I tend to prefer using a backoff increasing with the number of retries. This means the more a task fails, the more we have to wait until the next retry. I think this has a couple of interesting consequences:</p>
+<ul>
+<li>we don't hammer the external service in case of an outage,</li>
+<li>it gives more time to the service to go back to normal,</li>
+<li>and thus increases our overall chance of success</li>
+</ul>
+<p>A simple (but effective anyhow) implementation could look something like this:</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">backoff</span><span class="p">(</span><span class="n">attempts</span><span class="p">):</span>
+    <span class="sd">"""Return a backoff delay, in seconds, given a number of attempts.</span>
+
+<span class="sd">    The delay increases very rapidly with the number of attemps:</span>
+<span class="sd">    1, 2, 4, 8, 16, 32, ...</span>
+
+<span class="sd">    """</span>
+    <span class="k">return</span> <span class="mi">2</span> <span class="o">**</span> <span class="n">attempts</span>
+
+<span class="nd">@app.task</span><span class="p">(</span><span class="n">bind</span><span class="o">=</span><span class="bp">True</span><span class="p">,</span> <span class="n">max_retries</span><span class="o">=</span><span class="mi">3</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">send_mail</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">recipients</span><span class="p">,</span> <span class="n">sender_email</span><span class="p">,</span> <span class="n">subject</span><span class="p">,</span> <span class="n">body</span><span class="p">):</span>
+    <span class="sd">"""Send a plaintext email with argument subject, sender and body to a list of recipients."""</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">data</span> <span class="o">=</span> <span class="n">api_send_mail</span><span class="p">(</span><span class="n">recipients</span><span class="p">,</span> <span class="n">sender_email</span><span class="p">,</span> <span class="n">subject</span><span class="p">,</span> <span class="n">body</span><span class="p">)</span>
+    <span class="k">except</span> <span class="n">InvalidUserInput</span><span class="p">:</span>
+        <span class="k">raise</span>
+    <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+        <span class="n">sentrycli</span><span class="o">.</span><span class="n">captureException</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">retry</span><span class="p">(</span><span class="n">countdown</span><span class="o">=</span><span class="n">backoff</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">request</span><span class="o">.</span><span class="n">retries</span><span class="p">),</span> <span class="n">exc</span><span class="o">=</span><span class="n">exc</span><span class="p">)</span>
+        <span class="o">...</span>
+</pre></div>
+
+
+<h2>Fail fast and don't block forever</h2>
+<p>One thing to remember is to <strong>always</strong> specify a timeout on I/O operations, or at least on the celery task itself. If you don't, it's possible all your tasks could block indefinitely, which would then prevent any additional task to start. In the context of the <code>send_mail</code> task, I could probably do something like this, as an API call should probably not take more than 5 seconds:</p>
+<div class="highlight"><pre><span class="nd">@app.task</span><span class="p">(</span>
+    <span class="n">bind</span><span class="o">=</span><span class="bp">True</span><span class="p">,</span>
+    <span class="n">max_retries</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span>
+    <span class="n">soft_time_limit</span><span class="o">=</span><span class="mi">5</span> <span class="c"># time limit is in seconds.</span>
+<span class="p">)</span>
+<span class="k">def</span> <span class="nf">send_mail</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">recipients</span><span class="p">,</span> <span class="n">sender_email</span><span class="p">,</span> <span class="n">subject</span><span class="p">,</span> <span class="n">body</span><span class="p">):</span>
+    <span class="o">...</span>
+</pre></div>
+
+
+<p>If the task takes more than 5 seconds to complete, the <code>celery.exceptions.SoftTimeLimitExceeded</code> exception would get raised and logged to Sentry.</p>
+<p>I also tend to set the <a href="https://celery.readthedocs.org/en/latest/configuration.html?highlight=eager#celeryd-task-soft-time-limit"><code>CELERYD_TASK_SOFT_TIME_LIMIT</code></a> configuration option with a default value of 300 (5 minutes). This will act as a failsafe if I forget to set an appropriate <code>soft_time_limit</code> option on a task.</p>
+<h2>Share common behavior among tasks</h2>
+<p>All that is pretty dandy, but I don't want to re-implement the exception catching for every task. I should be able to specify a basic behavior shared between all my tasks. Turns out you can, using an <a href="https://celery.readthedocs.org/en/latest/userguide/tasks.html?highlight=context#abstract-classes">abstract task class</a>.</p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">myproject.tasks</span> <span class="kn">import</span> <span class="n">app</span>
+
+<span class="k">class</span> <span class="nc">BaseTask</span><span class="p">(</span><span class="n">app</span><span class="o">.</span><span class="n">Task</span><span class="p">):</span>
+    <span class="sd">"""Abstract base class for all tasks in my app."""</span>
+
+    <span class="n">abstract</span> <span class="o">=</span> <span class="bp">True</span>
+
+    <span class="k">def</span> <span class="nf">on_retry</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">exc</span><span class="p">,</span> <span class="n">task_id</span><span class="p">,</span> <span class="n">args</span><span class="p">,</span> <span class="n">kwargs</span><span class="p">,</span> <span class="n">einfo</span><span class="p">):</span>
+        <span class="sd">"""Log the exceptions to sentry at retry."""</span>
+        <span class="n">sentrycli</span><span class="o">.</span><span class="n">captureException</span><span class="p">(</span><span class="n">exc</span><span class="p">)</span>
+        <span class="nb">super</span><span class="p">(</span><span class="n">BaseTask</span><span class="p">,</span> <span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="n">on_retry</span><span class="p">(</span><span class="n">exc</span><span class="p">,</span> <span class="n">task_id</span><span class="p">,</span> <span class="n">args</span><span class="p">,</span> <span class="n">kwargs</span><span class="p">,</span> <span class="n">einfo</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">on_failure</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">exc</span><span class="p">,</span> <span class="n">task_id</span><span class="p">,</span> <span class="n">args</span><span class="p">,</span> <span class="n">kwargs</span><span class="p">,</span> <span class="n">einfo</span><span class="p">):</span>
+        <span class="sd">"""Log the exceptions to sentry."""</span>
+        <span class="n">sentrycli</span><span class="o">.</span><span class="n">captureException</span><span class="p">(</span><span class="n">exc</span><span class="p">)</span>
+        <span class="nb">super</span><span class="p">(</span><span class="n">BaseTask</span><span class="p">,</span> <span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="n">on_failure</span><span class="p">(</span><span class="n">exc</span><span class="p">,</span> <span class="n">task_id</span><span class="p">,</span> <span class="n">args</span><span class="p">,</span> <span class="n">kwargs</span><span class="p">,</span> <span class="n">einfo</span><span class="p">)</span>
+
+
+<span class="nd">@app.task</span><span class="p">(</span>
+    <span class="n">bind</span><span class="o">=</span><span class="bp">True</span><span class="p">,</span>
+    <span class="n">max_retries</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span>
+    <span class="n">soft_time_limit</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span>
+    <span class="n">base</span><span class="o">=</span><span class="n">BaseTask</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">send_mail</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">recipients</span><span class="p">,</span> <span class="n">sender_email</span><span class="p">,</span> <span class="n">subject</span><span class="p">,</span> <span class="n">body</span><span class="p">):</span>
+    <span class="sd">"""Send a plaintext email with argument subject, sender and body to a list of recipients."""</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">data</span> <span class="o">=</span> <span class="n">api_send_mail</span><span class="p">(</span><span class="n">recipients</span><span class="p">,</span> <span class="n">sender_email</span><span class="p">,</span> <span class="n">subject</span><span class="p">,</span> <span class="n">body</span><span class="p">)</span>
+    <span class="k">except</span> <span class="n">InvalidUserInput</span><span class="p">:</span>
+        <span class="k">raise</span>
+    <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">retry</span><span class="p">(</span><span class="n">countdown</span><span class="o">=</span><span class="n">backoff</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">request</span><span class="o">.</span><span class="n">retries</span><span class="p">),</span> <span class="n">exc</span><span class="o">=</span><span class="n">exc</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">data</span>
+</pre></div>
+
+
+<p>You can see that the <code>send_mail</code> task implementation only deals with email sending and expected error handling. Everything else is handled by the abstract base class. If the common behavior is more complex, this trick can <em>drastically</em> reduce the size of each task body and the amount of duplicated code in your tasks.</p>
+<p><strong>Note</strong>: this example is only here to demonstrate how to share behavior between tasks. To properly integrate Sentry with Celery, have a look at <a href="https://docs.getsentry.com/hosted/clients/python/integrations/celery/">this page</a>.</p>
+<p><strong>Tip</strong>: have a look at the list of <a href="https://celery.readthedocs.org/en/latest/userguide/tasks.html?highlight=context#handlers">available handlers</a>, to get an idea of what behavior can be shared between tasks.</p>
+<h2>Write large tasks as classes</h2>
+<p>So far, I've only implemented tasks as functions. However, it's also possible to define <a href="https://celery.readthedocs.org/en/latest/userguide/tasks.html#custom-task-classes">class tasks</a>.</p>
+<p>I think one of the scenarii where class tasks really shine are when you'd like to split a large task function into several well-defined and testable methods. As you can see <a href="https://celery.readthedocs.org/en/latest/userguide/tasks.html#custom-task-classes">here</a>, the <code>celery.task</code> decorator will generate a task class and inject the decorated function as the class <code>run</code> method.
+Defining a class task amounts to defining a class inheriting from <code>app.Task</code> with a <code>run</code> method.</p>
+<div class="highlight"><pre><span class="k">class</span> <span class="nc">handle_event</span><span class="p">(</span><span class="n">BaseTask</span><span class="p">):</span>   <span class="c"># BaseTask inherits from app.Task</span>
+
+    <span class="k">def</span> <span class="nf">validate_input</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">event</span><span class="p">):</span>
+        <span class="o">...</span>
+
+    <span class="k">def</span> <span class="nf">get_or_create_model</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">event</span><span class="p">):</span>
+        <span class="o">...</span>
+
+    <span class="k">def</span> <span class="nf">stream_event</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">event</span><span class="p">):</span>
+        <span class="o">...</span>
+
+    <span class="k">def</span> <span class="nf">run</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">event</span><span class="p">):</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">validate_intput</span><span class="p">(</span><span class="n">event</span><span class="p">):</span>
+            <span class="k">raise</span> <span class="n">InvalidInput</span><span class="p">(</span><span class="n">event</span><span class="p">)</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">model</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">get_or_create_model</span><span class="p">(</span><span class="n">event</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">call_hooks</span><span class="p">(</span><span class="n">event</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">persist_model</span><span class="p">(</span><span class="n">event</span><span class="p">)</span>
+        <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">retry</span><span class="p">(</span><span class="n">countdown</span><span class="o">=</span><span class="n">backoff</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">request</span><span class="o">.</span><span class="n">retries</span><span class="p">),</span> <span class="n">exc</span><span class="o">=</span><span class="n">exc</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">stream_event</span><span class="p">(</span><span class="n">event</span><span class="p">)</span>
+</pre></div>
+
+
+<p>By doing this, the task logic is clear and easy to follow (the <code>run</code> method stays concise even if the methods body are large), and each of these method can then be unit-tested independently.</p>
+<p>Another advantage of using class tasks is using multiple inheritance to specialize a task with multiple abstract base classes.
+For example, I'd like to use the <a href="https://github.com/TrackMaven/celery-once/">celery_once</a> <code>QueueOnce</code> abstract class to introduce some locking mechanism, while still using the <code>BaseTask</code> for sentry logging. This way, each abstract task class is used as a mixin, adding some behaviour to the task.</p>
+<h2>Unit-test your tasks</h2>
+<p>Unit testing a project involving celery has always been a pickle for me. I tried to deploy a broker and a test celery worker in the CI environment, but it felt like killing a fly with a bazooka. The answer turns out to be quite simple, thanks to Nicolas Le Manchet for figuring this one out! When the <a href="https://celery.readthedocs.org/en/latest/configuration.html#celery-always-eager"><code>CELERY_ALWAYS_EAGER</code></a> option is activated, all tasks called using their <code>apply_async</code> or <code>delay</code> method are called <em>directly</em>, without requiring any broker or celery worker. Easy as pie.</p></div>
+	</div></body></html>

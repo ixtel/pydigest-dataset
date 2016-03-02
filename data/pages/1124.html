@@ -1,0 +1,97 @@
+<html><body><div><div class="post-body entry-content" id="post-body-6895407166886563171" itemprop="description articleBody">
+<div dir="ltr" trbidi="on">
+
+<h2>
+Предисловие</h2>
+<div><p>
+Итак, начнем цикл статей про машинное обучение) В основном он будет основан на материале из различных книг, но основная идея цикла - это подача!) А подавать будем, попытавшись написать реальный проектик и попрактиковавшись в различных интересных штукенциях)</p>
+
+<a name="more"/></div>
+<h3>
+В поисках данных</h3><p>
+Итак, нам нужны данные - много данных!) И желательно интересных. Не знаю, как вы, но я долго думать не стал и воспользовался сайтом </p><a href="http://www.kinopoisk.ru/">kinopoisk.ru</a><p>, надеюсь сильно бить не будут, ведь мы будем взращивать их будущие кадры(т.е. Вас!)))
+
+</p><div>
+<p>
+Начнем с конфигурации. В разных книгах примеры данных хранятся во всяких rss, plain files и прочей не современной чепухе) Мы то с Вами живем в то время, когда даже слово sql стыдно произносить в приличном обществе, без приставки no!) Но мы произнесем - </p><a href="http://www.postgresql.org/">PostgreSQL</a><p>! Начнем с установки(ищем, где ищется)) а закончим созданием таблички votes.
+
+
+</p><pre class="brush: sql">CREATE TABLE votes
+(
+  id serial NOT NULL, --уникальный идентификатор
+  user_id integer NOT NULL, --id пользователя с сайта
+  film_id integer NOT NULL, --id фильма с сайта
+  vote smallint NOT NULL, --оценка фильму пользователем от 1 до 10
+  CONSTRAINT vote_id PRIMARY KEY (id)
+)</pre>
+<pre class="brush: sql"/>
+<pre class="brush: sql"/><p>
+Объяснять столбцы не буду!!!))) Если все получилось, давайте добавим данных. Бить меня не нужно, можно только корректировать, я для Вас написал следующее чудо, запускаем и...не ждем, а приступаем к работе, он и сам справится, за несколько лет)) У меня на момент написания этих строк обработано 9000 пользователей из как минимум 4722023 (спалился:)
+
+
+</p><pre class="brush: python">import re, psycopg2
+from lxml.html import parse
+from lxml.cssselect import CSSSelector
+
+def get_user_voites():
+
+ user_start_num = 200
+ user_end_num = 4722023
+
+ try:
+  conn=psycopg2.connect("dbname='postgres' user='postgres' password='120789' host='localhost'")
+  cur = conn.cursor()
+  page_num_sel = CSSSelector('div.pagesFromTo')
+
+  for user_num in xrange(user_start_num, user_end_num):
+
+   vote_film_list = []
+   loop_bool = True
+   page_num = 1
+
+   while loop_bool:
+    try:
+     page = parse('http://www.kinopoisk.ru/user/%s/votes/list/ord/date/page/%s/' % (user_num, page_num))
+
+     vote_count_div = int(page_num_sel(page)[0].text.split()[-1])
+
+     items = page.xpath("//div[contains(@class, 'item')]")
+     for item in items:
+      try:
+       film_div = item.find("div[@class='info']").find("div[@class='nameRus']").find("a")
+
+       vote_num = int(item.find("div[@class='num']").text)
+       film_id = re.search('film\/(\d)+\/$', film_div.values()[0]).group(0)[5:-1]
+       film_name = film_div.text
+       vote = item.find("div[@class='vote']").text
+
+       if vote and film_id:
+        vote_film_list.append({'vote': vote, 'user_id': user_num, 'film_id': film_id})
+      except:
+       pass
+
+     if vote_num &lt;= vote_count_div:
+      page_num += 1
+
+     print vote_num, page_num, vote_count_div, len(vote_film_list)
+     cur.executemany("""INSERT INTO votes(user_id, film_id, vote) VALUES (%(user_id)s, %(film_id)s, %(vote)s)""", vote_film_list)
+     conn.commit()
+     vote_film_list = []
+
+    except Exception, e:
+     print e
+     loop_bool = False
+
+
+ except Exception, e:
+  print "I am unable to connect to the database.", e
+
+ finally:
+  if conn:
+   conn.close()
+</pre>
+</div>
+</div>
+<p/>
+</div>
+</div></body></html>

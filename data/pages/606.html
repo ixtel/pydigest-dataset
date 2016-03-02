@@ -1,0 +1,172 @@
+<html><body><div><div class="content html_format"><p>
+      При написании собственного «инстаграма» появилась необходимость в наложении фильтров на изображение при аплоаде. Изначально, чтобы особо не нагружать сервер, было решено вынести процесс преобразования картинки на клиентскую сторону. Основная идея – загрузка изображения в канву, манипуляции над ним и выгрузка потока байт (результирующего изображения) на сервер. Для реализации была выбрана js-библиотека </p><a href="http://camanjs.com/">CamanJS </a><p>, которая может работать как в браузере, так и на стороне сервера через NodeJS. Однако пришлось от нее отказаться из-за трех причин:
+</p><a name="habracut"/>
+<ul>
+<li>CamanJS не поддерживается мобильными браузерами (Safari, Chrome в частности);</li>
+<li>CamanJS заставляет течь память в браузере (особенно при работе с крупными изображениями);</li>
+<li>CamanJS сильно тормозит в Firefox при наложении фильтров.</li>
+</ul><p>
+Затем была предпринята попытка использовать CamanJS на стороне сервера. Результат опять оказался неудовлетворительным:
+</p><ul>
+<li>После преобразования изображение увеличивалось в 3-4 раза;</li>
+<li>Преобразование изображения происходило совсем не быстро.</li>
+</ul>
+<p>
+В итоге пришлось полностью отказаться от CamanJS. 
+</p><p>
+Для обработки изображений на серверной стороне самым оптимальным вариантом оказался программный комплекс </p><a href="http://www.imagemagick.org/">ImageMagick</a><p>, который обладает довольно богатым функционалом и имеет множество расширений для различных языков программирования. Поскольку наш проект работает на django, то нас, прежде всего, интересовали python-расширения для ImageMagick – PythonMagick и Wanda. Как выяснилось, они поддерживают не все возможности ImageMagick, часть графических эффектов просто отсутствует, поэтому мы воспользовались прямым вызовом imagemagick через subprocess.</p><p>
+Применение эффектов происходит через специальные bash-скрипты, которые были получены с помощью очень полезных ресурсов </p><a href="http://www.fmwconcepts.com/imagemagick">http://www.fmwconcepts.com/imagemagick</a><p> — здесь лежат сами скрипты с описанием, </p><a href="http://jqmagick.imagemagick.org">http://jqmagick.imagemagick.org</a><p> – а здесь можно поэкспериментировать с различными эффектами и подобрать параметры. 
+</p><p>
+Сначала заходим на </p><a href="http://jqmagick.imagemagick.org">http://jqmagick.imagemagick.org</a><p>, аплоадим картинку, выбираем нужный эффект, подбираем параметры к нему. Если все красиво и все нас устраивает, копируем пример команды для выполнения скрипта с необходимыми параметрами из нижнего поля раздела «options» (по дефолту правая нижняя часть интрефейса jqmagick). Например:
+ 
+</p><pre><code class="bash">bash scripts/vintage1.sh -b 0 -c 35 -s roundrectangle -T torn -I grunge -C white output/8526-603.jpg output/3347-9458.jpg
+</code></pre>
+<p>
+Интересующий нас скрипт называется vintage1.sh. Перемещаемся на </p><a href="http://www.fmwconcepts.com/imagemagick">http://www.fmwconcepts.com/imagemagick</a><p>, находим нужный скрипт, скачиваем его и не забываем выставить флажок «на исполнение». И вот таким образом подбираем все нужные нам эффекты.</p><p>
+Теперь все готово для программной реализации.
+</p><p>
+Итак, задача: 
+</p><p>
+Дать возможность пользователям (в нашем случае это — продавцы на e-commerce площадке по продаже уникальных товаров) загружать изображения на сервер, применять к ним эффекты из заранее подготовленного набора с возможностью отображения результата. 
+
+</p><h3>Загрузка изображения на сервер</h3><p>
+Для загрузки изображения на сервер мы использовали js-библиотеку </p><a href="http://bgrins.github.io/filereader.js/">filereader.js</a><p>. Использование и пример конфигурации можно найти в спецификации для этой библиотеки. Непосредственную отправку файла на сервер мы реализовали с помощью метода send() oбъекта XMLHttpRequest после того, как файл будет полностью выгружен в объект FileReader браузера. Для этого определяем опцию «load»:
+
+</p><pre><code class="javascript">var opts = {
+        // … 
+        load: function(e, file) {
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', '{% url upload_file %}', true);
+            xhr.onload = function() {
+                if (this.status == 200) {
+                    // обрабатываем ответ от сервера после удачной загрузки
+                    var resp = JSON.parse(this.response);
+                    // сохраняем пути к оригинальному изображению и превью (для применения фильтров к нему)
+                    filter_image = resp['image'];   
+                    filter_thumb = resp['thumb'];
+                }          
+         };
+            xhr.send(file);
+         },
+         //…
+};
+</code></pre>
+<p>
+Не сервере мы принимаем выгружаемое изображение, создаем его копию для превью и возвращаем клиенту название оригинальной картинки и название превью к ней, чтобы заполнить атрибут src элемента  у превью.
+
+</p><pre><code class="python">import os
+import datetime
+from PIL import Image
+try:
+    from cStringIO import StringIO
+except ImportError:
+    from StringIO import StringIO
+import simplejson as json
+
+from django.http import HttpResponse
+from django.conf import settings
+
+def upload_file(request):
+    max_size = (2560, 2048)  # задаем максимальное разрешение для оригинала
+    thumb_size = (325, 325)  #  максимальное разрешение для превью
+    f_data = request.body
+    fake_file = StringIO()
+    fake_file.write(f_data)
+    fake_file.seek(0)
+    img = Image.open(fake_file)
+    img.thumbnail(max_size, Image.ANTIALIAS)  # ужимаем при необходимости оригинал
+    tmp_dir = settings.TEMP_IMG_DIR  # все временные изображения будем хранить в отведенном месте
+    if not os.path.exists(tmp_dir):
+        os.makedirs(tmp_dir)
+    # директории с изображениями будут группироваться по датам
+    inner_dir_name = datetime.datetime.now().strftime('%d.%m.%Y')  
+    inner_dir = os.path.abspath(os.path.join(tmp_dir, inner_dir_name))
+    if not os.path.exists(inner_dir):
+        os.makedirs(inner_dir)
+    tmp_file_name = generate_tmp_file_name()  # получение уникального имени для файла
+    thumb_tmp_file_name = 'thumb_' + tmp_file_name  # для превью добавляем префикс
+    output = os.path.abspath(os.path.join(inner_dir, tmp_file_name))
+    output_thumb = os.path.abspath(os.path.join(inner_dir, thumb_tmp_file_name))
+    if not img.mode == 'RGB':
+        img = img.convert('RGB')
+    img.save(output, "JPEG")  # преобразуем оригинал и сохраняем в jpeg для экономии места
+    img.thumbnail(thumb_size, Image.ANTIALIAS)  
+    img.save(output_thumb, "JPEG")  #  аналогично и для превью
+    to_response = json.dumps({
+        'image': ''.join([settings.MEDIA_URL, '/'.join([settings.TEMP_IMG_DIR_NAME,
+                                                        innder_dir_name, tmp_file_name])]),
+        'thumb': ''.join([settings.MEDIA_URL, '/'.join([settings.TEMP_IMG_DIR_NAME,
+                                                        innder_dir_name, thumb_tmp_file_name])]),
+    })
+    return HttpResponse(to_response,  mimetype="application/json")
+</code></pre>
+<p>
+Сам TEMP_IMG_DIR в setting.py определяется так:
+
+</p><pre><code class="python"># Директория для хранения временных картинок
+TEMP_IMG_DIR = os.path.abspath(os.path.join(MEDIA_ROOT, 'temp_img'))
+</code></pre>
+
+<h3>Применение эффектов к изображению</h3><p>
+Основная идея здесь заключается в том, что эффекты будут применяться не к оригинальному изображению, а к его превью, и лишь после финального нажатия на кнопку «Сохранить» выбранный эффект применится к самому изображению. </p><p>
+Функция применения эффекта на клиентской стороне:
+
+</p><pre><code class="javascript">function setFilter(filter_name) {
+    result_filter = filter_name
+    $.ajax({
+        url: '{% url set_filter %}',
+        method: 'POST',
+        data: {
+            'img_path': filter_thumb,    // отправляем путь к превью
+            'filter_name': filter_name     // и наименование фильтра
+        },
+        success: function(response) {
+            $('#result_img').attr('src', response);  // отображаем результат
+        }
+    })
+}
+</code></pre>
+<p>
+На серверной стороне определяем команды для применения эффектов и сопоставляем их с названиями фильтров, здесь удобно использовать словарь:
+
+</p><pre><code class="python">FILTERS_COMMAND = {
+    'f1': "bash_scripts/colortemp.sh -t 10950 {file_name} {output}",
+    'f2': "bash_scripts/colortemp.sh -t 5736 {file_name} {output}",
+    # …
+    'f8': "bash_scripts/colorfilter.sh -c sepia -m 1 -d 28 {file_name} {output}",
+    'f9': "bash_scripts/colorfilter.sh -c underwater -m 1 -d 20 {file_name} {output}"
+}
+</code></pre>
+<p>
+Функция применения эффекта на стороне сервера:
+
+</p><pre><code class="python">import os
+import sys
+import subprocess
+
+def apply_filter(img_path, filter_name, output=None):
+    if output is None:
+        output_file_name = ''.join([filter_name, '_', os.path.basename(img_path)])
+        output_file = os.path.abspath(os.path.join(img_path.replace(os.path.basename(img_path), ''), output_file_name))
+        if os.path.exists(output_file):
+            return output_file
+    else:
+        output_file = output
+    command = FILTERS_COMMAND[filter_name]
+    # Используем bash, стало быть, скобки должны быть в виде:
+    command = command.replace('(', '\(').replace(')', '\)')
+    command = command.format(file_name=img_path, output=output_file)
+    subprocess.check_output(command, shell=True, stderr=subprocess.STDOUT)
+    return output_file
+</code></pre>
+<p>
+Функция apply_filter вызывается обработчик set_filter, который принимает 2 аргумента: путь к изображению и наименование фильтра, а возвращает — путь к измененному изображению. 
+</p><p>
+После того, как пользователь определился с нужным эффектом, он нажимает кнопку «Сохранить», и вызывается функция set_filter, в качестве аргумента передается сохраненный ранее путь к оригинальному изображению и результирующий эффект.</p><p>
+Напоследок приложу скрин того, как все это выглядит у нас:
+</p><img src="https://habrastorage.org/getpro/habr/post_images/e1a/409/924/e1a409924889d0abd2f75c7815e55c4d.png" alt="image"/>
+      <p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

@@ -1,0 +1,93 @@
+<html><body><div><div class="entry">
+
+
+
+
+
+<p>Thu, 28 Aug 2014</p>
+
+<p>
+I've recently started working on a large, mature code base (some 65,000
+lines of Python code). It has 1048 unit tests implemented in the standard 
+unittest.TestCase fashion using the mox framework for mocking support (I'm not 
+surprised you've not heard of it).
+</p><p>
+Recently I fixed a bug which was causing a user interface panel to display
+when it shouldn't have been. The fix basically amounts to a couple of lines
+of code added to the panel in question:
+</p><pre class="code">
++    def can_access(self, context):
++        # extend basic permission-based check with a check to see whether 
++        # the Aggregates extension is even enabled in nova 
++        if not nova.extension_supported('Aggregates', context['request']):
++            return False
++        return super(Aggregates, self).can_access(context)
+</pre><p>
+
+When I ran the unit test suite I discovered to my horror that <b>498 of 
+the 1048 tests now failed</b>. The reason for this is that the can_access() 
+method here is called as a side-effect of those 498 tests and the 
+nova.extension_supported (which is a REST call under the hood) needed to be
+mocked correctly to support it being called.
+</p><p>
+
+I quickly discovered that given the size of the test
+suite, and the testing tools used, each of those 498 tests must be
+fixed by hand, one at a time (if I'm lucky, some of them can be knocked off
+two at a time).
+</p><p>
+
+The main cause is mox's mocking of callables like the one above which
+enforces the order that those callables are invoked. It also enforces
+that the calls are made at all (uncalled mocks are treated as test failures).
+</p><p>
+
+This means there is no possibility to provide a blanket mock
+for the "nova.extension_supported". Tests with existing calls to that API 
+need careful attention
+to ensure the ordering is correct. Tests which don't result in the side-
+effect call to the above method will raise an error, so even adding a mock
+setup in a TestCase.setUp() doesn't work in most cases.
+</p><p>
+
+It doesn't help that the codebase is so large, and has been developed by so
+many people over years. Mocking isn't consistently implemented; even the
+basic structure of tests in TestCases is inconsistent.
+</p><p>
+
+It's worth noting that the ordering check that mox provides is never used as
+far as I can tell in this codebase. I haven't sighted an example of
+multiple calls to the same mocked API without the additional use of the mox
+InAnyOrder() modifier. mox does not provide a mechanism to turn the ordering
+check off completely.
+</p><p>
+
+The <a href="https://pypi.python.org/pypi/pretend">pretend</a> library (my go-to for stubbing) splits out the
+mocking step and the verification of calls so the ordering will only be
+enforced if you deem it absolutely necessary.
+</p><p>
+
+The choice to use unittest-style TestCase classes makes managing fixtures
+much more difficult (it becomes a nightmare of classes and mixins and setUp()
+super() calls or alternatively a nightmare of mixin classes and multiple 
+explicit setup calls in test bodies).
+This is exacerbated by the test suite in question introducing its own
+mock-generating decorator which will generate a mock, but again leaves the
+implementation of the mocking to the test cases. <a href="https://pypi.python.org/pypi/pytest">py.test</a>'s fixtures are a
+far superior mechanism for managing mocking fixtures, allowing simpler,
+central creation of mocks and overriding of them through fixture 
+dependencies.
+</p><p>
+
+The result is that I spent some time working through some of the test suite
+and discovered that in an afternoon I could fix about 10% of the failing
+tests. I have decided that spending a week fixing the tests for my 5 line
+bug fix is just not worth it, and I've withdrawn <a href="https://review.openstack.org/#/c/117090">the patch</a>.
+</p>
+
+
+
+
+</div>
+
+</div></body></html>

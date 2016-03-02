@@ -1,0 +1,174 @@
+<html><body><div><div class="clear padding-top-small">
+                        <p/><center>Guest post by <a href="http://continuum.io/blog/pandas-categoricals" target="_blank">Matthew Rocklin</a></center>
+
+<p><strong>Pandas Categoricals efficiently encode and dramatically improve performance on data with text categories</strong></p>
+
+<p><em>Disclaimer: Categoricals were created by the Pandas development team and not by me.</em></p>
+
+<h2 id="thereismoretospeedthanparallelism">There is More to Speed Than Parallelism</h2>
+
+<p>I usually write about parallelism. As a result people ask me how to parallelize their slow computations. The answer is usually <strong>just use pandas</strong> in a better way</p>
+
+<ul>
+<li><em>Q: How do I make my pandas code faster with parallelism?</em></li>
+<li><em>A: You don’t need parallelism, you can use Pandas better</em></li>
+</ul>
+
+<p>This is almost always simpler and more effective than using multiple cores or multiple machines. You should look towards parallelism only after you’ve made sane choices about storage format, compression, data representation, etc..</p>
+
+<p>Today we’ll talk about how Pandas can represent categorical text data numerically. This is a cheap and underused trick to get an order of magnitude speedup on common queries.</p>
+
+<h2 id="categoricals">Categoricals</h2>
+
+<p>Often our data includes text columns with many repeated elements. Examples:</p>
+
+<ul>
+<li>Stock symbols – GOOG, APPL, MSFT, ...</li>
+<li>Gender – Female, Male, ...</li>
+<li>Experiment outcomes – Healthy, Sick, No Change, ...</li>
+<li>States – California, Texas, New York, ... </li>
+</ul>
+
+<p>We usually represent these as text. Pandas represents text with the object dtype which holds a normal Python string. This is a common culprit for slow code because object dtypes run at Python speeds, not at Pandas’ normal C speeds.</p>
+
+<p>Pandas categoricals are a new and powerful feature that encodes categorical data numerically so that we can leverage Pandas’ fast C code on this kind of text data.</p>
+
+<pre><code class="language-prettyprint lang-py">&gt;&gt;&gt; # Example dataframe with names, balances, and genders as object dtypes
+&gt;&gt;&gt; df = pd.DataFrame({'name': ['Alice', 'Bob', 'Charlie', 'Danielle'],
+...                    'balance': [100.0, 200.0, 300.0, 400.0],
+...                    'gender': ['Female', 'Male', 'Male', 'Female']},
+...                    columns=['name', 'balance', 'gender'])
+
+&gt;&gt;&gt; df.dtypes                           # Oh no!  Slow object dtypes!
+name        object  
+balance    float64  
+gender      object  
+dtype: object  
+</code></pre>
+
+<p>We can represent columns with many repeats, like gender, more efficiently by using categoricals. This stores our original data in two pieces</p>
+
+
+
+<pre><code>Female, Male, Male, Female  
+</code></pre>
+
+<p><strong>1.</strong> Index mapping each category to an integer</p>
+
+<pre><code>Female: 0  
+Male: 1  
+...
+</code></pre>
+
+<p><strong>2.</strong> Normal array of integers</p>
+
+<pre><code>0, 1, 1, 0  
+</code></pre>
+
+<p>This integer array is more compact and is now a normal C array. This allows for normal C-speeds on previously slow object dtype columns. Categorizing a column is easy:</p>
+
+<pre><code class="language-prettyprint lang-py">In [5]: df['gender'] = df['gender'].astype('category')  # Categorize!  
+</code></pre>
+
+<p>Lets look at the result</p>
+
+<pre><code class="language-prettyprint lang-py">In [6]: df                          # DataFrame looks the same  
+Out[6]:  
+       name  balance  gender
+0     Alice      100  Female  
+1       Bob      200    Male  
+2   Charlie      300    Male  
+3  Danielle      400  Female
+
+In [7]: df.dtypes                   # But dtypes have changed  
+Out[7]:  
+name         object  
+balance     float64  
+gender     category  
+dtype: object
+
+In [8]: df.gender                   # Note Categories at the bottom  
+Out[8]:  
+0    Female  
+1      Male  
+2      Male  
+3    Female  
+Name: gender, dtype: category  
+Categories (2, object): [Female, Male]
+
+In [9]: df.gender.cat.categories    # Category index  
+Out[9]: Index([u'Female', u'Male'], dtype='object')
+
+In [10]: df.gender.cat.codes        # Numerical values  
+Out[10]:  
+0    0  
+1    1  
+2    1  
+3    0  
+dtype: int8                         # Stored in single bytes!  
+</code></pre>
+
+<p>Notice that we can store our genders much more compactly as single bytes. We can continue to add genders (there are more than just two) and Pandas will use new values (2, 3, …) as necessary.</p>
+
+<p>Our dataframe looks and feels just like it did before. Pandas internals will smooth out the user experience so that you don’t notice that you’re actually using a compact array of integers.</p>
+
+<h2 id="performance">Performance</h2>
+
+<p>Lets look at a slightly larger example to see the performance difference.</p>
+
+<p>We take a small subset of the NYC Taxi dataset and group by medallion ID to find the taxi drivers who drove the longest distance during a certain period.</p>
+
+<pre><code class="language-prettyprint lang-py">In [1]: import pandas as pd  
+In [2]: df = pd.read_csv('trip_data_1_00.csv')
+
+In [3]: %time df.groupby(df.medallion).trip_distance.sum().sort(ascending=False,  
+inplace=False).head()  
+CPU times: user 161 ms, sys: 0 ns, total: 161 ms  
+Wall time: 175 ms
+
+Out[3]:  
+medallion  
+1E76B5DCA3A19D03B0FB39BCF2A2F534    870.83  
+6945300E90C69061B463CCDA370DE5D6    832.91  
+4F4BEA1914E323156BE0B24EF8205B73    811.99  
+191115180C29B1E2AF8BE0FD0ABD138F    787.33  
+B83044D63E9421B76011917CE280C137    782.78  
+Name: trip_distance, dtype: float64  
+</code></pre>
+
+<p>That took around 170ms. We categorize in about the same time.</p>
+
+<pre><code class="language-prettyprint lang-py">In [4]: %time df['medallion'] = df['medallion'].astype('category')  
+CPU times: user 168 ms, sys: 12.1 ms, total: 180 ms  
+Wall time: 197 ms  
+</code></pre>
+
+<p>Now that we have numerical categories our computaion runs 20ms, improving by about an order of magnitude.</p>
+
+<pre><code class="language-prettyprint lang-py">In [5]: %time df.groupby(df.medallion).trip_distance.sum().sort(ascending=False,  
+inplace=False).head()  
+CPU times: user 16.4 ms, sys: 3.89 ms, total: 20.3 ms  
+Wall time: 20.3 ms
+
+Out[5]:  
+medallion  
+1E76B5DCA3A19D03B0FB39BCF2A2F534    870.83  
+6945300E90C69061B463CCDA370DE5D6    832.91  
+4F4BEA1914E323156BE0B24EF8205B73    811.99  
+191115180C29B1E2AF8BE0FD0ABD138F    787.33  
+B83044D63E9421B76011917CE280C137    782.78  
+Name: trip_distance, dtype: float64  
+</code></pre>
+
+<p>We see almost an order of magnitude speedup after we do the one-time-operation of replacing object dtypes with categories. Most other computations on this column will be similarly fast. Our memory use drops dramatically as well.</p>
+
+<h2 id="conclusion">Conclusion</h2>
+
+<p>Pandas Categoricals efficiently encode repetitive text data. Categoricals are useful for data like stock symbols, gender, experiment outcomes, cities, states, etc.. Categoricals are easy to use and greatly improve performance on this data.</p>
+
+<p>We have several options to increase performance when dealing with inconveniently large or slow data. Good choices in storage format, compression, column layout, and data representation can dramatically improve query times and memory use. Each of these choices is as important as parallelism but isn’t overly hyped and so is often overlooked. </p>
+
+<p>Follow <a href="https://twitter.com/mrocklin">@mrocklin</a> and visit <a href="http://continuum.io/">continuum.io</a></p>
+                      </div>
+
+                </div></body></html>

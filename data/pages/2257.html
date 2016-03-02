@@ -1,0 +1,115 @@
+<html><body><div><div class="entry-content">
+    <p>This is the second in what I hope will be a series of explorations of advanced
+features in requests.</p>
+<p>Websites and servers sometimes, misbehave. They can misbehave in a number of
+ways:</p>
+<ul class="simple">
+<li>read errors</li>
+<li>large numbers of redirects</li>
+<li>failure to connect</li>
+<li>500 errors</li>
+</ul>
+<p>What most people don't know is that <a class="reference external" href="https://github.com/kennethreitz/requests">requests</a> can actually handle this for
+you, with help from <a class="reference external" href="https://github.com/shazow/urllib3">urllib3</a>.</p>
+<div class="section" id="using-retries-in-urllib3">
+<h2>Using Retries in urllib3</h2>
+<p>Recently urllib3 added the ability to configure retry logic on a <a class="reference external" href="https://urllib3.readthedocs.org/en/latest/managers.html">PoolManager</a>
+or on specific requests. For example, you could make a <tt class="docutils literal">PoolManager</tt> that
+retries every time it receives a 500 error:</p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">urllib3.util</span> <span class="kn">import</span> <span class="n">Retry</span>
+<span class="kn">from</span> <span class="nn">urllib3</span> <span class="kn">import</span> <span class="n">PoolManager</span>
+
+<span class="n">retries</span> <span class="o">=</span> <span class="n">Retry</span><span class="p">(</span><span class="n">total</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span> <span class="n">status_forcelist</span><span class="o">=</span><span class="p">[</span><span class="mi">500</span><span class="p">])</span>
+<span class="n">manager</span> <span class="o">=</span> <span class="n">PoolManager</span><span class="p">(</span><span class="n">retries</span><span class="o">=</span><span class="n">retries</span><span class="p">)</span>
+<span class="n">response</span> <span class="o">=</span> <span class="n">manager</span><span class="o">.</span><span class="n">request</span><span class="p">(</span><span class="s">'GET'</span><span class="p">,</span> <span class="s">'https://httpbin.org/status/500'</span><span class="p">)</span>
+</pre></div>
+<p>If you run this code, you should see it raise an exception - a
+<tt class="docutils literal">MaxRetryError</tt> to be specific. You can also do one that deals with
+redirects:</p>
+<div class="highlight"><pre><span class="n">retries</span> <span class="o">=</span> <span class="n">Retry</span><span class="p">(</span><span class="n">redirect</span><span class="o">=</span><span class="mi">5</span><span class="p">)</span>
+<span class="n">manager</span> <span class="o">=</span> <span class="n">PoolManager</span><span class="p">(</span><span class="n">retries</span><span class="o">=</span><span class="n">retries</span><span class="p">)</span>
+<span class="n">response</span> <span class="o">=</span> <span class="n">manager</span><span class="o">.</span><span class="n">request</span><span class="p">(</span><span class="s">'GET'</span><span class="p">,</span> <span class="s">'https://httpbin.org/redirect/3'</span><span class="p">)</span>
+</pre></div>
+<p>This will work just fine. But if you tell HTTPbin to redirect 5 times, you'll
+get a <tt class="docutils literal">MaxRetryError</tt> again.</p>
+</div>
+<div class="section" id="using-retries-in-requests">
+<h2>Using Retries in requests</h2>
+<p>You may be wondering now how you can use this with requests. If you're not
+already familiar with Transport Adapters in requests, you should go read
+<a class="reference external" href="https://lukasa.co.uk/">Cory</a>'s <a class="reference external" href="https://lukasa.co.uk/2012/12/Writing_A_Transport_Adapter/">blog post</a> first (but you're not required to).</p>
+<p>Now that you've read that, you should be able to better understand how you can
+use retries with requests. We allow users to specify their own Adapters in
+requests, but we use an <a class="reference external" href="http://docs.python-requests.org/en/latest/api/?highlight=httpadapter#requests.adapters.HTTPAdapter">HTTPAdapter</a>. An <tt class="docutils literal">HTTPAdapter</tt> can be initialized
+with a custom number of <tt class="docutils literal">pool_connections</tt>, a custom <tt class="docutils literal">pool_maxsize</tt>,
+whether the pool blocks (with <tt class="docutils literal">pool_block</tt>), and a custom <tt class="docutils literal">max_retries</tt>
+number.</p>
+<p>The trick is that <tt class="docutils literal">max_retries</tt> doesn't need to be an integer. For example:</p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">requests.packages.urllib3.util</span> <span class="kn">import</span> <span class="n">Retry</span>
+<span class="kn">from</span> <span class="nn">requests.adapters</span> <span class="kn">import</span> <span class="n">HTTPAdapter</span>
+<span class="kn">from</span> <span class="nn">requests</span> <span class="kn">import</span> <span class="n">Session</span><span class="p">,</span> <span class="n">exceptions</span>
+
+<span class="n">s</span> <span class="o">=</span> <span class="n">Session</span><span class="p">()</span>
+<span class="n">s</span><span class="o">.</span><span class="n">mount</span><span class="p">(</span><span class="s">'https://'</span><span class="p">,</span> <span class="n">HTTPAdapter</span><span class="p">(</span>
+    <span class="n">max_retries</span><span class="o">=</span><span class="n">Retry</span><span class="p">(</span><span class="n">total</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span> <span class="n">status_forcelist</span><span class="o">=</span><span class="p">[</span><span class="mi">500</span><span class="p">])</span>
+    <span class="p">)</span>
+<span class="p">)</span>
+
+<span class="n">s</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'https://httpbin.org/status/500'</span><span class="p">)</span>
+</pre></div>
+<p>This will raise a <tt class="docutils literal">RetryError</tt> exception because under no conditions will
+HTTPbin return anything other than a 500 status code. The trick, of course, is
+now figuring out exactly how you want retries to work in your application.</p>
+<p>Of course, if you still want the old behaviour of requests, we'll have that
+for the foreseeable future. By default, requests doesn't use urllib3's retry
+handling, but you can turn it on by simply passing an integer as before. So
+if you're already doing:</p>
+<div class="highlight"><pre><span class="n">s</span><span class="o">.</span><span class="n">mount</span><span class="p">(</span><span class="s">'https://'</span><span class="p">,</span> <span class="n">HTTPAdapter</span><span class="p">(</span><span class="n">max_retries</span><span class="o">=</span><span class="mi">5</span><span class="p">))</span>
+</pre></div>
+<p>your code will still work.</p>
+</div>
+<div class="section" id="a-non-trivial-example">
+<h2>A non-trivial example</h2>
+<p>Finally, let's look at a more practical example of how this might work. Let's
+use <a class="reference external" href="https://pypi.python.org/pypi">PyPI</a> as the server we're connecting to. PyPI sits behind a CDN which may
+return a 503 response if there's an issue between the origin servers and a
+point of presence (POP) server. Usually, if you retry that same request, it
+will succeed. So if you're using requests to download requests, you might
+usually make a request like this:</p>
+<div class="highlight"><pre><span class="kn">import</span> <span class="nn">requests</span>
+
+<span class="n">r</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'https://pypi.python.org/simple/requests/'</span><span class="p">)</span>
+</pre></div>
+<p>In this case, you might find that <tt class="docutils literal">r</tt> will have a status code of 503, but if
+you retry it, you'll get a 200 status code. Instead of having to write code to
+do this for you, specifying your own <tt class="docutils literal">Retry</tt> logic will handle this, for
+example:</p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">requests.packages.urllib3.util</span> <span class="kn">import</span> <span class="n">Retry</span>
+<span class="kn">from</span> <span class="nn">requests.adapters</span> <span class="kn">import</span> <span class="n">HTTPAdapter</span>
+<span class="kn">from</span> <span class="nn">requests</span> <span class="kn">import</span> <span class="n">Session</span><span class="p">,</span> <span class="n">exceptions</span>
+
+<span class="n">s</span> <span class="o">=</span> <span class="n">Session</span><span class="p">()</span>
+<span class="n">s</span><span class="o">.</span><span class="n">mount</span><span class="p">(</span><span class="s">'https://pypi.python.org/'</span><span class="p">,</span> <span class="n">HTTPAdapter</span><span class="p">(</span>
+    <span class="n">max_retries</span><span class="o">=</span><span class="n">Retry</span><span class="p">(</span><span class="n">total</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span> <span class="n">status_forcelist</span><span class="o">=</span><span class="p">[</span><span class="mi">500</span><span class="p">,</span> <span class="mi">503</span><span class="p">])</span>
+    <span class="p">)</span>
+<span class="p">)</span>
+<span class="n">r</span> <span class="o">=</span> <span class="n">s</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'https://pypi.python.org/simple/requests/'</span><span class="p">)</span>
+</pre></div>
+<p>Will try to retrieve that page at most 5 times if it receives either a 500 or
+503 response status code. Further, this will only retry if the URL requested
+starts with <tt class="docutils literal"><span class="pre">https://pypi.python.org/</span></tt> so if you're potentially requesting
+other sites over HTTPS, this will not affect them.</p>
+<p>Hopefully this bit of advanced logic is one that you will not need to use.
+Most users shouldn't need to have retries with logic like this. Of the users
+that do, simple retry logic shown above should suffice. There will be a very
+narrow subset of requests' users who need the <a class="reference external" href="https://urllib3.readthedocs.org/en/latest/helpers.html#urllib3.util.retry.Retry">Retry</a> object's more niche
+features, like back-off factors and method whitelists. By allowing users to
+access urllib3's more powerful features, requests becomes a far more powerful
+library than the elegant and user-friendly API might lead you to initially
+believe. As I write more of these, hopefully the hidden powers of requests
+will continue to impress you as they impress me.</p>
+
+</div>
+
+  </div>
+   </div></body></html>

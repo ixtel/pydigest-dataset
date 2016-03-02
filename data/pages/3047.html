@@ -1,0 +1,131 @@
+<html><body><div><div class="article-wrap" itemprop="text">
+      <p>When you want to execute a long-running or massively parallel process in a persistent way, you have a few options. You can launch a server, install a bunch of software, and stitch things together with <code>cron</code>. Or, you can install a <a href="http://hadoop.apache.org/">Hadoop</a> cluster, rewrite everything from the ground up to use map-reduce or Spark or another powerful concurrency framework, and orchestrate your job with that toolkit.</p>
+
+<p>Those options all have their place, but sometimes, all you want to do is <em>write some code</em> and <em>run it somewhere</em>. No server spin-up, no system administration, no patches and security updates. <a href="http://lambdaops.com/">Kyle Kelley</a> and I spent a few weeks around the holidays putting together <a href="https://github.com/cloudpipe/cloudpipe">an open-source project called <strong>“Cloudpipe”</strong></a> to accomplish exactly this. Today, we have a proof of concept we can run that successfully executes jobs, and we’re hard at work filling in the blanks in the architecture and putting together a real deployment.</p>
+
+<h2 id="using-it">Using it</h2>
+
+<p>To start, we chose to target an existing client SDK, Python’s <a href="https://pypi.python.org/pypi/multyvac/0.5.0">multyvac</a>, which was nice for a few reasons:</p>
+
+<ol>
+  <li>It gave me a concrete spec to target while I was mapping out the endpoints for the API server. This saved us a lot of bikeshedding in the early days.</li>
+  <li>It let me start backend-first and test things with real code, just as a user would experience them. Otherwise, I would have had to use awkward <code>curl</code> scripts until we could design and put together a decent SDK.</li>
+  <li>In theory, people are <a href="https://github.com/search?utf8=%E2%9C%93&amp;q=import+multyvac&amp;type=Code&amp;ref=searchresults">already using</a> the SDK. (If that search is any indication, though, we should have stuck with its predecessor, <a href="https://github.com/search?utf8=%E2%9C%93&amp;q=import+cloud&amp;type=Code&amp;ref=searchresults">cloud</a>, instead.)</li>
+</ol>
+
+<p>As a result, the only client SDK that exists today is for Python (and Python 2, at that). That’s going to change, though - we’ve been planning to <a href="https://github.com/cloudpipe/cloudpipe/issues/17">write our own client for Python</a> and <a href="https://github.com/ycombinator">Shaunak Kashyap</a> is already working on <a href="https://github.com/cloudpipe/sdk-node">an SDK for node.js</a>. We’re also likely to diverge more and more from multyvac as we move on.</p>
+
+<p>Once you have an account running on a cluster somewhere, you can install multyvac with:</p>
+
+
+
+<p>Then, you can submit functions as jobs:</p>
+
+<div class="highlighter-coderay"><div class="CodeRay">
+  <div class="code"><pre><span class="line-numbers"> <a href="#n1" name="n1">1</a></span><span>import</span> <span>multyvac</span>
+<span class="line-numbers"> <a href="#n2" name="n2">2</a></span>
+<span class="line-numbers"> <a href="#n3" name="n3">3</a></span><span># Connect to the cluster</span>
+<span class="line-numbers"> <a href="#n4" name="n4">4</a></span>multyvac.config.set_key(api_key=<span><span>'</span><span>username</span><span>'</span></span>,
+<span class="line-numbers"> <a href="#n5" name="n5">5</a></span>                        api_secret_key=<span><span>'</span><span>54321</span><span>'</span></span>,
+<span class="line-numbers"> <a href="#n6" name="n6">6</a></span>                        api_url=<span><span>'</span><span>https://somewhere/v1</span><span>'</span></span>)
+<span class="line-numbers"> <a href="#n7" name="n7">7</a></span>
+<span class="line-numbers"> <a href="#n8" name="n8">8</a></span><span>def</span> <span>add</span>(a, b):
+<span class="line-numbers"> <a href="#n9" name="n9">9</a></span>  <span>return</span> a + b
+<span class="line-numbers"><strong><a href="#n10" name="n10">10</a></strong></span>
+<span class="line-numbers"><a href="#n11" name="n11">11</a></span><span># Submit the function as a job. Args and kwargs will be</span>
+<span class="line-numbers"><a href="#n12" name="n12">12</a></span><span># passed to it server-side.</span>
+<span class="line-numbers"><a href="#n13" name="n13">13</a></span>jid = multyvac.submit(add, <span>3</span>, <span>4</span>)
+<span class="line-numbers"><a href="#n14" name="n14">14</a></span>
+<span class="line-numbers"><a href="#n15" name="n15">15</a></span><span># Use the job ID to get a Job object...</span>
+<span class="line-numbers"><a href="#n16" name="n16">16</a></span>job = multyvac.get(jid)
+<span class="line-numbers"><a href="#n17" name="n17">17</a></span>
+<span class="line-numbers"><a href="#n18" name="n18">18</a></span><span># ... and use the Job object to get the result.</span>
+<span class="line-numbers"><a href="#n19" name="n19">19</a></span><span># This call will block until the result is ready.</span>
+<span class="line-numbers"><strong><a href="#n20" name="n20">20</a></strong></span>result = job.get_result()
+</pre></div>
+</div>
+</div>
+
+<p>Multyvac uses some neat pickling tricks to send your function over the wire: you can actually send closures, or code that references external libraries, and it’ll work. Other languages’ SDKs may not be able to pull the same range of tricks, depending on how evil each runtime lets us be, but they’ll support the same basic idea.</p>
+
+<p>One important thing to notice is that the way work is submitted to the API is completely language-agnostic: it’s a contract between the SDK and the base Docker image that’s invoked on the server. The Cloudpipe API speaks strictly in terms of POSIX things: command and arguments, environment variables, and standard input, output and error streams.</p>
+
+<h2 id="how-it-works">How it works</h2>
+
+<p>Behind that URL, Cloudpipe is built from a small set of parts, all written in Go.</p>
+
+<p><em><a href="https://github.com/cloudpipe/cloudpipe">cloudpipe/cloudpipe</a></em></p>
+
+<p>The <strong>API server</strong> is an HTTPS server that hosts a JSON API. It’s a fairly thin layer that performs  CRUD operations on job models persisted in a MongoDB instance.</p>
+
+<p>We’re using Mongo because it’s <a href="https://objectrocket.com/">convenient for us</a>, by the way: storage operations are performed through an interface, so implementations built on other databases are possible and welcome.</p>
+
+<p>The <strong>job runner</strong> is a separate goroutine within the same process as each API server. It polls a queue of submitted jobs in MongoDB and uses the <a href="https://github.com/fsouza/go-dockerclient">go-dockerclient library</a> to launch each one. The runner creates a container from the requested image, attaches to its stdin, stdout and stderr, and starts it. Any provided stdin is fed in to the process; stdout and stderr are collected and used to update the job’s model in Mongo as it executes.</p>
+
+<p>In development mode, the container is launched on the same server that you’re running everything else on, but in any “real” setting user jobs should run on a different machine. We’re planning to use <a href="https://github.com/docker/swarm">swarm</a> as a way to manage submitting jobs to a cluster.</p>
+
+<p><em><a href="https://github.com/cloudpipe/auth-store">cloudpipe/auth-store</a></em></p>
+
+<p>Under the hood, the API server talks to a pluggable <strong>authentication server</strong> over HTTPS on an internal network, secured with a closed network of TLS credentials – meaning, the authentication server only accepts connections from clients who offer certificates signed by an internal certificate authority that we (the cluster operators) control.</p>
+
+<p>The authentication protocol consists of <a href="https://github.com/cloudpipe/cloudpipe/wiki/Authentication">two calls</a>. The reference authentication server, <code>cloudpipe/auth-store</code>, implements this with interally-stored usernames and passwords. It also offers an externally-facing API that can be used to create and manipulate accounts, but that’s all extra. We can also plug in an authentication backend that talks to Rackspace identity to use Rackspace credentials, for example, or implement one that speaks OAuth.</p>
+
+<p><em><a href="https://github.com/cloudpipe/runner-py2">cloudpipe/runner-py2</a></em></p>
+
+<p>A <strong>runner image</strong> is used to spawn a container that understands what the SDK is sending in and executes it as a non-root user. The Python one unpickles stdin and calls the resulting function, writing the result to a fixed location on the filesystem. Not bad for <a href="https://github.com/cloudpipe/runner-py2/blob/master/multyvacinit/pybootstrap.py#L10-L13">four lines of code</a>.</p>
+
+<p>Finally, all of these services are themselves running in <a href="https://registry.hub.docker.com/repos/cloudpipe/">Docker containers</a>, because why not.</p>
+
+<p>Here’s how it all fits together:</p>
+
+<p><img src="/assets/cloudpipe-compute-on-demand/cloudpipe-arch-ff91513f9898ab2e3221bcb949781177.png" alt="Cloudpipe architecture"/></p>
+
+<h2 id="into-the-future">Into the Future</h2>
+
+<p>What’s happening next? To begin with, we’re working on a simple web UI to provide a friendlier way to get your API key, create user accounts, monitor your jobs and so on. Shaunak is working on our first non-Python client SDK, for Node.js, and I’d like to start laying the groundwork for a Ruby SDK Soon (tm).</p>
+
+<p>I’m also interested in extending the base API to support:</p>
+
+<ul>
+  <li>
+    <p>Configurable sources of input and output. Run jobs to and from a Cloud Files container, or a database, or mount volumes into your container’s filesystem from a block volume.</p>
+  </li>
+  <li>
+    <p>Constructing derived images from the provided base images.</p>
+  </li>
+  <li>
+    <p>Job lifecycle management. Run jobs on a schedule. Save jobs and re-run them by name.</p>
+  </li>
+</ul>
+
+<p>Additionally, we’re going to start writing some <a href="http://www.ansible.com/home">Ansible roles</a> to help bootstrap servers as API hosts, authentication hosts, or user job hosts.</p>
+
+<p>Want to get involved? Dive right in – Pull requests are always welcome!</p>
+
+      <hr/>
+      <footer role="contentinfo">
+        <div class="article-author-bottom">
+          <img src="/assets/cat-sniffer-b4dc8328950b7ab07ad9552337b2682e.jpg" class="bio-photo" alt="Ash Wilson bio photo"/>
+<h3>Ash Wilson</h3>
+<p>Ash Wilson writes code at Rackspace. His specialties include: developer tooling, from SDKs to Atom packages; plugging things into other things (they had to cover all the electrical sockets); and eggs benedict.
+</p>
+
+<a href="http://twitter.com/smashwilson" class="author-social" target="_blank"> Twitter</a>
+<a href="http://facebook.com/kzintelepath" class="author-social" target="_blank"><i class="icon-facebook"/> Facebook</a>
+<a href="https://plus.google.com/u/0/+AshWilsonAway/" class="author-social" target="_blank"><i class="icon-google-plus"/> Google+</a>
+
+
+<a href="http://github.com/smashwilson" class="author-social" target="_blank"><i class="icon-github"/> Github</a>
+
+
+
+        </div>
+        <p class="byline"><strong>Cloudpipe: Compute on Demand</strong> was published on <time datetime="2015-01-30T00:00:00-05:00" itemprop="datePublished">January 30, 2015</time> by <span itemprop="author" itemscope="" itemtype="http://schema.org/Person"><span itemprop="name"><a href="https://azurefire.net/about" title="About Ash Wilson" itemprop="url">Ash Wilson</a></span></span>.</p>
+      </footer>
+
+      
+      
+      <noscript>Please enable JavaScript to view the <a href="http://disqus.com/?ref_noscript">comments powered by Disqus.</a></noscript>
+      <a href="http://disqus.com" class="dsq-brlink">comments powered by </a>
+    </div>
+  </div></body></html>

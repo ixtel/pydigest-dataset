@@ -1,0 +1,163 @@
+<html><body><div><div class="col-lg-8 col-lg-offset-2 col-md-10 col-md-offset-1">
+                    
+                    <h2 class="section-heading">Introduction</h2>
+
+                    <p>We recently had a client who asked us to help refine their feature generating process to produce more meaningful features for a specific investment process. The feature generation, which was pretty cool actually, revolved around third party data collected by a large financial data aggregator. But given the nature of the work, it's not something that I can necessarily divulge. The secondary issue, however, was their use of excel for nearly everything. So many things that can be automated in any language were still being performed manually. It was almost a religious experience to change the way they worked; to the point where their production reached levels were at a place they were unable to attain earlier (and in some cases, simply the sheer amount of time saved meant that they were able to go home early and be with their families).</p>
+
+                    <h2 class="section-heading">Example Table</h2>
+
+                    <p>Here is an example table of some standard financal data:</p>
+                    <table border="1" class="dataframe table">  <thead>    <tr><th>Cusip_Sedol</th><th>Country_Name</th>      <th>Security_Name</th>      <th>TCAP USD</th>      <th>SIC_Code</th>      <th>GIC_Code</th>      <th>Revenue (MM USD)</th>    </tr>  </thead>  <tbody>    <tr>     <td> 2562898</td>      <td>    Canada</td>      <td> 01 COMMUNIQUE LABORATORY INC</td>      <td>  12.885067</td>      <td>  7372</td>      <td> 45103010</td>      <td>                  1.234217</td>    </tr>    </tbody></table>
+
+
+                    <p>Here is an example of what a few other tables looked like, all with verying feature items and scores.</p>
+
+                    <table border="1" class="dataframe table">  <thead>    <tr>      <th>Feature 1</th>      <th>Feature 2</th>      <th>Feature 3</th>    <th>ISSUER_NAME</th> </tr>  </thead>  <tbody>    <tr>     <td> 6.5</td>      <td> 9.3</td>      <td> 10</td>     <td> 01 COMMUNIQUE LABORATORY INC</td>    </tr>  </tbody></table>
+
+                    <p>The goal here is to combine the features and company information into one table then perform some arbitrary sum/weighting formula to arrive at a new feature variable. In the past, the proprietors of this process used v-lookups and other standard excel 'formulas' to achieve their end goal. Now, not only did we derive some pretty awesome features for them, they were also able to reclaim some valuable time in their days.</p>
+
+                    <p/>
+
+                    <h2 class="section-heading">Example Script</h2>
+
+                    <div class="highlight-python"><div class="highlight"><pre><span class="gp">import pandas as pd
+from scipy import stats
+US_companies=pd.io.excel.read_excel('Companies_info.xlsx',1) # the number is the sheet number
+US_Features1=pd.io.excel.read_excel('Feature_set1.xlsx',1)
+US_Features2=pd.io.excel.read_excel('Feature_set2.xlsx',5)
+
+#this merges the two tables. creating an sql-like join. 
+Feature_Table=pd.merge(US_Features1,US_Features2, on='ISSUER_NAME')
+
+#think of this portion as a table join in sql
+#Create the US feature DB with all information
+#create a column with the same name
+US_companies['ISSUER_NAME']=US['Security_Name']
+US_Database=pd.merge(Feature_Table,US_companies, on='ISSUER_NAME')
+
+
+#create Energy database based off the GIC code 1010
+Energy_US=US_companies[US_companies['GIC_Code']=='1010']
+
+#fill in blanks with numpy.NaNs, this way we can caluclate averages and sums. 
+Energy_US = Energy_US.applymap(lambda x: np.nan if x=='' else x)
+
+
+#fill all column blanks with industry means
+# if every company in the column is full of NaNs, then nothing will happen, we
+#later convert that column to 0s so that we can do summations. 
+#once for US companies
+for i in Energy_US:
+    try:
+        Energy_US[i].fillna(Energy_US[i].mean())
+    except:
+        pass
+
+
+#here the .fillna(0) argument is simple: if a column is full of NAs, fill in that 
+#column with zeros. #this will only happen if ENTIRE column is missing data. 
+
+
+#model parameters
+#df.convert_objects(convert_numeric=True)
+#US and INTL model params
+Energy_US['Score']=(((Energy_US.FEATURE_1_CLASS_A.fillna(0)+Energy_US.FEATURE_2_CLASS_A.fillna(0)+\
+Energy_US.FEATURE_3_CLASS_A.fillna(0)+Energy_US.FEATURE_4_CLASS_A.fillna(0)+\
+Energy_US.FEATURE_5_CLASS_A.fillna(0)+Energy_US.FEATURE_6_CLASS_A.fillna(0)+\
+Energy_US.FEATURE_7_CLASS_A.fillna(0)+Energy_US.FEATURE_7_CLASS_A.fillna(0))*0.15)+\
+(Energy_US.FEATURE_1_CLASS_B.fillna(0)*.10)+\
+(Energy_US.FEATURE_1_CLASS_C.fillna(0)*.25)+\
+(Energy_US.FEATURE_1_CLASS_D.fillna(0)*.20)+\
+(Energy_US.FEATURE_1_CLASS_E.fillna(0)*.30))/4.1
+
+
+
+#these functions are for 'lambda' functions that are used for some 
+#client specific rounding of numbers. When using pandas.apply, it performs 
+#a function on an element-wise basis. Thus, you might need 
+#something for when an exception happens. 
+
+
+def tryconvert2(x):
+    try:
+        return round(float(x)/1000,1)
+    except:
+        return 'NA'
+
+#this is going to write all the files to a single output, 
+#so when you perform the function below,
+#it sends all the data to one xlsx file.
+
+writer = pd.ExcelWriter('output.xlsx')
+
+def excel_writer(DataFrame_Name):
+    #This function structures how you want to peform the output of your file
+    x=DataFrame_Name
+    New_df=pd.DataFrame()
+    New_df['Cusip Sedol']=x['Cusip_Sedol']
+    New_df['Security Name']=x['Security_Name']
+    New_df['Country Name']=x['Country_Name']
+    New_df['GIC Code']=x['GIC_Code']
+
+    #converts revenue to billions
+    New_df['Revenue']=x['Revenue (MM USD)'].map(lambda x:tryconvert2(x))
+    New_df['SIC Code']=x['SIC_Code']
+
+    #converts market cap to billions
+    New_df['Total Market Cap BN']=x['Total_Market_Cap'].map(lambda x:tryconvert2(x))
+
+    New_df['FEATURE 1 CLASS B']=x['FEATURE_1_CLASS_B']
+    New_df['FEATURE 1 CLASS C']=x['FEATURE_1_CLASS_C']
+    New_df['FEATURE 1 CLASS D']=x['FEATURE_1_CLASS_D']
+    New_df['FEATURE 1 CLASS E']=x['FEATURE_1_CLASS_E']
+
+    New_df['FEATURE 1 CLASS A']=x['FEATURE_1_CLASS_A']
+    New_df['FEATURE 2 CLASS A']=x['FEATURE_2_CLASS_A']
+    New_df['FEATURE 3 CLASS A']=x['FEATURE_3_CLASS_A']
+    New_df['FEATURE 4 CLASS A']=x['FEATURE_4_CLASS_A']
+    New_df['FEATURE 5 CLASS A']=x['FEATURE_5_CLASS_A']
+    New_df['FEATURE 6 CLASS A']=x['FEATURE_6_CLASS_A']
+    New_df['FEATURE 7 CLASS A']=x['FEATURE_7_CLASS_A']
+    New_df['FEATURE 8 CLASS A']=x['FEATURE_8_CLASS_A']
+
+    #Rounds the number to 3 spaces after the decimal
+    New_df['Score']=x['Score'].map(lambda x: round(x,3))
+    #a quintile ranker.
+    try:
+        New_df['Quintile']=pd.qcut(New_df['Score'],5, labels=np.arange(1,6))
+    except:
+        
+        twentyith=stats.scoreatpercentile(New_df['Score'],20)
+        fortyith=stats.scoreatpercentile(New_df['Score'],40)
+        sixtyith=stats.scoreatpercentile(New_df['Score'],60)
+        eightyith=stats.scoreatpercentile(New_df['Score'],80)
+        def checkcheck(x):
+            if x<twentyith: return="" elif="" twentyith="" fortyith="" sixtyith="" x="">=eightyith:
+                return 5
+        New_df['Quintile']=New_df['Score'].map(lambda x: checkcheck(x))
+
+    New_df.to_excel(writer,'Energy_US',index=False)
+
+
+excel_writer(Energy_US)
+#end.
+</twentyith:></span>
+</pre>
+</div>
+
+                    <p>When run manually, as they were doing previously, it would take up to a week to perform the necessary calculations for their processes. Not to mention that excel, when packed with data, is incredibly slow and memory intensive. One .xlsx file took about 2 minutes to load in standard excel, and then each successive V-lookup or sum function performed would take anywhere from a minute to 5 minutes to complete; most of which has to do with excel having to constantly recalculate anything when a process is changed. Here, with a simple python script, the entire week's process was completed in ~20 seconds. The simple point is that the amount of time saved using python compared to excel for even the mundane and everyday tasks cannot be understated.</p>
+
+
+                    <p> I suppose this post isn't like other posts where we focus on some of the cool work we're doing, but rather to demonstrate that learning a simple scripting language is so incredibly powerful. Here's a great example: <a href="http://pbpython.com/">Practial Business Python</a> of a blog that demonstrates far more applicable demonstrations of everyday business tasks in python than I could ever convey. If you want to learn Python in conjunction with Pandas, the creator, <a href="https://twitter.com/wesmckinn">Wes McKinney</a> has a great 10-minute intro located here:</p>
+
+                    
+
+
+
+
+
+                
+
+                </div>
+            </div>
+        </div></body></html>

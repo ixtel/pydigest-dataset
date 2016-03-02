@@ -1,0 +1,155 @@
+<html><body><div><div class="post-body entry-content" id="post-body-8465155282604465872" itemprop="description articleBody"><p>
+This is the ninth post in my series of blog posts about Python decorators and how I believe they are generally poorly implemented. It follows on from the previous post titled '</p><a href="http://blog.dscpl.com.au/2014/01/the-synchronized-decorator-as-context.html">The @synchronized decorator as context manager</a><p>', with the very first post in the series being '</p><a href="http://blog.dscpl.com.au/2014/01/how-you-implemented-your-python.html">How you implemented your Python decorator is wrong</a><p>'.
+</p><p>
+The posts so far in this series were bashed out in quick succession in a bit over a week. Because that was quite draining on the brain and due to other commitments I took a bit of a break. Hopefully I can get through another burst of posts, initially about performance considerations when implementing decorators and then start a dive into how to implement the object proxy which underlies the function wrapper the decorator mechanism described relies on.
+
+</p><h3>
+Overhead in decorating a normal function</h3>
+<p>
+In this post I am only going to look at the overhead of decorating a normal function with the decorator mechanism which has been described. The relevant part of the decorator mechanism which comes into play in this case is:
+</p><blockquote class="tr_bq">
+class function_wrapper(object_proxy):  </blockquote>
+<blockquote class="tr_bq">
+    def __init__(self, wrapped, wrapper):<br/>
+        super(function_wrapper, self).__init__(wrapped)<br/>
+        self.wrapper = wrapper<br/>
+        ...</blockquote>
+<blockquote class="tr_bq">
+    def __get__(self, instance, owner):<br/>
+        ...</blockquote>
+<blockquote class="tr_bq">
+    def __call__(self, *args, **kwargs):<br/>
+        return self.wrapper(self.wrapped, None, args, kwargs)  </blockquote>
+<blockquote class="tr_bq">
+def decorator(wrapper):<br/>
+    def _wrapper(wrapped, instance, args, kwargs):<br/>
+        def _execute(wrapped):<br/>
+            if instance is None:<br/>
+                return function_wrapper(wrapped, wrapper)<br/>
+            elif inspect.isclass(instance):<br/>
+                return function_wrapper(wrapped, wrapper.__get__(None, instance))<br/>
+            else:<br/>
+                return function_wrapper(wrapped, wrapper.__get__(instance, type(instance)))<br/>
+        return _execute(*args, **kwargs)<br/>
+    return function_wrapper(wrapper, _wrapper)</blockquote><p>
+If you want to refresh your memory of the complete code that was previously presented you can check back to the </p><a href="http://blog.dscpl.com.au/2014/01/maintaining-decorator-state-using-class.html">last post</a><p> where it was described in full.
+</p><p>
+With our decorator factory, when creating a decorator and then decorating a normal function with it we would use:
+</p><blockquote class="tr_bq">
+@decorator<br/>
+def my_function_wrapper(wrapped, instance, args, kwargs):<br/>
+    return wrapped(*args, **kwargs)  </blockquote>
+<blockquote class="tr_bq">
+@my_function_wrapper<br/>
+def function():<br/>
+    pass</blockquote><p>
+This is in contrast to the same decorator created in the more traditional way using a function closure.
+</p><blockquote class="tr_bq">
+def my_function_wrapper(wrapped):<br/>
+    def _my_function_wrapper(*args, **kwargs):<br/>
+        return wrapped(*args, **kwargs)<br/>
+    return _my_function_wrapper </blockquote>
+<blockquote class="tr_bq">
+@my_function_wrapper<br/>
+def function():<br/>
+    pass</blockquote>
+<div><p>
+Now what actually occurs in these two different cases when we make the call:</p>
+<blockquote class="tr_bq">
+function()</blockquote>
+
+<h3>
+Tracing the execution of the function</h3>
+<p>
+In order to trace the execution of our code we can use Python's profile hooks mechanism.
+</p><blockquote class="tr_bq">
+import sys </blockquote>
+<blockquote class="tr_bq">
+def tracer(frame, event, arg):<br/>
+    print(frame.f_code.co_name, event) </blockquote>
+<blockquote class="tr_bq">
+sys.setprofile(tracer) </blockquote>
+<blockquote class="tr_bq">
+function()</blockquote><p>
+The purpose of the profile hook is to allow you to register a callback function which is called on the entry and exit of all functions. Using this was can trace the sequence of function calls that are being made.
+</p><p>
+For the case of a decorator implemented as a function closure this yields:
+</p><blockquote class="tr_bq">
+_my_function_wrapper call<br/>
+    function call<br/>
+    function return<br/>
+_my_function_wrapper return</blockquote><p>
+So what we see here is that the nested function of our function closure is called. This is because the decorator in the case of a using a function closure is replacing 'function' with a reference to that nested function. When that nested function is called, it then in turn calls the original wrapped function.
+</p><p>
+For our implementation using our decorator factory, when we do the same thing we instead get:
+</p><blockquote class="tr_bq">
+__call__ call<br/>
+    my_function_wrapper call<br/>
+        function call<br/>
+        function return<br/>
+    my_function_wrapper return<br/>
+__call__ return</blockquote><p>
+The difference here is that our decorator replaces 'function' with an instance of our function wrapper class. Being a class, when it is called as if it was a function, the __call__() method is invoked on the instance of the class. The __call__() method is then invoking the user supplied wrapper function, which in turn calls the original wrapped function.
+</p><p>
+The result therefore is that we have introduced an extra level of indirection, or in other words an extra function call into the execution path.
+</p><p>
+Keep in mind though that __call__() is actually a method though and not just a normal function. Being a method that means there is actually a lot more work going on behind the scenes than a normal function call. In particular, the unbound method needs to be bound to the instance of our function wrapper class before it can be called. This doesn't appear in the trace of the calls, but it is occurring and that will incur additional overhead.
+
+</p><h3>
+Timing the execution of the function</h3>
+<p>
+By performing the trace above we know that our solution incurs an additional method call overhead. How much actual extra overhead is this resulting in though?
+</p><p>
+To try and measure the increase in overhead in each solution we can use the 'timeit' module to time the execution of our function call. As a baseline, we first want to time the call of a function without any decorator applied.
+</p><blockquote class="tr_bq">
+# benchmarks.py </blockquote>
+<blockquote class="tr_bq">
+def function():<br/>
+    pass </blockquote><p>
+To time this we use the command:
+</p><blockquote class="tr_bq">
+$ python -m timeit -s 'import benchmarks' 'benchmarks.function()'</blockquote><p>
+The 'timeit' module when used in this way will perform a suitable large number of iterations of calling the function, divide the resulting total time for all calls with the count of the number and end up with a time value for a single call.
+</p><p>
+For a 2012 model MacBook Pro this yields:
+</p><blockquote class="tr_bq">
+10000000 loops, best of 3: 0.132 usec per loop</blockquote><p>
+Next up is to try with a decorator implemented as a function closure. For this we get:
+</p><blockquote class="tr_bq">
+1000000 loops, best of 3: 0.326 usec per loop</blockquote><p>
+And finally with our decorator factory:
+</p><blockquote class="tr_bq">
+1000000 loops, best of 3: 0.771 usec per loop</blockquote><p>
+In this final case, rather than use the exact code as has been presented so far in this series of blog posts, I have used the 'wrapt' module implementation of what has been described. This implementation works slightly differently as it has a few extra capabilities over what has been described and the design is also a little bit different. The overhead will still be roughly equivalent and if anything will cast things as being slightly worse than the more minimal implementation.
+
+</p><h3>
+Speeding up execution of the wrapper</h3>
+<p>
+At this point no doubt there will be people wanting to point out that this so called better way of implementing a decorator is too slow to be practical to use, even if it is more correct as far as properly honouring things such as the descriptor protocol for method invocation.
+</p><p>
+Is there therefore anything that can be done to speed up the implementation?
+</p><p>
+That is of course a stupid question for me to be asking because you should realise by now that I would find a way. :-)
+</p><p>
+The path that can be taken at this point is to implement everything that has been described for the function wrapper and object proxy as a Python C extension module. For simplicity we can keep the decorator factory itself implemented as pure Python code as execution of that is not time critical as it would only be invoked once when the decorator is applied to the function and not on every call of the decorated function.
+</p><p>
+One thing I am definitely not going to do is blog about how to go about implementing the function wrapper and object proxy as a Python C extension module. Rest assured though that it works in the same way as the parallel pure Python implementation. It does obviously though run a lot quicker due to being implemented as C code using the Python C APIs rather than as pure Python code.
+</p><p>
+What is the result then by implementing the function wrapper and object proxy as a Python C extension module? It is:
+</p><blockquote class="tr_bq">
+1000000 loops, best of 3: 0.382 usec per loop</blockquote><p>
+So although a lot more effort was required in actually implementing the function wrapper and object proxy as a Python C extension module, the effort was well worth it, with the results now being very close to the implementation of the decorator that used a function closure.
+
+
+</p><h3>
+Normal functions vs methods of classes</h3>
+<p>
+So far we have only considered the case of decorating a normal function. As expected, due to the introduction of an extra level of indirection as well as the function wrapper being implemented as a class, overhead was notably more. Albeit, that it was still in the order of only half a microsecond.
+</p><p>
+All the same, we were able to speed things up to a point, by implementing our function wrapper and object proxy as C code, where the overhead above that of a decorator implemented as a function closure was negligible.
+</p><p>
+What now about where we decorate methods of a class. That is, instance methods, class methods and static methods. For that you will need to wait until the next blog post in this series on decorators.
+</p></div>
+<p/>
+</div>
+</div></body></html>

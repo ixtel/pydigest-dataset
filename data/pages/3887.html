@@ -1,0 +1,374 @@
+<html><body><div><div class="entry">
+    <p>As many of you probably know, being a data scientist requires a large skill set . . .</p>
+
+<p><img src="/images/Proj6_images/DSMap.png"/>
+Credit: <a href="http://nirvacana.com/thoughts/becoming-a-data-scientist/">Swami Chandrasekaran</a></p>
+
+<p>To master all of that at a high level would probably take a lifetime! I'm sure many data scientists would love to be highly skilled in all of these areas if possible, but busy Ph.D. students like me (that are trying to graduate in an efficient manner!) don't have enough time to focus on all of these skills.</p>
+
+<p>So which of these skills are most employers actually looking for? </p>
+
+<p>On DataScienceCentral, I saw a link to <a href="http://kumaranpm.blogspot.com/2014/11/popular-software-skills-in-data-science.html">this posting</a> by Kumaran Ponnambalam where he examined this question with R by scraping job postings. I thought it was an interesting idea. I wanted to find out this information for myself, as updated as possible, so I could see any changing trends in the job market. </p>
+
+<p>It would also be nice to see if different cities have different skills they like to emphasize (i.e. does the Silicon Valley market have different skills they prefer compared to New York City?)</p>
+
+<p>Data like this isn't going to be easily accessible through a .csv or database. Sometimes, you are going to have to get it yourself. That may require <a href="http://en.wikipedia.org/wiki/Web_scraping">web scraping</a>, which automates the process of collecting data from websites. I've always thought this sounded very cool, but I didn't know how to do it. </p>
+
+<p>Luckily, Greg Reda at Datascope Analytics had a great blog post about web scraping that helped me complete this project (see it <a href="http://www.gregreda.com/2013/03/03/web-scraping-101-with-python/">here</a>). He did a great job! I'm not going to go into as much detail about web scraping as he did in this post, so I would recommend going to his blog post if you want to learn the basics.</p>
+
+<p>So, in this post, I am going to scrape job postings from Indeed.com for data science jobs and see which skills employers want the most (Python or R? Are they interested in Spark yet? How dominant are NoSQL databases? Are they using proprietary software like SAS or are companies preferring open source now?) To make it even better, I will create the program so that I can have a detailed breakdown by city. </p>
+
+<h2>Program Setup</h2>
+
+<p>The basic workflow of the program will be:</p>
+
+<ul>
+<li>Enter the city we want to search for jobs in matching the title "data scientist" (in quotes so it is a direct match) on Indeed.com</li>
+<li>See the list of job postings displayed by the website</li>
+<li>Access the link to each job posting</li>
+<li>Scrape all of the html in the job posting</li>
+<li>Filter it to only include words</li>
+<li>Reduce the words to a set so that each word is only counted once</li>
+<li>Keep a running total of the words and see how often a job posting included them</li>
+</ul>
+
+<p>We will create two functions. The first will scape an individual job posting for the HTML, clean it up to get the words only, then output the final list of words. The second will manage which URLs to access via the job postings Indeed's website links to. </p>
+
+<p>In this post, we will use the urllib2 library to connect to the websites, the BeautifulSoup library to collect all of the HTML, the re library for parsing the words and filtering out other markup based on regular expressions, and pandas to manage and plot the final results. </p>
+
+<h2>The First Function: Cleaning a Website</h2>
+
+<p>This function will be called every time we access a new job posting. Its input is a URL for a website, while the output will be a final set of words collected from that website. </p>
+
+<p>In this post, I am going to import all of the libraries necessary first. </p>
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="kn">from</span> <span class="nn">bs4</span> <span class="kn">import</span> <span class="n">BeautifulSoup</span> <span class="c"># For HTML parsing</span>
+<span class="kn">import</span> <span class="nn">urllib2</span> <span class="c"># Website connections</span>
+<span class="kn">import</span> <span class="nn">re</span> <span class="c"># Regular expressions</span>
+<span class="kn">from</span> <span class="nn">time</span> <span class="kn">import</span> <span class="n">sleep</span> <span class="c"># To prevent overwhelming the server between connections</span>
+<span class="kn">from</span> <span class="nn">collections</span> <span class="kn">import</span> <span class="n">Counter</span> <span class="c"># Keep track of our term counts</span>
+<span class="kn">from</span> <span class="nn">nltk.corpus</span> <span class="kn">import</span> <span class="n">stopwords</span> <span class="c"># Filter out stopwords, such as 'the', 'or', 'and'</span>
+<span class="kn">import</span> <span class="nn">pandas</span> <span class="kn">as</span> <span class="nn">pd</span> <span class="c"># For converting results to a dataframe and bar chart plots</span>
+<span class="o">%</span><span class="n">matplotlib</span> <span class="n">inline</span>
+</code></pre></div>
+<p>Now create our first website parsing function.</p>
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="k">def</span> <span class="nf">text_cleaner</span><span class="p">(</span><span class="n">website</span><span class="p">):</span>
+    <span class="sd">'''</span>
+<span class="sd">    This function just cleans up the raw html so that I can look at it.</span>
+<span class="sd">    Inputs: a URL to investigate</span>
+<span class="sd">    Outputs: Cleaned text only</span>
+<span class="sd">    '''</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">site</span> <span class="o">=</span> <span class="n">urllib2</span><span class="o">.</span><span class="n">urlopen</span><span class="p">(</span><span class="n">website</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">()</span> <span class="c"># Connect to the job posting</span>
+    <span class="k">except</span><span class="p">:</span> 
+        <span class="k">return</span>   <span class="c"># Need this in case the website isn't there anymore or some other weird connection problem </span>
+
+    <span class="n">soup_obj</span> <span class="o">=</span> <span class="n">BeautifulSoup</span><span class="p">(</span><span class="n">site</span><span class="p">)</span> <span class="c"># Get the html from the site</span>
+
+    <span class="k">for</span> <span class="n">script</span> <span class="ow">in</span> <span class="n">soup_obj</span><span class="p">([</span><span class="s">"script"</span><span class="p">,</span> <span class="s">"style"</span><span class="p">]):</span>
+        <span class="n">script</span><span class="o">.</span><span class="n">extract</span><span class="p">()</span> <span class="c"># Remove these two elements from the BS4 object</span>
+
+
+
+    <span class="n">text</span> <span class="o">=</span> <span class="n">soup_obj</span><span class="o">.</span><span class="n">get_text</span><span class="p">()</span> <span class="c"># Get the text from this</span>
+
+
+
+    <span class="n">lines</span> <span class="o">=</span> <span class="p">(</span><span class="n">line</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span> <span class="k">for</span> <span class="n">line</span> <span class="ow">in</span> <span class="n">text</span><span class="o">.</span><span class="n">splitlines</span><span class="p">())</span> <span class="c"># break into lines</span>
+
+
+
+    <span class="n">chunks</span> <span class="o">=</span> <span class="p">(</span><span class="n">phrase</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span> <span class="k">for</span> <span class="n">line</span> <span class="ow">in</span> <span class="n">lines</span> <span class="k">for</span> <span class="n">phrase</span> <span class="ow">in</span> <span class="n">line</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s">"  "</span><span class="p">))</span> <span class="c"># break multi-headlines into a line each</span>
+
+    <span class="k">def</span> <span class="nf">chunk_space</span><span class="p">(</span><span class="n">chunk</span><span class="p">):</span>
+        <span class="n">chunk_out</span> <span class="o">=</span> <span class="n">chunk</span> <span class="o">+</span> <span class="s">' '</span> <span class="c"># Need to fix spacing issue</span>
+        <span class="k">return</span> <span class="n">chunk_out</span>  
+
+
+    <span class="n">text</span> <span class="o">=</span> <span class="s">''</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">chunk_space</span><span class="p">(</span><span class="n">chunk</span><span class="p">)</span> <span class="k">for</span> <span class="n">chunk</span> <span class="ow">in</span> <span class="n">chunks</span> <span class="k">if</span> <span class="n">chunk</span><span class="p">)</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s">'utf-8'</span><span class="p">)</span> <span class="c"># Get rid of all blank lines and ends of line</span>
+
+
+    <span class="c"># Now clean out all of the unicode junk (this line works great!!!)</span>
+
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">text</span> <span class="o">=</span> <span class="n">text</span><span class="o">.</span><span class="n">decode</span><span class="p">(</span><span class="s">'unicode_escape'</span><span class="p">)</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s">'ascii'</span><span class="p">,</span> <span class="s">'ignore'</span><span class="p">)</span> <span class="c"># Need this as some websites aren't formatted</span>
+    <span class="k">except</span><span class="p">:</span>                                                            <span class="c"># in a way that this works, can occasionally throw</span>
+        <span class="k">return</span>                                                         <span class="c"># an exception</span>
+
+
+    <span class="n">text</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">sub</span><span class="p">(</span><span class="s">"[^a-zA-Z.+3]"</span><span class="p">,</span><span class="s">" "</span><span class="p">,</span> <span class="n">text</span><span class="p">)</span>  <span class="c"># Now get rid of any terms that aren't words (include 3 for d3.js)</span>
+                                                <span class="c"># Also include + for C++</span>
+
+
+    <span class="n">text</span> <span class="o">=</span> <span class="n">text</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span><span class="o">.</span><span class="n">split</span><span class="p">()</span>  <span class="c"># Go to lower case and split them apart</span>
+
+
+    <span class="n">stop_words</span> <span class="o">=</span> <span class="nb">set</span><span class="p">(</span><span class="n">stopwords</span><span class="o">.</span><span class="n">words</span><span class="p">(</span><span class="s">"english"</span><span class="p">))</span> <span class="c"># Filter out any stop words</span>
+    <span class="n">text</span> <span class="o">=</span> <span class="p">[</span><span class="n">w</span> <span class="k">for</span> <span class="n">w</span> <span class="ow">in</span> <span class="n">text</span> <span class="k">if</span> <span class="ow">not</span> <span class="n">w</span> <span class="ow">in</span> <span class="n">stop_words</span><span class="p">]</span>
+
+
+
+    <span class="n">text</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">text</span><span class="p">))</span> <span class="c"># Last, just get the set of these. Ignore counts (we are just looking at whether a term existed</span>
+                            <span class="c"># or not on the website)</span>
+
+    <span class="k">return</span> <span class="n">text</span>
+</code></pre></div>
+<p>As you can see in the code above, a lot of cleaning for the raw html is necessary to get the final terms we are looking for. It extracts the relevant portions of the html, gets the text, removes blank lines and line endings, removes unicode, and filters with regular expressions to include only words. To see what the final result looks like, let's try calling this function on a sample job posting. The one I am using is a job posting for a <a href="http://www.indeed.com/viewjob?jk=5505e59f8e5a32a4&amp;q=%22data+scientist%22&amp;tk=19ftfgsmj19ti0l3&amp;from=web&amp;advn=1855944161169178&amp;sjdu=QwrRXKrqZ3CNX5W-O9jEvWC1RT2wMYkGnZrqGdrncbKqQ7uwTLXzT1_ME9WQ4M-7om7mrHAlvyJT8cA_14IV5w&amp;pub=pub-indeed">Data Scientist at Indeed itself</a>!</p>
+
+<p>If you are reading the IPython Notebook interactively, the example job posting may have disappeared so you can try your own to see how the function works. </p>
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">sample</span> <span class="o">=</span> <span class="n">text_cleaner</span><span class="p">(</span><span class="s">'http://www.indeed.com/viewjob?jk=5505e59f8e5a32a4&amp;q=</span><span class="si">%22d</span><span class="s">ata+scientist%22&amp;tk=19ftfgsmj19ti0l3&amp;from=web&amp;advn=1855944161169178&amp;sjdu=QwrRXKrqZ3CNX5W-O9jEvWC1RT2wMYkGnZrqGdrncbKqQ7uwTLXzT1_ME9WQ4M-7om7mrHAlvyJT8cA_14IV5w&amp;pub=pub-indeed'</span><span class="p">)</span>
+<span class="n">sample</span><span class="p">[:</span><span class="mi">20</span><span class="p">]</span> <span class="c"># Just show the first 20 words</span>
+</code></pre></div><div class="highlight"><pre><code class="language-python" data-lang="python"><span class="p">[</span><span class="s">'professionally.'</span><span class="p">,</span>
+ <span class="s">'code'</span><span class="p">,</span>
+ <span class="s">'cj'</span><span class="p">,</span>
+ <span class="s">'indeed'</span><span class="p">,</span>
+ <span class="s">'competitive'</span><span class="p">,</span>
+ <span class="s">'month'</span><span class="p">,</span>
+ <span class="s">'label'</span><span class="p">,</span>
+ <span class="s">'scientist'</span><span class="p">,</span>
+ <span class="s">'frequency'</span><span class="p">,</span>
+ <span class="s">'per'</span><span class="p">,</span>
+ <span class="s">'human'</span><span class="p">,</span>
+ <span class="s">'keywords'</span><span class="p">,</span>
+ <span class="s">'follow'</span><span class="p">,</span>
+ <span class="s">'alt'</span><span class="p">,</span>
+ <span class="s">'viewthroughconversion'</span><span class="p">,</span>
+ <span class="s">'find'</span><span class="p">,</span>
+ <span class="s">'access'</span><span class="p">,</span>
+ <span class="s">'style'</span><span class="p">,</span>
+ <span class="s">'retirement'</span><span class="p">,</span>
+ <span class="s">'candidate'</span><span class="p">]</span>
+</code></pre></div>
+<p>Now that we can extract terms from the website with our text_cleaner function, let's build another function that will call this and automatically loop through all of the websites on Indeed for us.</p>
+
+<h2>The Second Function: Accessing the Job Postings</h2>
+
+<p>This next function will allow us to search for "data scientist" jobs in a particular city (or nationally if we want to see everything!) and plot the final results in a bar chart so we can see which skills are most frequently desired. </p>
+
+<p>This second function is fairly long, so I will try to explain how everything works through a lot of commentary. The basic idea is to look through Indeed's pages of job results and click on all of the job links, but only in the center of the page where all of the jobs are posted (not on the edges). See an example <a href="http://www.indeed.com/jobs?q=%22data+scientist%22&amp;l=">here</a>. I just want the URLs in the "center" column of the website. You can get an idea of how Indeed organized the website by using a browser like Firefox or Chrome. Right click on the page to see the "Inspect Element" option in Firefox and the HTML will now be visible to you.</p>
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="k">def</span> <span class="nf">skills_info</span><span class="p">(</span><span class="n">city</span> <span class="o">=</span> <span class="bp">None</span><span class="p">,</span> <span class="n">state</span> <span class="o">=</span> <span class="bp">None</span><span class="p">):</span>
+    <span class="sd">'''</span>
+<span class="sd">    This function will take a desired city/state and look for all new job postings</span>
+<span class="sd">    on Indeed.com. It will crawl all of the job postings and keep track of how many</span>
+<span class="sd">    use a preset list of typical data science skills. The final percentage for each skill</span>
+<span class="sd">    is then displayed at the end of the collation. </span>
+
+<span class="sd">    Inputs: The location's city and state. These are optional. If no city/state is input, </span>
+<span class="sd">    the function will assume a national search (this can take a while!!!).</span>
+<span class="sd">    Input the city/state as strings, such as skills_info('Chicago', 'IL').</span>
+<span class="sd">    Use a two letter abbreviation for the state.</span>
+
+<span class="sd">    Output: A bar chart showing the most commonly desired skills in the job market for </span>
+<span class="sd">    a data scientist. </span>
+<span class="sd">    '''</span>
+
+    <span class="n">final_job</span> <span class="o">=</span> <span class="s">'data+scientist'</span> <span class="c"># searching for data scientist exact fit("data scientist" on Indeed search)</span>
+
+    <span class="c"># Make sure the city specified works properly if it has more than one word (such as San Francisco)</span>
+    <span class="k">if</span> <span class="n">city</span> <span class="ow">is</span> <span class="ow">not</span> <span class="bp">None</span><span class="p">:</span>
+        <span class="n">final_city</span> <span class="o">=</span> <span class="n">city</span><span class="o">.</span><span class="n">split</span><span class="p">()</span> 
+        <span class="n">final_city</span> <span class="o">=</span> <span class="s">'+'</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">word</span> <span class="k">for</span> <span class="n">word</span> <span class="ow">in</span> <span class="n">final_city</span><span class="p">)</span>
+        <span class="n">final_site_list</span> <span class="o">=</span> <span class="p">[</span><span class="s">'http://www.indeed.com/jobs?q=%22'</span><span class="p">,</span> <span class="n">final_job</span><span class="p">,</span> <span class="s">'%22&amp;l='</span><span class="p">,</span> <span class="n">final_city</span><span class="p">,</span>
+                    <span class="s">'%2C+'</span><span class="p">,</span> <span class="n">state</span><span class="p">]</span> <span class="c"># Join all of our strings together so that indeed will search correctly</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">final_site_list</span> <span class="o">=</span> <span class="p">[</span><span class="s">'http://www.indeed.com/jobs?q="'</span><span class="p">,</span> <span class="n">final_job</span><span class="p">,</span> <span class="s">'"'</span><span class="p">]</span>
+
+    <span class="n">final_site</span> <span class="o">=</span> <span class="s">''</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">final_site_list</span><span class="p">)</span> <span class="c"># Merge the html address together into one string</span>
+
+
+    <span class="n">base_url</span> <span class="o">=</span> <span class="s">'http://www.indeed.com'</span>
+
+
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">html</span> <span class="o">=</span> <span class="n">urllib2</span><span class="o">.</span><span class="n">urlopen</span><span class="p">(</span><span class="n">final_site</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">()</span> <span class="c"># Open up the front page of our search first</span>
+    <span class="k">except</span><span class="p">:</span>
+        <span class="s">'That city/state combination did not have any jobs. Exiting . . .'</span> <span class="c"># In case the city is invalid</span>
+        <span class="k">return</span>
+    <span class="n">soup</span> <span class="o">=</span> <span class="n">BeautifulSoup</span><span class="p">(</span><span class="n">html</span><span class="p">)</span> <span class="c"># Get the html from the first page</span>
+
+    <span class="c"># Now find out how many jobs there were</span>
+
+    <span class="n">num_jobs_area</span> <span class="o">=</span> <span class="n">soup</span><span class="o">.</span><span class="n">find</span><span class="p">(</span><span class="nb">id</span> <span class="o">=</span> <span class="s">'searchCount'</span><span class="p">)</span><span class="o">.</span><span class="n">string</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s">'utf-8'</span><span class="p">)</span> <span class="c"># Now extract the total number of jobs found</span>
+                                                                        <span class="c"># The 'searchCount' object has this</span>
+
+    <span class="n">job_numbers</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">findall</span><span class="p">(</span><span class="s">'\d+'</span><span class="p">,</span> <span class="n">num_jobs_area</span><span class="p">)</span> <span class="c"># Extract the total jobs found from the search result</span>
+
+
+    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">job_numbers</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">3</span><span class="p">:</span> <span class="c"># Have a total number of jobs greater than 1000</span>
+        <span class="n">total_num_jobs</span> <span class="o">=</span> <span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">job_numbers</span><span class="p">[</span><span class="mi">2</span><span class="p">])</span><span class="o">*</span><span class="mi">1000</span><span class="p">)</span> <span class="o">+</span> <span class="nb">int</span><span class="p">(</span><span class="n">job_numbers</span><span class="p">[</span><span class="mi">3</span><span class="p">])</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">total_num_jobs</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">job_numbers</span><span class="p">[</span><span class="mi">2</span><span class="p">])</span> 
+
+    <span class="n">city_title</span> <span class="o">=</span> <span class="n">city</span>
+    <span class="k">if</span> <span class="n">city</span> <span class="ow">is</span> <span class="bp">None</span><span class="p">:</span>
+        <span class="n">city_title</span> <span class="o">=</span> <span class="s">'Nationwide'</span>
+
+    <span class="k">print</span> <span class="s">'There were'</span><span class="p">,</span> <span class="n">total_num_jobs</span><span class="p">,</span> <span class="s">'jobs found,'</span><span class="p">,</span> <span class="n">city_title</span> <span class="c"># Display how many jobs were found</span>
+
+    <span class="n">num_pages</span> <span class="o">=</span> <span class="n">total_num_jobs</span><span class="o">/</span><span class="mi">10</span> <span class="c"># This will be how we know the number of times we need to iterate over each new</span>
+                                      <span class="c"># search result page</span>
+    <span class="n">job_descriptions</span> <span class="o">=</span> <span class="p">[]</span> <span class="c"># Store all our descriptions in this list</span>
+
+    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">xrange</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span><span class="n">num_pages</span><span class="o">+</span><span class="mi">1</span><span class="p">):</span> <span class="c"># Loop through all of our search result pages</span>
+        <span class="k">print</span> <span class="s">'Getting page'</span><span class="p">,</span> <span class="n">i</span>
+        <span class="n">start_num</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">i</span><span class="o">*</span><span class="mi">10</span><span class="p">)</span> <span class="c"># Assign the multiplier of 10 to view the pages we want</span>
+        <span class="n">current_page</span> <span class="o">=</span> <span class="s">''</span><span class="o">.</span><span class="n">join</span><span class="p">([</span><span class="n">final_site</span><span class="p">,</span> <span class="s">'&amp;start='</span><span class="p">,</span> <span class="n">start_num</span><span class="p">])</span>
+        <span class="c"># Now that we can view the correct 10 job returns, start collecting the text samples from each</span>
+
+        <span class="n">html_page</span> <span class="o">=</span> <span class="n">urllib2</span><span class="o">.</span><span class="n">urlopen</span><span class="p">(</span><span class="n">current_page</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">()</span> <span class="c"># Get the page</span>
+
+        <span class="n">page_obj</span> <span class="o">=</span> <span class="n">BeautifulSoup</span><span class="p">(</span><span class="n">html_page</span><span class="p">)</span> <span class="c"># Locate all of the job links</span>
+        <span class="n">job_link_area</span> <span class="o">=</span> <span class="n">page_obj</span><span class="o">.</span><span class="n">find</span><span class="p">(</span><span class="nb">id</span> <span class="o">=</span> <span class="s">'resultsCol'</span><span class="p">)</span> <span class="c"># The center column on the page where the job postings exist</span>
+
+        <span class="n">job_URLS</span> <span class="o">=</span> <span class="p">[</span><span class="n">base_url</span> <span class="o">+</span> <span class="n">link</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'href'</span><span class="p">)</span> <span class="k">for</span> <span class="n">link</span> <span class="ow">in</span> <span class="n">job_link_area</span><span class="o">.</span><span class="n">find_all</span><span class="p">(</span><span class="s">'a'</span><span class="p">)]</span> <span class="c"># Get the URLS for the jobs</span>
+
+        <span class="n">job_URLS</span> <span class="o">=</span> <span class="nb">filter</span><span class="p">(</span><span class="k">lambda</span> <span class="n">x</span><span class="p">:</span><span class="s">'clk'</span> <span class="ow">in</span> <span class="n">x</span><span class="p">,</span> <span class="n">job_URLS</span><span class="p">)</span> <span class="c"># Now get just the job related URLS</span>
+
+
+        <span class="k">for</span> <span class="n">j</span> <span class="ow">in</span> <span class="nb">xrange</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="nb">len</span><span class="p">(</span><span class="n">job_URLS</span><span class="p">)):</span>
+            <span class="n">final_description</span> <span class="o">=</span> <span class="n">text_cleaner</span><span class="p">(</span><span class="n">job_URLS</span><span class="p">[</span><span class="n">j</span><span class="p">])</span>
+            <span class="k">if</span> <span class="n">final_description</span><span class="p">:</span> <span class="c"># So that we only append when the website was accessed correctly</span>
+                <span class="n">job_descriptions</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">final_description</span><span class="p">)</span>
+            <span class="n">sleep</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span> <span class="c"># So that we don't be jerks. If you have a very fast internet connection you could hit the server a lot! </span>
+
+    <span class="k">print</span> <span class="s">'Done with collecting the job postings!'</span>    
+    <span class="k">print</span> <span class="s">'There were'</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">job_descriptions</span><span class="p">),</span> <span class="s">'jobs successfully found.'</span>
+
+
+    <span class="n">doc_frequency</span> <span class="o">=</span> <span class="n">Counter</span><span class="p">()</span> <span class="c"># This will create a full counter of our terms. </span>
+    <span class="p">[</span><span class="n">doc_frequency</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">item</span><span class="p">)</span> <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">job_descriptions</span><span class="p">]</span> <span class="c"># List comp</span>
+
+    <span class="c"># Now we can just look at our final dict list inside doc_frequency</span>
+
+    <span class="c"># Obtain our key terms and store them in a dict. These are the key data science skills we are looking for</span>
+
+    <span class="n">prog_lang_dict</span> <span class="o">=</span> <span class="n">Counter</span><span class="p">({</span><span class="s">'R'</span><span class="p">:</span><span class="n">doc_frequency</span><span class="p">[</span><span class="s">'r'</span><span class="p">],</span> <span class="s">'Python'</span><span class="p">:</span><span class="n">doc_frequency</span><span class="p">[</span><span class="s">'python'</span><span class="p">],</span>
+                    <span class="s">'Java'</span><span class="p">:</span><span class="n">doc_frequency</span><span class="p">[</span><span class="s">'java'</span><span class="p">],</span> <span class="s">'C++'</span><span class="p">:</span><span class="n">doc_frequency</span><span class="p">[</span><span class="s">'c++'</span><span class="p">],</span>
+                    <span class="s">'Ruby'</span><span class="p">:</span><span class="n">doc_frequency</span><span class="p">[</span><span class="s">'ruby'</span><span class="p">],</span>
+                    <span class="s">'Perl'</span><span class="p">:</span><span class="n">doc_frequency</span><span class="p">[</span><span class="s">'perl'</span><span class="p">],</span> <span class="s">'Matlab'</span><span class="p">:</span><span class="n">doc_frequency</span><span class="p">[</span><span class="s">'matlab'</span><span class="p">],</span>
+                    <span class="s">'JavaScript'</span><span class="p">:</span><span class="n">doc_frequency</span><span class="p">[</span><span class="s">'javascript'</span><span class="p">],</span> <span class="s">'Scala'</span><span class="p">:</span> <span class="n">doc_frequency</span><span class="p">[</span><span class="s">'scala'</span><span class="p">]})</span>
+
+    <span class="n">analysis_tool_dict</span> <span class="o">=</span> <span class="n">Counter</span><span class="p">({</span><span class="s">'Excel'</span><span class="p">:</span><span class="n">doc_frequency</span><span class="p">[</span><span class="s">'excel'</span><span class="p">],</span>  <span class="s">'Tableau'</span><span class="p">:</span><span class="n">doc_frequency</span><span class="p">[</span><span class="s">'tableau'</span><span class="p">],</span>
+                        <span class="s">'D3.js'</span><span class="p">:</span><span class="n">doc_frequency</span><span class="p">[</span><span class="s">'d3.js'</span><span class="p">],</span> <span class="s">'SAS'</span><span class="p">:</span><span class="n">doc_frequency</span><span class="p">[</span><span class="s">'sas'</span><span class="p">],</span>
+                        <span class="s">'SPSS'</span><span class="p">:</span><span class="n">doc_frequency</span><span class="p">[</span><span class="s">'spss'</span><span class="p">],</span> <span class="s">'D3'</span><span class="p">:</span><span class="n">doc_frequency</span><span class="p">[</span><span class="s">'d3'</span><span class="p">]})</span>  
+
+    <span class="n">hadoop_dict</span> <span class="o">=</span> <span class="n">Counter</span><span class="p">({</span><span class="s">'Hadoop'</span><span class="p">:</span><span class="n">doc_frequency</span><span class="p">[</span><span class="s">'hadoop'</span><span class="p">],</span> <span class="s">'MapReduce'</span><span class="p">:</span><span class="n">doc_frequency</span><span class="p">[</span><span class="s">'mapreduce'</span><span class="p">],</span>
+                <span class="s">'Spark'</span><span class="p">:</span><span class="n">doc_frequency</span><span class="p">[</span><span class="s">'spark'</span><span class="p">],</span> <span class="s">'Pig'</span><span class="p">:</span><span class="n">doc_frequency</span><span class="p">[</span><span class="s">'pig'</span><span class="p">],</span>
+                <span class="s">'Hive'</span><span class="p">:</span><span class="n">doc_frequency</span><span class="p">[</span><span class="s">'hive'</span><span class="p">],</span> <span class="s">'Shark'</span><span class="p">:</span><span class="n">doc_frequency</span><span class="p">[</span><span class="s">'shark'</span><span class="p">],</span>
+                <span class="s">'Oozie'</span><span class="p">:</span><span class="n">doc_frequency</span><span class="p">[</span><span class="s">'oozie'</span><span class="p">],</span> <span class="s">'ZooKeeper'</span><span class="p">:</span><span class="n">doc_frequency</span><span class="p">[</span><span class="s">'zookeeper'</span><span class="p">],</span>
+                <span class="s">'Flume'</span><span class="p">:</span><span class="n">doc_frequency</span><span class="p">[</span><span class="s">'flume'</span><span class="p">],</span> <span class="s">'Mahout'</span><span class="p">:</span><span class="n">doc_frequency</span><span class="p">[</span><span class="s">'mahout'</span><span class="p">]})</span>
+
+    <span class="n">database_dict</span> <span class="o">=</span> <span class="n">Counter</span><span class="p">({</span><span class="s">'SQL'</span><span class="p">:</span><span class="n">doc_frequency</span><span class="p">[</span><span class="s">'sql'</span><span class="p">],</span> <span class="s">'NoSQL'</span><span class="p">:</span><span class="n">doc_frequency</span><span class="p">[</span><span class="s">'nosql'</span><span class="p">],</span>
+                    <span class="s">'HBase'</span><span class="p">:</span><span class="n">doc_frequency</span><span class="p">[</span><span class="s">'hbase'</span><span class="p">],</span> <span class="s">'Cassandra'</span><span class="p">:</span><span class="n">doc_frequency</span><span class="p">[</span><span class="s">'cassandra'</span><span class="p">],</span>
+                    <span class="s">'MongoDB'</span><span class="p">:</span><span class="n">doc_frequency</span><span class="p">[</span><span class="s">'mongodb'</span><span class="p">]})</span>
+
+
+    <span class="n">overall_total_skills</span> <span class="o">=</span> <span class="n">prog_lang_dict</span> <span class="o">+</span> <span class="n">analysis_tool_dict</span> <span class="o">+</span> <span class="n">hadoop_dict</span> <span class="o">+</span> <span class="n">database_dict</span> <span class="c"># Combine our Counter objects</span>
+
+
+
+    <span class="n">final_frame</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">(</span><span class="n">overall_total_skills</span><span class="o">.</span><span class="n">items</span><span class="p">(),</span> <span class="n">columns</span> <span class="o">=</span> <span class="p">[</span><span class="s">'Term'</span><span class="p">,</span> <span class="s">'NumPostings'</span><span class="p">])</span> <span class="c"># Convert these terms to a </span>
+                                                                                                <span class="c"># dataframe </span>
+
+    <span class="c"># Change the values to reflect a percentage of the postings </span>
+
+    <span class="n">final_frame</span><span class="o">.</span><span class="n">NumPostings</span> <span class="o">=</span> <span class="p">(</span><span class="n">final_frame</span><span class="o">.</span><span class="n">NumPostings</span><span class="p">)</span><span class="o">*</span><span class="mi">100</span><span class="o">/</span><span class="nb">len</span><span class="p">(</span><span class="n">job_descriptions</span><span class="p">)</span> <span class="c"># Gives percentage of job postings </span>
+                                                                                    <span class="c">#  having that term </span>
+
+    <span class="c"># Sort the data for plotting purposes</span>
+
+    <span class="n">final_frame</span><span class="o">.</span><span class="n">sort</span><span class="p">(</span><span class="n">columns</span> <span class="o">=</span> <span class="s">'NumPostings'</span><span class="p">,</span> <span class="n">ascending</span> <span class="o">=</span> <span class="bp">False</span><span class="p">,</span> <span class="n">inplace</span> <span class="o">=</span> <span class="bp">True</span><span class="p">)</span>
+
+    <span class="c"># Get it ready for a bar plot</span>
+
+    <span class="n">final_plot</span> <span class="o">=</span> <span class="n">final_frame</span><span class="o">.</span><span class="n">plot</span><span class="p">(</span><span class="n">x</span> <span class="o">=</span> <span class="s">'Term'</span><span class="p">,</span> <span class="n">kind</span> <span class="o">=</span> <span class="s">'bar'</span><span class="p">,</span> <span class="n">legend</span> <span class="o">=</span> <span class="bp">None</span><span class="p">,</span> 
+                            <span class="n">title</span> <span class="o">=</span> <span class="s">'Percentage of Data Scientist Job Ads with a Key Skill, '</span> <span class="o">+</span> <span class="n">city_title</span><span class="p">)</span>
+
+    <span class="n">final_plot</span><span class="o">.</span><span class="n">set_ylabel</span><span class="p">(</span><span class="s">'Percentage Appearing in Job Ads'</span><span class="p">)</span>
+    <span class="n">fig</span> <span class="o">=</span> <span class="n">final_plot</span><span class="o">.</span><span class="n">get_figure</span><span class="p">()</span> <span class="c"># Have to convert the pandas plot object to a matplotlib object</span>
+
+
+    <span class="k">return</span> <span class="n">fig</span><span class="p">,</span> <span class="n">final_frame</span> <span class="c"># End of the function</span>
+</code></pre></div>
+<p>Let's now try running our new function on Seattle, Washington to see what results we get. Just as a note, all of these results were run on March 8, 2015 (with the exception of the national results that were run the next day). </p>
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">seattle_info</span> <span class="o">=</span> <span class="n">skills_info</span><span class="p">(</span><span class="n">city</span> <span class="o">=</span> <span class="s">'Seattle'</span><span class="p">,</span> <span class="n">state</span> <span class="o">=</span> <span class="s">'WA'</span><span class="p">)</span> 
+</code></pre></div><div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">There</span> <span class="n">were</span> <span class="mi">73</span> <span class="n">jobs</span> <span class="n">found</span><span class="p">,</span> <span class="n">Seattle</span>
+<span class="n">Getting</span> <span class="n">page</span> <span class="mi">1</span>
+<span class="n">Getting</span> <span class="n">page</span> <span class="mi">2</span>
+<span class="n">Getting</span> <span class="n">page</span> <span class="mi">3</span>
+<span class="n">Getting</span> <span class="n">page</span> <span class="mi">4</span>
+<span class="n">Getting</span> <span class="n">page</span> <span class="mi">5</span>
+<span class="n">Getting</span> <span class="n">page</span> <span class="mi">6</span>
+<span class="n">Getting</span> <span class="n">page</span> <span class="mi">7</span>
+<span class="n">Done</span> <span class="k">with</span> <span class="n">collecting</span> <span class="n">the</span> <span class="n">job</span> <span class="n">postings</span><span class="err">!</span>
+<span class="n">There</span> <span class="n">were</span> <span class="mi">74</span> <span class="n">jobs</span> <span class="n">successfully</span> <span class="n">found</span><span class="o">.</span>
+</code></pre></div>
+<p><img src="/images/Proj6_images/proj6_nb_16_1.png"/></p>
+
+<p>Looking at the plot above, it seems Python is definitely the most commonly requested skill. Relational databases are used far more commonly than unstructured NoSQL databases. Spark doesn't seem to have caught on to very many jobs yet (only about 7%) but it is listed more frequently than Pig, which has been around much longer! It also seems R is starting to lose the infamous Python vs. R battle that data scientists like arguing about (in my opinion just use both for their strengths!) </p>
+
+<p>What if we tried a different job market, such as Chicago? How do things change here?</p>
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">chicago_info</span> <span class="o">=</span> <span class="n">skills_info</span><span class="p">(</span><span class="n">city</span> <span class="o">=</span> <span class="s">'Chicago'</span><span class="p">,</span> <span class="n">state</span> <span class="o">=</span> <span class="s">'IL'</span><span class="p">)</span>
+</code></pre></div><div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">There</span> <span class="n">were</span> <span class="mi">63</span> <span class="n">jobs</span> <span class="n">found</span><span class="p">,</span> <span class="n">Chicago</span>
+<span class="n">Getting</span> <span class="n">page</span> <span class="mi">1</span>
+<span class="n">Getting</span> <span class="n">page</span> <span class="mi">2</span>
+<span class="n">Getting</span> <span class="n">page</span> <span class="mi">3</span>
+<span class="n">Getting</span> <span class="n">page</span> <span class="mi">4</span>
+<span class="n">Getting</span> <span class="n">page</span> <span class="mi">5</span>
+<span class="n">Getting</span> <span class="n">page</span> <span class="mi">6</span>
+<span class="n">Done</span> <span class="k">with</span> <span class="n">collecting</span> <span class="n">the</span> <span class="n">job</span> <span class="n">postings</span><span class="err">!</span>
+<span class="n">There</span> <span class="n">were</span> <span class="mi">68</span> <span class="n">jobs</span> <span class="n">successfully</span> <span class="n">found</span><span class="o">.</span>
+</code></pre></div>
+<p><img src="/images/Proj6_images/proj6_nb_18_1.png"/></p>
+
+<p>In the case of Chicago, it seems Hadoop is the top skill to have. My guess is some of the companies list Hadoop without really understanding that Hadoop is an entire framework and not a specific "skill." Python has now dropped to third place compared to Seattle. It also seems Spark appears in a greater percentage of job ads from Chicago than it did in Seattle, but Pig is requested more often. </p>
+
+<p>What about the largest Data Scientist job markets like San Francisco and New York City?</p>
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">silicon_val_info</span> <span class="o">=</span> <span class="n">skills_info</span><span class="p">(</span><span class="n">city</span> <span class="o">=</span> <span class="s">'San Francisco'</span><span class="p">,</span> <span class="n">state</span> <span class="o">=</span> <span class="s">'CA'</span><span class="p">)</span>
+</code></pre></div><div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">There</span> <span class="n">were</span> <span class="mi">299</span> <span class="n">jobs</span> <span class="n">found</span><span class="p">,</span> <span class="n">San</span> <span class="n">Francisco</span>
+<span class="o">...</span> <span class="c"># I deleted some of the output for the purposes of this website</span>
+<span class="n">Getting</span> <span class="n">page</span> <span class="mi">27</span>
+<span class="n">Getting</span> <span class="n">page</span> <span class="mi">28</span>
+<span class="n">Getting</span> <span class="n">page</span> <span class="mi">29</span>
+<span class="n">Done</span> <span class="k">with</span> <span class="n">collecting</span> <span class="n">the</span> <span class="n">job</span> <span class="n">postings</span><span class="err">!</span>
+<span class="n">There</span> <span class="n">were</span> <span class="mi">336</span> <span class="n">jobs</span> <span class="n">successfully</span> <span class="n">found</span><span class="o">.</span>
+</code></pre></div>
+<p><img src="/images/Proj6_images/proj6_nb_20_1.png"/></p>
+
+<p>Once again, Python is the top skill demanded, with R in second. In terms of the Hadoop framework, Hive was the most in demand. This makes sense given most companies are still dealing with structured data and Hive's strong similarity to SQL. Spark also beat Excel (thank goodness!) yet the percentage of job descriptions mentioning Spark was smaller in the Bay Area than in Chicago. A bit surprising since Spark originated at Berkeley, but this is just a snapshot in time after all. </p>
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">nyc_info</span> <span class="o">=</span> <span class="n">skills_info</span><span class="p">(</span><span class="n">city</span> <span class="o">=</span> <span class="s">'New York'</span><span class="p">,</span> <span class="n">state</span> <span class="o">=</span> <span class="s">'NY'</span><span class="p">)</span>
+</code></pre></div><div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">There</span> <span class="n">were</span> <span class="mi">300</span> <span class="n">jobs</span> <span class="n">found</span><span class="p">,</span> <span class="n">New</span> <span class="n">York</span>
+<span class="o">...</span>
+<span class="n">Getting</span> <span class="n">page</span> <span class="mi">27</span>
+<span class="n">Getting</span> <span class="n">page</span> <span class="mi">28</span>
+<span class="n">Getting</span> <span class="n">page</span> <span class="mi">29</span>
+<span class="n">Getting</span> <span class="n">page</span> <span class="mi">30</span>
+<span class="n">Done</span> <span class="k">with</span> <span class="n">collecting</span> <span class="n">the</span> <span class="n">job</span> <span class="n">postings</span><span class="err">!</span>
+<span class="n">There</span> <span class="n">were</span> <span class="mi">335</span> <span class="n">jobs</span> <span class="n">successfully</span> <span class="n">found</span><span class="o">.</span>
+</code></pre></div>
+<p><img src="/images/Proj6_images/proj6_nb_22_1.png"/></p>
+
+<p>New York City and San Francisco had almost exactly the same number of job postings, which seems to show the job market is relatively balanced between the two coasts. R <strong>finally</strong> comes in first place in the Big Apple, with Python close behind. Demand for Spark seems pretty limited still, however. I think Spark has a bright future, so this may change by the end of the year. </p>
+
+<p>Last, let's see the overall national trend. (I ran this separately because it takes a long time to run). </p>
+
+<p><img src="/images/Proj6_images/proj6_nb_24_0.png"/></p>
+
+<p>From a national standpoint, I notice a few interesting things:</p>
+
+<ul>
+<li><p>Python is more in demand than R now for data science jobs. I think this will continue to be the trend as the Python data science community is further developed. Python is the "glue" that can hold almost every aspect of data science together. From data manipulation in pandas, machine learning with scikit-learn, web applications with Flash/Django, and an interface to Spark via PySpark, Python probably has you covered somewhere along the way. Is it always the best tool for the job? No, but it can usually get you there. R is still important in some areas where Python isn't quite as good yet (such as plotting or statistical libraries). With Microsoft <a href="http://blog.revolutionanalytics.com/2015/01/revolution-acquired.html">buying Revolution Analytics recently as an example</a>, R still has a role to play which is why it is in second place. </p></li>
+<li><p>Data visualization doesn't seem to be in very high demand yet. D3 (or D3.js depending on the terminology the company used) is very low on the list. This surprised me because D3 seems to have <a href="https://github.com/mbostock/d3/wiki/Gallery">a lot of power</a>, yet it doesn't seem to have won many companies over as a skill they value. Tableau is still more popular, even though it isn't open source. </p></li>
+<li><p>Even nationally, Spark is now (at least for this snapshot in time) a more in-demand skill than Excel. Perhaps companies are starting to realize that Excel isn't exactly the best tool for data science at scale (sorry Microsoft!) and is better suited for a Data Analyst role. </p></li>
+</ul>
+
+<h2>Summary</h2>
+
+<p>Designing our own web crawler, we were able to find out which skills companies are most interested in for data science jobs on Indeed. Trends vary somewhat between cities, but the top four skills were Python, R, SQL, and Hadoop pretty consistently. Java, SAS, and Hive would probably be considered the second tier.</p>
+
+<p>Notice, however, that these skills are just for the software/programming languages that a data scientist should know. There are many others, such as machine learning, statistics, mathematics, and an understanding of what insights or products can be helpful to a business. These are also very important skills that are necessary to be a successful data scientist in my opinion, so don't forget about them!</p>
+
+<p>If you would like the IPython Notebook for this blog post, you can find it <a href="http://nbviewer.ipython.org/github/jmsteinw/Notebooks/blob/master/IndeedJobs.ipynb">here.</a></p>
+
+  </div>
+
+  </div></body></html>

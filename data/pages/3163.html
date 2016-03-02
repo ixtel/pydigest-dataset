@@ -1,0 +1,113 @@
+<html><body><div><div class="entry-content">
+			<p>With my first post, I thought I would post about something that I didn’t have much luck in finding an existing solution.  I wanted to get emails from my running Python program when there were errors.  The logging library offers the <a href="https://docs.python.org/3/library/logging.handlers.html#logging.handlers.SMTPHandler">SMTPHandler</a> as a simple solution (assuming you have an SMTP server to send the message to).  But what if you are running a very early beta with lots of errors or you pushed a new change that’s breaking?</p>
+<p>Your inbox will get flooded.</p>
+<p>If your program is single threaded, it is simple to create an expanded SMTP handler that will limit repeated emails:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+import datetime
+import logging.handlers
+
+class SMTPPlusHandler(logging.handlers.SMTPHandler):
+
+    def __init__(self, mailhost, fromaddr, toaddrs, subject, credentials=None, secure=None, timeout=5.0):
+        super(SMTPPlusHandler, self).__init__(mailhost, fromaddr, toaddrs, subject, credentials, secure, timeout)
+        self.state = {}
+
+    def uniq_key(self, record):
+        key = record.levelname + record.pathname
+        if record.exc_info:
+            key += str(record.exc_info[0])
+        return key
+
+    def block_ts(self, count):
+        throttle_secs = 60 * count ^ 3
+        return datetime.datetime.now().timestamp() + throttle_secs
+
+    def update_status(self, key, status):
+        status['count'] += 1
+        status['block_ts'] = self.block_ts(status['count'])
+
+    def is_blocked(self, status):
+        return datetime.datetime.now().timestamp() &lt; status['block_ts']
+
+    def is_emittable(self, record):
+        key = self.uniq_key(record)
+        status = self.state.get(key, {'count': 0, 'block_ts': 0})
+        if self.is_blocked(status):
+            return False
+        else:
+            self.update_status(key, status)
+            self.state[key] = status
+            return True
+
+    def emit(self, record):
+        if self.is_emittable(record):
+             super(SMTPPlusHandler, self).emit(record)
+</pre>
+<p>Let’s break this down:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+class SMTPPlusHandler(logging.handlers.SMTPHandler):
+
+    def __init__(self, mailhost, fromaddr, toaddrs, subject, credentials=None, secure=None, timeout=5.0):
+        super(SMTPPlusHandler, self).__init__(mailhost, fromaddr, toaddrs, subject, credentials, secure, timeout)
+        self.state = {}
+</pre>
+<p>We create a derived class of the logging library’s <strong>SMTPHandler</strong> and initialize it via <strong>super()</strong>.  <em>state</em> will be used to track emailed log records.</p>
+<pre class="brush: python; title: ; notranslate" title="">
+def emit(self, record):
+        if self.is_emittable(record):
+             super(SMTPPlusHandler, self).emit(record)
+</pre>
+<p>Working from the top down, we make a wrapper around the base class <strong>emit()</strong> function.  The base <strong>emit()</strong> is what takes the <em>record</em> and sends an email.  Here we add in a check to see if the <em>record</em> is emittable before calling the base <strong>emit()</strong>.</p>
+<pre class="brush: python; title: ; notranslate" title="">
+def is_emittable(self, record):
+    key = self.uniq_key(record)
+    status = self.state.get(key, {'count': 0, 'block_ts': 0})
+    if self.is_blocked(status):
+        return False
+    else:
+        self.update_status(key, status)
+        self.state[key] = status
+        return True
+</pre>
+<p><strong>is_emittable()</strong> will take care of tracking the <em>state</em> and checking if an email should be sent.  First, we create a key that will be used to store this record type in our <em>state</em>.  Next, we get what I call <em>status</em>.  <em>status</em> is a dictionary that contains a count of the number of emails sent and a timestamp, in seconds, for what we will block until.  If this is the first time this record type has been emitted, status will default with zero values.</p>
+<pre class="brush: python; title: ; notranslate" title="">
+def uniq_key(self, record):
+    key = record.levelname + record.pathname
+    if record.exc_info:
+        key += str(record.exc_info[0])
+    return key
+</pre>
+<p><strong>uniq_key()</strong> takes the log <em>record</em> and makes a key out of it.  This is what we’ll use to determine if something is a duplicate record.  This is subjective and what I’ve done here is just an example.  You can find the different fields here for <a href="https://docs.python.org/3.4/library/logging.html#logging.LogRecord">LogRecord</a>.</p>
+<pre class="brush: python; title: ; notranslate" title="">
+def is_blocked(self, status):
+        return datetime.datetime.now().timestamp() &lt; status['block_ts']
+</pre>
+<p><strong>is_blocked() </strong>compares the current timestamp to the blocking timestamp.  Note, datetime.timestamp() is only available from Python 3.3 and up.</p>
+<pre class="brush: python; title: ; notranslate" title="">
+def update_status(self, key, status):
+    status['count'] += 1
+    status['block_ts'] = self.block_ts(status['count'])
+</pre>
+<p>If the record is not blocked and we send an email, <strong>update_status() </strong>increments the count and sets a new blocking timestamp.</p>
+<pre class="brush: python; title: ; notranslate" title="">
+def block_ts(self, count):
+    throttle_secs = 60 * count ^ 3
+    return datetime.datetime.now().timestamp() + throttle_secs
+</pre>
+<p><strong>block_ts() </strong>takes the current timestamp and adds seconds to it depending on the <em>count</em>.  I chose 60count^3 because it does a good job of spacing out the intervals.  After the first email, it will block for 1 minute, second it will block for 8 minutes, third for 27 minutes.</p>
+<p>Now that our handler is complete we can add it to our logging config:</p>
+<pre class="brush: plain; title: ; notranslate" title="">
+[handlers]
+keys=smtpPlusHandler
+
+[handler_smtpPlusHandler]
+class=my.python.path.smtpPlusHandler.SMTPPlusHandler
+level=WARN
+formatter=simpleFormatter
+args=('mailhost', 'ALERT@mydomain.com', ['devops@mydomain.com', 'bossman@mydomain.com'], 'EMAIL ALERT PROGRAM1')
+</pre>
+<p>Note, you have to change the class path to your path.  You can set the from address, who will receive the email as a list, and the subject of the email.</p>
+<p>From there, any time you log something with the level you set for the smtp handler, an email will be sent.  I will discuss how this can be modified for multiprocessed programs in a subsequent post.  Feel free to leave ask questions or leave feedback.</p>
+		<div id="jp-post-flair" class="sharedaddy sd-like-enabled sd-sharing-enabled"><div class="sharedaddy sd-block sd-like jetpack-likes-widget-wrapper jetpack-likes-widget-unloaded" id="like-post-wrapper-84399234-6-56d598dbddfb6" data-src="//widgets.wp.com/likes/#blog_id=84399234&amp;post_id=6&amp;origin=rpostelnik.wordpress.com&amp;obj_id=84399234-6-56d598dbddfb6" data-name="like-post-frame-84399234-6-56d598dbddfb6"><h3 class="sd-title">Like this:</h3><p class="likes-widget-placeholder post-likes-widget-placeholder"><span class="button"><span>Like</span></span> <span class="loading">Loading...</span></p><span class="sd-text-color"/><a class="sd-link-color"/></div></div>					</div>
+
+	</div></body></html>

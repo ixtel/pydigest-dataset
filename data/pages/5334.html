@@ -1,0 +1,200 @@
+<html><body><div><div class="entry-content">
+		<p>Connecting computers is so difficult that software and services to do this is a multi-billion dollar business. So today we’re still connecting applications using raw UDP and TCP, proprietary protocols, HTTP, Websockets. It remains painful, slow, hard to scale, and essentially centralized.</p>
+<p>To fix the world, we needed to do two things. One, to solve the general problem of “how to connect any code to any code, anywhere”. Two, to wrap that up in the simplest possible building blocks that people could understand and use easily. It sounds ridiculously simple. And maybe it is. That’s kind of the whole point. Zero MQ comes to rescue us from the problem.With averge hardware configuration, we can handle 2.5-8 Million messages/second using ZeroMQ.</p>
+<h2 id="toc_0">What is ZMQ?</h2>
+<p>ZeroMQ is a library used to implement messaging and communication systems between applications and processes – fast and asynchronously.It is faster like a bullet train.You can use it for multiple purposes.Like the things listed below.</p>
+<p>* Networking and concurrency library</p>
+<p>* Asynchronous messaging</p>
+<p>* Brokerless communication</p>
+<p>* Multiple transport</p>
+<p>* Cross-platform and open-source</p>
+<p>Why a message queue is required in the distributed applications and how ZeroMQ can be used as the best communication practise between applciations will be explained in few minutes.</p>
+<p><a href="https://impythonist.files.wordpress.com/2015/07/selection_001.png"><img class="aligncenter size-full wp-image-1113" src="https://impythonist.files.wordpress.com/2015/07/selection_001.png?w=1000" alt="Selection_001"/></a></p>
+<p>I guess you captured the logic from above pic.Instead of hitting the server directly for each request  we can push it into a message queue and process it by workers , then route it to appropriate location. Ok, now context switch to collatz conjecture.</p>
+<h2 id="toc_0">What is Collatz conjecture?</h2>
+<p>This is the 3n+1 mathematical <span class="">problem</span> (or Collatz conjecture). Collatz conjecture states that for any number n, the following function f(n) will always boil down to 1 as  result, if you keep feeding the previous result to the function over and over again.</p>
+<p/>
+<p>  f(n) = {</p>
+<p>           3n+1, if n is odd,</p>
+<p>           n/2, if n is even</p>
+<p>           1, if n is 1</p>
+<p>        }</p>
+<p/>
+<p>Eg: if n = 20, then:</p>
+<p>           f(20) = 20/2 = 10</p>
+<p>           f(10) = 10/2 = 5</p>
+<p>           f(5)  = 3*5+1 = 16</p>
+<p>           f(16) = 16/2 = 8</p>
+<p>           f(8)  = 8/2 = 4</p>
+<p>           f(4)  = 4/2 = 2</p>
+<p>           f(2)  = 1</p>
+<p/>
+<p>The term cycle count refers to the length of the sequence of numbers generated. In the above case, cycle count for f(20) is 9.</p>
+<p>We are going to build a collatz conjecture cycle finding server using Python and ZeroMQ. complete code of this project is available at this location</p>
+
+<p/>
+<p/>
+<p>
+<h2 id="toc_0">Beauty of collatz conjecture</h2>
+</p>
+<p>All numbers leads to one. It is the philosophy of collatz conjecture. visit this site to visually see the construction of collatz numbers for orbital length of 18.</p>
+
+
+<p/>
+<p/>
+<p/>
+<p/>
+<p>
+<h2 id="toc_0">Let us build a Collatz Conjecture Cycle Server</h2>
+</p>
+<p>Now come to the coding part.Our aim is to construct the server that takes a number from client and calculates longest collatz cycle from 1 to that number and returns it back. For ex. If we give input of 1000 our server should calculate collatz cycles for 1,2,3,……..,1000 seperately and return the longest cycle of all.</p>
+<p/>
+<p>
+<h2 id="toc_0">Ingredients</h2>
+</p>
+
+<p>we can build the same server with Python and Gevent alone , but that setup is vulnerable after 10K connections. For scaling it to millions ,we should use the power of ZeroMQ.</p>
+<div>
+<h2 id="toc_0">Requirements</h2>
+<ul>
+<li>Install  ZeroMQ4.1.2 ( http://zeromq.org/intro:get-the-software ) .Below process shows step wise installation procedure.</li>
+</ul>
+<pre class="code-pre ">$ sudo apt-get install uuid uuid-dev uuid-runtime
+$ sudo apt-get install libzmq-dbg libzmq-dev libzmq1
+$ sudo apt-get install build-essential gcc
+$ cd tmp/ &amp;&amp; wget http://download.zeromq.org/zeromq-4.1.2.tar.gz
+$ <span class="line">tar -xvf zeromq-4.1.2.tar.gz &amp;&amp; </span><span class="line"><span class="nb">cd</span> ./zeromq-4.1.2.tar.gz
+$ ./configure &amp;&amp; make
+$ sudo make install
+$ sudo ldconfig</span></pre>
+
+<pre class="code-pre ">$ sudo apt-get install python-dev
+$ sudo pip install pyzmq</pre>
+
+<pre class="code-pre ">$ sudo pip install gevent</pre>
+<p>Please be aware that ZeroMQ installation will fail if all deapendecies are not installed. pyzmq installation will fail if python-dev library deapendency is not fulfilled. I hope now you are ready with the required set up on a Ubuntu 14.04 machine.</p>
+<p>This ZeroMQ server is used to serve requests through a TCP port to which a zmq socket is attached. Server collects data from that bound socket. let us first design function for returning maximum collatz cycle for a given inupt range. That algorithm would look like below</p>
+<h2 id="toc_0">Collatz Conjecture Algorithm</h2>
+<pre class="code-pre ">import gevent
+from gevent import monkey
+
+monkey.patch_all()
+
+#Algorithm for finding collatz conjecture longest cycle.
+#Returns max cycle from cycles calculated from 1 to n.
+def do_collatz(n):
+    def collatz(n,cycle=''):
+        while True:
+            if n == 1:
+                cycle += str(n)
+                break
+            else:
+                if n % 2 == 1:
+                    n = ( 3 * n ) + 1
+                    cycle += str(n)
+                else:
+                    n = n/2
+                    cycle += str(n)
+       return len(cycle)
+    #This Gevent code is for speeding up the calculation of cycles
+    jobs = [ gevent.spawn(collatz, x) for x in range(1,n) ]
+    gevent.joinall(jobs)
+    return max([g.value for g in jobs])
+</pre>
+<p>Now let us use this function in our ZeroMQ server that we are going to write below. It just recieves a number from client and calls this do_collatz function and returns the longest cycle back to the client.</p>
+<h2 id="toc_0">ZeroMQ Collatz Server</h2>
+</div>
+<pre class="code-pre ">#zmq_collatz_server.py
+
+import time
+import zmq
+import gevent
+from gevent import monkey
+
+monkey.patch_all()
+
+#Create context
+context = zmq.Context()
+
+#Set type of socket
+socket = context.socket(zmq.REP)
+
+#Bind socket to port 5555
+socket.bind("tcp://*:5555")
+
+#Algorithm for finding collatz conjecture
+def do_collatz(n):
+    def collatz(n,cycle=''):
+        while True:
+            if n == 1:
+                cycle += str(n)
+                break
+            else:
+                if n % 2 == 1:
+                    n = ( 3 * n ) + 1
+                    cycle += str(n)
+                else:
+                    n = n/2
+                    cycle += str(n)
+       return len(cycle)
+    #This Gevent code is for speeding up the calculation of cycles 
+    jobs = [ gevent.spawn(collatz, x) for x in range(1,n) ]
+    gevent.joinall(jobs)
+    return max([g.value for g in jobs])
+
+#Create a loop and listen for clients to send requests 
+while True:
+    # Wait for next request from client
+    number = int(socket.recv())
+    print("Received request for finding max collatz cycle between 1.....%s" % number)
+    # Send reply back collatz conjecture maximum cycle to client
+    num = str(do_collatz(number))
+    socket.send(num)
+</pre>
+<p> </p>
+<p>Now we have a server ready to serve any no of clients.Let us build a ZeroMQ client to send request to above server and recieves the maximum collatz cycle for a given no.</p>
+<h2 id="toc_0">ZeroMQ Collatz Client</h2>
+<pre class="code-pre ">#zmq_collatz_client.py
+
+import zmq
+context = zmq.Context()
+
+# Socket to talk to server
+print 'Connecting to hello world server'
+
+socket = context.socket(zmq.REQ)
+socket.connect("tcp://localhost:5555")
+
+number = raw_input("please give a no to calculate collatz conjecture max cycle: ")
+print 'Sending request %s ' % number
+#Send number to server
+socket.send(number)
+#Wait and print result
+message = socket.recv()
+print 'Collatz Conjecture max cycle of %s is &lt;[ %s ]&gt;' % (number, message)
+</pre>
+<p>That’s it. Our client is ready too. Now open the terminal with three tabs. One for server and other two for two clients to send the request. The output looks like this on my Ubuntu  14.04 machine.</p>
+<p><a href="https://impythonist.files.wordpress.com/2015/07/selection_002.png"><img class="aligncenter wp-image-1132 size-large" src="https://impythonist.files.wordpress.com/2015/07/selection_002.png?w=1000&amp;h=483" alt=""/></a></p>
+<p>Next try to give input 1000 from one client and 7000 from another client. Server instantly return maximum collatz cycle back to the client. It looks like this.<a href="https://impythonist.files.wordpress.com/2015/07/selection_002.png"><br/>
+</a></p>
+<p><a href="https://impythonist.files.wordpress.com/2015/07/selection_003.png"><img class="aligncenter size-full wp-image-1135" src="https://impythonist.files.wordpress.com/2015/07/selection_003.png?w=1000&amp;h=475" alt="Selection_003"/></a></p>
+<p>So it is clearly visible that our ZeroMQ server is working perfectly for serving the clients and solves collatz conjecture problem. This is called Request-Reply pattern of implementation of ZeroMQ. Here communication is acheived through TCP rather than HTTP. There are three more patterns can be implemented using ZeroMQ. They are:</p>
+<ul>
+<li><strong>Publish/Subscribe Pattern:</strong> Used for distributing data from a single process (e.g. publisher) to multiple recipients (e.g. subscribers).</li>
+<li><strong>Pipeline Pattern:</strong> Used for distributing data to connected nodes.</li>
+<li><strong>Exclusive Pair Pattern:</strong> Used for connecting two peers together, forming a pair.</li>
+</ul>
+<p>So ZeroMQ has a lot of scope. It is a good scalability solution for current distributed application architectures. All code for above collatz-cycle is availlable at below github link.</p>
+<p><a href="https://github.com/narenaryan/collatz-cycle-server" rel="nofollow">https://github.com/narenaryan/collatz-cycle-server</a></p>
+<p>References:</p>
+<p><a href="https://www.digitalocean.com/community/tutorials/how-to-work-with-the-zeromq-messaging-library" rel="nofollow">https://www.digitalocean.com/community/tutorials/how-to-work-with-the-zeromq-messaging-library</a></p>
+<p><a href="http://zeromq.org/intro:read-the-manual" rel="nofollow">http://zeromq.org/intro:read-the-manual</a></p>
+<p><a href="http://inerciatech.com/post/5251827502/a-rabbitmq-to-zeromq-gateway" rel="nofollow">http://inerciatech.com/post/5251827502/a-rabbitmq-to-zeromq-gateway</a></p>
+<p><a href="https://speakerd.s3.amazonaws.com/presentations/8035a1002fcd013209132673290742c6/ZeroMQ.pdf" rel="nofollow">https://speakerd.s3.amazonaws.com/presentations/8035a1002fcd013209132673290742c6/ZeroMQ.pdf</a></p>
+<p> </p>
+		<div id="jp-post-flair" class="sharedaddy sd-like-enabled sd-sharing-enabled"><div class="sharedaddy sd-block sd-like jetpack-likes-widget-wrapper jetpack-likes-widget-unloaded" id="like-post-wrapper-62549587-1099-56d5a085c9e1b" data-src="//widgets.wp.com/likes/#blog_id=62549587&amp;post_id=1099&amp;origin=impythonist.wordpress.com&amp;obj_id=62549587-1099-56d5a085c9e1b" data-name="like-post-frame-62549587-1099-56d5a085c9e1b"><h3 class="sd-title">Like this:</h3><p class="likes-widget-placeholder post-likes-widget-placeholder"><span class="button"><span>Like</span></span> <span class="loading">Loading...</span></p><span class="sd-text-color"/><a class="sd-link-color"/></div>
+<p id="jp-relatedposts" class="jp-relatedposts">
+	<h3 class="jp-relatedposts-headline"><em>Related</em></h3>
+</p></div>					</div>
+
+	</div></body></html>

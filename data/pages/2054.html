@@ -1,0 +1,225 @@
+<html><body><div><div class="content html_format"><p>
+      Статья про то, как с помощью</p><a href="http://legacy.python.org/dev/peps/pep-0342/"> расширенных генераторов Python</a><p> сделать собственную реализацию сопрограмм, переключающихся по получению событий. Простота кода получившегося модуля вас приятно удивит и прояснит новые и мало используемые возможности языка, которые можно получить, используя такие генераторы. Статья поможет разобраться и с тем, как это устроено в серьезных реализациях: </p><a href="https://docs.python.org/3/library/asyncio.html">asyncio</a><p>, </p><a href="http://www.tornadoweb.org/en/stable/">tornado</a><p>, etc.
+</p><a name="habracut"/>
+<h4>Теоретические моменты и disclaimer</h4><p>
+Понятие сопрограмма имеет очень широкое толкование, поэтому следует определиться, какими характеристиками они будут обладать в нашей реализации:
+</p><ul>
+<li>Выполняются совместно в одном потоке;</li>
+<li>Выполнение может прерываться для ожидания определенного события;</li>
+<li>Выполнение может возобновиться после получения ожидаемого события;</li>
+<li>Может вернуть результат по завершению.</li>
+</ul><p>
+Как следствие получаем: </p><a href="https://ru.wikipedia.org/wiki/%D0%A1%D0%BE%D0%B1%D1%8B%D1%82%D0%B8%D0%B9%D0%BD%D0%BE-%D0%BE%D1%80%D0%B8%D0%B5%D0%BD%D1%82%D0%B8%D1%80%D0%BE%D0%B2%D0%B0%D0%BD%D0%BD%D0%BE%D0%B5_%D0%BF%D1%80%D0%BE%D0%B3%D1%80%D0%B0%D0%BC%D0%BC%D0%B8%D1%80%D0%BE%D0%B2%D0%B0%D0%BD%D0%B8%D0%B5">событийно-ориентированное программирование</a><p> без функций обратного вызова и </p><a href="https://ru.wikipedia.org/wiki/%D0%9C%D0%BD%D0%BE%D0%B3%D0%BE%D0%B7%D0%B0%D0%B4%D0%B0%D1%87%D0%BD%D0%BE%D1%81%D1%82%D1%8C#.D0.A1.D0.BE.D0.B2.D0.BC.D0.B5.D1.81.D1.82.D0.BD.D0.B0.D1.8F_.D0.B8.D0.BB.D0.B8_.D0.BA.D0.BE.D0.BE.D0.BF.D0.B5.D1.80.D0.B0.D1.82.D0.B8.D0.B2.D0.BD.D0.B0.D1.8F_.D0.BC.D0.BD.D0.BE.D0.B3.D0.BE.D0.B7.D0.B0.D0.B4.D0.B0.D1.87.D0.BD.D0.BE.D1.81.D1.82.D1.8C">кооперативную многозадачность</a><p>. Эффект от использования такой парадигмы программирования будет существенным только для задач, реагирующих на неравномерно поступающие события. В первую очередь это задачи обработки I/O: сетевые сервера, пользовательские интерфейсы, и т. п. Другой возможный вариант применения — это задачи расчета состояния персонажей в игровом мире. Но категорически не подойдет для задач, которые производят долгие расчеты. </p><p>
+Следует четко понимать, что пока выполняющаяся сопрограмма не прервалась на ожидание события, все остальные находятся в состоянии останова, даже если ожидаемое ими событие уже произошло.
+
+</p><h4>Основа всего</h4><p>
+В Python хорошей основой для всего этого являются генераторы, если их правильно приготовить в прямом и переносном смысле. Точнее расширенные генераторы, API которых окончательно сформировался в версии Python 3.3. В предыдущих версиях не было реализовано возвращение значения (результата) по завершению работы генератора и не было удобного механизма вызова одного генератора из другого. Тем не менее, реализации сопрограмм были и раньше, но из-за ограничений обычных генераторов они были не так «красивы» как то, что получится у нас. Очень хорошая статья на эту тему </p><a href="http://www.dabeaz.com/coroutines/">«A Curious Course on Coroutines and Concurrency»</a><p> единственный её недостаток, так это то, что нет обновленной версии. Такой где реализация coroutine в python использует последние новшества в языке, в частности в API Enhanced Python Generators. Ниже рассмотрены возможности расширенных генераторов, которые нам понадобятся. </p><p>
+Передача сообщений в сопрограмму у нас будет построена на возможности задать генератору его состояние. Скопируйте код ниже в окно запущенного интерпретатора Python версии 3.3 и выше.
+</p><pre><code class="python">def gen_factory():
+    state = None
+    while True:
+        print("state:", state)
+        state = yield state
+
+gen = gen_factory()
+</code></pre><p>
+Генератор создан, его надо запустить. 
+</p><pre><code class="python">&gt;&gt;&gt; next(gen)
+state: None
+</code></pre><p>
+Получено исходное состояние. Изменим состояние:
+</p><pre><code class="python">&gt;&gt;&gt; gen.send("OK")
+state: OK
+'OK'
+</code></pre><p>
+Видим что состояние изменилось и возвращено в результате. Следующие вызовы send будут возвращать уже передаваемое ими состояние. 
+
+</p><h4>Зачем нам все это?</h4><p>
+Представьте задачу: передавать привет Петрову раз в две секунды, Иванову раз в три секунды, а всему миру раз в пять секунд. В виде Python кода можно представить как-то так:
+</p><pre><code class="python">def hello(name, timeout):
+    while True:
+        sleep(timeout)
+        print("Привет, {}!".format(name))
+
+hello("Петров", 2.0)
+hello("Иванов", 3.0)
+hello("Мир", 5.0)
+</code></pre><p>
+Смотрится хорошо, но приветы будет получать только Петров. Однако! Небольшая модификация не влияющая на ясность кода, а даже наоборот — уточняющая нашу мысль, и это уже может заработать как положено.
+</p><pre><code class="python">@coroutine
+def hello(name, timeout):
+    while True:
+        yield from sleep(timeout)
+        print("Привет, {}!".format(name))
+
+hello("Петров", 2.0)
+hello("Иванов", 3.0)
+hello("Мир", 5.0)
+run()
+</code></pre><p>
+Код получился в стиле pythonic way — наглядно иллюстрирует задачу, линейный без калбэков, без лишних наворотов с объектами, любые комментарии в нем излишни. Осталось только реализовать декоратор coroutine, свою версию функции sleep и функцию run. В реализации, конечно, без наворотов не обойдется. Но это тоже pythonic way, прятать за фасадом библиотечных модулей всю магию.
+
+</p><h4>Самое интересное</h4><p>
+Назовем модуль с реализацией незатейливо — concurrency, со смыслом и отражает тот факт, что это фактически, будет реализация кооперативной многозадачности. Понятно, что декоратор должен будет сделать из обычной функции генератор и запустить его (сделать первый вызов next). Конструкция языка yield from пробрасывает вызов в следующий генератор. То есть функция sleep должна создать генератор, в котором можно спрятать всю магию. В генератор, ее вызвавший, вернется только код полученного события. Здесь возвращаемый результат не обрабатывается, код тут может получить по сути только один результат, означающий что тайм-аут истек. Ожидание же ввода-вывода может возвращать разные виды событий, например (чтение/запись/тайм аут). Более того, генераторы порождаемые функциями типа sleep могут вернуть по yield from любой тип данных и соответственно их функционал может быть не ограничен ожиданием событий. Функция run запустит диспетчер событий, его задача — получить событие извне и/или сгенерировать внутри, определить его получателя и собственно отправить.</p><p>
+Начнем с декоратора:
+</p><pre><code class="python">class coroutine(object):
+    """Делает из функции сопрограмму на базе расширенного генератора."""
+    _current = None
+
+    def __init__(self, callable):
+        self._callable = callable
+
+    def __call__(self, *args, **kwargs):
+        corogen = self._callable(*args, **kwargs)
+        cls = self.__class__
+        if cls._current is None:
+            try:
+                cls._current = corogen
+                next(corogen)
+            finally:
+                cls._current = None
+        return corogen
+</code></pre><p>
+Он выполнен в виде класса, типичный прием, как и обещал, он создает и запускает генератор. Конструкция с _current добавлена для того, чтобы избежать запуска генератора, если декорированная функция, его создающая вызывается внутри тела другого генератора. В этом случае первый вызов будет и так сделан. Так же это поможет разобраться, в какой генератор должно быть передано событие, чтобы оно попало по цепочке в генератор, созданный функцией sleep.
+</p><pre><code class="python">def sleep(timeout):
+    """Приостанавливает выполнение до получения события "таймаут истек"."""
+    corogen = coroutine._current
+    dispatcher.setup_timeout(corogen, timeout)
+    revent = yield
+    return revent
+</code></pre><p>
+Здесь видим вызов dispatcher.setup_sleep, это сообщает диспетчеру событий, что генератор такой-то ожидает событие «тайм-аут» по истечению заданного параметром timeout количества секунд. 
+</p><pre><code class="python">from collections import deque
+from time import time, sleep as sys_sleep
+
+
+class Dispatcher(object):
+    """Объект реализующий диспечер событий."""
+    def __init__(self):
+        self._pending = deque()
+        self._deadline = time() + 3600.0
+
+    def setup_timeout(self, corogen, timeout):
+        deadline = time() + timeout
+        self._deadline = min([self._deadline, deadline])
+        self._pending.append([corogen, deadline])
+        self._pending = deque(sorted(self._pending, key=lambda a: a[1]))
+
+    def run(self):
+        """Запускает цикл обработки событий."""
+        while len(self._pending) &gt; 0:
+            timeout = self._deadline - time()
+            self._deadline = time() + 3600.0
+            if timeout &gt; 0:
+                sys_sleep(timeout)
+            while len(self._pending) &gt; 0:
+                if self._pending[0][1] &lt;= time():
+                    corogen, _ = self._pending.popleft()
+                    try:
+                        coroutine._current = corogen
+                        corogen.send("timeout")
+                    except StopIteration:
+                        pass
+                    finally:
+                        coroutine._current = None
+                else:
+                    break
+
+dispatcher = Dispatcher()
+run = lambda: dispatcher.run()
+</code></pre><p>
+В коде диспетчера событий тоже нет ничего необычного. Куда передавать события определяется с помощью переменной класса coroutine._current. При загрузке модуля создается экземпляр класса, в рабочей реализации это конечно же должен быть синглетон. Класс collections.deque задействован вместо списка, так как побыстрее и полезен своим методом popleft. Ну вот собственно и все, и нет какой-то особой магии. Вся она на поверку спрятана еще глубже, в реализации расширенных генераторов Python. Их остается только правильно приготовить.
+
+</p><div class="spoiler"><b class="spoiler_title">Файл: concurrency.py</b><div class="spoiler_text"><pre><code class="python"># concurrency.py
+from collections import deque
+from time import time, sleep as sys_sleep
+
+
+class coroutine(object):
+    """Делает из функции сопрограмму на базе расширенного генератора."""
+    _current = None
+
+    def __init__(self, callable):
+        self._callable = callable
+
+    def __call__(self, *args, **kwargs):
+        corogen = self._callable(*args, **kwargs)
+        cls = self.__class__
+        if cls._current is None:
+            try:
+                cls._current = corogen
+                next(corogen)
+            finally:
+                cls._current = None
+        return corogen
+
+
+def sleep(timeout):
+    """Приостанавливает выполнение до получения события "таймаут истек"."""
+    corogen = coroutine._current
+    dispatcher.setup_timeout(corogen, timeout)
+    revent = yield
+    return revent
+
+
+class Dispatcher(object):
+    """Объект реализующий диспечер событий."""
+    def __init__(self):
+        self._pending = deque()
+        self._deadline = time() + 3600.0
+
+    def setup_timeout(self, corogen, timeout):
+        deadline = time() + timeout
+        self._deadline = min([self._deadline, deadline])
+        self._pending.append([corogen, deadline])
+        self._pending = deque(sorted(self._pending, key=lambda a: a[1]))
+
+    def run(self):
+        """Запускает цикл обработки событий."""
+        while len(self._pending) &gt; 0:
+            timeout = self._deadline - time()
+            self._deadline = time() + 3600.0
+            if timeout &gt; 0:
+                sys_sleep(timeout)
+            while len(self._pending) &gt; 0:
+                if self._pending[0][1] &lt;= time():
+                    corogen, _ = self._pending.popleft()
+                    try:
+                        coroutine._current = corogen
+                        corogen.send("timeout")
+                    except StopIteration:
+                        pass
+                    finally:
+                        coroutine._current = None
+                else:
+                    break
+
+dispatcher = Dispatcher()
+run = lambda: dispatcher.run()
+</code></pre>
+</div></div>
+<div class="spoiler"><b class="spoiler_title">Файл: sample.py</b><div class="spoiler_text"><pre><code class="python"># sample.py
+from concurency import coroutine, sleep, run
+
+@coroutine
+def hello(name, timeout):
+    while True:
+        yield from sleep(timeout)
+        print("Привет, {}!".format(name))
+
+hello("Петров", 2.0)
+hello("Иванов", 3.0)
+hello("Мир", 5.0)
+run()
+</code></pre>
+</div></div>
+
+<h4>Outro</h4><p>
+Если тема интересная, можно продолжить в сторону реализации ожидания событий ввода/вывода с асинхронным TCP Echo сервером в качестве примера. С реальным диспетчером событий, реализованным в виде динамической библиотеки написанной на другом, более быстром, чем Python языке.
+
+      
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

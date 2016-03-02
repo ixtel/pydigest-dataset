@@ -1,0 +1,199 @@
+<html><body><div><div class="ArticleText">
+
+<p>
+In a talk that could easily be seen as a follow-on to his <a href="/Articles/641244/">PyCon 2015 talk</a>, Josh Triplett presented at <a href="http://events.linuxfoundation.org/events/linuxcon-north-america">LinuxCon
+North America</a> on
+using Python to explore the low-level firmware of today's systems.  The <a href="http://biosbits.org/">BIOS Implementation Test Suite</a> (BITS)
+provides an environment that hearkens back to the days of BASIC,
+<tt>PEEK</tt>, and <tt>POKE</tt>, as he demonstrated at PyCon in Montréal
+in April, but it is much more than that.  In Seattle at
+LinuxCon, he showed that it can also be used to look at and use the <a href="https://en.wikipedia.org/wiki/Unified_Extensible_Firmware_Interface">Extensible
+Firmware 
+Interface</a> (EFI) and <a href="https://en.wikipedia.org/wiki/Advanced_Configuration_and_Power_Interface">Advanced
+Configuration and Power Interface</a> (ACPI) code 
+in a system—all from Python. 
+</p>
+
+<a href="/Articles/656287/">
+<img src="http://static.lwn.net/images/2015/lcna-triplett-sm.jpg" border="0" hspace="5" align="right" alt="[Josh Triplett]"/>
+</a>
+
+<p>
+Triplett started his talk with a bit of nostalgia: pictures of various home
+computers from the 1980s (e.g. Commodore 64, TRS-80, Apple II) in
+his <a href="http://events.linuxfoundation.org/sites/events/files/slides/bits-with-demo.pdf">slides
+[PDF]</a>.  He polled the room to see which were the first computers used
+by those in the room before showing a picture of the first IBM PC,
+which was his first computer.  There was a common element to all of those
+early home computers, he said: they provided access to the low-level hardware
+of the system.  These days, we have lost a lot of that access
+because the operating system mediates access to the hardware.
+</p>
+
+<p>
+The IBM PC ran <a href="https://en.wikipedia.org/wiki/DOS">DOS</a>, which
+accessed the hardware through the <a href="https://en.wikipedia.org/wiki/BIOS">Basic Input/Output System</a>
+(BIOS).  There were fixed data tables and addresses in the BIOS for
+accessing the hardware. Various system services (e.g. disk, display, serial
+ports) were available via interrupts.  If the BIOS did not know about the
+hardware, the system couldn't talk to it.
+</p>
+
+<p>
+EFI and ACPI came along "to solve every problem BIOS ever had and quite a
+few it didn't", Triplett said.  The key concept behind both is
+"extensibility", but they also have a reputation for being "subtle,
+complicated, and quick to anger", he said.  The operating system and
+bootloader both use the facilities provided by EFI and ACPI, but it is
+mostly done from C code. 
+</p>
+
+<p>
+BITS came about because of a need to access BIOS, EFI, and
+ACPI without writing any C code.  Triplett (and his father, Burt Triplett,
+both of whom work for Intel) ported Python to run in the GRUB
+bootloader, which allowed using the language to poke at the low-level
+firmware.  As with his PyCon presentation, his slides were displayed and
+his demos were run from within the BITS environment in a virtual machine
+(VM) on
+his laptop.
+</p>
+
+<p>
+He uses <a href="http://www.linux-kvm.org/page/Main_Page">KVM</a> with <a href="http://www.tianocore.org/ovmf/">Open Virtual Machine Firmware</a>
+(OVMF), which provides Unified EFI (UEFI, the successor to EFI) from <a href="http://www.tianocore.org/">Tiano</a> for use in a VM.
+It is much
+safer to play with EFI and ACPI in a VM, he said, so that if things "blow
+up", they
+won't also take your system with it.
+</p>
+
+<p>
+BITS has a full Python interpreter that runs in ring 0 on x86
+systems.  That gives it the same privilege level that an operating system
+running on x86 has.  In addition, many of the Python standard library
+modules are available in BITS, along with a few modules that provide
+useful types and functions for BITS, EFI, ACPI, and so on.
+</p>
+
+<p>
+Triplett then demonstrated using the BITS Python to access memory from a
+specific address in the firmware, which showed the path where he had built
+OVMF:
+</p><pre>
+    &gt;&gt;&gt; import bits
+    &gt;&gt;&gt; from ctypes import *
+
+    &gt;&gt;&gt; mem = (c_char * 128).from_address(0xf1390)
+    &gt;&gt;&gt; print bits.dumpmem(mem)
+    00000000: 2f 68 6f 6d 65 2f 6a 6f 73 68 ... /home/josh...
+    ...
+</pre><p>
+
+The ctypes module provides access to C data types (like </p><tt>c_char</tt><p>)
+from Python.  The code 
+creates an array of 128 bytes from the address specified (found using
+</p><tt>strings</tt><p> on the binary), which can then be
+manipulated by the Python code—and dumped to the screen using a utility
+function 
+from the bits module.
+
+
+</p><p>
+He then moved on to look at ACPI:
+</p><pre>
+    &gt;&gt;&gt; import acpi
+    &gt;&gt;&gt; acpi.get_table_list()
+    ['APIC', 'DSDT', 'FACP', 'FACS', 'HPET', 'RSDP', 'RSDT', ...
+    &gt;&gt;&gt; print bits.dumpmem(acpi.get_table('RSDP'))
+    00000000: 52 53 ...			    RSD.PTR..BOCHS..
+    ...
+</pre>
+<a href="http://wiki.osdev.org/RSDP">RSDP</a><p> is the ACPI Root System
+Description Pointer and the "RSD PTR" string—represented as "RSD.PTR" in
+the memory dump—is how BIOS finds that data
+structure in the firmware.  RSDP contains information about the ACPI version
+and the original equipment manufacturer (OEM) that provided it (for QEMU,
+its ACPI descends from the </p><a href="https://en.wikipedia.org/wiki/Bochs">Bochs</a><p> 
+emulator, thus "BOCHS" as the OEM ID).  The RSDP also has a pointer to the </p><a href="http://wiki.osdev.org/RSDT">Root System Description Table</a><p> (RSDT),
+which points to the rest of the system description tables, including those
+that describe hardware and other features that are specific to that
+particular system.
+The </p><tt>acpi.parse_table()</tt><p> function can be used to examine these
+tables, as Triplett demonstrated.
+
+
+</p><p>
+In the classic-BIOS world, serial ports can be found by consulting a table
+at a fixed address but, in a modern system, hardware is found differently.
+Resources are discovered using identifiers such as "COM1" (for the first serial
+port).  Those identifiers lead to various descriptors in the ACPI tables
+that specify everything needed to talk to the device (address, interrupts,
+etc.).  In today's systems, this is how all of the built-in hardware is
+discovered.  By using <tt>acpi.display_resources()</tt> and
+<tt>acpi.parse_descriptor()</tt>, Triplett was able to show some of the
+"guts" of the COM1 "current resource settings" (<a href="http://wiki.phoenix.com/wiki/index.php/CRS"><tt>_CRS</tt></a>), including
+its 0x3f8 address—which he then used to output a string from a loop in Python
+using <tt>bits.outb()</tt>. 
+</p>
+
+<p>
+Both ACPI and UEFI are huge <a href="http://www.uefi.org/specifications">specifications</a>, each with
+thousands of pages of 
+documentation.  ACPI is largely concerned with how to find the hardware in the
+system, while UEFI is the way to get modern "BIOS" services.  Triplett
+proceeded to demonstrate accessing UEFI using the "efi" module that comes
+with BITS.
+</p>
+
+<p>
+He started by printing out the EFI system table data structure,
+which is accessed in 
+BITS with <tt>efi.system_table</tt>.  That table provides a bunch of
+information about the system and its EFI firmware, including things like
+pointers to the
+standard input and output as well as to the boot and runtime
+services provided by EFI.  The system table is what gets passed to an EFI
+program (e.g. a bootloader)
+as one of its arguments.
+</p>
+
+<p>
+In EFI, objects are identified using globally unique identifiers (GUIDs).
+Triplett showed how to retrieve and use those GUIDs to access various
+pieces of information.  For example, the ACPI table GUID can be used to
+retrieve a pointer to the ACPI RSDP, which is how that data structure is
+found on 
+modern systems (rather than searching for the magic "RSD PTR" string as
+BIOS does).
+</p>
+
+<p>
+Triplett then demonstrated how to clear the screen using the
+<tt>ClearScreen()</tt> function in the "text output protocol" that is
+attached to the standard output channel (i.e. <tt>ConOut</tt>) in the
+system table.  He 
+also showed using the "file system protocol" to access files in the EFI
+filesystem. 
+</p>
+
+<p>
+That was all a prelude to his final act, however.  He noted that he had
+done graphics before in talks about BITS (e.g. the Mandelbrot set in his
+PyCon presentation), so that was now "boring".  This time, he used the
+"input text protocol" along with graphics to build an simple, interactive <a href="https://en.wikipedia.org/wiki/Tron"><i>Tron</i></a>-inspired game.
+It drew a line that would change direction based on arrow-key input and
+would halt when the line intersected itself.
+Triplett clearly knows how to finish up a conference talk as, once again,
+there was nice round of applause to acknowledge his amusing hackery—and the
+talk as a whole.
+</p>
+
+<p>
+[I would like to thank the Linux Foundation for travel assistance to
+Seattle for LinuxCon North America.]</p><hr align="left"/><p>
+           (</p><a href="https://lwn.net/login?target=/Articles/655992/">Log in</a><p> to post comments)
+           </p><p>
+           
+</p></div> 
+</div></body></html>

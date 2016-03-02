@@ -1,0 +1,273 @@
+<html><body><div><div class="content">
+      
+        <h1 class="content-title">Using SQLite4's LSM Storage Engine as a Stand-alone NoSQL Database with Python</h1>
+      
+      
+      
+  
+  
+  
+    <p><a href="http://media.charlesleifer.com/blog/photos/lsm.png" title="photos/lsm.png"><img alt="photos/lsm.png" class="img-responsive" src="http://m.charlesleifer.com/t/800x-/blog/photos/lsm.png?key=_fs-LARsyNjCjt1KqAGixQ"/></a></p>
+<p><a href="http://charlesleifer.com/blog/tags/sqlite/">SQLite</a> and <a href="http://charlesleifer.com/blog/tags/nosql/">Key/Value databases</a> are two of my favorite topics to blog about. Today I get to write about both, because in this post I will be demonstrating a Python wrapper for SQLite4's <a href="https://en.wikipedia.org/wiki/Log-structured_merge-tree">log-structured merge-tree</a> (LSM) key/value store.</p>
+<p>I don't actively follow SQLite's releases, but the recent release of SQLite <a href="http://sqlite.org/releaselog/3_8_11.html">3.8.11</a> drew quite a bit of attention as the release notes described massive performance improvements over 3.8.0. While reading the release notes I happened to see a blurb about a new, experimental full-text search extension (<a href="/blog/building-the-sqlite-fts5-search-extension/">which I wrote about in a different post</a>), and all this got me to wondering what was going on with <a href="http://sqlite.org/src4/doc/trunk/www/design.wiki">SQLite4</a>.</p>
+<p>As I was reading about SQLite4, I saw that one of the design goals was to provide an <a href="http://sqlite.org/src4/doc/trunk/www/storage.wiki">interface for pluggable storage engines</a>. At the time I'm writing this, SQLite4 has two built-in storage backends, one of which is an LSM key/value store. Over the past month or two I've been having fun with <a href="http://cython.org/">Cython</a>, writing Python wrappers for the embedded key/value stores <a href="http://unqlite-python.readthedocs.org/">UnQLite</a> and <a href="http://vedis-python.readthedocs.org/">Vedis</a>. I figured it would be cool to use Cython to write a Python interface for SQLite4's LSM storage engine.</p>
+<p>After pulling down the <a href="http://sqlite.org/src4/tree?ci=trunk">SQLite4 source code</a> and reading through the <a href="https://github.com/coleifer/python-lsm-db/blob/master/src/lsm.h">LSM header file</a> (it's very small!), I started coding and the result is <a href="https://github.com/coleifer/python-lsm-db">python-lsm-db</a> (<a href="http://lsm-db.readthedocs.org">docs</a>).</p>
+<h3>What is an LSM tree?</h3>
+<p>As I understand them, LSM trees consist of an in-memory tree that acts like a buffer, and one or more persistent trees stored on disk. The <em>M</em> in <em>LSM</em> stands for <em>merge</em>, an operation where the buffered writes are merged into the tree(s) on disk. By merging into the disk-backed tree, the cost of all those disk seeks can be greatly reduced, meaning one thing: fast writes. The counter-point is that random reads may be slower because there could be multiple trees to search, and because an LSM tree may be <em>higher</em> than a comparable B-Tree. I gather that another benefit of LSM trees is that data may be stored more contiguously (less fragmented), leading to faster reads of ranges of keys.</p>
+<p>Again, this is my understanding, based on reading a couple blog posts and the SQLite4 documentation. If I've got it wrong or have omitted important details, please <a href="#comments">let me know!</a>.</p>
+<h3>Features</h3>
+<p>The SQLite4 LSM implementation has some very nice features:</p>
+<ul>
+<li>Embedded database, hosted by your application.</li>
+<li>Keys support in-order traversal using cursors.</li>
+<li>Transactional (including nested transactions).</li>
+<li>Single writer/multiple reader MVCC based transactional concurrency model.</li>
+<li>On-disk database stored in a single file.</li>
+<li>Data is durable in the face of application or power failure.</li>
+<li>Lots of tuning parameters so you can tailor it to your specific needs.</li>
+</ul>
+<h3>Building the Python library</h3>
+<p>Alright, let's try it out. To get started, go ahead and create a <code>virtualenv</code> and use <code>pip</code> to install <code>Cython</code> and <code>lsm-db</code>:</p>
+<div class="highlight"><pre><span class="gp">$</span> virtualenv test_lsm
+<span class="gp">$</span> <span class="nb">cd</span> test_lsm
+<span class="gp">$</span> <span class="nb">source</span> bin/activate
+<span class="gp">(test_lsm) $</span> pip install Cython lsm-db
+</pre></div>
+<p>You can verify the install worked by running the following:</p>
+<div class="highlight"><pre><span class="gp">(test_lsm) $</span> python -c <span class="s2">"import lsm, tempfile; lsm.LSM(tempfile.mktemp())"</span>
+</pre></div>
+<p>The above command should produce no output if everything is installed and working correctly. If you encounter problems, be aware that I've really only tested this on Linux using Python 2.7, so if you're running Python 3.4 on Windows (ew, why) you may have to do a little debugging.</p>
+<h3>Kicking the tires</h3>
+<p>What follows is a sample interactive console session designed to show some of the basic features and functionality of the <code>lsm-db</code> library. The <a href="http://lsm-db.readthedocs.org/en/latest/api.html">API documentation</a> contains a complete list of classes, methods, and descriptions of their parameters and return values.</p>
+<p>To begin, fire up a Python interpreter in your virtualenv and instantiate an <code>LSM</code> object, specifying a path to a database file:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">lsm</span> <span class="kn">import</span> <span class="n">LSM</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">db</span> <span class="o">=</span> <span class="n">LSM</span><span class="p">(</span><span class="s1">'test.ldb'</span><span class="p">)</span>
+</pre></div>
+<p>In addition to the <code>filename</code>, the <code>LSM</code> class provides a number of tuning parameters you can tweak to adjust things like the block size, page size, and more (<a href="http://lsm-db.readthedocs.org/en/latest/api.html#lsm.LSM.__init__">doc link</a>).</p>
+<h3>Key/Value features</h3>
+<p>The SQLite4 LSM engine is a key/value store, making it roughly analogous to Python's <code>dict</code> object. Rather than follow the C conventions defined in the header file, we will use dictionary APIs to interact with the LSM database.</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">db</span><span class="p">[</span><span class="s1">'foo'</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'bar'</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="k">print</span> <span class="n">db</span><span class="p">[</span><span class="s1">'foo'</span><span class="p">]</span>
+<span class="go">bar</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">4</span><span class="p">):</span>
+<span class="gp">... </span>    <span class="n">db</span><span class="p">[</span><span class="s1">'k</span><span class="si">%s</span><span class="s1">'</span> <span class="o">%</span> <span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">i</span><span class="p">)</span>
+<span class="gp">...</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="s1">'k3'</span> <span class="ow">in</span> <span class="n">db</span>
+<span class="go">True</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="s1">'k4'</span> <span class="ow">in</span> <span class="n">db</span>
+<span class="go">False</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="k">del</span> <span class="n">db</span><span class="p">[</span><span class="s1">'k3'</span><span class="p">]</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">db</span><span class="p">[</span><span class="s1">'k3'</span><span class="p">]</span>
+<span class="gt">Traceback (most recent call last):</span>
+  File <span class="nb">"&lt;stdin&gt;"</span>, line <span class="m">1</span>, in <span class="n">&lt;module&gt;</span>
+  File <span class="nb">"lsm.pyx"</span>, line <span class="m">973</span>, in <span class="n">lsm.LSM.__getitem__ (lsm.c:7142)</span>
+  File <span class="nb">"lsm.pyx"</span>, line <span class="m">777</span>, in <span class="n">lsm.LSM.fetch (lsm.c:5756)</span>
+  File <span class="nb">"lsm.pyx"</span>, line <span class="m">778</span>, in <span class="n">lsm.LSM.fetch (lsm.c:5679)</span>
+  File <span class="nb">"lsm.pyx"</span>, line <span class="m">1289</span>, in <span class="n">lsm.Cursor.seek (lsm.c:12122)</span>
+  File <span class="nb">"lsm.pyx"</span>, line <span class="m">1311</span>, in <span class="n">lsm.Cursor.seek (lsm.c:12008)</span>
+<span class="gr">KeyError</span>: <span class="n">'k3'</span>
+</pre></div>
+<p>Note that when we attempted to access a key we just deleted, a <code>KeyError</code> was raised. By default when you attempt to look up a key, <code>lsm-db</code> will search for an exact match. Interestingly, the SQLite4 LSM allows you to also search for the <em>closest</em> key lexicographically, if the specific key you are searching for does not exist. In addition to matching keys by equality, there are two <em>seek methods</em>: <code>SEEK_LE</code> and <code>SEEK_GE</code>, which will return the next-closest key. Failing to find an exact match, <code>SEEK_LE</code> will return the highest key whose value does not exceed the search key. Similarly, <code>SEEK_GE</code> will return the lowest key whose value exceeds the search key. For example, we know <code>k1.5</code> does not exist, so let's see how the two seek methods handle this:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">lsm</span> <span class="kn">import</span> <span class="n">SEEK_LE</span><span class="p">,</span> <span class="n">SEEK_GE</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Here we will match "k1", the highest key that is less than k1.5</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">db</span><span class="p">[</span><span class="s1">'k1.5'</span><span class="p">,</span> <span class="n">SEEK_LE</span><span class="p">]</span>
+<span class="go">'1'</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Here we will match "k2", the lowest key that is greater than k1.5</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">db</span><span class="p">[</span><span class="s1">'k1.5'</span><span class="p">,</span> <span class="n">SEEK_GE</span><span class="p">]</span>
+<span class="go">'2'</span>
+</pre></div>
+<p>In addition to the methods shown above, <code>LSM</code> also supports other common dictionary methods such as <code>keys()</code>, <code>values()</code> and <code>update()</code>.</p>
+<h3>Slices and Iteration</h3>
+<p>The SQLite4 LSM database can be iterated through directly, or sliced to return a subset of keys. An interesting feature is that when you request a range of keys, the start and end keys do not need to exist. If either key is missing, the database will rely on the appropriate <code>SEEK_</code> method to find the next-closest key.</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="p">[</span><span class="n">item</span> <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">db</span><span class="p">]</span>
+<span class="go">[('foo', 'bar'), ('k0', '0'), ('k1', '1'), ('k2', '2')]</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="n">db</span><span class="p">[</span><span class="s1">'k0'</span><span class="p">:</span><span class="s1">'k99'</span><span class="p">]</span>
+<span class="go">&lt;generator object at 0x7f2ae93072f8&gt;</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="nb">list</span><span class="p">(</span><span class="n">db</span><span class="p">[</span><span class="s1">'k0'</span><span class="p">:</span><span class="s1">'k99'</span><span class="p">])</span>
+<span class="go">[('k0', '0'), ('k1', '1'), ('k2', '2')]</span>
+</pre></div>
+<p>You can use open-ended slices to return all keys in a given direction.</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="nb">list</span><span class="p">(</span><span class="n">db</span><span class="p">[</span><span class="s1">'k0'</span><span class="p">:])</span>
+<span class="go">[('k0', '0'), ('k1', '1'), ('k2', '2')]</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="nb">list</span><span class="p">(</span><span class="n">db</span><span class="p">[:</span><span class="s1">'k1'</span><span class="p">])</span>
+<span class="go">[('foo', 'bar'), ('k0', '0'), ('k1', '1')]</span>
+</pre></div>
+<p>If the lower- or upper-bound is outside the range of keys an empty list is returned.</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="nb">list</span><span class="p">(</span><span class="n">db</span><span class="p">[:</span><span class="s1">'aaa'</span><span class="p">])</span>
+<span class="go">[]</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="nb">list</span><span class="p">(</span><span class="n">db</span><span class="p">[</span><span class="s1">'z'</span><span class="p">:])</span>
+<span class="go">[]</span>
+</pre></div>
+<p>To retrieve keys in reverse order, simply use a higher key as the first parameter of your slice. If you are retrieving an open-ended slice, you can specify <code>True</code> as the <code>step</code> parameter of the slice.</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="nb">list</span><span class="p">(</span><span class="n">db</span><span class="p">[</span><span class="s1">'k1'</span><span class="p">:</span><span class="s1">'aaa'</span><span class="p">])</span>  <span class="c1"># Since 'k1' &gt; 'aaa', keys are retrieved in reverse:</span>
+<span class="go">[('k1', '1'), ('k0', '0'), ('foo', 'bar')]</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="nb">list</span><span class="p">(</span><span class="n">db</span><span class="p">[</span><span class="s1">'k1'</span><span class="p">::</span><span class="bp">True</span><span class="p">])</span>  <span class="c1"># Open-ended slices specify True for step:</span>
+<span class="go">[('k1', '1'), ('k0', '0'), ('foo', 'bar')]</span>
+</pre></div>
+<p>You can also <strong>delete</strong> slices of keys, but note that the delete <strong>will not</strong> include the keys themselves:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="k">del</span> <span class="n">db</span><span class="p">[</span><span class="s1">'k0'</span><span class="p">:</span><span class="s1">'k99'</span><span class="p">]</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="nb">list</span><span class="p">(</span><span class="n">db</span><span class="p">)</span>  <span class="c1"># Note that 'k0' still exists.</span>
+<span class="go">[('foo', 'bar'), ('k0', '0')]</span>
+</pre></div>
+<p>For more examples and a detailed description of how the <code>SEEK_</code> methods work, check out the <a href="http://lsm-db.readthedocs.org/en/latest/api.html#lsm.LSM.fetch_range">LSM.fetch_range()</a> documentation.</p>
+<h3>Cursors</h3>
+<p>While slicing may cover most use-cases, for finer-grained control you can use cursors to search and traverse records.</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="k">with</span> <span class="n">db</span><span class="o">.</span><span class="n">cursor</span><span class="p">()</span> <span class="k">as</span> <span class="n">cursor</span><span class="p">:</span>
+<span class="gp">... </span>    <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">cursor</span><span class="p">:</span>
+<span class="gp">... </span>        <span class="k">print</span> <span class="n">key</span><span class="p">,</span> <span class="s1">'=&gt;'</span><span class="p">,</span> <span class="n">value</span>
+<span class="gp">...</span>
+<span class="go">foo =&gt; bar</span>
+<span class="go">k0 =&gt; 0</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="n">db</span><span class="o">.</span><span class="n">update</span><span class="p">({</span><span class="s1">'k1'</span><span class="p">:</span> <span class="s1">'1'</span><span class="p">,</span> <span class="s1">'k2'</span><span class="p">:</span> <span class="s1">'2'</span><span class="p">,</span> <span class="s1">'k3'</span><span class="p">:</span> <span class="s1">'3'</span><span class="p">})</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="k">with</span> <span class="n">db</span><span class="o">.</span><span class="n">cursor</span><span class="p">()</span> <span class="k">as</span> <span class="n">cursor</span><span class="p">:</span>
+<span class="gp">... </span>    <span class="n">cursor</span><span class="o">.</span><span class="n">first</span><span class="p">()</span>
+<span class="gp">... </span>    <span class="k">print</span> <span class="n">cursor</span><span class="o">.</span><span class="n">key</span><span class="p">()</span>
+<span class="gp">... </span>    <span class="n">cursor</span><span class="o">.</span><span class="n">last</span><span class="p">()</span>
+<span class="gp">... </span>    <span class="k">print</span> <span class="n">cursor</span><span class="o">.</span><span class="n">key</span><span class="p">()</span>
+<span class="gp">... </span>    <span class="n">cursor</span><span class="o">.</span><span class="n">previous</span><span class="p">()</span>
+<span class="gp">... </span>    <span class="k">print</span> <span class="n">cursor</span><span class="o">.</span><span class="n">key</span><span class="p">()</span>
+<span class="gp">...</span>
+<span class="go">foo</span>
+<span class="go">k3</span>
+<span class="go">k2</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="k">with</span> <span class="n">db</span><span class="o">.</span><span class="n">cursor</span><span class="p">()</span> <span class="k">as</span> <span class="n">cursor</span><span class="p">:</span>
+<span class="gp">... </span>    <span class="n">cursor</span><span class="o">.</span><span class="n">seek</span><span class="p">(</span><span class="s1">'k0'</span><span class="p">,</span> <span class="n">SEEK_GE</span><span class="p">)</span>
+<span class="gp">... </span>    <span class="k">print</span> <span class="nb">list</span><span class="p">(</span><span class="n">cursor</span><span class="o">.</span><span class="n">fetch_until</span><span class="p">(</span><span class="s1">'k99'</span><span class="p">))</span>
+<span class="gp">...</span>
+<span class="go">[('k0', '0'), ('k1', '1'), ('k2', '2'), ('k3', '3')]</span>
+</pre></div>
+<p>It is very important to close a cursor when you are through using it. For this reason, it is recommended you use the <code>LSM.cursor()</code> context-manager, which ensures the cursor is closed properly.</p>
+<h3>Transactions</h3>
+<p>The SQLite4 LSM database supports nested transactions. The simplest way to use transactions is with the <code>LSM.transaction()</code> method, which doubles as a context-manager or decorator.</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="k">with</span> <span class="n">db</span><span class="o">.</span><span class="n">transaction</span><span class="p">()</span> <span class="k">as</span> <span class="n">txn</span><span class="p">:</span>
+<span class="gp">... </span>    <span class="n">db</span><span class="p">[</span><span class="s1">'k1'</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'1-mod'</span>
+<span class="gp">... </span>    <span class="k">with</span> <span class="n">db</span><span class="o">.</span><span class="n">transaction</span><span class="p">()</span> <span class="k">as</span> <span class="n">txn2</span><span class="p">:</span>
+<span class="gp">... </span>        <span class="n">db</span><span class="p">[</span><span class="s1">'k2'</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'2-mod'</span>
+<span class="gp">... </span>        <span class="n">txn2</span><span class="o">.</span><span class="n">rollback</span><span class="p">()</span>
+<span class="gp">...</span>
+<span class="go">True</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="k">print</span> <span class="n">db</span><span class="p">[</span><span class="s1">'k1'</span><span class="p">],</span> <span class="n">db</span><span class="p">[</span><span class="s1">'k2'</span><span class="p">]</span>
+<span class="go">1-mod 2</span>
+</pre></div>
+<p>You can commit or roll-back transactions part-way through a wrapped block, and a new transaction will begin in the old one's place:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="k">with</span> <span class="n">db</span><span class="o">.</span><span class="n">transaction</span><span class="p">()</span> <span class="k">as</span> <span class="n">txn</span><span class="p">:</span>
+<span class="gp">... </span>   <span class="n">db</span><span class="p">[</span><span class="s1">'k1'</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'outer txn'</span>
+<span class="gp">... </span>   <span class="n">txn</span><span class="o">.</span><span class="n">commit</span><span class="p">()</span>  <span class="c1"># The write is preserved.</span>
+<span class="gp">...</span>
+<span class="gp">... </span>   <span class="n">db</span><span class="p">[</span><span class="s1">'k1'</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'outer txn-2'</span>
+<span class="gp">... </span>   <span class="k">with</span> <span class="n">db</span><span class="o">.</span><span class="n">transaction</span><span class="p">()</span> <span class="k">as</span> <span class="n">txn2</span><span class="p">:</span>
+<span class="gp">... </span>       <span class="n">db</span><span class="p">[</span><span class="s1">'k1'</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'inner-txn'</span>  <span class="c1"># This is commited after the block ends.</span>
+<span class="gp">... </span>   <span class="k">print</span> <span class="n">db</span><span class="p">[</span><span class="s1">'k1'</span><span class="p">]</span>  <span class="c1"># Prints "inner-txn".</span>
+<span class="gp">... </span>   <span class="n">txn</span><span class="o">.</span><span class="n">rollback</span><span class="p">()</span>  <span class="c1"># Rolls back both the changes from txn2 and the preceding write.</span>
+<span class="gp">... </span>   <span class="k">print</span> <span class="n">db</span><span class="p">[</span><span class="s1">'k1'</span><span class="p">]</span>
+<span class="gp">...</span>
+<span class="go">1              &lt;- Return value from call to commit().</span>
+<span class="go">inner-txn      &lt;- Printed after end of txn2.</span>
+<span class="go">True           &lt;- Return value of call to rollback().</span>
+<span class="go">outer txn      &lt;- Printed after rollback.</span>
+</pre></div>
+<p>If you like, you can also explicitly call <code>LSM.begin()</code>, <code>LSM.commit()</code>, and <code>LSM.rollback()</code>.</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">db</span><span class="o">.</span><span class="n">begin</span><span class="p">()</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">db</span><span class="p">[</span><span class="s1">'foo'</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'baze'</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="k">print</span> <span class="n">db</span><span class="p">[</span><span class="s1">'foo'</span><span class="p">]</span>
+<span class="go">baze</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">db</span><span class="o">.</span><span class="n">rollback</span><span class="p">()</span>
+<span class="go">True</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="k">print</span> <span class="n">db</span><span class="p">[</span><span class="s1">'foo'</span><span class="p">]</span>
+<span class="go">bar</span>
+</pre></div>
+<h3>Performance</h3>
+<p>I hate bogus benchmarks, but I was pretty curious about the LSM database's performance. I couldn't resist and put together a <a href="https://gist.github.com/coleifer/747c4406b3c2363e0716">little benchmark</a> comparing the SQLite4 LSM to LevelDB, BerkeleyDB and KyotoCabinet. These aren't really apples-to-apples comparisons, as KyotoCabinet and BerkeleyDB are built on B-trees, and KyotoCabinet and LevelDB do not support multiple processes accessing the database. I am also not quite clear on whether LevelDB supports transactions. Additionally, the benchmark does not use the database libraries directly, but goes through whatever Python driver was available. Inefficiencies or quirks in the Python libraries could skew results. All that said, let's take a look at the results.</p>
+<p>Here are the results (smaller is better):</p>
+<div class="highlight"><pre>Testing with N = 100000
+------------------------------------
+
+BDBBTree
+~~~~~~~~
+Writes:        0.469
+Reads:         0.479
+Range (10%):   0.212
+Range (20%):   0.192
+Range (40%):   0.185
+Range (80%):   0.186
+
+KyotoBTree
+~~~~~~~~~~
+Writes:        0.208
+Reads:         0.203
+Range (10%):   0.219
+Range (20%):   0.188
+Range (40%):   0.188
+Range (80%):   0.187
+
+LevelDB
+~~~~~~~
+Writes:        0.227
+Reads:         0.225
+Range (10%):   0.031
+Range (20%):   0.027
+Range (40%):   0.028
+Range (80%):   0.027
+
+LSM
+~~~
+Writes:        0.282
+Reads:         0.239
+Range (10%):   0.059
+Range (20%):   0.052
+Range (40%):   0.052
+Range (80%):   0.052
+</pre></div>
+<p>My interpretation of these numbers is that BerkeleyDB and KyotoCabinet perform about as one would expect when fetching ranges of keys, that is, similar to how they perform when reading at random. LevelDB and LSM, though, were significantly faster reading ranges of keys, and quite fast at writing as well.</p>
+<p>LevelDB outperformed the SQLite4 LSM, but SQLite was still a good deal faster than the B-Trees when it came to reading ranges. I had to do a little debugging with the LSM benchmark because the LSM reads were coming in 4 times slower than the writes! I initially thought something was just slow about reading, until I looked more closely and realized that creating a Python cursor wrapper for each <code>fetch()</code> was the issue. And indeed, it was, because by replacing the Python code with a couple calls directly to the C APIs I was able to get much faster reads. If you've chosen to try out the LSM Python bindings, make sure you're on at least version 0.1.4, as previous versions have the slow <code>fetch()</code> implementation.</p>
+<p><a name="note-on-sqlite4"/></p>
+<h3>A note on SQLite4</h3>
+<p>If you'd like to build SQLite4 for yourself, you can clone the fossil repository and compile it. You can also build your own copies of the source amalgamation (single source file for easy embedding). To do this:</p>
+<div class="highlight"><pre><span class="gp">$</span> fossil clone http://www.sqlite.org/src4/ sqlite4.fossil
+<span class="gp">$</span> mkdir sqlite4-build
+<span class="gp">$</span> <span class="nb">cd</span> sqlite4-build
+<span class="gp">$</span> fossil open ../sqlite4.fossil
+<span class="gp">$</span> ln -s Makefile.linux-gcc Makefile
+<span class="gp">$</span> <span class="nb">export</span> <span class="nv">CFLAGS</span><span class="o">=</span><span class="s2">"</span><span class="nv">$CF</span><span class="s2">LAGS -DSQLITE_ENABLE_FTS3=1 -DSQLITE_ENABLE_COLUMN_METADATA=1 -DSQLITE_ENABLE_UNLOCK_NOTIFY -DSQLITE_SECURE_DELETE</span>
+<span class="gp">$</span><span class="s2"> make</span>
+</pre></div>
+<p>You will now find <code>sqlite4</code> (binary), <code>libsqlite4.a</code>, and <code>sqlite4.h</code>.</p>
+<p>If you want to create an amalgamation, you can run <code>make sqlite4.c</code>.</p>
+<p>I should also mention that the current status of SQLite4 is...well...unknown. Dr. Hipp has indicated (or I seem to remember him say so) that he plans to continue supporting SQLite3. Since that is where his users are, I don't blame him. So, if I were an end-user, I'd look at SQLite4 as an experiment. One that may possibly be revived, but not necessarily so, and even then, possibly not in its current form.</p>
+<h3>Want more?</h3>
+<p>If you'd like to learn more, the following links may be helpful:</p>
+
+<p>Other blog posts you may enjoy:</p>
+
+<p>If you are interested in some other embedded NoSQL-ey databases, check out <a href="http://unqlite-python.readthedocs.org/">unqlite-python</a> and <a href="http://vedis-python.readthedocs.org/">vedis-python</a>. They are like MongoDB and Redis, respectively, all wrapped up in a lightweight C extension and embeddable in your Python project.</p>
+<p>Thanks for reading! I hope you found this post interesting. Please feel free to leave a comment or ask a question using the <a href="#comments">form below</a>.</p>
+<p>By the way, does anybody out there know what the plans are for SQLite4?</p>
+  
+  
+
+  
+  
+  
+
+
+<hr/>
+
+  <p>Commenting has been closed, but please feel free to <a href="/contact/">contact me</a></p>
+
+
+    </div>
+
+    </div></body></html>

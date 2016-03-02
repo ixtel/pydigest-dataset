@@ -1,0 +1,86 @@
+<html><body><div><div class="text_cell_render border-box-sizing rendered_html">
+<h2 id="Preparing-the-Data">Preparing the Data<a class="anchor-link" href="#Preparing-the-Data">¶</a></h2><p>With our Hadoop cluster up and running, we can move the reddit comment data from Amazon S3 to HDFS.</p>
+<p>We can SSH into the head node of the cluster and run the following command with valid AWS credentials, which will transfer the reddit comment data (975 GB of JSON data) from a public Amazon S3 bucket to the HDFS data store on the cluster:</p>
+
+<pre><code>hadoop distcp s3n://{{ AWS_KEY }}:{{ AWS_SECRET }}@blaze-data/reddit/json/*/*.json /user/ubuntu</code></pre>
+<p>The time required to move the data from Amazon S3 to HDFS was about 1 hour and 45 minutes.</p>
+<p>We can run the following command on the head node to download the JSON serializer/deserializer (SerDe) module to enable Hive to read and write in JSON format:</p>
+
+<pre><code>$ wget http://s3.amazonaws.com/elasticmapreduce/samples/hive-ads/libs/jsonserde.jar</code></pre>
+<p>On the head node, we open the interactive Hive shell using the <code>hive</code> command, load the JSON SerDe module, create a table, and load the data into Hive:</p>
+
+<pre><code>$ hive
+hive &gt; ADD JAR jsonserde.jar;
+hive &gt; CREATE TABLE reddit_json (
+  archived                 boolean,
+  author                   string,
+  author_flair_css_class   string,
+  author_flair_text        string,
+  body                     string,
+  controversiality         int,
+  created_utc              string,
+  distinguished            string,
+  downs                    int,
+  edited                   boolean,
+  gilded                   int,
+  id                       string,
+  link_id                  string,
+  name                     string,
+  parent_id                string,
+  removal_reason           string,
+  retrieved_on             timestamp,
+  score                    int,
+  score_hidden             boolean,
+  subreddit                string,
+  subreddit_id             string,
+  ups                      int
+)
+ROW FORMAT
+    serde 'com.amazon.elasticmapreduce.JsonSerde'
+    with serdeproperties ('paths'='archived,author,author_flair_css_class,author_flair_text,body,controversiality,created_utc,distinguished,downs,edited,gilded,id,link_id,name,parent_id,removal_reason,retrieved_on,score,score_hidden,subreddit,subreddit_id,ups');
+
+hive &gt; LOAD DATA INPATH '/user/ubuntu/*.json' INTO TABLE reddit_json;</code></pre>
+<p>The time required to load the data into Hive was less than 1 minute.</p>
+<p>Once the data is loaded in Hive, we can query the data using SQL statements such as <code>SELECT count(*) FROM reddit_json;</code>, however, the responses will be fairly slow because the data is in JSON format.</p>
+<p>Alternatively, we can migrate the data to <a href="https://parquet.apache.org/">Parquet</a> format. Apache Parquet is a columnar data store that was designed for HDFS and performs very well in many cases.</p>
+<p>We can use the following commands in the interactive Hive shell to create a new table and convert the data to Parquet format:</p>
+
+<pre><code>hive &gt; CREATE TABLE reddit_parquet (
+  archived                 boolean,
+  author                   string,
+  author_flair_css_class   string,
+  author_flair_text        string,
+  body                     string,
+  controversiality         int,
+  created_utc              string,
+  distinguished            string,
+  downs                    int,
+  edited                   boolean,
+  gilded                   int,
+  id                       string,
+  link_id                  string,
+  name                     string,
+  parent_id                string,
+  removal_reason           string,
+  retrieved_on             timestamp,
+  score                    int,
+  score_hidden             boolean,
+  subreddit                string,
+  subreddit_id             string,
+  ups                      int,
+  created_utc_t            timestamp
+)
+STORED AS PARQUET;
+
+hive &gt; SET dfs.block.size=1g;
+
+hive &gt; INSERT OVERWRITE TABLE reddit_parquet select *, cast(cast(created_utc as double) as timestamp) as created_utc_t FROM reddit_json;</code></pre>
+<p>The time required to convert the data to Parquet format was about 50 minutes.</p>
+<p>Note that we added a new column in timestamp format (<code>created_utc_t</code>) based on the original <code>created_utc</code> column. The original column was a <code>string</code> of numbers (timestamp), so first we cast this to a <code>double</code> and then we cast the resulting <code>double</code> to a <code>timestamp</code>.</p>
+<p>Finally, we SSH into one of the compute nodes and execute the following command from the interactive Impala shell to update the tables from the Hive metastore.</p>
+
+<pre><code>$ sudo impala-shell
+impala&gt; invalidate metadata;</code></pre>
+
+</div>
+</div></body></html>

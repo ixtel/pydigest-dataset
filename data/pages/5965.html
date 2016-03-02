@@ -1,0 +1,132 @@
+<html><body><div><div itemprop="articleBody">
+        <p><a class="reference external" href="http://pythonpaste.org/deploy/">PasteDeploy</a> is a great tool for managing WSGI applications.  Unfortunately,
+there is no support of configuration formats other than INI-files.  <a class="reference external" href="https://github.com/inklesspen/montague">Montague</a>
+is going to solve the problem, but its documentation is unfinished and says
+nothing useful.  Hope, it will be changed soon.  But if you don’t want to wait,
+as me do, the following recipe is for you.</p>
+<p>Using <a class="reference external" href="http://configtree.readthedocs.org/en/latest/">ConfigTree</a> on my current project, I stumbled with the problem: how to
+serve <a class="reference external" href="http://docs.pylonsproject.org/projects/pyramid/en/latest/">Pyramid</a> applications (I got three ones) from the custom configuration?
+Here is how it looks like in YAML:</p>
+<pre class="code yaml literal-block">
+<span class="l-Scalar-Plain">app</span><span class="p-Indicator">:</span>
+    <span class="l-Scalar-Plain">use</span><span class="p-Indicator">:</span> <span class="s">"egg:MyApp#main"</span>
+    <span class="c1"># Application local settings goes here</span>
+<span class="l-Scalar-Plain">filters</span><span class="p-Indicator">:</span>
+    <span class="p-Indicator">-</span>
+        <span class="l-Scalar-Plain">use</span><span class="p-Indicator">:</span> <span class="s">"egg:MyFilter#filter1"</span>
+        <span class="c1"># Filter local settings goes here</span>
+    <span class="p-Indicator">-</span>
+        <span class="l-Scalar-Plain">use</span><span class="p-Indicator">:</span> <span class="s">"egg:MyFilter#filter2"</span>
+<span class="l-Scalar-Plain">server</span><span class="p-Indicator">:</span>
+    <span class="l-Scalar-Plain">use</span><span class="p-Indicator">:</span> <span class="s">"egg:MyServer#main"</span>
+    <span class="c1"># Server local settings goes here</span>
+</pre>
+<p>The easy way is to build INI-file and use it.  The hard way is to make my own
+loader.  I chose the hard one.</p>
+<p>PasteDeploy <a class="reference external" href="http://pythonpaste.org/deploy/#basic-usage">provides public functions</a> <tt class="docutils literal">loadapp</tt>, <tt class="docutils literal">loadfilter</tt>, and <tt class="docutils literal">loadserver</tt>.
+However, these functions don’t work, because they don’t accept local settings.  Only global
+configuration can be passed into.</p>
+<pre class="code python literal-block">
+<span class="n">app</span> <span class="o">=</span> <span class="n">loadapp</span><span class="p">(</span><span class="s">'egg:MyApp#main'</span><span class="p">,</span> <span class="n">global_conf</span><span class="o">=</span><span class="n">config</span><span class="p">)</span>
+</pre>
+<p>But the most of PasteDeploy-based applications simply ignore <tt class="docutils literal">global_conf</tt>.
+For example, here is the paste factory of <a class="reference external" href="http://waitress.readthedocs.org/en/latest/">Waitress</a>:</p>
+<pre class="code python literal-block">
+<span class="k">def</span> <span class="nf">serve_paste</span><span class="p">(</span><span class="n">app</span><span class="p">,</span> <span class="n">global_conf</span><span class="p">,</span> <span class="o">**</span><span class="n">kw</span><span class="p">):</span>
+    <span class="n">serve</span><span class="p">(</span><span class="n">app</span><span class="p">,</span> <span class="o">**</span><span class="n">kw</span><span class="p">)</span>        <span class="c"># global_conf? Who needs this shit?</span>
+    <span class="k">return</span> <span class="mi">0</span>
+</pre>
+<p>I dug around the sources of PasteDeploy and found <tt class="docutils literal">loadcontext</tt> function.
+It is kind of low level private function.  But who cares?  So here is the
+source of loader, that uses the function.</p>
+<pre class="code python literal-block">
+<span class="kn">from</span> <span class="nn">paste.deploy.loadwsgi</span> <span class="kn">import</span> <span class="n">loadcontext</span><span class="p">,</span> <span class="n">APP</span><span class="p">,</span> <span class="n">FILTER</span><span class="p">,</span> <span class="n">SERVER</span>
+
+
+<span class="k">def</span> <span class="nf">run</span><span class="p">(</span><span class="n">config</span><span class="p">):</span>
+
+    <span class="k">def</span> <span class="nf">load_object</span><span class="p">(</span><span class="n">object_type</span><span class="p">,</span> <span class="n">conf</span><span class="p">):</span>
+        <span class="n">conf</span> <span class="o">=</span> <span class="n">conf</span><span class="o">.</span><span class="n">copy</span><span class="p">()</span>
+        <span class="n">spec</span> <span class="o">=</span> <span class="n">conf</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="s">'use'</span><span class="p">)</span>
+        <span class="n">context</span> <span class="o">=</span> <span class="n">loadcontext</span><span class="p">(</span><span class="n">object_type</span><span class="p">,</span> <span class="n">spec</span><span class="p">)</span>    <span class="c"># Loading object</span>
+        <span class="n">context</span><span class="o">.</span><span class="n">local_conf</span> <span class="o">=</span> <span class="n">conf</span>                   <span class="c"># Passing local settings</span>
+        <span class="k">return</span> <span class="n">context</span><span class="o">.</span><span class="n">create</span><span class="p">()</span>
+
+    <span class="n">app</span> <span class="o">=</span> <span class="n">load_object</span><span class="p">(</span><span class="n">APP</span><span class="p">,</span> <span class="n">config</span><span class="p">[</span><span class="s">'app'</span><span class="p">])</span>
+    <span class="k">if</span> <span class="s">'filters'</span> <span class="ow">in</span> <span class="n">config</span><span class="p">:</span>
+        <span class="k">for</span> <span class="n">filter_conf</span> <span class="ow">in</span> <span class="n">config</span><span class="p">[</span><span class="s">'filters'</span><span class="p">]:</span>
+            <span class="n">filter_app</span> <span class="o">=</span> <span class="n">load_object</span><span class="p">(</span><span class="n">FILTER</span><span class="p">,</span> <span class="n">filter_conf</span><span class="p">)</span>
+            <span class="n">app</span> <span class="o">=</span> <span class="n">filter_app</span><span class="p">(</span><span class="n">app</span><span class="p">)</span>
+    <span class="n">server</span> <span class="o">=</span> <span class="n">load_object</span><span class="p">(</span><span class="n">SERVER</span><span class="p">,</span> <span class="n">config</span><span class="p">[</span><span class="s">'server'</span><span class="p">])</span>
+    <span class="n">server</span><span class="p">(</span><span class="n">app</span><span class="p">)</span>
+</pre>
+<p>But it is not the end.  Pyramid comes with its own command <a class="reference external" href="http://docs.pylonsproject.org/projects/pyramid/en/latest/narr/project.html#what-is-this-pserve-thing">pserve</a>, that
+uses PasteDeploy to load and start up application from INI-file.
+And there is an option of the command that makes development fun.
+I mean <tt class="docutils literal"><span class="pre">--reload</span></tt> one.  It starts separate process with a file monitor that
+restarts your application when its sources are changed.  The following code
+provides the feature.  It depends on Pyramid, because I don’t want to reinvent
+the wheel.  But if you use another framework, it won’t be hard to write your
+own file monitor.</p>
+<pre class="code python literal-block">
+<span class="kn">import</span> <span class="nn">sys</span>
+<span class="kn">import</span> <span class="nn">os</span>
+<span class="kn">import</span> <span class="nn">signal</span>
+<span class="kn">from</span> <span class="nn">subprocess</span> <span class="kn">import</span> <span class="n">Popen</span>
+
+<span class="kn">from</span> <span class="nn">paste.deploy.loadwsgi</span> <span class="kn">import</span> <span class="n">loadcontext</span><span class="p">,</span> <span class="n">APP</span><span class="p">,</span> <span class="n">FILTER</span><span class="p">,</span> <span class="n">SERVER</span>
+<span class="kn">from</span> <span class="nn">pyramid.scripts.pserve</span> <span class="kn">import</span> <span class="n">install_reloader</span><span class="p">,</span> <span class="n">kill</span>
+
+
+<span class="k">def</span> <span class="nf">run</span><span class="p">(</span><span class="n">config</span><span class="p">,</span> <span class="n">with_reloader</span><span class="o">=</span><span class="bp">False</span><span class="p">):</span>
+
+    <span class="k">def</span> <span class="nf">load_object</span><span class="p">(</span><span class="n">object_type</span><span class="p">,</span> <span class="n">conf</span><span class="p">):</span>
+        <span class="n">conf</span> <span class="o">=</span> <span class="n">conf</span><span class="o">.</span><span class="n">copy</span><span class="p">()</span>
+        <span class="n">spec</span> <span class="o">=</span> <span class="n">conf</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="s">'use'</span><span class="p">)</span>
+        <span class="n">context</span> <span class="o">=</span> <span class="n">loadcontext</span><span class="p">(</span><span class="n">object_type</span><span class="p">,</span> <span class="n">spec</span><span class="p">)</span>
+        <span class="n">context</span><span class="o">.</span><span class="n">local_conf</span> <span class="o">=</span> <span class="n">conf</span>
+        <span class="k">return</span> <span class="n">context</span><span class="o">.</span><span class="n">create</span><span class="p">()</span>
+
+    <span class="k">def</span> <span class="nf">run_server</span><span class="p">():</span>
+        <span class="n">app</span> <span class="o">=</span> <span class="n">load_object</span><span class="p">(</span><span class="n">APP</span><span class="p">,</span> <span class="n">config</span><span class="p">[</span><span class="s">'app'</span><span class="p">])</span>
+        <span class="k">if</span> <span class="s">'filters'</span> <span class="ow">in</span> <span class="n">config</span><span class="p">:</span>
+            <span class="k">for</span> <span class="n">filter_conf</span> <span class="ow">in</span> <span class="n">config</span><span class="p">[</span><span class="s">'filters'</span><span class="p">]:</span>
+                <span class="n">filter_app</span> <span class="o">=</span> <span class="n">load_object</span><span class="p">(</span><span class="n">FILTER</span><span class="p">,</span> <span class="n">filter_conf</span><span class="p">)</span>
+                <span class="n">app</span> <span class="o">=</span> <span class="n">filter_app</span><span class="p">(</span><span class="n">app</span><span class="p">)</span>
+        <span class="n">server</span> <span class="o">=</span> <span class="n">load_object</span><span class="p">(</span><span class="n">SERVER</span><span class="p">,</span> <span class="n">config</span><span class="p">[</span><span class="s">'server'</span><span class="p">])</span>
+        <span class="n">server</span><span class="p">(</span><span class="n">app</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">with_reloader</span><span class="p">:</span>
+        <span class="n">run_server</span><span class="p">()</span>
+    <span class="k">elif</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'master_process_is_running'</span><span class="p">):</span>
+        <span class="c"># Pass your configuration files here using ``extra_files`` argument</span>
+        <span class="n">install_reloader</span><span class="p">(</span><span class="n">extra_files</span><span class="o">=</span><span class="bp">None</span><span class="p">)</span>
+        <span class="n">run_server</span><span class="p">()</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">print</span><span class="p">(</span><span class="s">"Starting subprocess with file monitor"</span><span class="p">)</span>
+        <span class="n">environ</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">copy</span><span class="p">()</span>
+        <span class="n">environ</span><span class="p">[</span><span class="s">'master_process_is_running'</span><span class="p">]</span> <span class="o">=</span> <span class="s">'true'</span>
+        <span class="n">childproc</span> <span class="o">=</span> <span class="bp">None</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="k">while</span> <span class="bp">True</span><span class="p">:</span>
+                <span class="k">try</span><span class="p">:</span>
+                    <span class="n">childproc</span> <span class="o">=</span> <span class="n">Popen</span><span class="p">(</span><span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">,</span> <span class="n">env</span><span class="o">=</span><span class="n">environ</span><span class="p">)</span>
+                    <span class="n">exitcode</span> <span class="o">=</span> <span class="n">childproc</span><span class="o">.</span><span class="n">wait</span><span class="p">()</span>
+                    <span class="n">childproc</span> <span class="o">=</span> <span class="bp">None</span>
+                    <span class="k">if</span> <span class="n">exitcode</span> <span class="o">!=</span> <span class="mi">3</span><span class="p">:</span>
+                        <span class="k">return</span> <span class="n">exitcode</span>
+                <span class="k">finally</span><span class="p">:</span>
+                    <span class="k">if</span> <span class="n">childproc</span> <span class="ow">is</span> <span class="ow">not</span> <span class="bp">None</span><span class="p">:</span>
+                        <span class="k">try</span><span class="p">:</span>
+                            <span class="n">kill</span><span class="p">(</span><span class="n">childproc</span><span class="o">.</span><span class="n">pid</span><span class="p">,</span> <span class="n">signal</span><span class="o">.</span><span class="n">SIGTERM</span><span class="p">)</span>
+                        <span class="k">except</span> <span class="p">(</span><span class="ne">OSError</span><span class="p">,</span> <span class="ne">IOError</span><span class="p">):</span>
+                            <span class="k">pass</span>
+        <span class="k">except</span> <span class="ne">KeyboardInterrupt</span><span class="p">:</span>
+            <span class="k">pass</span>
+</pre>
+<p>That’s it.  Wrap the code with a console script and don’t forget to initialize
+the logging.</p>
+
+    </div>
+
+    </div></body></html>

@@ -1,0 +1,81 @@
+<html><body><div><div class="post-text" itemprop="text">
+<p>SQlite stores date-times as strings. So as other have suggested in comments and other <a href="http://stackoverflow.com/a/1933735/248296">answers</a> you should use a different format for storing dates, so that "date ordering and lexical ordering work out the same":</p>
+
+<pre><code>import datetime as dt
+import peewee as pw
+
+db = pw.SqliteDatabase('people1.db')
+
+class Person(pw.Model):
+    name = pw.CharField()
+    birthday = pw.DateField(formats=['%Y-%m-%d'])
+    class Meta:
+        database = db # This model uses the "people.db" database.
+
+db.create_tables([Person])
+
+
+Person.create(name='Bob0', birthday=dt.date(1940, 4, 13))
+Person.create(name='Bob1', birthday=dt.date(1950, 5, 13))
+Person.create(name='Bob2', birthday=dt.date(1960, 3, 13))
+Person.create(name='Bob3', birthday=dt.date(1970, 3, 13))
+Person.create(name='Bob4', birthday=dt.date(1980, 3, 13))
+Person.create(name='Bob5', birthday=dt.date(1990, 3, 13))
+
+base = Person.create(name="base", birthday=dt.date(1960, 3, 13))
+
+for item in Person.select().where(Person.birthday &gt; base.birthday):
+    print item.name , item.birthday
+</code></pre>
+
+<p>This gives:</p>
+
+<pre><code>Bob3 1970-03-13
+Bob4 1980-03-13
+Bob5 1990-03-13
+</code></pre>
+
+<p><strong>UPDATE</strong></p>
+
+<p>I haven't noticed your comment that you don't want to change the database.</p>
+
+<p>Here is a crazy way to extract parts of the date:</p>
+
+<pre><code>SELECT
+    birthday,
+    CAST(substr(birthday, 1, instr(birthday, '/') - 1) AS integer),
+    CAST(substr(substr(birthday, instr(birthday, '/') + 1), 1, instr(substr(birthday, instr(birthday, '/') + 1), '/') - 1) AS integer),
+    CAST(substr(birthday, instr(birthday, '/') + instr(substr(birthday, instr(birthday, '/') + 1), '/') + 1) AS integer)
+FROM person
+</code></pre>
+
+<p>which on my test data gives:</p>
+
+<pre><code>4/13/1940   4   13  1940
+12/13/1950  12  13  1950
+3/3/1960    3   3   1960
+3/25/1970   3   25  1970
+3/13/1980   3   13  1980
+3/13/1990   3   13  1990
+3/13/1960   3   13  1960
+</code></pre>
+
+<p>You can use these expressions to compare them with parts of the given date:</p>
+
+<pre><code>query = """
+SELECT *
+FROM person
+WHERE
+    (
+        substr('0000' || CAST(substr(birthday, instr(birthday, '/') + instr(substr(birthday, instr(birthday, '/') + 1), '/') + 1) AS integer), -4, 4) || '-' || -- year
+        substr('00' || CAST(substr(birthday, 1, instr(birthday, '/') - 1) AS integer), -2, 2) || '-' || -- month
+        substr('00' || CAST(substr(substr(birthday, instr(birthday, '/') + 1), 1, instr(substr(birthday, instr(birthday, '/') + 1), '/') - 1) AS integer), -2, 2) -- day
+    ) &gt; '1960-03-03'
+"""
+for item in Person.raw(query):
+    print item.name, item.birthday
+</code></pre>
+
+<p>I am reconstructing ISO date here and use it for comparison.</p>
+    </div>
+    </div></body></html>

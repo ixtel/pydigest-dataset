@@ -1,0 +1,81 @@
+<html><body><div><div class="span3 articleInfo light">
+<p><i class="icon-calendar"/> Tue 20 January 2015</p>
+    <p class="articleTags">
+        <i class="icon-tag"/> tags:
+            <a href="http://martinbrochhaus.com/tag/python.html">python</a>
+            <a href="http://martinbrochhaus.com/tag/django.html">django</a>
+            <a href="http://martinbrochhaus.com/tag/database.html">database</a>
+    </p>
+        </div>
+        <div class="span6 articleDetailContent">
+            <p>Django 1.7 was a <a href="https://docs.djangoproject.com/en/1.7/releases/1.7/">huge release</a>
+with tons of great new features.</p>
+<p>One major change is that <a href="http://south.readthedocs.org/en/latest/releasenotes/1.0.html#library-migration-path">South</a>
+has been discontinued and Django now provides migrations in it's core.</p>
+<p>This raises a problem for maintainers of reusable apps, <a href="http://github.com/bitmazk/">like me and my team</a>:</p>
+<blockquote>
+<p>How can we provide migrations for both, Django 1.6 &amp; South and Django 1.7 &amp; core migrations?</p>
+</blockquote>
+<p>The good thing is that South as of version 1.0 will first look for a folder
+called <code>south_migrations</code> and only afterwards search for the usual <code>migrations</code>
+folder.  Therefore, you can simply rename your old <code>migrations</code> folder to
+<code>south_migrations</code>.</p>
+<p>Next you need to activate a second venv that has Django&gt;1.7 installed and run
+<code>./manage.py makemigrations appname</code>. This will create new initial migrations
+using the new core migrations app.</p>
+<p>Now you have two folders: <code>south_migrations</code> with your old migrations and
+<code>migrations</code> with your new migrations.</p>
+<p>Every time you make changes to your models, you have to activate the 1.6 venv
+and run <code>./manage.py schemamigration appname --auto</code>, then activate the 1.7
+venv and run <code>./manage.py makemigrations appname</code>. It might be a good idea to
+create a fabric task <code>fab makemigrations</code> which takes care of everything.</p>
+<p>If you are a good developer you will surely do Test Driven Development. In the
+past I had given a PyCon Talk about <a href="https://github.com/mbrochh/tdd-with-django-reusable-app">Test Driven Development with reusable Django apps</a>.</p>
+<p>In that talk I desribed how we execute our tests with a <code>runtests.py</code> so that
+we don't need to setup a whole Django project for each reusable app. With
+Django 1.7 there is a little problem, now: You will have <code>south</code> in your
+<code>INSTALLED_APPS</code> setting but Django&gt;1.7 does not allow that any more. As a
+quick hack, you can simply add <code>south</code> only when the active Django version is
+<code>&lt;1.7</code>. Have a look at our <a href="https://github.com/bitmazk/django-reusable-app-template/blob/master/template/package_name/tests/south_settings.py#L28">django-reusable-app-template</a>
+for an example. It should look something like this:</p>
+<table class="highlighttable"><tr><td class="linenos"/><td class="code"><div class="highlight"><pre><span class="kn">from</span> <span class="nn">distutils.version</span> <span class="kn">import</span> <span class="n">StrictVersion</span>
+<span class="kn">import</span> <span class="nn">django</span>
+<span class="n">django_version</span> <span class="o">=</span> <span class="n">django</span><span class="o">.</span><span class="n">get_version</span><span class="p">()</span>
+<span class="k">if</span> <span class="n">StrictVersion</span><span class="p">(</span><span class="n">django_version</span><span class="p">)</span> <span class="o">&lt;</span> <span class="n">StrictVersion</span><span class="p">(</span><span class="s">'1.7'</span><span class="p">):</span>
+    <span class="n">INSTALLED_APPS</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="s">'south'</span><span class="p">,</span> <span class="p">)</span>
+</pre></div>
+</td></tr></table>
+
+<p>Finally, it would be really great to always run all tests against both
+environments. This is where <a href="http://tox.readthedocs.org/en/latest/">tox</a> enters 
+the stage.</p>
+<p>Your <code>tox.ini</code> should look like this:</p>
+<table class="highlighttable"><tr><td class="linenos"/><td class="code"><div class="highlight"><pre><span class="k">[tox]</span>
+<span class="na">envlist</span> <span class="o">=</span> <span class="s">py27-django{16,17}</span>
+
+<span class="k">[testenv]</span>
+<span class="na">usedevelop</span> <span class="o">=</span> <span class="s">True</span>
+<span class="na">deps</span> <span class="o">=</span><span class="s"/>
+<span class="s">    django16: Django&lt;1.7</span>
+<span class="s">    django17: Django&gt;=1.7,&lt;1.8</span>
+<span class="s">    -rtest_requirements.txt</span>
+<span class="na">commands</span> <span class="o">=</span> <span class="s">{toxinidir}/VAR_PACKAGE_NAME/tests/runtests.py</span>
+</pre></div>
+</td></tr></table>
+
+<p>The <code>envlist</code> setting defines a list of environments that tox should setup. We
+can use variables here, so the <code>{16,17}</code> results in two environments with the
+names <code>py27-django16</code> and <code>py27-django17</code>. In the <code>deps</code> setting we can make
+use of those variables again and so we declare that in case of <code>django16</code> we
+want to install <code>Django&lt;1.7</code> and otherwise <code>Django&gt;-1.7,&lt;1.8</code>. Afterwards we
+install our other <code>test_requirements.txt</code>. Behind the scenes this is the usual
+call to <code>pip install -r test_requirements.txt</code>. Our reusable app also has a
+<code>setup.py</code> with <code>install_requires</code>, thankfully, tox is smart enough to install
+these dependencies as well.</p>
+<p>All you have to do in order to run your tests is:</p>
+
+
+<p>There is also a package called <code>detox</code> which claims to run the tests in
+parallel but I couldn't get it up and running on OSX.</p>
+        </div>
+    </div></body></html>

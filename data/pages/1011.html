@@ -1,0 +1,146 @@
+<html><body><div><div class="entry-content" itemprop="articleBody">
+    
+        <p>The preparation for <a href="http://www.slideshare.net/jeffknupp/building-automated-rest-apis-with-python">my talk on Monday</a>
+at the Wharton Web Conference got me thinking a lot about the impedance mismatch 
+between web frameworks and REST
+APIs. The more you develop REST APIs with frameworks like Django or Flask, the
+more clear it is that something is amiss. It's a subtle feeling of needing to
+fight against the grain to accomplish your goal.</p>
+<p>Which of course led me down another rabbit hole: server-side web frameworks in general.
+There are two things they pretty much suck at right now: helping you write REST
+APIs and supporting bidirectional communication over things like WebSockets.
+
+I wondered what would happen if you took the guts of Flask (i.e. Werkzeug) and
+built around it a framework of frameworks. A way to write a real-time
+application or a REST API or a series of simple templated pages or an entirely
+static site or a ... well, you get the idea. I wondered, and then I started
+writing.</p>
+<p>My current progress is (as of ten minutes ago) called
+<a href="http://www.github.com/jeffknupp/omega">"Omega"</a>. It's a fully
+functional framework in some regards, and a totally incomplete one in others.
+Here, though, is what it would look like to have an automatically generated,
+browsable REST API <em>with real-time chat</em> (bet you didn't see that coming).</p>
+<div class="codehilite"><pre><span class="sd">"""Code for the Twooter application."""</span>
+<span class="kn">from</span> <span class="nn">werkzeug</span> <span class="kn">import</span> <span class="n">Response</span>
+<span class="kn">from</span> <span class="nn">omega.http.core</span> <span class="kn">import</span> <span class="n">create_app</span>
+<span class="kn">from</span> <span class="nn">sqlalchemy</span> <span class="kn">import</span> <span class="n">create_engine</span>
+<span class="kn">from</span> <span class="nn">gevent</span> <span class="kn">import</span> <span class="n">monkey</span>
+<span class="n">monkey</span><span class="o">.</span><span class="n">patch_all</span><span class="p">()</span>
+<span class="kn">from</span> <span class="nn">models</span> <span class="kn">import</span> <span class="n">Twoot</span><span class="p">,</span> <span class="n">User</span>
+<span class="kn">from</span> <span class="nn">sockets</span> <span class="kn">import</span> <span class="n">ChatNamespace</span>
+
+
+<span class="n">app</span> <span class="o">=</span> <span class="n">create_app</span><span class="p">(</span><span class="n">__name__</span><span class="p">)</span>
+
+
+<span class="nd">@app.route</span><span class="p">(</span><span class="s">'/chat'</span><span class="p">,</span> <span class="n">methods</span><span class="o">=</span><span class="p">[</span><span class="s">'POST'</span><span class="p">])</span>
+<span class="k">def</span> <span class="nf">chat</span><span class="p">(</span><span class="n">request</span><span class="p">):</span>
+    <span class="sd">"""Route chat posts to the *chat* handler function. Broadcast the message</span>
+<span class="sd">    to all users."""</span>
+    <span class="n">message</span> <span class="o">=</span> <span class="s">'{}: {}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">request</span><span class="o">.</span><span class="n">form</span><span class="p">[</span><span class="s">'user'</span><span class="p">],</span> <span class="n">request</span><span class="o">.</span><span class="n">form</span><span class="p">[</span><span class="s">'message'</span><span class="p">])</span>
+    <span class="k">if</span> <span class="n">message</span><span class="p">:</span>
+        <span class="n">ChatNamespace</span><span class="o">.</span><span class="n">broadcast</span><span class="p">(</span><span class="s">'message'</span><span class="p">,</span> <span class="n">message</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">Response</span><span class="p">()</span>
+
+
+<span class="k">if</span> <span class="n">__name__</span> <span class="o">==</span> <span class="s">'__main__'</span><span class="p">:</span>
+    <span class="n">app</span><span class="o">.</span><span class="n">engine</span><span class="p">(</span><span class="n">create_engine</span><span class="p">(</span>
+        <span class="s">'postgresql+psycopg2://jknupp@localhost/omega'</span><span class="p">))</span>
+    <span class="n">app</span><span class="o">.</span><span class="n">orm_resource</span><span class="p">(</span><span class="n">Twoot</span><span class="p">)</span>
+    <span class="n">app</span><span class="o">.</span><span class="n">orm_resource</span><span class="p">(</span><span class="n">User</span><span class="p">)</span>
+    <span class="n">app</span><span class="o">.</span><span class="n">namespace</span><span class="p">(</span><span class="s">'/chats'</span><span class="p">,</span> <span class="n">ChatNamespace</span><span class="p">)</span>
+    <span class="n">app</span><span class="o">.</span><span class="n">auto_generate_home</span><span class="p">()</span>
+    <span class="n">app</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">debug</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+</pre></div>
+
+
+<p>And here are the <code>models.py</code> and <code>sockets.py</code> files:</p>
+<p>(<code>models.py</code>)</p>
+<div class="codehilite"><pre><span class="kn">import</span> <span class="nn">datetime</span>
+
+<span class="kn">from</span> <span class="nn">omega.http.orm</span> <span class="kn">import</span> <span class="p">(</span>
+    <span class="n">Model</span><span class="p">,</span>
+    <span class="n">Column</span><span class="p">,</span>
+    <span class="n">String</span><span class="p">,</span>
+    <span class="n">DateTime</span><span class="p">,</span>
+    <span class="n">Integer</span><span class="p">,</span>
+    <span class="n">relationship</span><span class="p">,</span>
+    <span class="n">ForeignKey</span><span class="p">,</span>
+    <span class="p">)</span>
+
+
+<span class="k">class</span> <span class="nc">User</span><span class="p">(</span><span class="n">Model</span><span class="p">):</span>
+    <span class="sd">"""A Twooter User"""</span>
+    <span class="n">__tablename__</span> <span class="o">=</span> <span class="s">'user'</span>
+
+    <span class="nb">id</span> <span class="o">=</span> <span class="n">Column</span><span class="p">(</span><span class="n">Integer</span><span class="p">,</span> <span class="n">primary_key</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+    <span class="n">user_name</span> <span class="o">=</span> <span class="n">Column</span><span class="p">(</span><span class="n">String</span><span class="p">)</span>
+    <span class="n">joined_at</span> <span class="o">=</span> <span class="n">Column</span><span class="p">(</span><span class="n">DateTime</span><span class="p">,</span> <span class="n">default</span><span class="o">=</span><span class="n">datetime</span><span class="o">.</span><span class="n">datetime</span><span class="o">.</span><span class="n">now</span><span class="p">())</span>
+
+
+<span class="k">class</span> <span class="nc">Twoot</span><span class="p">(</span><span class="n">Model</span><span class="p">):</span>
+    <span class="sd">"""A Twoot message"""</span>
+    <span class="n">__tablename__</span> <span class="o">=</span> <span class="s">'twoot'</span>
+
+    <span class="nb">id</span> <span class="o">=</span> <span class="n">Column</span><span class="p">(</span><span class="n">Integer</span><span class="p">,</span> <span class="n">primary_key</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+    <span class="n">content</span> <span class="o">=</span> <span class="n">Column</span><span class="p">(</span><span class="n">String</span><span class="p">)</span>
+    <span class="n">posted_at</span> <span class="o">=</span> <span class="n">Column</span><span class="p">(</span><span class="n">DateTime</span><span class="p">,</span> <span class="n">default</span><span class="o">=</span><span class="n">datetime</span><span class="o">.</span><span class="n">datetime</span><span class="o">.</span><span class="n">now</span><span class="p">())</span>
+    <span class="n">user_id</span> <span class="o">=</span> <span class="n">Column</span><span class="p">(</span><span class="n">Integer</span><span class="p">,</span> <span class="n">ForeignKey</span><span class="p">(</span><span class="s">'user.id'</span><span class="p">))</span>
+    <span class="n">user</span> <span class="o">=</span> <span class="n">relationship</span><span class="p">(</span><span class="n">User</span><span class="p">)</span>
+</pre></div>
+
+
+<p>(<code>sockets.py</code>)</p>
+<div class="codehilite"><pre><span class="kn">from</span> <span class="nn">socketio.namespace</span> <span class="kn">import</span> <span class="n">BaseNamespace</span>
+
+<span class="k">class</span> <span class="nc">ChatNamespace</span><span class="p">(</span><span class="n">BaseNamespace</span><span class="p">):</span>
+    <span class="n">sockets</span> <span class="o">=</span> <span class="p">{}</span>
+
+    <span class="k">def</span> <span class="nf">on_chat</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">msg</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">emit</span><span class="p">(</span><span class="s">'chat'</span><span class="p">,</span> <span class="n">msg</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">recv_connect</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">print</span> <span class="s">"Got a socket connection"</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">sockets</span><span class="p">[</span><span class="nb">id</span><span class="p">(</span><span class="bp">self</span><span class="p">)]</span> <span class="o">=</span> <span class="bp">self</span>
+
+    <span class="k">def</span> <span class="nf">disconnect</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="k">print</span> <span class="s">"Got a socket disconnection"</span>
+        <span class="k">if</span> <span class="nb">id</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">sockets</span><span class="p">:</span>
+            <span class="k">del</span> <span class="bp">self</span><span class="o">.</span><span class="n">sockets</span><span class="p">[</span><span class="nb">id</span><span class="p">(</span><span class="bp">self</span><span class="p">)]</span>
+        <span class="nb">super</span><span class="p">(</span><span class="n">ChatNamespace</span><span class="p">,</span> <span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="n">disconnect</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+
+    <span class="nd">@classmethod</span>
+    <span class="k">def</span> <span class="nf">broadcast</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">event</span><span class="p">,</span> <span class="n">message</span><span class="p">):</span>
+        <span class="k">for</span> <span class="n">ws</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">sockets</span><span class="o">.</span><span class="n">values</span><span class="p">():</span>
+            <span class="n">ws</span><span class="o">.</span><span class="n">emit</span><span class="p">(</span><span class="n">event</span><span class="p">,</span> <span class="n">message</span><span class="p">)</span>
+</pre></div>
+
+
+<p>Pretty minimal. I've become obsessed with the notion of auto-generating as much
+as humanly possible so that the code required by the client is literally the
+minimal amount of information that needs to be transmitted to describe how their
+system should look. That means that Omega gives you Django admin-style
+functionality out of the box, as well as django-rest-framework functionality on
+the API side. Customization is possible, but the goal is to avoid it unless
+absolutely necessary. It's taking the idea of an opinionated framework to the
+extreme, all the way to look and feel (both of which are purposely hideous, at
+the moment.</p>
+<p>The thing is, though, you can copy that code, run it, use <code>curl</code> to interact
+with the REST API, browse through it and edit stuff by hitting
+<code>localhost:5000/</code>, and even connect two browser tabs to <code>localhost:5000/</code> and
+hold a chat session between them. You can do all of that <em>right now</em>, in a way
+that asks as little of you as possible.</p>
+<h2>The Future</h2>
+<p>Omega is not done; I mean, it's barely usable. It will likely never be "done".
+Instead, it's an experiment in taking a different tack than today's
+"micro-frameworks". You might call it the first "macro-framework". Or you might
+call it "Omega: The Last Framework". Either way, I'm guessing you've not seen
+anything quite like it before.</p>
+        <small>Posted on <time datetime="2014-07-17 15:46:00" pubdate="" data-updated="true" itemprop="datePublished">Jul 17, 2014</time> by <span itemprop="author"> Jeff Knupp</span></small>
+    <p class="meta">
+    <a href="/blog/2014/07/15/your-databases-rest-api-sandman-one-year-later" title="Previous Post: Your Database's REST API: Sandman One Year Later">« Previous Post: Your Database's REST API: Sandman One Year Later</a>
+    </p>
+      
+
+</div>
+</div></body></html>

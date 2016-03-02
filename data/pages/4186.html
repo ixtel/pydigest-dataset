@@ -1,0 +1,227 @@
+<html><body><div><div class="post-text" itemprop="text">
+<p>This my example Glade/GtkBuilder/Gtk application. I've defined a function <code>xml_gettext</code> which transparently translates glade xml files and passes to <code>gtk.Builder</code> instance as a string.  </p>
+
+<pre><code>import mygettext as gettext
+import os
+import sys
+
+import gtk
+from gtk import glade
+
+glade_xml = '''&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+&lt;interface&gt;
+  &lt;!-- interface-requires gtk+ 3.0 --&gt;
+  &lt;object class="GtkWindow" id="window1"&gt;
+    &lt;property name="can_focus"&gt;False&lt;/property&gt;
+    &lt;signal name="delete-event" handler="onDeleteWindow" swapped="no"/&gt;
+    &lt;child&gt;
+      &lt;object class="GtkButton" id="button1"&gt;
+        &lt;property name="label" translatable="yes"&gt;Welcome to Python!&lt;/property&gt;
+        &lt;property name="use_action_appearance"&gt;False&lt;/property&gt;
+        &lt;property name="visible"&gt;True&lt;/property&gt;
+        &lt;property name="can_focus"&gt;True&lt;/property&gt;
+        &lt;property name="receives_default"&gt;True&lt;/property&gt;
+        &lt;property name="use_action_appearance"&gt;False&lt;/property&gt;
+        &lt;signal name="pressed" handler="onButtonPressed" swapped="no"/&gt;
+      &lt;/object&gt;
+    &lt;/child&gt;
+  &lt;/object&gt;
+&lt;/interface&gt;'''
+
+class Handler:
+    def onDeleteWindow(self, *args):
+        gtk.main_quit(*args)
+
+    def onButtonPressed(self, button):
+       print('locale: {}\nLANGUAGE: {}'.format(
+              gettext.find('myapp','locale'),os.environ['LANGUAGE']))
+
+def main():
+    builder = gtk.Builder()
+    translated_xml = gettext.xml_gettext(glade_xml)
+    builder.add_from_string(translated_xml)
+    builder.connect_signals(Handler())
+
+    window = builder.get_object("window1")
+    window.show_all()
+
+    gtk.main()
+
+if __name__ == '__main__':
+    main()  
+</code></pre>
+
+<p>I've archived my locale directories into <code>locale.zip</code> which is included in the <code>pyz</code> bundle.<br/>
+This is contents of <code>locale.zip</code>  </p>
+
+<pre><code>(u'/locale/fr_FR/LC_MESSAGES/myapp.mo',
+ u'/locale/en_US/LC_MESSAGES/myapp.mo',
+ u'/locale/en_IN/LC_MESSAGES/myapp.mo')
+</code></pre>
+
+<p>To make the locale.zip as a filesystem I use ZipFS from <a href="https://pypi.python.org/pypi/fs/0.5.1" rel="nofollow">fs</a>.  </p>
+
+<p>Fortunately Python <code>gettext</code> is not GNU gettext. <code>gettext</code> is pure Python it doesn't use GNU gettext but mimics it. <code>gettext</code> has two core functions <code>find</code> and <code>translation</code>. I've redefined these two in a seperate module named <code>mygettext</code> to make them use files from the <code>ZipFS</code>.  </p>
+
+<p><code>gettext</code> uses <code>os.path</code> ,<code>os.path.exists</code> and <code>open</code> to find files and open them which I replace with the equivalent ones form <code>fs</code> module.  </p>
+
+<p>This is contents of my application.  </p>
+
+<pre><code>pyzzer.pyz -i glade_v1.pyz  
+# A zipped Python application
+# Built with pyzzer
+
+Archive contents:
+  glade_dist/glade_example.py
+  glade_dist/locale.zip
+  glade_dist/__init__.py
+  glade_dist/mygettext.py
+  __main__.py
+</code></pre>
+
+<p>Because <code>pyz</code> files have text, usually a shebang, prepended to it, I skip this line after opening the <code>pyz</code> file in binary mode. Other modules in the application that want to use the <code>gettext.gettext</code> function, should import <code>zfs_gettext</code> instead from <code>mygettext</code> and make it an alias to <code>_</code>.  </p>
+
+<p>Here goes <code>mygettext.py</code>.  </p>
+
+<pre><code>from errno import ENOENT
+from gettext import _expand_lang, _translations, _default_localedir
+from gettext import GNUTranslations, NullTranslations
+import gettext
+import copy
+import os
+import sys
+from xml.etree import ElementTree as ET
+import zipfile
+
+import fs
+from fs.zipfs import ZipFS
+
+
+zfs = None
+if zipfile.is_zipfile(sys.argv[0]):
+    try:
+        myself = open(sys.argv[0],'rb')
+        next(myself)
+        zfs = ZipFS(ZipFS(myself,'r').open('glade_dist/locale.zip','rb'))
+    except:
+        pass
+else:
+    try:
+        zfs = ZipFS('locale.zip','r')
+    except:
+        pass
+if zfs:
+    os.path = fs.path
+    os.path.exists = zfs.exists
+    open = zfs.open
+
+def find(domain, localedir=None, languages=None, all=0):
+
+    # Get some reasonable defaults for arguments that were not supplied
+    if localedir is None:
+        localedir = _default_localedir
+    if languages is None:
+        languages = []
+        for envar in ('LANGUAGE', 'LC_ALL', 'LC_MESSAGES', 'LANG'):
+            val = os.environ.get(envar)
+            if val:
+                languages = val.split(':')
+                break
+                                                                                     if 'C' not in languages:
+            languages.append('C')
+    # now normalize and expand the languages
+    nelangs = []
+    for lang in languages:
+        for nelang in _expand_lang(lang):
+            if nelang not in nelangs:
+                nelangs.append(nelang)
+    # select a language
+    if all:
+        result = []
+    else:
+        result = None
+    for lang in nelangs:
+        if lang == 'C':
+            break
+        mofile = os.path.join(localedir, lang, 'LC_MESSAGES', '%s.mo' % domain)
+        mofile_lp = os.path.join("/usr/share/locale-langpack", lang,
+                               'LC_MESSAGES', '%s.mo' % domain)
+
+        # first look into the standard locale dir, then into the 
+        # langpack locale dir
+
+        # standard mo file
+        if os.path.exists(mofile):
+            if all:
+                result.append(mofile)
+            else:
+                return mofile
+
+        # langpack mofile -&gt; use it
+        if os.path.exists(mofile_lp): 
+            if all:
+                result.append(mofile_lp)
+            else:
+               return mofile
+
+        # langpack mofile -&gt; use it
+        if os.path.exists(mofile_lp): 
+            if all:
+                result.append(mofile_lp)
+            else:
+                return mofile_lp
+
+    return result
+
+def translation(domain, localedir=None, languages=None,
+                class_=None, fallback=False, codeset=None):
+    if class_ is None:
+        class_ = GNUTranslations
+    mofiles = find(domain, localedir, languages, all=1)
+    if not mofiles:
+        if fallback:
+            return NullTranslations()
+        raise IOError(ENOENT, 'No translation file found for domain', domain)
+    # Avoid opening, reading, and parsing the .mo file after it's been done
+    # once.
+    result = None
+    for mofile in mofiles:
+        key = (class_, os.path.abspath(mofile))
+        t = _translations.get(key)
+        if t is None:
+            with open(mofile, 'rb') as fp:
+                t = _translations.setdefault(key, class_(fp))
+        # Copy the translation object to allow setting fallbacks and
+        # output charset. All other instance data is shared with the
+        # cached object.
+        t = copy.copy(t)
+        if codeset:
+            t.set_output_charset(codeset)
+        if result is None:
+            result = t
+        else:
+            result.add_fallback(t)
+    return result
+
+def xml_gettext(xml_str):
+    root = ET.fromstring(xml_str)
+    labels = root.findall('.//*[@name="label"][@translatable="yes"]')
+    for label in labels:
+        label.text = _(label.text)
+    return ET.tostring(root)
+
+gettext.find = find
+gettext.translation = translation
+_ = zfs_gettext = gettext.gettext
+
+gettext.bindtextdomain('myapp','locale')
+gettext.textdomain('myapp')
+</code></pre>
+
+<p>The following two shouldn't be called because <code>glade</code> doesn't use Python <code>gettext</code>.  </p>
+
+<pre><code>glade.bindtextdomain('myapp','locale')
+glade.textdomain('myapp')
+</code></pre>
+    </div>
+    </div></body></html>

@@ -1,0 +1,151 @@
+<html><body><div><div class="clear padding-top-small">
+                        <p><em>You can see this Domino project <a href="https://app.dominodatalab.com/r00sj3/crimemaps">here</a></em></p>
+
+<p>I get very excited about a nice map. But when it comes to creating maps in Python, I have struggled to find the right library in the ever changing jungle of Python libraries. After some research I discovered <a href="https://github.com/python-visualization/folium">Folium</a>, which makes it easy to create <a href="http://leafletjs.com/">Leaflet</a> maps in Python. This blog post outlines how I used Folium to visualize a data set about crime in San Francisco. I then describe a how to use Domino to turn this Python code into a self-service reporting tool.  </p>
+
+<h2 id="folium">Folium</h2>
+
+<p>Folium is a powerful Python library that helps you create several types of Leaflet maps. The fact that the Folium results are interactive makes this library very useful for dashboard building. To get an idea, just zoom/click around on the next map to get an impression. The <a href="https://github.com/python-visualization/folium">Folium github</a> contains many other examples. </p>
+
+
+
+<p>By default, Folium creates a map in a separate HTML file. In case you use Jupyter (like myself), you might prefer to get inline maps. <a href="https://app.dominodatalab.com/r00sj3/crimemaps/view/examples.ipynb">This Jupyter example</a> shows how to display maps inline. </p>
+
+<h2 id="data">Data</h2>
+
+<p>For this example I needed some interesting data that contains locations. I decided to use <a href="https://data.sfgov.org/Public-Safety/SFPD-Incidents-Current-Year-2015-/ritf-b9ki">SFPD incident data from SF OpenData</a>. Use the Export function (select csv) to download the entire (2015) dataset. <br/>
+<img src="/content/images/2015/10/sfopendata_crime.png" alt=""/></p>
+
+<h2 id="script">Script</h2>
+
+<p>My <a href="https://app.dominodatalab.com/r00sj3/crimemaps/view/crimemap.ipynb">Jupyter notebook</a> contains only a few lines of code. It loads the incident file into a pandas dataframe, selects the first 1000 records to speed things up a little, and creates an inline map containing an interactive map with markers based on the resulting dataset. </p>
+
+<pre><code class="language-prettyprint lang-python">import folium  
+import pandas as pd
+
+SF_COORDINATES = (37.76, -122.45)  
+crimedata = pd.read_csv('SFPD_Incidents_-_Current_Year__2015_.csv')
+
+#for speed purposes
+MAX_RECORDS = 1000
+
+#create empty map zoomed in on San Francisco
+map = folium.Map(location=SF_COORDINATES, zoom_start=12)
+
+#add a marker for every record in the filtered data, use a clustered view
+for each in crimedata[0:MAX_RECORDS].iterrows():  
+    map.simple_marker(
+        location = [each[1]['Y'],each[1]['X']], 
+        clustered_marker = True)
+
+display(map)  
+</code></pre>
+
+<p>When running this, it creates a map with location markers that are clustered (<code>clustered_marker = True</code>) if close together. The tileset used in here is OpenStreetMap (which is default). Folium can be used with other tilesets like Mapbox or Cloudmade too. <br/>
+<img src="/content/images/2015/10/1000recordsmap.png" alt=""/></p>
+
+<p>You save a map as an html file by using <code>map.create_map(path='map.html')</code> instead of <code>display(map)</code></p>
+
+<h2 id="choroplethmap">Choropleth map</h2>
+
+<p>Well, that was fun! But this might not be an ideal visualization to compare maps with each other. Lucky for us, there is also a way to create a choropleth map thanks to Folium. </p>
+
+<p><a href="https://en.wikipedia.org/wiki/Choropleth_map">Wikipedia</a>:</p>
+
+<blockquote>
+  <p>A choropleth map (from Greek χώρο ("area/region") + πλήθος ("multitude")) is a thematic map in which areas are shaded or patterned in proportion to the measurement of the statistical variable being displayed on the map, such as population density or per-capita income.</p>
+</blockquote>
+
+<p>To create a choropleth, we need a geojson file to create the areas/boundaries that match the San Francisco police districts in the data file. With a Google search on "sfpd districts geojson" I found a <a href="https://catalog.data.gov/dataset/sfpd-districts-zipped-shapefile-format-350b4">government open data website</a> with a Shapefile (download the zip file) that almost matches my needs.  </p>
+
+<p>The next step is to convert the Shapefile into a geojson file. The easiest way is to use an <a href="http://ogre.adc4gis.com/">ogr2ogr web client</a>. Select the downloaded zip file and put <code>crs:84</code> in the Target SRS field. Save the result as sfpddistricts.geojson and upload the file to your Domino project. </p>
+
+<p>The additional Python code to create a choropleth is as follows. Note that I used the whole dataset instead of the 1000 records used earlier. Because the choropleth is based on the aggregated counts, the speed isn't suffering from large datasets.</p>
+
+<pre><code class="language-prettyprint lang-python">#definition of the boundaries in the map
+district_geo = r'sfpddistricts.geojson'
+
+#calculating total number of incidents per district
+crimedata2 = pd.DataFrame(crimedata['PdDistrict'].value_counts().astype(float))  
+crimedata2.to_json('crimeagg.json')  
+crimedata2 = crimedata2.reset_index()  
+crimedata2.columns = ['District', 'Number']
+
+#creation of the choropleth
+map1 = folium.Map(location=SF_COORDINATES, zoom_start=12)  
+map1.geo_json(geo_path = district_geo,  
+              data_out = 'crimeagg.json', 
+              data = crimedata2,
+              columns = ['District', 'Number'],
+              key_on = 'feature.properties.DISTRICT',
+              fill_color = 'YlOrRd', 
+              fill_opacity = 0.7, 
+              line_opacity = 0.2,
+              legend_name = 'Number of incidents per district')
+
+display(map1)  
+</code></pre>
+
+<p>It creates a choropleth map like below with a legend in the upper right corner. <a href="http://colorbrewer2.org/">Color Brewer</a> color schemes are built-in and added like <code>fill_color = 'YlOrRd'</code>. The aggregated counts are stored in a separate json file (<code>crimedata2.to_json('crimeagg.json')</code>) which is later used as data source during the creation of the map. </p>
+
+<p><img src="/content/images/2015/10/choromap.png" alt=""/></p>
+
+
+
+<p>The crime incident data is much richer than just locations and districts. It also contains variables like categories, dates and times. This creates the opportunity to, for instance, get better insights in specific sorts of incidents. To avoid making maps for all combinations of variables, I used Domino's "Launcher" feature to let others create their own maps based on their parameters. </p>
+
+<p>A Launcher in Domino is a self-service web form that lets non-technical users run your script. To create one, we just need to specify what parameters to expose through the web form.</p>
+
+<p>My launcher will have two parameters: <br/>
+1. "Dayofweek" is a multi-select list and contains all the days of the week. <br/>
+2. "Category" is a select menu with all the incident categories that are in the data. </p>
+
+<p>Out of laziness, I decide to create a little script to create the list of categories that occur in the data. </p>
+
+<p><img src="/content/images/2015/10/preparelauncher.png" alt=""/></p>
+
+<p>I copy paste the result of the second cell into the Allowed Values field in the newly created launcher. </p>
+
+<p><img src="/content/images/2015/10/parameterslauncher.png" alt=""/></p>
+
+<p>And when finished, the launcher looks like this:</p>
+
+<p><img src="/content/images/2015/10/launcher.png" alt=""/></p>
+
+<p>The script that handles the launcher requests is <a href="https://app.dominodatalab.com/r00sj3/crimemaps/view/main.py">main.py</a>. This next bit of code handles the user input and uses it to filter the dataset:</p>
+
+<pre><code class="language-prettyprint lang-python">args = sys.argv  
+dayselect = args[1].split(',')  
+crimeselect = args[2]
+
+daycond = crimedata['DayOfWeek'].isin(dayselect)  
+crimecond = crimedata['Category'] == (crimeselect)
+
+filtered_crimedata = crimedata[crimecond &amp; daycond]  
+</code></pre>
+
+<p>Now that we have category and description information, why not use it as a popup for the markers? Just add <code>popup=each[1]['Category'] + ": " + each[1]['Descript']</code> to the parameters of the marker placement function. Main.py contains both the marker map code and the choropleth code. </p>
+
+<p>Now we can create maps using the launcher. The following (static) map shows the drugs and narcotics related incidents in the weekends (Saturday &amp; Sunday). Zooming in on the created map will make the clusters split. The blue markers refer to individual incidents. It is probably no surprise to see that most drug related incidents take place in and near the Tenderloin area.</p>
+
+<p><img src="/content/images/2015/10/mapdrugweekend.png" alt=""/></p>
+
+<p>It also creates a choropleth map like this one, telling a story similar to the map with markers. <br/>
+<img src="/content/images/2015/10/mapchorodrugweekend.png" alt=""/></p>
+
+<h2 id="bonuscomparingmaps">Bonus: comparing maps</h2>
+
+<p>Now that we have created the code and launcher like this, we can use the Domino comparison feature to put multiple maps side by side. </p>
+
+<p>I had two separate runs from the launcher, one with burglaries in the weekend and one during weekdays. Both runs succeeded. The next step is to select both runs and hit compare at the top. </p>
+
+<p/><center><img src="/content/images/2015/10/compare.png"/></center>
+
+<p>A page will open which contains a comparison of both runs. The nice part is that it will put the maps next to each other. This way we can easily see that, in case of our example, burglaries seem more evenly spread over San Francisco in weekends than during weekdays. </p>
+
+<p><img src="/content/images/2015/10/compareresult.png" alt=""/></p>
+
+<p>So there we have it, a pretty easy way to create and compare maps. I didn't find very shocking crime incident trends, yet. So feel free to share your most interesting finds in the comments. </p>
+                      </div>
+
+                </div></body></html>

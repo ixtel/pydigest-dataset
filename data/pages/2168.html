@@ -1,0 +1,212 @@
+<html><body><div><div class="art-body-inner">
+            <p>So my friend called me about a week ago. He asked me to set up a mailing list service for his domain I manage.  </p>
+
+<blockquote>
+  <p>"One thing though: I only want specific people to be able to send e-mail to the list."</p>
+</blockquote>
+
+<p>Could I have found a system that has a nice GUI and does this and more? Sure. The real question is: was I going to? Absolutely not.</p>
+
+<hr/>
+
+<p>In this article I will tell you how to forward email with python. <br/>
+On how to forward email to a script in postfix, read my <a href="http://fonorobert.me/postfix-forward-to-script/">previous post.</a></p>
+
+<p>You can check my final code <a href="https://github.com/fonorobert/mailforward">on github.</a></p>
+
+<h2 id="theproject">The project</h2>
+
+<p>A python script that processes incoming email and forwards it based on the sender and the incoming email's recipient.</p>
+
+<h2 id="receivingemail">Receiving email</h2>
+
+<p>After <a href="http://fonorobert.me/postfix-forward-to-script/">postfix forwards email</a>, we can get it in python through <code>stdin</code> like so:</p>
+
+<pre><code>import sys
+email_in = sys.stdin.read()
+</code></pre>
+
+<p>This will give us a string of the whole email, headers and all. <br/>
+The next step is to parse it into a <code>Message</code> object. This will enable us to perform all kinds of email tricks on it (like extracting From and To addresses)</p>
+
+<p>From <a href="https://docs.python.org/3.4/library/email.message.html">the python documentation:</a></p>
+
+<blockquote>
+  <p>The central class in the email package is the <code>Message</code> class, imported from the <code>email.message</code> module. (...) <code>Message</code> provides the core functionality for setting and querying header fields, and for accessing message bodies.</p>
+</blockquote>
+
+<p>Let's do the actual parsing:</p>
+
+<pre><code>from email.parser import Parser
+incoming = Parser().parsestr(email_in)
+</code></pre>
+
+<p><code>incoming</code> is now a <code>Message</code> object that we can work with.</p>
+
+<h2 id="gettingtheheaders">Getting the headers</h2>
+
+<p>Now that we have a <code>Message</code> object called <code>incoming</code>, it's pretty simple to get stuff from it, like the sender or recipient of the email:</p>
+
+<pre><code>sender = incoming['from']
+this_address = incoming['to']
+</code></pre>
+
+<p>We will set up our script to look at the original address the email was sent to and decide which mailing list to work with based on that. <br/>
+We will use the <code>parseddr</code> function to do that:</p>
+
+<pre><code>from email.utils import parseaddr
+to_list = parseaddr(incoming['to'])[1]
+</code></pre>
+
+<p><code>parseaddr()</code> returns a list of display name and address, for example: </p>
+
+<pre><code>toaddress = ("John Doe", "johndoe@example.com")
+</code></pre>
+
+<p>That's why we needed the <code>[1]</code> at the end, to get the email address as a string.</p>
+
+<p>Now we need to get the part before the @ to see which list the mail was sent to:</p>
+
+<pre><code>list_user = to_list.split('@')[0]
+</code></pre>
+
+<p>We now have the list name and the sender, so we can go on and perform our checks to see if the list exists and the sender is authorized to use it.</p>
+
+<h2 id="checkinglistandsenderauthorization">Checking list and sender authorization</h2>
+
+<p>Our next step is to check if the list actually exists.</p>
+
+<p>As we will need to parse files twice, let's write a function for that:</p>
+
+<pre><code>def readlist(file_path):
+    with open(file_path, mode="r") as f:
+        lines = f.readlines()
+        result = [i.strip() for i in lines]
+    return result
+</code></pre>
+
+<p>This simple function reads the contents of the given file and  returns a list of text on each line.</p>
+
+<p><em>Note the list comprehension, this is one of the things why I love python.</em></p>
+
+<p>First we will try to read the mailing list file:</p>
+
+<pre><code>try:
+    list_members = readlist(list_user + ".list")
+except FileNotFoundError:
+    bounce(nolist, incoming)
+    #If the file is not found we will send a "bounce" email
+    #stating the list does not exist.
+    #We can write this function later.
+</code></pre>
+
+<p>Next we will load the authorized senders file:</p>
+
+<pre><code>senders = readlist("senders.list")
+</code></pre>
+
+<p>Now let's check if the sender is authorized to use this mailing list:</p>
+
+<pre><code> #We get the sender email from the headers the same way
+ #we did with the mailing list address:
+
+ sender_addr = parseaddr(sender)[1]
+
+ #Then we perform the test:
+
+ if sender_str not in senders:
+     bounce(nonauth, incoming)
+ else:
+     #The sender is authorized to send
+     #Here we will send the actual email
+</code></pre>
+
+<h2 id="sendingemail">Sending email</h2>
+
+<p>Now that we checked if the list exists and that the sender is on our "authorized senders" list it's time to forward the email to all recipients.</p>
+
+<p>First some imports:</p>
+
+<pre><code> import smtplib
+ from email.mime.multipart import MIMEMultipart
+</code></pre>
+
+<p>We will use <code>smtplib</code> to send email through SMTP. <code>MIMEMultipart</code> is for managing <code>Message</code> objects.</p>
+
+<p>The following goes into the <code>else:</code> part of our last <code>if</code> statements:</p>
+
+<pre><code>for member in list_members:
+    #Iterate through the list of recipients
+
+    #Create a Message object
+    msg = MIMEMultipart()
+    #Set the payload to what we received
+    msg.set_payload(incoming)
+
+    #Change headers so From is the list address
+    #and Reply-to is original sender
+    msg['From'] = this_address
+    msg['reply-to'] = sender
+    msg['To'] = member
+    msg['Subject'] = incoming['subject']
+
+    #Create an SMTP object on localhost
+    s = smtplib.SMTP('localhost')
+
+    #Send message, and close the SMTP connection
+    s.send_message(msg)
+    s.quit()
+</code></pre>
+
+<h2 id="finaltouches">Final touches</h2>
+
+<p>The only thing left is to write the <code>bounce</code> function we used previously. <br/>
+The steps will be very similar to how we sent email to the list:</p>
+
+<pre><code>from email.mime.text import MIMEText
+
+def bounce(bouncetext, incoming):
+    msg = MIMEMultipart()
+    msg['Subject'] = "Re: " + incoming['subject']
+    msg['From'] = incoming['to']
+    msg['To'] = incoming['from']
+    msg.attach(MIMEText(bouncetext, _charset='UTF-8'))
+    s = smtplib.SMTP('localhost')
+    s.send_message(msg)
+    s.quit()
+    exit(0)
+</code></pre>
+
+<p>Finally let's see all the imports we used:</p>
+
+<pre><code>import sys
+from email.parser import Parser
+from email.utils import parseaddr
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+</code></pre>
+
+<p>Now we add a "shebang" to the <strong>first line</strong> of our script to make it executable outside the python interpreter:</p>
+
+<pre><code>#!/usr/bin/env python3
+</code></pre>
+
+<p>And we are done. Upload the script to your server and off the emails go. </p>
+
+<p><strong>Good job!</strong></p>
+
+<hr/>
+
+<p>If you get stuck, it's always wise to read the docs:</p>
+
+
+
+<hr/>
+
+<p>I have a <a href="http://tinyletter.com/fonorobert">tiny newsletter</a> you could subscribe to.</p>
+
+<p><em>I am also on twitter, see you there.</em> <br/>
+<a href="http://twitter.com/fonorobert">@fonorobert</a></p>
+        </div>
+    </div></body></html>

@@ -1,0 +1,251 @@
+<html><body><div><div class="content html_format">
+      <h4>Предыстория</h4><p>
+На определенном этапе развития технологий компании </p><a href="http://habrahabr.ru/company/acronis/">Acronis</a><p> было принято решение изучить возможность распространения интерпретатора языка python3 собственной сборки как часть наших продуктов, расширив его при этом нашими собственными модулями, обеспечивающими доступ к инфраструктуре этих продуктов. Данный пост является одним из результатов исследований в этом направлении.
+</p><p>
+В первую очередь, нам хотелось иметь ограниченный компактный набор конечных распространяемых модулей. Однако публичная сборка питона, распространяемая через </p><a href="http://www.python.org">python.org</a><p> к этому не располагает, одна только стандартная библиотека, являющаяся неотъемлемой частью самого языка, состоит из более чем тысячи py-файлов. Именно поэтому, мы сразу обратили внимание на такую любопытную особенность интерпретатора, как возможность импорта модулей, находящихся в zip-архивах, когда все множество исходников на питоне, относящихся к одному или нескольким модулям, упаковано в zip-архив и распространяется одним zip-файлом.
+
+</p><a name="habracut"/><p>Оглядываясь назад, можно с уверенностью сказать, что поддержка работы с zip-модулями в питон — мощная и удобная вещь. И она работает, причем работает хорошо. После ряда экспериментов с zip-модулями, проникнувшись духом zip-пекеджинга, мы настолько вошли во вкус, что всю стандартную библиотеку языка питон (скриптовую ее часть) также упаковали в отдельный zip-файл.
+
+</p><h4>Начало</h4><p>
+Для начала создадим тестовое окружение, максимально простое, но в то же время достаточное для демонстрации всех намеченных возможностей обсуждаемого функционала. Окружение будет виндовое, так уж мне оказалось в данный момент удобнее. Для желающих попробовать приведенные здесь примеры под линукс, просто отмечу, что принципиальных отличий быть не должно, единственное что требуется, это установленный python3, либо через пакетный менеджер вашего линуксового дистрибутива, либо через старый добрый </p><nobr>configure/make/make install.</nobr>
+<p>
+Простые демонстрационные модули, которые мы будем паковать в zip, у меня изначально размещены в d:\habr\lib:
+</p><ul>
+<li>say_hello.py<br/>
+<pre><code class="python">def say_hello():
+    print("Hello python world.")
+</code></pre></li>
+<li>my_sysinfo/__init__.py<br/>
+<pre><code class="python">from .sysinfo import print_sysinfo
+</code></pre></li>
+<li>my_sysinfo/sysinfo.py<br/>
+<pre><code class="python">import sys
+import traceback
+
+def print_sysinfo():
+    print(80 * '-')
+    print(sys.version)
+    print(80 * '-')
+    traceback.print_stack()
+    print(80 * '-')
+</code></pre></li>
+</ul><p>
+Поскольку среди прочего хотелось продемонстрировать возможность упаковки именно нескольких модулей в один zip-файл, здесь я создал два разнотипных модуля, первый модуль </p><code>say_hello</code><p> состоит из одного файла </p><code>say_hello.py</code><p> c заиммплеменченной в нем функцией </p><code>say_hello()</code><p>, второй модуль </p><code>my_sysinfo</code><p> сделан чуть более сложным – в виде директории с файлом</p><code> __init__.py</code><p>, содержащим в списке импорта функцию </p><code>print_sysinfo</code><p>. Забегая вперед, сразу скажу, что эта функция среди прочей сводной инфы типа </p><code>sys.version</code><p> также печатает стек собственного вызова именно для раскрытия особенностей zip-пекеджинга.
+</p><p>
+Проверяем, что все работает в неупакованном виде:
+</p><pre><code>c:\Python33\python.exe
+</code></pre>
+<pre><code class="python">Python 3.3.2 (v3.3.2:d047928ae3f6, May 16 2013, 00:03:43) [MSC v.1600 32 bit (Intel)] on win32
+Type "help", "copyright", "credits" or "license" for more information.
+&gt;&gt;&gt; import sys
+&gt;&gt;&gt; sys.path.insert(0,'d:\\habr\\lib')
+&gt;&gt;&gt; import say_hello
+&gt;&gt;&gt; say_hello.say_hello()
+Hello python world.
+&gt;&gt;&gt; import my_sysinfo
+&gt;&gt;&gt; my_sysinfo.print_sysinfo()
+--------------------------------------------------------------------------------
+3.3.2 (v3.3.2:d047928ae3f6, May 16 2013, 00:03:43) [MSC v.1600 32 bit (Intel)]
+--------------------------------------------------------------------------------
+  File "&lt;stdin&gt;", line 1, in &lt;module&gt;
+  File "d:\habr\lib\my_sysinfo\sysinfo.py", line 9, in print_sysinfo
+    traceback.print_stack()
+--------------------------------------------------------------------------------
+</code></pre>
+
+<h4>Упаковка в zip</h4><p>
+В самой упаковке исходных py-файлов в zip никаких секретов нет. Для этого можно воспользоваться любым доступным под рукой zip-архиватором, либо упаковать прямо питон-скриптом, воспользовавшись для этого функционалом из стандартного модуля </p><code>zipfile</code><p>. Чуть позже я приведу код простого скрипта упаковки, который я назвал </p><a href="#mkpyzip">mkpyzip.py</a><p> и положил в папку d:\habr\tools.
+</p><p>
+Упаковываем этим скриптом приведенные выше модули в zip-файл d:\habr\output\mybundle.zip:
+</p><pre><code>С:\Python33\python.exe d:\habr\tools\mkpyzip.py --src d:\habr\lib\my_sysinfo d:\habr\lib\say_hello.py --out d:\habr\output\mybundle.zip
+::: d:\habr\lib\my_sysinfo\__init__.py &gt;&gt;&gt; mybundle.zip/my_sysinfo/__init__.py
+::: d:\habr\lib\my_sysinfo\sysinfo.py &gt;&gt;&gt; mybundle.zip/my_sysinfo/sysinfo.py
+::: d:\habr\lib\say_hello.py &gt;&gt;&gt; mybundle.zip/say_hello.py
+</code></pre><p>В этот скрипт среди прочего добавлен подробный вывод о том, какой файл и под каким именем упаковывается в zip-архив.
+</p><p>
+Проверяем, что все работает будучи упакованным в такой zip-архив:
+</p><a name="nopyc"/><pre><code>c:\Python33\python.exe
+</code></pre>
+<pre><code class="python">Python 3.3.2 (v3.3.2:d047928ae3f6, May 16 2013, 00:03:43) [MSC v.1600 32 bit (Intel)] on win32
+Type "help", "copyright", "credits" or "license" for more information.
+&gt;&gt;&gt; import sys
+&gt;&gt;&gt; sys.path.insert(0, 'd:\\habr\\output\\mybundle.zip')
+&gt;&gt;&gt; import say_hello
+&gt;&gt;&gt; say_hello.say_hello()
+Hello python world.
+&gt;&gt;&gt; import my_sysinfo
+&gt;&gt;&gt; my_sysinfo.print_sysinfo()
+--------------------------------------------------------------------------------
+3.3.2 (v3.3.2:d047928ae3f6, May 16 2013, 00:03:43) [MSC v.1600 32 bit (Intel)]
+--------------------------------------------------------------------------------
+  File "&lt;stdin&gt;", line 1, in &lt;module&gt;
+  File "d:\habr\output\mybundle.zip\my_sysinfo\sysinfo.py", line 9, in print_sysinfo
+    traceback.print_stack()
+--------------------------------------------------------------------------------
+</code></pre><p>Из оутпута видно, что все работает как положено, будучи упакованным в zip-архив, в частности распечатка стека из нашей функции </p><code>my_sysinfo.print_sysinfo()</code><p> показывает, что код вызываемой функции находится внутри нашего zip-файла — d:\habr\output\mybundle.zip\my_sysinfo\sysinfo.py
+
+</p><h4>Генерация байт-кода при упаковке в zip</h4><p>
+А сейчас самое время вспомнить о такой хорошо известной особенности интерпретатора, как генерация байт-кода при импорте модуля, либо загрузка и выполнение байт-кода сгенерированного ранее, если таковой является валидным в момент импорта. В случае с модулями упакованными в zip, дела обстоят несколько иначе. Для zip-модулей байт-код должен быть сгенерирован и упакован в zip-файл заранее, иначе интерпретатор после каждого перезапуска при импорте любого модуля из zip-файла будет генерировать для него байт-код в памяти заново. Что ж, в нашем скрипте </p><a href="#mkpyzip">mkpyzip.py</a><p> генерация байт-кода уже предусмотрена, просто добавим опцию </p><code>--mkpyc</code><p> и перегенерим zip-файл:
+</p><pre><code>c:\Python33\python.exe d:\habr\tools\mkpyzip.py --mkpyc --src d:\habr\lib\my_sysinfo d:\habr\lib\say_hello.py --out d:\habr\output\mybundle.zip
+::: d:\habr\lib\my_sysinfo\__init__.py &gt;&gt;&gt; mybundle.zip/my_sysinfo/__init__.py
+::: mkpyc for: d:\habr\lib\my_sysinfo\__init__.py &gt;&gt;&gt; mybundle.zip/my_sysinfo/__init__.pyc
+::: d:\habr\lib\my_sysinfo\sysinfo.py &gt;&gt;&gt; mybundle.zip/my_sysinfo/sysinfo.py
+::: mkpyc for: d:\habr\lib\my_sysinfo\sysinfo.py &gt;&gt;&gt; mybundle.zip/my_sysinfo/sysinfo.pyc
+::: d:\habr\lib\say_hello.py &gt;&gt;&gt; mybundle.zip/say_hello.py
+::: mkpyc for: d:\habr\lib\say_hello.py &gt;&gt;&gt; mybundle.zip/say_hello.pyc
+</code></pre><p>
+Теперь, когда раскрыты основные аспекты упаковки питон-модулей в zip-файл, самое время привести и код самой утилиты mkpyzip.py. Сразу отмечу, что ничего особенного в этом скрипте нет, а прототип для генерации байт-кода был позаимствован из стандартной библиотеки языка python (для поиска этого прототипа достаточно сделать поиск по ключевому слову wr_long).
+</p><a name="mkpyzip"/><div class="spoiler"><b class="spoiler_title">mkpyzip.py</b><div class="spoiler_text"><pre><code class="python">import argparse
+import imp
+import io
+import marshal
+import os
+import os.path
+import zipfile
+
+def compile_file(filename, codename, out):
+    def wr_long(f, x):
+        f.write(bytes([x &amp; 0xff, (x &gt;&gt; 8)  &amp; 0xff, (x &gt;&gt; 16) &amp; 0xff, (x &gt;&gt; 24) &amp; 0xff]))
+    with io.open(filename, mode='rt', encoding='utf8') as f:
+        source = f.read()
+        ast = compile(source, codename, 'exec', optimize=1)
+        st = os.fstat(f.fileno())
+        timestamp = int(st.st_mtime)
+        size = st.st_size &amp; 0xFFFFFFFF
+        out.write(b'\0\0\0\0')
+        wr_long(out, timestamp)
+        wr_long(out, size)
+        marshal.dump(ast, out)
+        out.flush()
+        out.seek(0, 0)
+        out.write(imp.get_magic())
+
+def compile_in_memory(source, codename):
+    with io.BytesIO() as fc:
+        compile_file(source, codename, fc)
+        return fc.getvalue()
+
+def make_module_catalog(src):
+    root_path = os.path.abspath(os.path.normpath(src))
+    root_arcname = os.path.basename(root_path)
+    if not os.path.isdir(root_path):
+        return [(root_path, root_arcname)]
+    catalog = []
+    subdirs = [(root_path, root_arcname)]
+    while subdirs:
+        idx = len(subdirs) - 1
+        subdir_path, subdir_archname = subdirs[idx]
+        del subdirs[idx]
+        for item in sorted(os.listdir(subdir_path)):
+            if item == '__pycache__' or item.endswith('.pyc'):
+                continue
+            item_path = os.path.join(subdir_path, item)
+            item_arcname = '/'.join([subdir_archname, item])
+            if os.path.isdir(item_path):
+                subdirs.append((item_path, item_arcname))
+            else:
+                catalog.append((item_path, item_arcname))
+    return catalog
+
+def mk_pyzip(sources, outzip, mkpyc=False):
+    zipfilename = os.path.abspath(os.path.normpath(outzip))
+    display_zipname = os.path.basename(zipfilename)
+    with zipfile.ZipFile(zipfilename, "w", zipfile.ZIP_DEFLATED) as fzip:
+        for src in sources:
+            catalog = make_module_catalog(src)
+            for entry in catalog:
+                fname, arcname = entry[0], entry[1]
+                fzip.write(fname, arcname)
+                print("::: {} &gt;&gt;&gt; {}/{}".format(fname, display_zipname, arcname))
+                if mkpyc and arcname.endswith('.py'):
+                    bytes = compile_in_memory(fname, arcname)
+                    pyc_name = ''.join([os.path.splitext(arcname)[0], '.pyc'])
+                    fzip.writestr(pyc_name, bytes)
+                    print("::: mkpyc for: {} &gt;&gt;&gt; {}/{}".format(fname, display_zipname, pyc_name))
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--src', nargs='+', required=True)
+    parser.add_argument('--out', required=True)
+    parser.add_argument('--mkpyc', action='store_true')
+    args = parser.parse_args()
+    mk_pyzip(args.src, args.out, args.mkpyc)
+
+if __name__ == '__main__':
+    main()
+</code></pre></div></div>
+
+<h4>Валидность байт-кода</h4><p>
+Добавлю также пару слов о том, как убедится в том, что сгенерированный нами байт-код валиден и интерпретатор нормально его подхватывает при импорте модуля без попыток перегенерации нового байт-кода в памяти.</p><p>
+Для этого просто распечатаем атрибут </p><code>__file__</code><p>, у заимпорченого модуля</p><code> say_hello</code><p>.
+</p><pre><code>c:\Python33\python.exe
+</code></pre>
+<pre><code class="python">Python 3.3.2 (v3.3.2:d047928ae3f6, May 16 2013, 00:03:43) [MSC v.1600 32 bit (Intel)] on win32
+Type "help", "copyright", "credits" or "license" for more information.
+&gt;&gt;&gt; import sys
+&gt;&gt;&gt; sys.path.insert(0,'d:\\habr\\output\\mybundle.zip')
+&gt;&gt;&gt; import say_hello
+&gt;&gt;&gt; say_hello.__file__
+'d:\\habr\\output\\mybundle.zip\\say_hello.pyc'
+</code></pre><p>То, что атрибут </p><code>__file__</code><p> у загруженного модуля указывает на сгенерированный нами pyc-файл, является достаточным доказательством валидности нашего байт-кода.
+</p><p>
+На этом я бы наверное мог с чистой совестью закончить свой вводный обзор о zip-пекеджинге в языке питон, если бы не одно «но»…
+
+</p><h4>Сюрпризы</h4><p>
+Один из моих коллег как-то раз взял в руки </p><a href="http://www.eclipse.org/">Eclipse</a><p> и с помощью хорошо известного к нему дополнения</p><a href="http://pydev.org/"> PyDev</a><p> попытался заняться отладкой написанного им питон-скрипта, использовавшего среди прочего также и функционал и из питон-модулей зазипованых по только что описанной технологии.
+</p><p>
+Основной неприятный сюрприз заключался в том, что PyDev напрочь отказывался подобные модули дебажить. Сильно заинтересовавшись этой неприятностью мы начали искать первоисточник проблемы. Сейчас, оглядываясь уже назад, мы можем сказать, что по нашему личному убеждению в PyDev просто недостаточно качественная поддержка для отладки zip-модулей.
+</p><p>
+Тем не менее в момент исследования нюансы отладки под PyDev были сразу же исключены из рассмотрения, т.к. встроенный в питон отладчик pdb также выдавал информацию о стеке вызовов весьма сомнительного вида. Причем информация была сомнительной только в случае, когда в zip-архиве наравне с исходными py-файлами также находились и pyc-файлы с байт-кодом. В случае же zip-архива с одними только py-файлами автоматически генерируемый байт-код явно чем-то отличался, и отладка в pdb давала правильную информацию, не вызывавшую нареканий. За исключением отладки все работало как положено. И тем не менее с нашим байт-кодом было что-то определенно не то. И об этом нам явно сигнализировал pdb.
+</p><p>
+Теперь, когда первоисточник проблемы нами найден, вдаваться в детали отладки питон-кода под pdb уже не хочется. Чтобы пояснить причину проблемы, давайте просто заново распечатаем стек вызовов из зазипованого байт-кода, воспользовавшись написанной ранее функцией print_sysinfo() из модуля my_sysinfo.
+</p><pre><code>c:\Python33\python.exe
+</code></pre>
+<pre><code class="python">Python 3.3.2 (v3.3.2:d047928ae3f6, May 16 2013, 00:03:43) [MSC v.1600 32 bit (Intel)] on win32
+Type "help", "copyright", "credits" or "license" for more information.
+&gt;&gt;&gt; import sys
+&gt;&gt;&gt; sys.path.insert(0,'d:\\habr\\output\\mybundle.zip')
+&gt;&gt;&gt; import my_sysinfo
+&gt;&gt;&gt; my_sysinfo.print_sysinfo()
+--------------------------------------------------------------------------------
+3.3.2 (v3.3.2:d047928ae3f6, May 16 2013, 00:03:43) [MSC v.1600 32 bit (Intel)]
+--------------------------------------------------------------------------------
+  File "&lt;stdin&gt;", line 1, in &lt;module&gt;
+  File "my_sysinfo/sysinfo.py", line 9, in print_sysinfo
+    traceback.print_stack()
+--------------------------------------------------------------------------------
+</code></pre><p>
+Теперь сравним этот оутпут с тем, который был получен нами </p><a href="#nopyc">ранее</a><p>, еще до того, как мы начали зиповать наш собственный байт-код. Ключевое отличие здесь в путях к файлу в стековом фрейме.
+
+</p><u>Без байт-кода в zip-файле у нас был оутпут вида:</u><p>
+ File «stdin», line 1, in «module»</p><p>
+ File "</p><b>d:\habr\output\mybundle.zip\my_sysinfo\sysinfo.py</b><p>", line 9, in print_sysinfo</p><p>
+ traceback.print_stack()
+
+</p><u>А после добавления байт-кода он принял вид:</u><p>
+ File «stdin», line 1, in «module»</p><p>
+ File "</p><b>my_sysinfo/sysinfo.py</b><p>", line 9, in print_sysinfo</p><p>
+ traceback.print_stack()
+</p><p>
+Из оутпута становится четко видно, что при добавлении байт-кода в zip-архив в стеке вызовов путь к файлу из абсолютного пути превращается в относительный, причем относительный по отношению к корню zip-архива. Тут внимательный читатель может сразу возразить, что мы же сами сгенерировали такой байт-код, подав данный относительный путь в builtin-функцию </p><code>compile</code><p> в утилите </p><a href="#mkpyzip">mkpyzip.py</a><p>. Но если об этом поразмыслить чуть глубже, то становится понятно, что полный то путь в данном случае никак не уместен, ибо конечная наша цель — это, собрав zip-архив на одной машине, иметь возможность использовать его на другой, возможно даже на машине с другой операционной системой.
+</p><p>
+Никто из нас на тот момент не был близко знаком с имлементацией загрузки zip-модулей в интерпретатор, поэтому невозможно было дать однозначного ответа на вопрос, в чем же корень проблемы: то ли мы по незнанию что-то упускаем при генерации байт-кода, то ли сам загрузчик zip-модулей в питон ведет себя некорректно при его загрузке.
+</p><p>
+В итоге было решено обратиться за советом к самим разработчикам языка питон через </p><a href="mailto:python-dev@python.org">python-dev@python.org</a><p>. Единственное, что они нам посоветовали на тот момент, это завести на эту тему баг, что бы не потерялся контекст описанной проблемы. Баг мы завели </p><a href="http://bugs.python.org/issue18307">bugs.python.org/issue18307</a><p> и стали ждать. Примерно после месяца ожидания и занятий другими не менее насущными проблемами наше терпение тихо кончилось, и python33.dll попал в отладчик.
+</p><p>
+В итоге мы подтвердили наши подозрения и с определенностью можем утверждать, что именно Си-шная имплементация загрузчика zip-модулей в питон ведет себя некорректно при загрузке байт-кода. Точнее то, что описанный здесь случай, требующий автоматической нормализации путей в байт-коде при его загрузке из zip-файлов, был просто не реализован. В итоге в рамках этого же бага мы предложили патч, исправляющий данную проблему, и приводящий пути к файлам в стеках вызовов к абсолютному виду.
+</p><p>
+Сейчас, примерно пол-года спустя, данный баг на </p><a href="http://bugs.python.org">bugs.python.org</a><p> остается открытым. Видимо потому, что zip-модули в питон — фича, хотя и мощная, но достаточно редко используемая, особенно случай с байт-кодом внутри zip-архива. Тем не менее, имея собственный репозитарий с исходниками питона (который мы по возможности стараемся держать максимально близким к публичному оригиналу), мы просто закоммитили к себе данный патч.
+
+</p><h4>Заключение</h4><p>
+Модули в питон, будучи запакованными в zip-архив, работают также хорошо, как и в неупакованном виде. Единственное к чему надо быть готовым, что после упаковки могут возникнуть определенные сложности с их отладкой как через Eclipse+PyDev, так и через другие IDE, отладка в которых также основана на PyDev. Тем не менее в определенных ситуациях возможность иметь компактное множество бинарных продакшн-модулей может оказаться значительно важнее легкой отладки питон-кода в IDE.
+
+</p><h4>P.S. Мы изобрели setuptools/eggs? Нет.</h4><p>
+Zip-модули в питон — это совершенно независимая и самодостаточная функциональность, заложенная в ядро самого интерпретатора языка. setuptools/eggs — это лишь самый широко известный вариант ее применения.
+
+      
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

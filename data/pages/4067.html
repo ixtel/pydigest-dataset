@@ -1,0 +1,419 @@
+<html><body><div><div class="content html_format"><p>
+      Всем привет.</p>
+<p>
+В статье описывается разработка и развёртывание системы SSO-аутентификации, использующей Kerberos и JWT. Модуль аутентификации разработан с применением Flask, Flask-Login и PyJWT. Развёртывание выполнено с использованием веб-сервера Apache, сервера идентификации FreeIPA и модуля mod_lookup_identity на CentOS 6/7. В статье много текста, средне кода и мало картинок. В общем, будет интересно.
+
+</p><img src="https://habrastorage.org/files/a34/317/86b/a3431786b09b4e8b9bc30d4d3613ca5c.jpg" alt="image"/>
+<a name="habracut"/><p>
+Немного расскажу про SSO. Single Sign-On (SSO) — принцип аутентификации, позволяющий пользователю ввести пароль только один раз при начале работы с системой и после этого обеспечивающий пользователю беспарольный вход во все приложения домена. На практике 100% SSO встречается очень редко, ибо в организациях часто бывают legacy-системы, которые просто не знают такой аббревиатуры либо не поддерживают современные методы. К возможным методам SSO относятся протокол Kerberos, сертификаты SSL и прочее. Собственно задача аутентификации/проверки токена может возлагаться как на каждое приложение, так и на какой-то центральный сервер аутентификации. Обычно внедрение SSO подразумевает наличие центральной базы данных пользовательских аккаунтов и некое ПО для управления этой базой.
+</p><p>
+Для Windows-окружения есть стандартное решение, обеспечивающее как SSO, так и централизованную БД пользователей — Active Directory. В linux-мире всё не так однозначно. Был и успешно сдох NIS (но не до конца), есть некоторое количество «стандартных» решений на LDAP, многие (и я тоже) делали какие-то свои надстройки и веб-интерфейсы над OpenLDAP, пытались использовать winbind для связи с AD и так далее. На мой скромный взгляд Red Hat дальше всех ушла в вопросе стандартного «контроллера домена» для Linux, купив и допилив FreeIPA. Продукт разворачивается одной командой, прекрасно работает в RHEL/OEL/CentOS/Fedora-среде (докладывают, что и для Debian есть клиентский модуль), обеспечивает кросс-доменную аутентификацию в AD, управляется целиком через веб-интерфейс, централизует настройки DNS, automount, sudo… Короче, он у меня есть и я с ним счастливо живу.
+</p><p>
+Тут хочу повториться, что софт я писать не особо умею и не очень люблю, но иногда приходится. И вот писал я убийцу Google Forms, и, естественно, встала задача аутентифицировать пользователя, кою я успешно решил, возложив задачу проверки kerberos-тикета на Apache и запрашивая после этого данные из LDAP (из FreeIPA) для uid из переменной REMOTE_USER. В дальнейшем, применив </p><a href="http://www.adelton.com/apache/mod_lookup_identity/">mod_lookup_identity</a><p>, смог даже отказаться от работы с LDAP. Но было в этом решении одно слабое место — пользователи windows и я, заходящие с устройств, не управляемых FreeIPA и, соответственно не имеющие kerberos-тикета (строго говоря, win-пользователи могли бы иметь тикет через изврат с cmd либо через развёртывание AD и cross-domain trust, но ни тем, ни другим извращением заниматься не хотелось).
+</p><p>
+Давным давно прочитал я про </p><a href="http://jwt.io/">JSON Web Tokens</a><p> и всегда чесались руки их попробовать. Вот и представилась возможность. Я порешил сделать так: те, кто имеют krb-тикет, пусть аутентифицируются через Kerberos, а те бедняги, у кого тикета нет, пусть вводят логин-пароль и попадают на Basic-аутентификацию. Тем более, что для Basic Auth есть </p><a href="http://www.adelton.com/apache/mod_authnz_pam/">mod_authnz_pam</a><p>, позволяющий вообще забыть про проверку паролей руками. Результат аутентификации будет записываться в cookie в виде JWT, а приложение, запросившее аутентификацию, будет получать эти данные из токена. Соответственно, оформилась потребность в центральном сервисе аутентификации, выдающем JWT.
+</p><p>
+Для разработки использовались Python и Flask (так как это единственное, на чём я могу разрабатывать более-менее законченные приложения). Для управления аутентификацией в Flask был взят Flask-Login, для работы с jwt — </p><a href="https://github.com/jpadilla/pyjwt">PyJWT</a><p>. Ссылка на исходники, если кому нужна, будет в конце.
+</p><p>
+С подачи моей жены сервис аутентификации был назван Hogwarts' Hat (hh) — та шляпа тоже всё про всех знала.
+</p><p>
+Для hh был создан свой virtualenv, код был скопирован в корень этого virtualenv, запускается приложение на mod_wsgi. Ниже конфиг апача:
+</p><div class="spoiler"><b class="spoiler_title">hogwartshat.conf</b><div class="spoiler_text"><pre>
+&lt;VirtualHost *:80&gt;
+  ServerName hh.gsk.loc
+
+  # параметры WSGI-процесса
+  WSGIDaemonProcess hogwartshat user=hogwartshat group=hogwartshat threads=10
+  WSGIScriptAlias / /var/www/flask/hogwartshat/hogwartshat.py
+  WSGIScriptReloading On
+
+  # параметры аутентификации
+  &lt;Location /&gt;
+    AuthType Kerberos
+    AuthName "HogwartsHat"
+
+    # разрешить откат на Basic Auth
+    KrbDelegateBasic On
+
+    KrbServiceName HTTP/garage.gsk.loc@GSK.LOC
+    KrbMethodNegotiate On
+
+    # если отключить следующую директиву - работать перестаёт, почему - не понял
+    KrbMethodK5Passwd On
+
+    KrbAuthRealms GSK.LOC
+    Krb5KeyTab /etc/httpd/conf/keytab
+    AuthBasicProvider PAM
+
+    # указание на файл конфигурации PAM из /etc/pam.d
+    AuthPAMService garage
+
+    Require valid-user
+
+    # Следующие директивы записывают в переменные окружения сведения о пользователе, полученные из sssd через DBus
+    LookupUserGECOS REMOTE_USER_FULLNAME
+    LookupUserAttr uid REMOTE_USER_ID
+    LookupUserAttr krbLastSuccessfulAuth REMOTE_USER_LASTGOODAUTH
+    LookupUserAttr krbLastFailedAuth REMOTE_USER_LASTBADAUTH
+    LookupUserGroups REMOTE_USER_GROUPS ":"
+
+    # Таймаут меньше 1 с (1000 мс) смысла не имеет - DBus и LDAP просто не успевают отработать в 20-30% случаев
+    LookupDbusTimeout 2000
+  &lt;/Location&gt;
+
+  &lt;Directory /var/www/flask/hogwartshat&gt;
+    WSGIProcessGroup hogwartshat
+    WSGIApplicationGroup %{GLOBAL}
+  &lt;/Directory&gt;
+  LogLevel warn
+  ErrorLog logs/hogwartshat_error.log
+  CustomLog logs/hogwartshat_access.log combined
+&lt;/VirtualHost&gt;
+</pre>
+</div></div><p>
+Логика такова:
+</p><ol>
+<li>На первый запрос пользователя сервер отвечает 401 и просит Negotiate-аутентификацию</li>
+<li>Пользователь предоставляет krb-тикет</li>
+<li>Сервер запрашивает у sssd информацию о пользователе, устанавливает переменные окружения и передаёт запрос в wsgi-приложение</li>
+</ol><p>
+либо:
+</p><ol>
+<li>На первый запрос пользователя сервер отвечает 401 и просит Negotiate-аутентификацию</li>
+<li>Пользователь не предоставляет krb-тикет</li>
+<li>Сервер отвечает 401 и просит Basic Auth</li>
+<li>Пользователь вводит логин-пароль и успешно аутентифицируется</li>
+<li>Сервер запрашивает у sssd информацию о пользователе, устанавливает переменные окружения и передаёт запрос в wsgi-приложение</li>
+</ol><p>
+В любом другом случае пользователь получает 401 от сервера, что не очень красиво, но зато легко реализовать. Альтернативой мог бы стать </p><a href="http://www.adelton.com/apache/mod_intercept_form_submit/">mod_intercept_form_submit</a><p>, но не хотелось возиться с формами.
+</p><p>
+wsgi-файл сервиса выглядит так:
+</p><div class="spoiler"><b class="spoiler_title">hogwartshat.py</b><div class="spoiler_text"><pre>
+#!/usr/bin/env python
+# -*- coding: utf8 -*-
+
+import os
+import sys
+
+PROJECT_DIR = '/var/www/flask/hogwartshat'
+
+# активация virtualenv (фактически, дописывание в начало PATH каталога с virtualenv)
+activate_this = os.path.join(PROJECT_DIR, 'bin', 'activate_this.py')
+execfile(activate_this, dict(__file__=activate_this))
+sys.path.append(PROJECT_DIR)
+
+from app import app as application
+
+# в instance.py - ключи шифрования
+application.config.from_object('app.config')
+application.config.from_pyfile('../instance.py')
+</pre>
+</div></div>
+<p>
+__init__.py для пакета app тривиален, поэтому рассматривать его здесь не буду. А вот views.py интереснее — там Flask-Login помогает облегчить работу с данными пользователя:
+</p><div class="spoiler"><b class="spoiler_title">views.py, load_user_from_request()</b><div class="spoiler_text"><pre>
+@login_manager.request_loader
+def load_user_from_request(req):
+    logging.debug('req_loader env vars: %s' % str(req.environ))
+    uid = req.environ.get('REMOTE_USER')
+    if uid is None:
+        login_manager.login_message = 'User is not authenticated by HTTPD'
+        return None
+    try:
+        return HTTPDPoweredUser(
+            req.environ.get(app.config.get('HTTPD_NAME_ATTR')),
+            req.environ.get(app.config.get('HTTPD_FULLNAME_ATTR')),
+            req.environ.get(app.config.get('HTTPD_UID_ATTR')),
+            req.environ.get(app.config.get('HTTPD_LAST_GOOD_AUTH_ATTR')),
+            req.environ.get(app.config.get('HTTPD_LAST_FAILED_AUTH_ATTR')),
+            req.environ.get(app.config.get('HTTPD_GROUPS_ATTR'))
+        )
+    except AttributeError:
+        login_manager.login_message = 'One of the required HTTPD_* attributes not found in request'
+        return None
+</pre>
+</div></div><p>
+Основная идея — свой request_loader, который создаёт объект типа HTTPDPoweredUser из переменных окружения, установленных апачем. В дальнейшем в любой функции, завёрнутой в декоратор login_required, можно получить доступ к информации и пользователе через переменную current_user.
+</p><p>
+Сервис написан таким образом, что при заходе в / аутентифицированному пользователю выдаётся свежий jwt-кукис следующим образом:
+
+</p><div class="spoiler"><b class="spoiler_title">views.py, index()</b><div class="spoiler_text"><pre>
+@app.route('/', methods=['GET'])
+@login_required
+def index():
+    if current_user is not None:
+        cookie = current_user.get_auth_token()
+        expire_date = datetime.utcnow() + timedelta(hours=app.config.get('JWT_EXPIRE_TIME_HOURS'))
+        response = make_response(render_template('index.html', user=current_user, cookie=cookie))
+        response.set_cookie(
+            app.config.get('JWT_COOKIE_NAME'),
+            value=cookie,
+            expires=expire_date,
+            domain=app.config.get('JWT_COOKIE_DOMAIN'),
+            path=app.config.get('JWT_COOKIE_PATH'),
+            secure=app.config.get('SESSION_COOKIE_SECURE')
+        )
+        logging.debug('jwt response: %s' % str(response))
+        return response
+    else:
+        abort(403)
+</pre>
+</div></div>
+<div class="spoiler"><b class="spoiler_title">users.py, get_auth_token()</b><div class="spoiler_text"><pre>
+    def get_auth_token(self):
+        tokens = {
+            'exp': datetime.utcnow() + timedelta(hours=app.config.get('JWT_EXPIRE_TIME_HOURS')),
+            'nbf': datetime.utcnow(),
+            'iss': app.config.get('JWT_ISSUER_NAME'),
+            'aud': app.config.get('JWT_URN') + 'all',
+            'uid': self.uid,
+            'fullname': self.fullname,
+            'groups': self.groups
+        }
+        logging.debug('jwt tokens: %s' % str(tokens))
+        cookie = jwt.encode(tokens, app.config.get('JWT_PRIVATE_KEY'), algorithm=app.config.get('JWT_ALG'))
+        logging.debug('jwt cookie: %s' % str(cookie))
+        return cookie
+</pre>
+</div></div><p>
+Как видно, в токен помимо uid записываются также и ФИО пользователя, и его группы, что избавляет другие приложения от необходимости лазить в центральную БД за инфой о пользователях.
+</p><p>
+Также у сервиса есть страничка /status, где можно посмотреть на состояние своего jwt:
+
+</p><div class="spoiler"><b class="spoiler_title">views.py, status()</b><div class="spoiler_text"><pre>
+@app.route('/status', methods=['GET'])
+@login_required
+def status():
+    auth_cookie = request.cookies.get(app.config.get('JWT_COOKIE_NAME'))
+    logging.debug('cookie: %s' % str(auth_cookie))
+    tokens = {}
+    error_message = ''
+    if auth_cookie is not None:
+        try:
+            tokens = jwt.decode(
+                auth_cookie,
+                app.config.get('JWT_PUBLIC_KEY'),
+                audience=app.config.get('JWT_URN') + 'all',
+                issuer=app.config.get('JWT_ISSUER_NAME')
+            )
+            nbf = datetime.utcfromtimestamp(tokens.get('nbf'))
+            tokens['nbf'] = '(' + str(nbf) + ') ' + str(tokens.get('nbf'))
+            exp = datetime.utcfromtimestamp(tokens.get('exp'))
+            tokens['exp'] = '(' + str(exp) + ') ' + str(tokens.get('exp'))
+            logging.debug('cookie decoded successfully')
+        except jwt.DecodeError:
+            logging.debug('status: jwt.DecodeError')
+            error_message = 'Failed to decode provided JWT'
+        except jwt.ExpiredSignatureError:
+            logging.debug('status: jwt.ExpiredSignatureError')
+            error_message = 'JWT is expired'
+        except jwt.InvalidIssuerError:
+            logging.debug('status: jwt.InvalidIssuerError')
+            error_message = 'JWT is issued by a wrong issuer'
+        except jwt.InvalidAudienceError:
+            logging.debug('status: jwt.InvalidAudienceError')
+            error_message = 'JWT is issued for another audience'
+    else:
+        error_message = 'No JWT cookie received'
+    logging.debug('tokens: %s' % str(tokens))
+    attr_error = False if current_user is not None else True
+    return render_template(
+        'status.html',
+        error=False if error_message == '' else True,
+        error_message=error_message,
+        tokens=tokens,
+        attr_error=attr_error,
+        user=current_user
+    )
+</pre>
+</div></div><p>
+Ключи я генерировал так:
+</p><pre>
+openssl ecparam -genkey -name secp521r1 -noout -out hogwartshat_key.pem # p521 - не опечатка
+openssl ec -in hogwartshat_key.pem -pubout -out hogwartshat_pub.pem
+</pre><p>
+Потом просто скопировал содержимое pem-файлов в конфиг. Обратите внимание, что PyJWT для работы с асимметричными ключами и эллиптическими кривыми требует модуля cryptography. Радиуса кривизны моих рук не хватило, чтобы запустить PyJWT с предложенными в документации альтернативными модулями.
+</p><p>
+Ну и, собственно, кусок кода, отвечающий за аутентификацию для сторонних приложений:
+
+</p><div class="spoiler"><b class="spoiler_title">views.py, return_to()</b><div class="spoiler_text"><pre>
+@app.route('/return_to', methods=['GET'])
+@login_required
+def return_to():
+    app_id = request.args.get('appid')
+    data = request.args.get('data')
+    if app_id is None:
+        return make_error_page('No application ID provided', str(request.url)), 400
+    elif app_id not in app.config.get('APPS_PUBLIC_KEYS').keys():
+        return make_error_page('Unknown application ID provided', str(request.url)), 403
+    if data is None:
+        return make_error_page('Application provided empty request', str(request.url)), 400
+    else:
+        try:
+            tokens = jwt.decode(
+                data,
+                app.config.get('APPS_PUBLIC_KEYS')[app_id],
+                audience=app.config.get('JWT_ISSUER_NAME'),
+                issuer=app.config.get('JWT_URN') + app_id
+            )
+            return_url = tokens.get('return_url')
+            if current_user is not None:
+                cookie = current_user.get_auth_token()
+                expire_date = datetime.utcnow() + timedelta(hours=app.config.get('JWT_EXPIRE_TIME_HOURS'))
+                response = make_response(redirect(str(return_url), code=301))
+                response.set_cookie(
+                    app.config.get('JWT_COOKIE_NAME'),
+                    value=cookie,
+                    expires=expire_date,
+                    domain=app.config.get('JWT_COOKIE_DOMAIN'),
+                    path=app.config.get('JWT_COOKIE_PATH'),
+                    secure=app.config.get('SESSION_COOKIE_SECURE')
+                )
+                logging.debug('jwt response: %s' % str(response))
+                return response
+        except jwt.DecodeError:
+            return make_error_page('Failed to decode provided JWT', str(request.url)), 412
+        except jwt.ExpiredSignatureError:
+            return make_error_page('JWT is expired', str(request.url)), 412
+        except jwt.InvalidIssuerError:
+            return make_error_page('JWT is issued by a wrong issuer', str(request.url)), 412
+        except jwt.InvalidAudienceError:
+            return make_error_page('JWT is issued for another audience', str(request.url)), 412
+    return str(request.args)
+</pre>
+</div></div><p>
+Немножко скриншотов. Главная страница:
+
+</p><img src="https://habrastorage.org/files/0f0/c99/2ac/0f0c992ac8344342be42cb40c3f38b55.png" alt="image"/>
+<p>
+Печенька свежая, в чём можно убедиться на странице /status:
+
+</p><img src="https://habrastorage.org/files/26f/029/bd4/26f029bd49814215b166b97e3fd4c191.png" alt="image"/>
+<p>
+last_good_auth из krb-переменных обновился, так как любой переход между страницами вызывает аутентификацию пользователя через krb-тикет. В jwt параметры exp и nbf не обновились, потому как куку никто и не обновлял. А вот что будет, если кукис удалить:
+
+</p><img src="https://habrastorage.org/files/e61/345/e47/e61345e47e76420fbb60381e225ca215.png" alt="image"/>
+<p>
+Ну и самое интересное — аутентификация в стороннем приложении. Для демонстрации было написано маленькое и уродливое приложение, которое умеет прочитать кукис и показать либо страницу с данными из JWT, либо страницу с ошибкой. Оно настолько маленькое и настолько уродливое, что я просто весь код выложу сюда:
+
+</p><div class="spoiler"><b class="spoiler_title">demo, __init__.py</b><div class="spoiler_text"><pre>
+import jwt
+import logging.config
+from datetime import datetime, timedelta
+
+from flask import Flask, redirect, render_template, get_flashed_messages
+from flask_login import LoginManager, UserMixin, login_required, current_user
+
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'the session is unavailable because no secret key was set.'
+
+login_manager = LoginManager()
+login_manager.init_app(app)
+
+key = '''-----BEGIN EC PRIVATE KEY-----
+-----END EC PRIVATE KEY-----'''
+
+hh_pubkey = '''-----BEGIN PUBLIC KEY-----
+-----END PUBLIC KEY-----'''
+
+logging.config.fileConfig('logging.conf')
+
+
+class JWTPoweredUser(UserMixin):
+    def __init__(self, fullname, uid, groups):
+        for attr in [fullname, uid, groups]:
+            if attr is None:
+                raise AttributeError('%s cannot be None' % attr.__name__)
+        self.fullname = fullname
+        self.uid = uid
+        self.groups = groups
+
+    def is_anonymous(self):
+        return False
+
+    def is_active(self):
+        return True
+
+    def is_authenticated(self):
+        return True
+
+    def get_id(self):
+        return unicode(self.uid)
+
+
+@login_manager.request_loader
+def load_user_from_request(req):
+    cookie = req.cookies.get('gsk_auth')
+    if cookie is None:
+        login_manager.login_message = 'no cookie'
+        return None
+    try:
+        tokens = jwt.decode(cookie, hh_pubkey, issuer='gsk:hogwartshat', audience='gsk:all')
+    except jwt.ExpiredSignatureError:
+        login_manager.login_message = 'expired'
+        return None
+    except jwt.DecodeError:
+        login_manager.login_message = 'decode error'
+        return None
+    except jwt.InvalidIssuerError:
+        login_manager.login_message = 'invalid issuer'
+        return None
+    except jwt.InvalidAudienceError:
+        login_manager.login_message = 'invalid audience'
+        return None
+    return JWTPoweredUser(tokens.get('fullname'), tokens.get('uid'), tokens.get('groups'))
+
+
+@login_manager.unauthorized_handler
+def unauthorized():
+    data = jwt.encode({
+        'iss': 'gsk:test',
+        'aud': 'gsk:hogwartshat',
+        'nbf': datetime.utcnow(),
+        'exp': datetime.utcnow() + timedelta(minutes=1),
+        'return_url': 'http://jwttest.gsk.loc'
+    }, key, algorithm='ES512')
+    logging.debug('jwt request: %s' % data)
+    url = 'http://hh.gsk.loc/return_to?appid=test&amp;data=%s' % data
+    logging.debug('jwt return_to: %s' % url)
+    page = render_template(
+        'error.html',
+        error=login_manager.login_message,
+        url=url
+    )
+    logging.debug('jwt page: %s' % page)
+    return page, 403
+
+
+@app.route('/', methods=['GET'])
+@login_required
+def index():
+    return render_template('index.html', user=current_user)
+</pre>
+</div></div><p>
+Суть та же — кастомный request_loader проверяет токен, а если с ним что-то не так — возвращает None, что заставляет Flask-Login выполнить unauthorized_handler, который тоже кастомный.
+</p><p>
+Демо без cookie:
+
+</p><img src="https://habrastorage.org/files/a15/733/a59/a15733a5923f44b59bba9b55673f40ac.png" alt="image"/>
+<p>
+После похода за печеньками:
+
+</p><img src="https://habrastorage.org/files/bd9/664/9e4/bd96649e489746aa8a84081adfa2bb37.png" alt="image"/>
+<p>
+Естественно, никто не запрещает редирект сделать автоматическим, вместо показа 403. Более того, демо-приложение изначально так и было написано, но затем для наглядности была прикручена страница с картинками.
+</p><p>
+Можно ещё поиздеваться над аутентификатором, подставляя ему в параметр запроса data всякий мусор, в том числе устаревшие и/или имеющие некорректные парамеры iss/aud токены — он всё успешно жуёт и ругается. Остаётся последняя нерешённая проблема — как сообщить желающему аутентификации приложению об ошибке? На данный момент рабочая мысль — передавать в запросе URL-callback, на который будет отправлен отчёт об ошибке. Мысль пока единственная, поэтому реализовывать не тороплюсь.
+</p><p>
+Вторая нерешённая проблема — это selinux. Так как модуль cryptography использует нативные библиотеки, их надо все пометить типом lib_t. Видимо, не все ещё нашёл, так что пока что просто отключил selinux. Добавляю определения типов для файлов через semanage fcontext -a -t &lt;тип&gt; '&lt;regex-путь&gt;'.
+</p><p>
+Если кого-то заинтересовал полный исходный код, скачать можно </p><a href="https://drive.google.com/file/d/0B3nBxG8DDnSdb3dYOWdyUWp5ZFU">здесь</a><p>. Лицензия — делайте что хотите; если код вам пригодится — то и хорошо.
+</p><p>
+Ругайте.
+
+      
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

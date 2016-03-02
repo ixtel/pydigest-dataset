@@ -1,0 +1,428 @@
+<html><body><div><section class="post">
+                <header class="post-header">
+                    <h1 class="article-title">What happens when we hit the speed limit of python</h1>
+                        <p class="post-meta">
+                            Tags:                                 <a class="post-category" href="http://haridas.in/tag/python.html">python</a>
+                                <a class="post-category" href="http://haridas.in/tag/networking.html">networking</a>
+                                <a class="post-category" href="http://haridas.in/tag/tcp.html">tcp</a>
+                        </p>
+
+
+<a href="http://twitter.com/share" class="twitter-share-button" data-count="horizontal" data-via="haridas_n">
+    Tweet
+</a>
+
+
+
+
+<p class="g-plusone" data-size="medium"/>
+
+
+                        <p class="post-date">
+                            in <a href="http://haridas.in/category/blog.html">blog</a> · Sat 04 October 2014
+                        </p>
+                </header>
+            </section>
+            <p>Python is a beautiful language but we know the limitations of the
+python compared with compiled language. So here I'm explaining a scenario
+where python was not the ideal choice.</p>
+<p>We are using python for network programming, specifically a TCP client/server
+program which read packets from another C based server. We picked python because
+on the requirements the traffic volume wasn't huge enough to consider compiled
+languages like C/C++ or Java, and we are already using python so more comfortable
+with it.</p>
+<div class="section" id="the-network-topology">
+<h2>The network topology</h2>
+<div class="highlight"><pre>Network =&gt; TCP Server A =&gt; TCP Server B ( Do some operation.) ==&gt; Network.
+
+Where :-
+    Server A is implemented in C.
+    Server B is the one we implemented.
+</pre></div>
+<p>The data flowing from Server A to Server B via TCP. The Server B is implemented
+in python for now. This setup was running for more than a year without any
+problems or crashing. Then it started showing problems. The Server B crashing
+sometime because of the socket connection between the Server A and Server
+B getting closed by the Server A, We don't know why. Bellow listed are the errors
+that we are getting, one interesting thing is; these two errors won't happen
+together, some time Errno 104, some time Errno 107.</p>
+<blockquote>
+<ol class="arabic simple">
+<li>Errno: 104 - Peer closed the socket connection.</li>
+<li>Errno: 107 - Transport endpoint closed.</li>
+</ol>
+</blockquote>
+<p>I initially thought this was happening because of python's long running process
+exiting due to memory overflow or some other reasons. We thought this because
+python's reputation as a long running daemon is not great. Then we figure
+out that long running daemon wasn't the reason for this issue, since the main
+python process wasn't consuming more RAM and it's very stable in memory usage.
+Our python server using very simple data structures, so python VM very
+efficiently handling the Memory.</p>
+<p>Then I started to look into other areas of program, by changing the settings
+and tuning parameters to see any of it fixes the issue. All of the options
+seems to work for a while but it throws the same error after few days.
+I was stuck and no idea about the issue and spend around a week to go through
+the program's in and out to see any possible causes. But no clue from it.</p>
+<p>Finally Stack Overflow came into help, IRC wasn't helpful for these type of very
+specific issues. Programmers can't live without Google and Stack Overflow.
+I put the question on the SO, people helped me to make the question better by
+adding the TCP traces picked up using <tt class="docutils literal">tcpdump</tt>. With in hours I got the
+answer I was looking for. It's mainly due the python socket reading related.
+In the Python side we are not clearing the TCP packets from the receive buffer
+of TCP socket completely, only reading few bytes (300B to 10KB) at a time.
+So which causing the Python server to send receive window size flag of TCP
+protocol as ZERO for multiple times In the heavy traffic period.
+This might triggering this issue. That was the idea I got from the stack Overflow.</p>
+<p>You can see the <a class="reference external" href="http://stackoverflow.com/questions/22142730/tcp-connection-reset-by-peer-and-transport-end-point-is-not-connected">stackOverflow post</a>, I explained more technical
+details on the SO question, please have a look on it to get more details about
+the issue and sample tcpdump trace file to see what was happened on the network.</p>
+<p>The problem on the python side is that,  it's a single threaded server which
+reading the data from the socket, one thing we are right now not doing is reading
+until socket is empty due to some implementation restrictions. From the SO
+answer I got some quick solutions to try,</p>
+<ol class="arabic simple">
+<li>Remove unwanted codes from the main loop, so the total time taken to process
+one socket read would be as small as possible.</li>
+<li>Tweak with the Kernel parameters for the TCP sending and receiving buffer
+size.</li>
+<li>Improve the Code base or re-implement it in C completely or do the main part as
+C extension.</li>
+</ol>
+<p>The method 1 and 2 was easy go ahead with, So I did it right away. It gives
+considerable difference and the crashes reduced considerably. But still it
+happened once or twice. So I know that it's not enough and need reimplementation
+of the parts which causing this problem. But we are holding  on the
+reimplementation since it will take lot of time to change the existing stuff.
+Any way the current changes give enough time to try more things to improve the
+existing code and investigate the problem more.</p>
+<p>Mean while I did some more investigation locally to understand the issue more.
+From that what I understood was, when the network is heavily loaded the Python
+server side not clearing the traffic quick enough and which forcing the remote server
+to close the TCP socket (Not yet found why it's closing it). Right after the
+socket is closed on the remote end,  Python side of the code might be trying
+<cite>socket.send</cite> or <cite>socket.recv</cite> and it will fail since no active socket. So in
+the beginning I mentioned that I'm getting two errors, this is
+because some time right after the remote server closed the socket, the next
+socket interaction in the python side may be <cite>socket.send</cite> which was triggering the
+error <tt class="docutils literal">Errno 104</tt>. If it was <cite>socket.recv</cite> it would have been <tt class="docutils literal">Errno 107</tt>.</p>
+<p>One other thing I learned after this was that, the TCP server usually handles
+the slow remote servers by blocking the new massage write into
+the sending buffer. In my environment I understood the remote server A
+is not blocking the write(Non-blocking socket) instead closing the socket( This
+could be due to timeout).If the TCP server has option to cache the extra
+packets into disk then it could have handled this peak traffic period.</p>
+</div>
+<div class="section" id="final-thoughts">
+<h2>Final thoughts</h2>
+<p>If these options are there with the TCP server that I was handling, this problem
+couldn't have happened. So finally now I can say that Python
+could have handled this situation if the traffic spikes some times only - In
+our case that was the situation. Python couldn't have done it if the rate of
+server is more than the rate at which Python can clear the socket backlog.</p>
+<p>Update (02-May-2014):-</p>
+<p>Please check out this <a class="reference external" href="http://www.reddit.com/r/Python/comments/24jaxr/what_happens_when_we_hit_the_speed_limit_of_python/#ch7rd9y">reddit</a> discussion about this post, which give you more
+insight into the problem and possible solutions.</p>
+<p>Update ( 03-May-2014):-</p>
+</div>
+<div class="section" id="simulate-the-production-environment">
+<h2>Simulate the Production Environment</h2>
+<p>So finally I got the working sample to simulate my server and client
+behaviour. This was only possible from the encouragement I got from reddit and
+twitter for my this blog entry. Thank you guys.</p>
+<p>Here I created one C tcp sample server(tcp_server.c), which simulate my actual C
+server in the production environment. And one Python TCP client(tcp_server.py)
+which simulate the TCP socket reading operation in the production Python server
+implementation.</p>
+<div class="highlight"><pre><span class="c"># Python server tcp_server.py</span>
+
+<span class="kn">from</span> <span class="nn">optparse</span> <span class="kn">import</span> <span class="n">OptionParser</span>
+<span class="kn">import</span> <span class="nn">socket</span>
+<span class="kn">import</span> <span class="nn">time</span>
+<span class="kn">import</span> <span class="nn">select</span>
+
+<span class="n">PORT</span> <span class="o">=</span> <span class="mi">8000</span>
+<span class="n">HOST</span> <span class="o">=</span> <span class="s">"localhost"</span>
+
+
+<span class="k">def</span> <span class="nf">start_tcp_client</span><span class="p">():</span>
+    <span class="sd">"""</span>
+<span class="sd">    Connect to sever and push lot of data.</span>
+<span class="sd">    """</span>
+    <span class="k">print</span> <span class="s">"Starting Client"</span>
+    <span class="n">sock</span> <span class="o">=</span> <span class="n">socket</span><span class="o">.</span><span class="n">socket</span><span class="p">(</span><span class="n">socket</span><span class="o">.</span><span class="n">AF_INET</span><span class="p">,</span> <span class="nb">type</span><span class="o">=</span><span class="n">socket</span><span class="o">.</span><span class="n">SOCK_STREAM</span><span class="p">,</span> <span class="n">proto</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+    <span class="n">sock</span><span class="o">.</span><span class="n">setsockopt</span><span class="p">(</span><span class="n">socket</span><span class="o">.</span><span class="n">SOL_SOCKET</span><span class="p">,</span> <span class="n">socket</span><span class="o">.</span><span class="n">SO_REUSEADDR</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+    <span class="n">sock</span><span class="o">.</span><span class="n">connect</span><span class="p">((</span><span class="n">HOST</span><span class="p">,</span> <span class="n">PORT</span><span class="p">))</span>
+
+    <span class="n">count</span> <span class="o">=</span> <span class="mi">1</span>
+    <span class="k">while</span> <span class="mi">1</span><span class="p">:</span>
+        <span class="k">print</span> <span class="s">"sending "</span> <span class="o">+</span> <span class="nb">str</span><span class="p">(</span><span class="n">count</span><span class="p">)</span>
+        <span class="n">data</span> <span class="o">=</span> <span class="n">sock</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="mi">10</span><span class="p">)</span>
+
+        <span class="c">#</span>
+        <span class="c"># Does some action on the data. and return the response.</span>
+        <span class="c">#</span>
+        <span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="mf">0.5</span><span class="p">)</span>
+
+        <span class="n">sock</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="s">'Hi i got the data'</span><span class="p">)</span>
+        <span class="k">print</span> <span class="n">data</span>
+        <span class="n">count</span> <span class="o">+=</span> <span class="mi">1</span>
+
+
+<span class="k">def</span> <span class="nf">start_tcp_client_with_fix</span><span class="p">():</span>
+    <span class="sd">"""</span>
+<span class="sd">    The TCP client with fix applied. So it will read complete data from</span>
+<span class="sd">    socket and avoid the errors like 'errno 104' or 'errno 107'.</span>
+<span class="sd">    """</span>
+    <span class="k">print</span> <span class="s">"Starting the newly implemented client..."</span>
+    <span class="n">sock</span> <span class="o">=</span> <span class="n">socket</span><span class="o">.</span><span class="n">socket</span><span class="p">(</span><span class="n">socket</span><span class="o">.</span><span class="n">AF_INET</span><span class="p">,</span> <span class="nb">type</span><span class="o">=</span><span class="n">socket</span><span class="o">.</span><span class="n">SOCK_STREAM</span><span class="p">,</span> <span class="n">proto</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+    <span class="n">sock</span><span class="o">.</span><span class="n">setsockopt</span><span class="p">(</span><span class="n">socket</span><span class="o">.</span><span class="n">SOL_SOCKET</span><span class="p">,</span> <span class="n">socket</span><span class="o">.</span><span class="n">SO_REUSEADDR</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+    <span class="n">sock</span><span class="o">.</span><span class="n">connect</span><span class="p">((</span><span class="n">HOST</span><span class="p">,</span> <span class="n">PORT</span><span class="p">))</span>
+
+    <span class="c"># make the socket non-blocking</span>
+    <span class="n">sock</span><span class="o">.</span><span class="n">setblocking</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+
+    <span class="n">count</span> <span class="o">=</span> <span class="mi">1</span>
+    <span class="k">while</span> <span class="mi">1</span><span class="p">:</span>
+        <span class="k">print</span> <span class="s">"sending "</span> <span class="o">+</span> <span class="nb">str</span><span class="p">(</span><span class="n">count</span><span class="p">)</span>
+        <span class="n">data</span> <span class="o">=</span> <span class="s">""</span>
+        <span class="n">t_data</span> <span class="o">=</span> <span class="s">""</span>
+
+        <span class="n">rsock</span><span class="p">,</span> <span class="n">_</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">select</span><span class="o">.</span><span class="n">select</span><span class="p">([</span><span class="n">sock</span><span class="p">],</span> <span class="p">[],</span> <span class="p">[])</span>
+        <span class="k">if</span> <span class="n">rsock</span><span class="p">:</span>
+            <span class="n">rsock</span> <span class="o">=</span> <span class="n">rsock</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="k">while</span><span class="p">(</span><span class="mi">1</span><span class="p">):</span>
+                    <span class="n">t_data</span> <span class="o">=</span> <span class="n">rsock</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="mi">1024</span><span class="p">)</span>
+                    <span class="n">data</span> <span class="o">+=</span> <span class="n">t_data</span>
+            <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">ex</span><span class="p">:</span>
+                <span class="k">if</span> <span class="n">ex</span><span class="o">.</span><span class="n">errno</span> <span class="o">==</span> <span class="mi">11</span><span class="p">:</span>  <span class="c"># EAGAIN</span>
+                    <span class="c"># Nothing more to read;</span>
+                    <span class="k">pass</span>
+                <span class="k">else</span><span class="p">:</span>
+                    <span class="k">raise</span> <span class="n">ex</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">continue</span>
+        <span class="c">#</span>
+        <span class="c"># Doese some action on the package `data`</span>
+        <span class="c">#</span>
+        <span class="k">print</span> <span class="s">"Handled {} bytes"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">data</span><span class="p">))</span>
+        <span class="n">rsock</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">data</span><span class="p">)))</span>
+
+        <span class="n">count</span> <span class="o">+=</span> <span class="mi">1</span>
+
+<span class="k">if</span> <span class="n">__name__</span> <span class="o">==</span> <span class="s">"__main__"</span><span class="p">:</span>
+
+    <span class="n">parser</span> <span class="o">=</span> <span class="n">OptionParser</span><span class="p">()</span>
+
+    <span class="n">parser</span><span class="o">.</span><span class="n">add_option</span><span class="p">(</span><span class="s">"-c"</span><span class="p">,</span> <span class="s">"--client"</span><span class="p">,</span> <span class="n">action</span><span class="o">=</span><span class="s">"store_true"</span><span class="p">,</span>
+                      <span class="n">dest</span><span class="o">=</span><span class="s">"new_client"</span><span class="p">,</span>
+                      <span class="n">default</span><span class="o">=</span><span class="bp">False</span><span class="p">,</span>
+                      <span class="n">help</span><span class="o">=</span><span class="s">"Start the new client with fix applied."</span><span class="p">)</span>
+
+    <span class="n">options</span><span class="p">,</span> <span class="n">args</span> <span class="o">=</span> <span class="n">parser</span><span class="o">.</span><span class="n">parse_args</span><span class="p">()</span>
+    <span class="n">new_client</span> <span class="o">=</span> <span class="n">options</span><span class="o">.</span><span class="n">new_client</span>
+
+    <span class="k">if</span> <span class="n">new_client</span><span class="p">:</span>
+        <span class="n">start_tcp_client_with_fix</span><span class="p">()</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">start_tcp_client</span><span class="p">()</span>
+</pre></div>
+<div class="highlight"><pre><span class="cm">/*</span>
+<span class="cm">    tcp_server.c - Implements the TCP server in my production environment.</span>
+<span class="cm">*/</span>
+
+<span class="cp">#include &lt;stdio.h&gt;</span>
+<span class="cp">#include &lt;stdlib.h&gt;</span>
+<span class="cp">#include &lt;stdlib.h&gt;</span>
+<span class="cp">#include &lt;string.h&gt;</span>
+<span class="cp">#include &lt;unistd.h&gt;</span>
+<span class="cp">#include &lt;errno.h&gt;</span>
+
+<span class="cp">#include &lt;netdb.h&gt;</span>
+<span class="cp">#include &lt;sys/types.h&gt;</span>
+<span class="cp">#include &lt;sys/socket.h&gt;</span>
+<span class="cp">#include &lt;arpa/inet.h&gt;</span>
+<span class="cp">#include &lt;netinet/in.h&gt;</span>
+<span class="cp">#include &lt;sys/wait.h&gt;</span>
+<span class="cp">#include &lt;fcntl.h&gt;</span>
+
+
+<span class="cp">#define PORT "8000"</span>
+<span class="cp">#define HOST "127.0.0.1"</span>
+<span class="cp">#define MAX_LISTEN 5</span>
+<span class="cp">#define SIZE 512</span>
+
+
+<span class="kt">void</span> <span class="o">*</span><span class="nf">get_in_addr</span><span class="p">(</span><span class="k">struct</span> <span class="n">sockaddr</span> <span class="o">*</span><span class="n">sa</span><span class="p">){</span>
+    <span class="k">if</span><span class="p">(</span><span class="n">sa</span><span class="o">-&gt;</span><span class="n">sa_family</span> <span class="o">==</span> <span class="n">AF_INET</span><span class="p">){</span>
+        <span class="k">return</span> <span class="o">&amp;</span><span class="p">(((</span><span class="k">struct</span> <span class="n">sockaddr_in</span><span class="o">*</span><span class="p">)</span><span class="n">sa</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">sin_addr</span><span class="p">);</span>
+    <span class="p">}</span>
+
+    <span class="k">return</span> <span class="o">&amp;</span><span class="p">(((</span><span class="k">struct</span> <span class="n">sockaddr_in6</span><span class="o">*</span><span class="p">)</span><span class="n">sa</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">sin6_addr</span><span class="p">);</span>
+<span class="p">}</span>
+
+
+<span class="kt">int</span> <span class="nf">send_sock_msg</span><span class="p">(</span><span class="kt">int</span> <span class="n">sock_fd</span><span class="p">){</span>
+    <span class="k">struct</span> <span class="n">sockaddr_in</span> <span class="n">receiver_addr</span><span class="p">;</span>
+
+    <span class="kt">char</span> <span class="n">line</span><span class="p">[</span><span class="mi">15</span><span class="p">]</span> <span class="o">=</span> <span class="s">"Hello World!"</span><span class="p">;</span>
+    <span class="k">struct</span> <span class="n">msghdr</span> <span class="n">msg</span><span class="p">;</span>
+    <span class="k">struct</span> <span class="n">iovec</span> <span class="n">iov</span><span class="p">;</span>
+
+    <span class="c1">//sock_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);</span>
+
+    <span class="n">receiver_addr</span><span class="p">.</span><span class="n">sin_family</span> <span class="o">=</span> <span class="n">AF_INET</span><span class="p">;</span>
+    <span class="n">receiver_addr</span><span class="p">.</span><span class="n">sin_addr</span><span class="p">.</span><span class="n">s_addr</span> <span class="o">=</span> <span class="n">htonl</span><span class="p">(</span><span class="n">INADDR_LOOPBACK</span><span class="p">);</span>
+    <span class="n">receiver_addr</span><span class="p">.</span><span class="n">sin_port</span> <span class="o">=</span> <span class="n">htons</span><span class="p">(</span><span class="mi">8000</span><span class="p">);</span>
+
+    <span class="n">msg</span><span class="p">.</span><span class="n">msg_name</span> <span class="o">=</span> <span class="o">&amp;</span><span class="n">receiver_addr</span><span class="p">;</span>
+    <span class="n">msg</span><span class="p">.</span><span class="n">msg_namelen</span> <span class="o">=</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">receiver_addr</span><span class="p">);</span>
+    <span class="n">msg</span><span class="p">.</span><span class="n">msg_iov</span> <span class="o">=</span> <span class="o">&amp;</span><span class="n">iov</span><span class="p">;</span>
+    <span class="n">msg</span><span class="p">.</span><span class="n">msg_iovlen</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+    <span class="n">msg</span><span class="p">.</span><span class="n">msg_iov</span><span class="o">-&gt;</span><span class="n">iov_base</span> <span class="o">=</span> <span class="n">line</span><span class="p">;</span>
+    <span class="n">msg</span><span class="p">.</span><span class="n">msg_iov</span><span class="o">-&gt;</span><span class="n">iov_len</span> <span class="o">=</span> <span class="mi">13</span><span class="p">;</span>
+    <span class="n">msg</span><span class="p">.</span><span class="n">msg_control</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="n">msg</span><span class="p">.</span><span class="n">msg_controllen</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="n">msg</span><span class="p">.</span><span class="n">msg_flags</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+
+    <span class="k">return</span> <span class="n">sendmsg</span><span class="p">(</span><span class="n">sock_fd</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">msg</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">int</span> <span class="nf">main</span><span class="p">(</span><span class="kt">void</span><span class="p">){</span>
+
+    <span class="kt">int</span> <span class="n">sd</span><span class="p">,</span> <span class="n">new_sd</span><span class="p">;</span>
+    <span class="kt">int</span> <span class="n">yes</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+    <span class="kt">int</span> <span class="n">rv</span><span class="p">;</span>
+    <span class="kt">int</span> <span class="n">ttl</span> <span class="o">=</span> <span class="mi">8</span><span class="p">;</span>
+    <span class="kt">char</span> <span class="n">s</span><span class="p">[</span><span class="n">INET6_ADDRSTRLEN</span><span class="p">];</span>
+
+    <span class="k">struct</span> <span class="n">sockaddr_in</span> <span class="n">addr</span><span class="p">;</span>
+    <span class="k">struct</span> <span class="n">addrinfo</span> <span class="n">hints</span><span class="p">,</span> <span class="o">*</span><span class="n">serverinfo</span><span class="p">,</span> <span class="o">*</span><span class="n">p</span><span class="p">;</span>
+    <span class="k">struct</span> <span class="n">sockaddr_storage</span> <span class="n">their_addr</span><span class="p">;</span> <span class="c1">// COnnectors address info.</span>
+    <span class="kt">socklen_t</span> <span class="n">sin_size</span><span class="p">;</span>
+
+    <span class="n">memset</span><span class="p">(</span><span class="o">&amp;</span><span class="n">hints</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">hints</span><span class="p">));</span>
+    <span class="n">hints</span><span class="p">.</span><span class="n">ai_family</span> <span class="o">=</span> <span class="n">AF_UNSPEC</span><span class="p">;</span>
+    <span class="n">hints</span><span class="p">.</span><span class="n">ai_socktype</span> <span class="o">=</span> <span class="n">SOCK_STREAM</span><span class="p">;</span>
+    <span class="n">hints</span><span class="p">.</span><span class="n">ai_flags</span> <span class="o">=</span> <span class="n">AI_PASSIVE</span><span class="p">;</span>
+
+    <span class="k">if</span><span class="p">((</span><span class="n">rv</span> <span class="o">=</span> <span class="n">getaddrinfo</span><span class="p">(</span><span class="nb">NULL</span><span class="p">,</span> <span class="n">PORT</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">hints</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">serverinfo</span><span class="p">))</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">){</span>
+        <span class="n">fprintf</span><span class="p">(</span><span class="n">stderr</span><span class="p">,</span> <span class="s">"getaddrinfo: %s</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">gai_strerror</span><span class="p">(</span><span class="n">rv</span><span class="p">));</span>
+        <span class="k">return</span> <span class="mi">1</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="c1">// Loop through different results and pick up the first one.</span>
+    <span class="k">for</span><span class="p">(</span> <span class="n">p</span> <span class="o">=</span> <span class="n">serverinfo</span><span class="p">;</span> <span class="n">p</span> <span class="o">!=</span> <span class="nb">NULL</span><span class="p">;</span> <span class="n">p</span> <span class="o">=</span> <span class="n">p</span><span class="o">-&gt;</span><span class="n">ai_next</span><span class="p">){</span>
+
+        <span class="k">if</span> <span class="p">((</span><span class="n">sd</span> <span class="o">=</span> <span class="n">socket</span><span class="p">(</span><span class="n">AF_INET</span><span class="p">,</span> <span class="n">SOCK_STREAM</span><span class="p">,</span> <span class="mi">0</span><span class="p">))</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">){</span>
+            <span class="n">perror</span><span class="p">(</span><span class="s">"server: socket"</span><span class="p">);</span>
+            <span class="k">continue</span><span class="p">;</span>
+        <span class="p">}</span>
+
+        <span class="k">if</span><span class="p">((</span><span class="n">fcntl</span><span class="p">(</span><span class="n">sd</span><span class="p">,</span> <span class="n">F_SETFL</span><span class="p">,</span> <span class="n">O_NONBLOCK</span><span class="p">))</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">){</span>
+            <span class="n">perror</span><span class="p">(</span><span class="s">"error:fnctl"</span><span class="p">);</span>
+            <span class="n">exit</span><span class="p">(</span><span class="n">EXIT_FAILURE</span><span class="p">);</span>
+        <span class="p">}</span>
+
+        <span class="k">if</span><span class="p">(</span><span class="n">setsockopt</span><span class="p">(</span><span class="n">sd</span><span class="p">,</span> <span class="n">SOL_SOCKET</span><span class="p">,</span> <span class="n">SO_REUSEADDR</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">yes</span><span class="p">,</span>
+                    <span class="k">sizeof</span><span class="p">(</span><span class="kt">int</span><span class="p">))</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span><span class="p">){</span>
+            <span class="n">perror</span><span class="p">(</span><span class="s">"setsockopt"</span><span class="p">);</span>
+            <span class="n">exit</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span>
+        <span class="p">}</span>
+
+        <span class="k">if</span><span class="p">(</span><span class="n">bind</span><span class="p">(</span><span class="n">sd</span><span class="p">,</span> <span class="n">p</span><span class="o">-&gt;</span><span class="n">ai_addr</span><span class="p">,</span> <span class="n">p</span><span class="o">-&gt;</span><span class="n">ai_addrlen</span><span class="p">)</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span><span class="p">){</span>
+            <span class="n">close</span><span class="p">(</span><span class="n">sd</span><span class="p">);</span>
+            <span class="n">perror</span><span class="p">(</span><span class="s">"server: bind"</span><span class="p">);</span>
+            <span class="k">continue</span><span class="p">;</span>
+        <span class="p">}</span>
+
+        <span class="k">break</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="k">if</span> <span class="p">(</span><span class="n">p</span> <span class="o">==</span> <span class="nb">NULL</span><span class="p">){</span>
+        <span class="n">fprintf</span><span class="p">(</span><span class="n">stderr</span><span class="p">,</span> <span class="s">"server: failed to bind </span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+        <span class="k">return</span> <span class="mi">2</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="n">freeaddrinfo</span><span class="p">(</span><span class="n">serverinfo</span><span class="p">);</span> <span class="c1">// No need for it further.</span>
+
+    <span class="k">if</span><span class="p">(</span><span class="n">listen</span><span class="p">(</span><span class="n">sd</span><span class="p">,</span> <span class="n">MAX_LISTEN</span><span class="p">)</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span><span class="p">){</span>
+        <span class="n">perror</span><span class="p">(</span><span class="s">"listen"</span><span class="p">);</span>
+        <span class="n">exit</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span>
+    <span class="p">}</span>
+
+
+    <span class="n">printf</span><span class="p">(</span><span class="s">"server: waiting for connections...</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+
+    <span class="k">while</span><span class="p">(</span><span class="mi">1</span><span class="p">){</span>
+        <span class="n">sin_size</span> <span class="o">=</span> <span class="k">sizeof</span> <span class="n">their_addr</span><span class="p">;</span>
+        <span class="n">new_sd</span>  <span class="o">=</span> <span class="n">accept</span><span class="p">(</span><span class="n">sd</span><span class="p">,</span> <span class="p">(</span><span class="k">struct</span> <span class="n">sockaddr</span> <span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">their_addr</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">sin_size</span><span class="p">);</span>
+
+        <span class="k">if</span><span class="p">(</span><span class="n">new_sd</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span><span class="p">){</span>
+            <span class="n">perror</span><span class="p">(</span><span class="s">"accept ..."</span><span class="p">);</span>
+            <span class="n">sleep</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span>
+            <span class="k">continue</span><span class="p">;</span>
+        <span class="p">}</span>
+
+        <span class="n">inet_ntop</span><span class="p">(</span><span class="n">their_addr</span><span class="p">.</span><span class="n">ss_family</span><span class="p">,</span>
+                <span class="n">get_in_addr</span><span class="p">((</span><span class="k">struct</span> <span class="n">sockaddr</span> <span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">their_addr</span><span class="p">),</span>
+                <span class="n">s</span><span class="p">,</span> <span class="k">sizeof</span> <span class="n">s</span><span class="p">);</span>
+
+        <span class="n">printf</span><span class="p">(</span><span class="s">"server: got connection from %s </span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">s</span><span class="p">);</span>
+
+        <span class="k">if</span><span class="p">(</span><span class="o">!</span><span class="n">fork</span><span class="p">()){</span> <span class="c1">// This is child process.</span>
+            <span class="c1">// Child doesn't need the listner socket. I'm not sure thought.</span>
+            <span class="n">close</span><span class="p">(</span><span class="n">sd</span><span class="p">);</span>
+            <span class="kt">int</span> <span class="n">count</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="kt">FILE</span> <span class="o">*</span><span class="n">logfile</span> <span class="o">=</span> <span class="n">fopen</span><span class="p">(</span><span class="s">"server.log"</span><span class="p">,</span> <span class="s">"w"</span><span class="p">);</span>
+
+            <span class="k">if</span><span class="p">(</span><span class="n">logfile</span> <span class="o">==</span> <span class="nb">NULL</span><span class="p">){</span>
+                <span class="n">perror</span><span class="p">(</span><span class="s">"logfile open error"</span><span class="p">);</span>
+                <span class="k">return</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">);</span>
+            <span class="p">}</span>
+
+            <span class="cm">/*</span>
+<span class="cm">             * Change the new client socket non-blocking.</span>
+<span class="cm">             *</span>
+<span class="cm">             * This will simulte the server scenario by writing the send</span>
+<span class="cm">             * buffer as much as it can, and returns -1 if it's full. So</span>
+<span class="cm">             * that point the * server is reset the connection by closing</span>
+<span class="cm">             * the socket. So that's the current server behaviour in my</span>
+<span class="cm">             * environment. Check the python client side, how it handling</span>
+<span class="cm">             * to avoid the connection reset by the server.</span>
+<span class="cm">             */</span>
+
+            <span class="k">if</span><span class="p">((</span><span class="n">fcntl</span><span class="p">(</span><span class="n">new_sd</span><span class="p">,</span> <span class="n">F_SETFL</span><span class="p">,</span> <span class="n">O_NONBLOCK</span><span class="p">))</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">){</span>
+                <span class="n">perror</span><span class="p">(</span><span class="s">"error:fnctl"</span><span class="p">);</span>
+                <span class="n">exit</span><span class="p">(</span><span class="n">EXIT_FAILURE</span><span class="p">);</span>
+            <span class="p">}</span>
+
+            <span class="k">while</span><span class="p">(</span><span class="mi">1</span><span class="p">){</span>
+                <span class="kt">int</span> <span class="n">numbytes</span><span class="p">;</span>
+
+                <span class="n">sleep</span><span class="p">(</span><span class="mf">0.1</span><span class="p">);</span>
+
+                <span class="k">if</span><span class="p">((</span><span class="n">numbytes</span> <span class="o">=</span> <span class="n">send_sock_msg</span><span class="p">(</span><span class="n">new_sd</span><span class="p">))</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">){</span>
+                <span class="n">fprintf</span><span class="p">(</span><span class="n">logfile</span><span class="p">,</span> <span class="s">"Kernel sending buffer is full."</span>\
+                       <span class="s">"Closing the connection.: %d %d</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">count</span><span class="p">,</span><span class="n">numbytes</span><span class="p">);</span>
+                <span class="n">close</span><span class="p">(</span><span class="n">new_sd</span><span class="p">);</span>
+                <span class="n">exit</span><span class="p">(</span><span class="n">EXIT_FAILURE</span><span class="p">);</span>
+                <span class="p">}</span>
+
+                <span class="n">fprintf</span><span class="p">(</span><span class="n">logfile</span><span class="p">,</span> <span class="s">"Server sending the msg no: %d %d</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span>
+                        <span class="n">count</span><span class="p">,</span><span class="n">numbytes</span><span class="p">);</span>
+                <span class="n">count</span> <span class="o">++</span><span class="p">;</span>
+            <span class="p">}</span>
+            <span class="n">close</span><span class="p">(</span><span class="n">new_sd</span><span class="p">);</span>
+            <span class="n">exit</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+        <span class="p">}</span>
+
+        <span class="n">close</span><span class="p">(</span><span class="n">new_sd</span><span class="p">);</span> <span class="c1">// Parent doesn't need child's socket.</span>
+    <span class="p">}</span>
+
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</div></body></html>

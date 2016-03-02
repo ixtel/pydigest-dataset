@@ -1,0 +1,50 @@
+<html><body><div><div class="post-text" itemprop="text">
+
+<p>I am attempting to adapt the Jinja2 <a href="https://github.com/mitsuhiko/jinja2/blob/2.8/jinja2/ext.py#L413-L431">WithExtension</a> to produce a generic extension for wrapping a block (followed by some more complex ones).</p>
+
+<p>My objective is to support the following in templates:</p>
+
+<pre><code>{% wrap template='wrapper.html.j2' ... %}
+    &lt;img src="{{ url('image:thumbnail' ... }}"&gt;
+{% endwrap %}
+</code></pre>
+
+<p>And for wrapper.html.j2 to look like something like:</p>
+
+<pre><code>&lt;div&gt;
+    some ifs and stuff
+    {{ content }}
+    more ifs and stuff
+&lt;/div&gt;
+</code></pre>
+
+<p>I believe my example is most of the way there, WithExtension appears to parse the block and then append the AST representation of some <code>{% assign .. %}</code> nodes into the context of the nodes it is parsing.</p>
+
+<p>So I figured I want the same thing, those assignments, followed by an include block, which I'd expect to be able to access those variables when the AST is parsed, and to pass through the block that was wrapped as a variable <code>content</code>.</p>
+
+<p>I have the following thus far:</p>
+
+<pre><code>class WrapExtension(Extension):
+    tags = set(['wrap'])
+
+    def parse(self, parser):
+        node = nodes.Scope(lineno=next(parser.stream).lineno)
+        assignments = []
+        while parser.stream.current.type != 'block_end':
+            lineno = parser.stream.current.lineno
+            if assignments:
+                parser.stream.expect('comma')
+            target = parser.parse_assign_target()
+            parser.stream.expect('assign')
+            expr = parser.parse_expression()
+            assignments.append(nodes.Assign(target, expr, lineno=lineno))
+        content = parser.parse_statements(('name:endwrap',), drop_needle=True)
+        assignments.append(nodes.Name('content', content))
+        assignments.append(nodes.Include(nodes.Template('wrapper.html.j2'), True, False))
+        node.body = assignments
+        return node
+</code></pre>
+
+<p>However, it falls over at my <code>nodes.Include</code> line, I simply get <code>assert frame is None, 'no root frame allowed'</code>. I believe I need to pass AST to <code>nodes.Template</code> rather than a template name, but I don't really know how to parse in additional nodes for the objective of getting AST rather than string output (i.e. renderings) – nor whether this is the right approach. Am I on the right lines, any ideas on how I should go about this?</p>
+    </div>
+    </div></body></html>

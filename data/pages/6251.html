@@ -1,0 +1,164 @@
+<html><body><div><div itemprop="articleBody">
+	<p>I have been an enthusiast of ZeroMQ for quite some time. If there was an opportunity
+that required some sockets on steroids, I would not think twice. Ah, how those three
+messaging pattern were useful (i.e. Request/Reply, Push/Pull, Publish/Subscribe).
+They had the amazing trait of being able to drastically streamline the development of
+distributed systems. And its portability, with wrappers for more than 30 languages,
+brokerlessness and amazing documentation made it a no brainer for me to favour ZeroMQ
+over other messaging alternatives.</p>
+
+	<p>Using <a href="http://zeromq.org/">ZeroMQ</a> in Python with <a href="https://github.com/zeromq/pyzmq">PyZMQ</a>, however, always made me feel like I’m coding in
+C/C++, which I also love by the way. Unfortunately, that lack of <a href="https://github.com/zeromq/pyzmq">PyZMQ</a> <span class="caps">API</span>’s, if I
+may say, “pythonicity”, just felt wrong to me. And by the end of last January, I
+decided to do something about it. So that is how <a href="https://github.com/zmqless/python-zeroless">Zeroless</a> was born.</p>
+<p>My mission was to leverage on <a href="https://github.com/zeromq/pyzmq">PyZMQ</a> to build a more elegant wrapper for <a href="http://zeromq.org/">ZeroMQ</a>.
+Something more aligned with the python way of doing things. And, to a certain degree,
+I have succeeded. However, I have never made a comprehensive effort to publicise
+<a href="https://github.com/zmqless/python-zeroless">Zeroless</a> in any way so, in this post, I hope not only to explain how <a href="https://github.com/zmqless/python-zeroless">Zeroless</a>
+differs from <a href="https://github.com/zeromq/pyzmq">PyZMQ</a> but also to reach a greater audience, that may be as enthusiastic
+about <a href="http://zeromq.org/">ZeroMQ</a> as myself. Therefore, without further ado, here goes some of the design
+decisions I have made for <a href="https://github.com/zmqless/python-zeroless">Zeroless</a>:</p>
+<h1><span class="caps">TCP</span> only for the win</h1>
+<p>Ok, I know <span class="caps">PGM</span>, <span class="caps">INPROC</span> and <span class="caps">IPC</span> have their use cases. <span class="caps">PGM</span> for instance provides a
+Publish/Subscribe specific transport, that scales better than <span class="caps">TCP</span> in the
+Publish/Subscribe use case, as it cut out the <span class="caps">ACK</span> flood publishers gets on
+every new message. There are also some extra reliability, that you also cannot
+find in <span class="caps">TCP</span>. <span class="caps">IPC</span>, on the other hand, is a pattern agnostic way of providing more
+efficient inter-process communication than traditional networking, but is Unix-like
+only. As for <span class="caps">INPROC</span>’s particular case, which efficient applicability is being
+hindered by the Python’s <span class="caps">GIL</span>, I do not see why bother with it.</p>
+<p>Nevertheless, I have a feeling that the vast majority of the users, like myself,
+are quite good with just <span class="caps">TCP</span>. Which is exactly what you need when building really
+horizontally scalable networked services, especially in this time of a renewed
+vision for <span class="caps">SOA</span>, with microservices having a lot of attention. So let us just use
+<span class="caps">TCP</span> and free our minds to think about other matters.</p>
+<h1>No more contexts</h1>
+<p><a href="https://github.com/zeromq/pyzmq">PyZMQ</a> applications require users to create a context, in order to instantiate
+sockets. Technically, a context serves as a container for all your sockets and
+usually one of it, per process, is just what you need. As a matter of fact, you
+could have more, but why bother your runtime with more event loops, for your
+socket stuff, when one suffices? Also, if you are using <span class="caps">INPROC</span> as transport,
+you may also need to share a context for the communication to happen. But again,
+if <span class="caps">INPROC</span> is is not that useful in Python as aforementioned, do we really need
+explicitly manage contexts?</p>
+<p>Not at all, so that is why in <a href="https://github.com/zmqless/python-zeroless">Zeroless</a> you just have to manage Clients, sockets
+that connect, and Servers, sockets that bind, without concerning yourself with
+contexts ;). For instance, in order to instantiate a client you would:</p>
+<table class="codehilitetable"><tr><td class="linenos"/><td class="code"><div class="codehilite"><pre><span class="n">client</span> <span class="o">=</span> <span class="n">Client</span><span class="p">()</span>
+
+<span class="c"># You could use connect_local(port=12345) as well</span>
+<span class="n">client</span><span class="o">.</span><span class="n">connect</span><span class="p">(</span><span class="n">ip</span><span class="o">=</span><span class="s">'127.0.0.1'</span><span class="p">,</span> <span class="n">port</span><span class="o">=</span><span class="mi">12345</span><span class="p">)</span>
+</pre></div>
+</td></tr></table>
+
+<p>Similarly, for servers, you would:</p>
+<table class="codehilitetable"><tr><td class="linenos"/><td class="code"><div class="codehilite"><pre><span class="n">server</span> <span class="o">=</span> <span class="n">Server</span><span class="p">(</span><span class="n">port</span><span class="o">=</span><span class="mi">12345</span><span class="p">)</span> <span class="c"># No need to call bind here</span>
+</pre></div>
+</td></tr></table>
+
+<p>Finally, note that no real connect/bind will occur unless you instantiate a
+messaging pattern, which are the subject of our next topic.</p>
+<h1>Like a factory method pattern</h1>
+<p>One thing I never liked about <a href="https://github.com/zeromq/pyzmq">PyZMQ</a> sockets’s instantiation is that we have to call
+a method called socket, which receives an enum representing the type of the socket.
+Why don’t they just provide a separate method for every socket possible, like as if
+it was a factory method pattern kind of interface. That would allow a more
+straightforward experience for developers, that could then rely on their favourite
+<span class="caps">IDE</span>’s code complete to quickly understand what kind of sockets and parameters they
+could set. That enum approach, however, will probably make your users go to the
+documentation, but solely because of the way the <a href="https://github.com/zeromq/pyzmq">PyZMQ</a>‘s interface is.</p>
+<p>In <a href="https://github.com/zmqless/python-zeroless">Zeroless</a>, we fixed that, so you don’t need to check the documentation every
+time you want to instantiate a socket, instead just have a descent code complete
+support and you are done. For instance, compare how you would instantiate a
+publisher socket with <a href="https://github.com/zmqless/python-zeroless">Zeroless</a>:</p>
+<table class="codehilitetable"><tr><td class="linenos"/><td class="code"><div class="codehilite"><pre><span class="n">pub</span> <span class="o">=</span> <span class="n">Server</span><span class="p">(</span><span class="n">port</span><span class="o">=</span><span class="mi">12345</span><span class="p">)</span><span class="o">.</span><span class="n">pub</span><span class="p">(</span><span class="n">topic</span><span class="o">=</span><span class="n">b</span><span class="s">''</span><span class="p">)</span>
+</pre></div>
+</td></tr></table>
+
+<h1>Connections awareness</h1>
+<p>One of the questions you may ask is to whom your clients are connected to. And
+for that, <a href="https://github.com/zeromq/pyzmq">PyZMQ</a> cannot help you. Unless you manage that list off connections by
+yourself, you wouldn’t be able to get it afterwards. Therefore, in <a href="https://github.com/zmqless/python-zeroless">Zeroless</a>,
+we provide an addresses property, so that you can retrieve all your ip and port
+pairs as a list of tuples. But that is only for clients of course, as there is
+no way to know which sockets are connected to your server without building
+some sort of infrastructure for that yourself.</p>
+<h1>Subscribe should not be tricky</h1>
+<p>In terms of interface, the subscribe case is particularly problematic in <a href="https://github.com/zeromq/pyzmq">PyZMQ</a>.
+One must use the not so intuitive <a href="https://zeromq.github.io/pyzmq/api/zmq.html#zmq.Context.setsockopt">setsockopt()</a> method, in
+order to define the topics it subscribes to. Like in the following snippet:</p>
+<table class="codehilitetable"><tr><td class="linenos"/><td class="code"><div class="codehilite"><pre><span class="n">socket</span> <span class="o">=</span> <span class="n">context</span><span class="o">.</span><span class="n">socket</span><span class="p">(</span><span class="n">zmq</span><span class="o">.</span><span class="n">SUB</span><span class="p">)</span>
+<span class="n">socket</span><span class="o">.</span><span class="n">setsockopt</span><span class="p">(</span><span class="n">zmq</span><span class="o">.</span><span class="n">SUBSCRIBE</span><span class="p">,</span> <span class="n">b</span><span class="s">""</span><span class="p">)</span> <span class="c"># Subscribe to all topics</span>
+</pre></div>
+</td></tr></table>
+
+<p>I believe most new <a href="http://zeromq.org/">ZeroMQ</a>‘s user get this wrong at first, as they supose no
+topic means you are subscribed to all topics, and keep asking himself/herself why
+that damn subscriber socket does not receives your published messages.</p>
+<p>In <a href="https://github.com/zmqless/python-zeroless">Zeroless</a>, we fixed that, so that you don’t have to instantiate your socket
+and set something as essential as a topic, in the subscribe case, via some kind
+of “obscure” method. Just compare how you would instantiate a subscriber socket
+with <a href="https://github.com/zmqless/python-zeroless">Zeroless</a>:</p>
+<table class="codehilitetable"><tr><td class="linenos"/><td class="code"><div class="codehilite"><pre><span class="n">listen_for_pub</span> <span class="o">=</span> <span class="n">client</span><span class="o">.</span><span class="n">sub</span><span class="p">(</span><span class="n">topics</span><span class="o">=</span><span class="p">[</span><span class="n">b</span><span class="s">''</span><span class="p">])</span>
+</pre></div>
+</td></tr></table>
+
+<h1>Generators and high-order functions as first class citizens</h1>
+<p><a href="https://github.com/zeromq/pyzmq">PyZMQ</a> sockets tend to use <a href="https://zeromq.github.io/pyzmq/api/zmq.html#zmq.Socket.send">send()</a> and <a href="https://zeromq.github.io/pyzmq/api/zmq.html#zmq.Socket.recv">recv()</a> methods
+for the message exchange part. However, it always felt wrong to me to do stuff like:</p>
+<table class="codehilitetable"><tr><td class="linenos"/><td class="code"><div class="codehilite"><pre><span class="k">while</span> <span class="bp">True</span><span class="p">:</span>
+    <span class="n">data</span> <span class="o">=</span> <span class="n">socket</span><span class="o">.</span><span class="n">recv</span><span class="p">()</span>
+    <span class="c"># do something with data</span>
+</pre></div>
+</td></tr></table>
+
+<p>That is, if Python has built-in support for iterables, or generators if you prefer,
+why don’t we just do something like:</p>
+<table class="codehilitetable"><tr><td class="linenos"/><td class="code"><div class="codehilite"><pre><span class="n">listen_for_push</span> <span class="o">=</span> <span class="n">Server</span><span class="p">(</span><span class="n">port</span><span class="o">=</span><span class="mi">12345</span><span class="p">)</span><span class="o">.</span><span class="n">pull</span><span class="p">()</span>
+
+<span class="k">for</span> <span class="n">data</span> <span class="ow">in</span> <span class="n">listen_for_push</span><span class="p">:</span>
+    <span class="c"># do something with data</span>
+</pre></div>
+</td></tr></table>
+
+<p>Way more idiomatic to read incoming messages that way, right? As for sending them,
+I also followed a different path.</p>
+<table class="codehilitetable"><tr><td class="linenos"/><td class="code"><div class="codehilite"><pre><span class="n">push</span> <span class="o">=</span> <span class="n">client</span><span class="o">.</span><span class="n">push</span><span class="p">()</span>
+<span class="n">push</span><span class="p">(</span><span class="n">b</span><span class="s">"Msg1"</span><span class="p">)</span>
+</pre></div>
+</td></tr></table>
+
+<p>Therefore, in <a href="https://github.com/zmqless/python-zeroless">Zeroless</a>, every time you instantiate a message pattern that is
+suposed to send messages, use it as a function. Otherwise, treat it as a generator.</p>
+<h1>Multi-part made easy</h1>
+<p>In <a href="https://github.com/zeromq/pyzmq">PyZMQ</a>, if you want to send a multipart message, you have to use the
+<a href="https://zeromq.github.io/pyzmq/api/zmq.html#zmq.Socket.recv_multipart">recv_multipart()</a> and <a href="https://zeromq.github.io/pyzmq/api/zmq.html#zmq.Socket.send_multipart">send_multipart()</a>
+methods. Methods that instead of a single message, will deal with a list of them.
+In <a href="https://github.com/zmqless/python-zeroless">Zeroless</a>, I favoured consistency for a quicker and easier learning path,
+therefore there is no difference between the singlepart and the multipart <span class="caps">API</span>.</p>
+<p>If you want to send a multipart message, just consider that your send function have
+a printf like interface and you are set. So, for instance, if you want to send an
+id separated from your message body, you could:</p>
+<table class="codehilitetable"><tr><td class="linenos"/><td class="code"><div class="codehilite"><pre><span class="n">push</span> <span class="o">=</span> <span class="n">client</span><span class="o">.</span><span class="n">push</span><span class="p">()</span>
+<span class="n">push</span><span class="p">(</span><span class="n">b</span><span class="s">'1'</span><span class="p">,</span> <span class="n">b</span><span class="s">'OK'</span><span class="p">)</span>
+</pre></div>
+</td></tr></table>
+
+<p>Additionally, if someone send you a multipart message, your generator will return a
+tuple with all of its parts. As a result of that, to get the message from the previous
+example you would need to:</p>
+<table class="codehilitetable"><tr><td class="linenos"/><td class="code"><div class="codehilite"><pre><span class="n">listen_for_push</span> <span class="o">=</span> <span class="n">Server</span><span class="p">(</span><span class="n">port</span><span class="o">=</span><span class="mi">12345</span><span class="p">)</span><span class="o">.</span><span class="n">pull</span><span class="p">()</span>
+<span class="k">for</span> <span class="nb">id</span><span class="p">,</span> <span class="n">msg</span> <span class="ow">in</span> <span class="n">listen_for_push</span><span class="p">:</span>
+    <span class="c"># do something with id and msg</span>
+</pre></div>
+</td></tr></table>
+
+<h1>The future</h1>
+<p>Although feature parity was never part of my plans, there still some of <a href="https://github.com/zeromq/pyzmq">PyZMQ</a>‘s
+functionalities I would like to provide in <a href="https://github.com/zmqless/python-zeroless">Zeroless</a>. Like both <a href="https://zeromq.github.io/pyzmq/api/zmq.html#poller">poller</a>
+and <a href="https://zeromq.github.io/pyzmq/api/zmq.devices.html">devices</a> APIs, for instance. So expect more on the way o/. While
+that, if you felt compelled to help shape this project, please clone our <a href="https://github.com/zmqless/python-zeroless.git">repository</a>
+and see our <a href="http://python-zeroless.readthedocs.org/en/latest/development.html#contributing">guidelines</a>.</p>
+</div> 
+
+</div></body></html>

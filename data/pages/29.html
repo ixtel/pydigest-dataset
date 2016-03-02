@@ -1,0 +1,414 @@
+<html><body><div><div class="entry-content">
+                
+                <p>Making thematic maps has traditionally been the preserve of a ‘proper’ <span class="caps">GIS</span>, such as <a href="http://www.esri.com/software/arcgis">ArcGIS</a> or <a href="http://www.qgis.org/en/site/"><span class="caps">QGIS</span></a>. While these tools make it easy to work with shapefiles, and expose a range of common everyday <span class="caps">GIS</span> operations, they aren’t particularly well-suited to exploratory data analysis. In short, if you need to obtain, reshape, and otherwise wrangle data before you use it to make a map, it’s easier to use a data analysis tool (such as <a href="http://pandas.pydata.org">Pandas</a>), and couple it to a plotting library. This tutorial will be demonstrating the use of:</p>
+<ul>
+<li>Pandas</li>
+<li>Matplotlib</li>
+<li>The matplotlib Basemap toolkit, for plotting 2D data on maps</li>
+<li>Fiona, a Python interface to <a href="http://www.gdal.org/ogr/"><span class="caps">OGR</span></a></li>
+<li>Shapely, for analyzing and manipulating planar geometric objects</li>
+<li>Descartes, which turns said geometric objects into matplotlib “patches”</li>
+<li>PySAL, a spatial analysis library</li>
+</ul>
+<p>The approach I’m using here uses an interactive <a href="https://en.wikipedia.org/wiki/REPL"><span class="caps">REPL</span></a> (IPython Notebook) for data exploration and analysis, and the <a href="https://pypi.python.org/pypi/descartes">Descartes</a> package to render individual polygons (in this case, wards in London) as matplotlib patches, before adding them to a matplotlib axes instance. I should stress that many of the plotting operations could be more quickly accomplished, but my aim here is to demonstrate how to precisely control certain operations, in order to achieve e.g. the precise line width, colour, alpha value or label position you want.</p>
+<h2>Package installation</h2>
+<p>This tutorial uses Python 2.7.x, and the following non-stdlib packages are required:</p>
+<ul>
+<li>IPython</li>
+<li>Pandas</li>
+<li>Numpy</li>
+<li>Matplotlib</li>
+<li>Basemap</li>
+<li>Shapely</li>
+<li>Fiona</li>
+<li>Descartes</li>
+<li>PySAL</li>
+</ul>
+<p>The installation of some of these packages can be onerous, and requires a great number of third-party dependencies (<span class="caps">GDAL</span> <span class="amp">&amp;</span> <span class="caps">OGR</span>, C <span class="amp">&amp;</span> <span class="caps">FORTRAN77</span> (yes, really) compilers). If you’re experienced with Python package installation and building software from source, feel free to install these dependencies (if you’re using <span class="caps">OSX</span>, Homebrew and/or <a href="http://www.kyngchaos.com/software/frameworks">Kyngchaos</a> are helpful, particularly for <span class="caps">GDAL</span> <span class="amp">&amp;</span> <span class="caps">OGR</span>), before installing the required packages in a virtualenv, and skipping the rest of this section.</p>
+<p>For everyone else: Enthought’s <a href="https://www.enthought.com/products/canopy/">Canopy</a> (which is free for academic users) provides almost everything you need, with the exception of <code>Descartes</code> and <code>PySAL</code>. You can install them into the Canopy User Python quite easily, see <a href="https://support.enthought.com/entries/23389761-Installing-packages-into-Canopy-User-Python-from-the-OS-command-line">this support article for details</a>.</p>
+<h2>Running the Code</h2>
+<p>I find <a href="http://ipython.org/notebook.html">IPython Notebook</a> best for this: code can be run in isolation within cells, making it easy to correct mistakes, and graphics are rendered inline, making it easy to fine-tune output. Opening a notebook is straightforward: run <code>ipython notebook --pylab inline</code> from the command line. This will open a new notebook in your browser. Canopy users: the Canopy Editor will do this for you.</p>
+<h2><span class="caps">PEP8</span></h2>
+<p>Some (16, to be exact) of my lines are over-long. I know. I’m sorry.</p>
+<h2>Obtaining a basemap</h2>
+<p>We’re going to be working with basemaps from Esri Shapefiles, and
+we’re going to plot data on a map of London. I’ve created a shapefile for this, and it’s available in <code>.zip</code> format <a href="extra/london.zip">here</a>, under <a href="https://www.ordnancesurvey.co.uk/docs/licences/os-opendata-licence.pdf">Crown Copyright</a>. Download it, and extract the files into a directory named <code>data</code>, under your main project directory.</p>
+<h2>Obtaining some data</h2>
+<p>We’re going to make three maps, using the same data: <a href="http://en.wikipedia.org/wiki/Blue_plaque">blue plaque</a> locations within London. In order to do this, we’re going to extract the longitude, latitude, and some other features from the master <span class="caps">XML</span> file which is available from from Open Plaques. Get it <a href="https://dl.dropbox.com/u/21695507/openplaques/london_20131229.xml">here</a>. This file contains data for every plaque Open Plaques knows about, but it’s incomplete in some cases, and will require cleanup before we can begin to extract a useful subset.</p>
+<h2>Extracting and cleaning the data</h2>
+<p>Let’s start by importing the packages we need. I’ll discuss the significance of certain libraries as needed.</p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">lxml</span> <span class="kn">import</span> <span class="n">etree</span>
+<span class="kn">import</span> <span class="nn">pandas</span> <span class="kn">as</span> <span class="nn">pd</span>
+<span class="kn">import</span> <span class="nn">numpy</span> <span class="kn">as</span> <span class="nn">np</span>
+<span class="kn">import</span> <span class="nn">matplotlib.pyplot</span> <span class="kn">as</span> <span class="nn">plt</span>
+<span class="kn">import</span> <span class="nn">matplotlib.cm</span> <span class="kn">as</span> <span class="nn">cm</span>
+<span class="kn">from</span> <span class="nn">matplotlib.colors</span> <span class="kn">import</span> <span class="n">Normalize</span>
+<span class="kn">from</span> <span class="nn">matplotlib.collections</span> <span class="kn">import</span> <span class="n">PatchCollection</span>
+<span class="kn">from</span> <span class="nn">mpl_toolkits.basemap</span> <span class="kn">import</span> <span class="n">Basemap</span>
+<span class="kn">from</span> <span class="nn">shapely.geometry</span> <span class="kn">import</span> <span class="n">Point</span><span class="p">,</span> <span class="n">Polygon</span><span class="p">,</span> <span class="n">MultiPoint</span><span class="p">,</span> <span class="n">MultiPolygon</span>
+<span class="kn">from</span> <span class="nn">shapely.prepared</span> <span class="kn">import</span> <span class="n">prep</span>
+<span class="kn">from</span> <span class="nn">pysal.esda.mapclassify</span> <span class="kn">import</span> <span class="n">Natural_Breaks</span> <span class="k">as</span> <span class="n">nb</span>
+<span class="kn">from</span> <span class="nn">descartes</span> <span class="kn">import</span> <span class="n">PolygonPatch</span>
+<span class="kn">import</span> <span class="nn">fiona</span>
+<span class="kn">from</span> <span class="nn">itertools</span> <span class="kn">import</span> <span class="n">chain</span>
+</pre></div>
+
+
+<p>Now, we’re going to extract all the useful <span class="caps">XML</span> data into a dict.</p>
+<div class="highlight"><pre><span class="n">tree</span> <span class="o">=</span> <span class="n">etree</span><span class="o">.</span><span class="n">parse</span><span class="p">(</span><span class="s">"data/london_20131229.xml"</span><span class="p">)</span>
+<span class="n">root</span> <span class="o">=</span> <span class="n">tree</span><span class="o">.</span><span class="n">getroot</span><span class="p">()</span>
+
+<span class="n">output</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">()</span>
+<span class="n">output</span><span class="p">[</span><span class="s">'raw'</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+<span class="n">output</span><span class="p">[</span><span class="s">'crs'</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+<span class="n">output</span><span class="p">[</span><span class="s">'lon'</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+<span class="n">output</span><span class="p">[</span><span class="s">'lat'</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+
+<span class="k">for</span> <span class="n">each</span> <span class="ow">in</span> <span class="n">root</span><span class="o">.</span><span class="n">xpath</span><span class="p">(</span><span class="s">'/openplaques/plaque/geo'</span><span class="p">):</span>
+    <span class="c"># check what we got back</span>
+    <span class="n">output</span><span class="p">[</span><span class="s">'crs'</span><span class="p">]</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">each</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'reference_system'</span><span class="p">))</span>
+    <span class="n">output</span><span class="p">[</span><span class="s">'lon'</span><span class="p">]</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">each</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'longitude'</span><span class="p">))</span>
+    <span class="n">output</span><span class="p">[</span><span class="s">'lat'</span><span class="p">]</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">each</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'latitude'</span><span class="p">))</span>
+    <span class="c"># now go back up to plaque</span>
+    <span class="n">r</span> <span class="o">=</span> <span class="n">each</span><span class="o">.</span><span class="n">getparent</span><span class="p">()</span><span class="o">.</span><span class="n">xpath</span><span class="p">(</span><span class="s">'inscription/raw'</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span>
+    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">r</span><span class="o">.</span><span class="n">text</span><span class="p">,</span> <span class="nb">str</span><span class="p">):</span>
+        <span class="n">output</span><span class="p">[</span><span class="s">'raw'</span><span class="p">]</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">r</span><span class="o">.</span><span class="n">text</span><span class="o">.</span><span class="n">lstrip</span><span class="p">()</span><span class="o">.</span><span class="n">rstrip</span><span class="p">())</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">output</span><span class="p">[</span><span class="s">'raw'</span><span class="p">]</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="bp">None</span><span class="p">)</span>
+</pre></div>
+
+
+<p>This will produce a dict containing the coordinate reference system, longitude, latitude, and description of each plaque record. Next, we’re going to create a Pandas DataFrame, drop all records which don’t contain a description, and convert the long and lat values from string to floating-point numbers.</p>
+<div class="highlight"><pre><span class="n">df</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">(</span><span class="n">output</span><span class="p">)</span>
+<span class="n">df</span> <span class="o">=</span> <span class="n">df</span><span class="o">.</span><span class="n">replace</span><span class="p">({</span><span class="s">'raw'</span><span class="p">:</span> <span class="mi">0</span><span class="p">},</span> <span class="bp">None</span><span class="p">)</span>
+<span class="n">df</span> <span class="o">=</span> <span class="n">df</span><span class="o">.</span><span class="n">dropna</span><span class="p">()</span>
+<span class="n">df</span><span class="p">[[</span><span class="s">'lon'</span><span class="p">,</span> <span class="s">'lat'</span><span class="p">]]</span> <span class="o">=</span> <span class="n">df</span><span class="p">[[</span><span class="s">'lon'</span><span class="p">,</span> <span class="s">'lat'</span><span class="p">]]</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="nb">float</span><span class="p">)</span>
+</pre></div>
+
+
+<p>Now, we’re going to open our shapefile, and get some data out of it, in order to set up our basemap:</p>
+<div class="highlight"><pre><span class="n">shp</span> <span class="o">=</span> <span class="n">fiona</span><span class="o">.</span><span class="n">open</span><span class="p">(</span><span class="s">'data/london_wards.shp'</span><span class="p">)</span>
+<span class="n">bds</span> <span class="o">=</span> <span class="n">shp</span><span class="o">.</span><span class="n">bounds</span>
+<span class="n">shp</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+<span class="n">extra</span> <span class="o">=</span> <span class="mf">0.01</span>
+<span class="n">ll</span> <span class="o">=</span> <span class="p">(</span><span class="n">bds</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">bds</span><span class="p">[</span><span class="mi">1</span><span class="p">])</span>
+<span class="n">ur</span> <span class="o">=</span> <span class="p">(</span><span class="n">bds</span><span class="p">[</span><span class="mi">2</span><span class="p">],</span> <span class="n">bds</span><span class="p">[</span><span class="mi">3</span><span class="p">])</span>
+<span class="n">coords</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">chain</span><span class="p">(</span><span class="n">ll</span><span class="p">,</span> <span class="n">ur</span><span class="p">))</span>
+<span class="n">w</span><span class="p">,</span> <span class="n">h</span> <span class="o">=</span> <span class="n">coords</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span> <span class="o">-</span> <span class="n">coords</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">coords</span><span class="p">[</span><span class="mi">3</span><span class="p">]</span> <span class="o">-</span> <span class="n">coords</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>
+</pre></div>
+
+
+<p>We’ve done two things here:</p>
+<ol>
+<li>extracted the map boundaries</li>
+<li>Calculated the extent, width and height of our basemap</li>
+</ol>
+<p>We’re ready to create a Basemap instance, which we can use to plot our maps on.</p>
+<div class="highlight"><pre><span class="n">m</span> <span class="o">=</span> <span class="n">Basemap</span><span class="p">(</span>
+    <span class="n">projection</span><span class="o">=</span><span class="s">'tmerc'</span><span class="p">,</span>
+    <span class="n">lon_0</span><span class="o">=-</span><span class="mf">2.</span><span class="p">,</span>
+    <span class="n">lat_0</span><span class="o">=</span><span class="mf">49.</span><span class="p">,</span>
+    <span class="n">ellps</span> <span class="o">=</span> <span class="s">'WGS84'</span><span class="p">,</span>
+    <span class="n">llcrnrlon</span><span class="o">=</span><span class="n">coords</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">-</span> <span class="n">extra</span> <span class="o">*</span> <span class="n">w</span><span class="p">,</span>
+    <span class="n">llcrnrlat</span><span class="o">=</span><span class="n">coords</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">-</span> <span class="n">extra</span> <span class="o">+</span> <span class="mf">0.01</span> <span class="o">*</span> <span class="n">h</span><span class="p">,</span>
+    <span class="n">urcrnrlon</span><span class="o">=</span><span class="n">coords</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span> <span class="o">+</span> <span class="n">extra</span> <span class="o">*</span> <span class="n">w</span><span class="p">,</span>
+    <span class="n">urcrnrlat</span><span class="o">=</span><span class="n">coords</span><span class="p">[</span><span class="mi">3</span><span class="p">]</span> <span class="o">+</span> <span class="n">extra</span> <span class="o">+</span> <span class="mf">0.01</span> <span class="o">*</span> <span class="n">h</span><span class="p">,</span>
+    <span class="n">lat_ts</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span>
+    <span class="n">resolution</span><span class="o">=</span><span class="s">'i'</span><span class="p">,</span>
+    <span class="n">suppress_ticks</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+<span class="n">m</span><span class="o">.</span><span class="n">readshapefile</span><span class="p">(</span>
+    <span class="s">'data/london_wards'</span><span class="p">,</span>
+    <span class="s">'london'</span><span class="p">,</span>
+    <span class="n">color</span><span class="o">=</span><span class="s">'none'</span><span class="p">,</span>
+    <span class="n">zorder</span><span class="o">=</span><span class="mi">2</span><span class="p">)</span>
+</pre></div>
+
+
+<p>I’ve chosen the transverse mercator projection, because it exhibits less distortion over areas with a small east-west extent. This projection requires us to specify a central longitude and latitude, which I’ve set as -2, 49.</p>
+<div class="highlight"><pre><span class="c"># set up a map dataframe</span>
+<span class="n">df_map</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">({</span>
+    <span class="s">'poly'</span><span class="p">:</span> <span class="p">[</span><span class="n">Polygon</span><span class="p">(</span><span class="n">xy</span><span class="p">)</span> <span class="k">for</span> <span class="n">xy</span> <span class="ow">in</span> <span class="n">m</span><span class="o">.</span><span class="n">london</span><span class="p">],</span>
+    <span class="s">'ward_name'</span><span class="p">:</span> <span class="p">[</span><span class="n">ward</span><span class="p">[</span><span class="s">'NAME'</span><span class="p">]</span> <span class="k">for</span> <span class="n">ward</span> <span class="ow">in</span> <span class="n">m</span><span class="o">.</span><span class="n">london_info</span><span class="p">]})</span>
+<span class="n">df_map</span><span class="p">[</span><span class="s">'area_m'</span><span class="p">]</span> <span class="o">=</span> <span class="n">df_map</span><span class="p">[</span><span class="s">'poly'</span><span class="p">]</span><span class="o">.</span><span class="n">map</span><span class="p">(</span><span class="k">lambda</span> <span class="n">x</span><span class="p">:</span> <span class="n">x</span><span class="o">.</span><span class="n">area</span><span class="p">)</span>
+<span class="n">df_map</span><span class="p">[</span><span class="s">'area_km'</span><span class="p">]</span> <span class="o">=</span> <span class="n">df_map</span><span class="p">[</span><span class="s">'area_m'</span><span class="p">]</span> <span class="o">/</span> <span class="mi">100000</span>
+
+<span class="c"># Create Point objects in map coordinates from dataframe lon and lat values</span>
+<span class="n">map_points</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">Series</span><span class="p">(</span>
+    <span class="p">[</span><span class="n">Point</span><span class="p">(</span><span class="n">m</span><span class="p">(</span><span class="n">mapped_x</span><span class="p">,</span> <span class="n">mapped_y</span><span class="p">))</span> <span class="k">for</span> <span class="n">mapped_x</span><span class="p">,</span> <span class="n">mapped_y</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">df</span><span class="p">[</span><span class="s">'lon'</span><span class="p">],</span> <span class="n">df</span><span class="p">[</span><span class="s">'lat'</span><span class="p">])])</span>
+<span class="n">plaque_points</span> <span class="o">=</span> <span class="n">MultiPoint</span><span class="p">(</span><span class="nb">list</span><span class="p">(</span><span class="n">map_points</span><span class="o">.</span><span class="n">values</span><span class="p">))</span>
+<span class="n">wards_polygon</span> <span class="o">=</span> <span class="n">prep</span><span class="p">(</span><span class="n">MultiPolygon</span><span class="p">(</span><span class="nb">list</span><span class="p">(</span><span class="n">df_map</span><span class="p">[</span><span class="s">'poly'</span><span class="p">]</span><span class="o">.</span><span class="n">values</span><span class="p">)))</span>
+<span class="c"># calculate points that fall within the London boundary</span>
+<span class="n">ldn_points</span> <span class="o">=</span> <span class="nb">filter</span><span class="p">(</span><span class="n">wards_polygon</span><span class="o">.</span><span class="n">contains</span><span class="p">,</span> <span class="n">plaque_points</span><span class="p">)</span>
+</pre></div>
+
+
+<p>Note that the <code>map_points</code> series was created by passing longitude and latitude values to our Basemap instance, <code>m</code>. This converts the coordinates from long and lat degrees to map projection coordinates, in metres.
+Our <code>df_map</code> dataframe now contains columns holding:</p>
+<ul>
+<li>a polygon for each ward in the shapefile</li>
+<li>its description</li>
+<li>its area in square metres</li>
+<li>its area in square kilometres</li>
+</ul>
+<p>We’ve also created a prepared geometry object from the combined ward polygons. We’ve done this in order to <a href="http://toblerity.org/shapely/manual.html#prepared-geometry-operations">speed up our membership-checking operation significantly</a>. We perform the membership check by creating a MultiPolygon from <code>map_points</code>, then filtering using the <code>contains()</code> method, which is a binary predicate returning all points which are contained within <code>wards_polygon</code>. The result is a Pandas series, <code>ldn_points</code>, which we will be using to make our maps.</p>
+<p>The two functions below make it easier to generate colour bars for our maps. Have a look at the docstrings for more detail – in essence, one of them discretises a colour ramp, and the other labels colour bars more easily.</p>
+<div class="highlight"><pre><span class="c"># Convenience functions for working with colour ramps and bars</span>
+<span class="k">def</span> <span class="nf">colorbar_index</span><span class="p">(</span><span class="n">ncolors</span><span class="p">,</span> <span class="n">cmap</span><span class="p">,</span> <span class="n">labels</span><span class="o">=</span><span class="bp">None</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="sd">"""</span>
+<span class="sd">    This is a convenience function to stop you making off-by-one errors</span>
+<span class="sd">    Takes a standard colour ramp, and discretizes it,</span>
+<span class="sd">    then draws a colour bar with correctly aligned labels</span>
+<span class="sd">    """</span>
+    <span class="n">cmap</span> <span class="o">=</span> <span class="n">cmap_discretize</span><span class="p">(</span><span class="n">cmap</span><span class="p">,</span> <span class="n">ncolors</span><span class="p">)</span>
+    <span class="n">mappable</span> <span class="o">=</span> <span class="n">cm</span><span class="o">.</span><span class="n">ScalarMappable</span><span class="p">(</span><span class="n">cmap</span><span class="o">=</span><span class="n">cmap</span><span class="p">)</span>
+    <span class="n">mappable</span><span class="o">.</span><span class="n">set_array</span><span class="p">([])</span>
+    <span class="n">mappable</span><span class="o">.</span><span class="n">set_clim</span><span class="p">(</span><span class="o">-</span><span class="mf">0.5</span><span class="p">,</span> <span class="n">ncolors</span><span class="o">+</span><span class="mf">0.5</span><span class="p">)</span>
+    <span class="n">colorbar</span> <span class="o">=</span> <span class="n">plt</span><span class="o">.</span><span class="n">colorbar</span><span class="p">(</span><span class="n">mappable</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+    <span class="n">colorbar</span><span class="o">.</span><span class="n">set_ticks</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">linspace</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">ncolors</span><span class="p">,</span> <span class="n">ncolors</span><span class="p">))</span>
+    <span class="n">colorbar</span><span class="o">.</span><span class="n">set_ticklabels</span><span class="p">(</span><span class="nb">range</span><span class="p">(</span><span class="n">ncolors</span><span class="p">))</span>
+    <span class="k">if</span> <span class="n">labels</span><span class="p">:</span>
+        <span class="n">colorbar</span><span class="o">.</span><span class="n">set_ticklabels</span><span class="p">(</span><span class="n">labels</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">colorbar</span>
+
+<span class="k">def</span> <span class="nf">cmap_discretize</span><span class="p">(</span><span class="n">cmap</span><span class="p">,</span> <span class="n">N</span><span class="p">):</span>
+    <span class="sd">"""</span>
+<span class="sd">    Return a discrete colormap from the continuous colormap cmap.</span>
+
+<span class="sd">        cmap: colormap instance, eg. cm.jet. </span>
+<span class="sd">        N: number of colors.</span>
+
+<span class="sd">    Example</span>
+<span class="sd">        x = resize(arange(100), (5,100))</span>
+<span class="sd">        djet = cmap_discretize(cm.jet, 5)</span>
+<span class="sd">        imshow(x, cmap=djet)</span>
+
+<span class="sd">    """</span>
+    <span class="k">if</span> <span class="nb">type</span><span class="p">(</span><span class="n">cmap</span><span class="p">)</span> <span class="o">==</span> <span class="nb">str</span><span class="p">:</span>
+        <span class="n">cmap</span> <span class="o">=</span> <span class="n">get_cmap</span><span class="p">(</span><span class="n">cmap</span><span class="p">)</span>
+    <span class="n">colors_i</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">concatenate</span><span class="p">((</span><span class="n">np</span><span class="o">.</span><span class="n">linspace</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mf">1.</span><span class="p">,</span> <span class="n">N</span><span class="p">),</span> <span class="p">(</span><span class="mf">0.</span><span class="p">,</span> <span class="mf">0.</span><span class="p">,</span> <span class="mf">0.</span><span class="p">,</span> <span class="mf">0.</span><span class="p">)))</span>
+    <span class="n">colors_rgba</span> <span class="o">=</span> <span class="n">cmap</span><span class="p">(</span><span class="n">colors_i</span><span class="p">)</span>
+    <span class="n">indices</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">linspace</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mf">1.</span><span class="p">,</span> <span class="n">N</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span>
+    <span class="n">cdict</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="k">for</span> <span class="n">ki</span><span class="p">,</span> <span class="n">key</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">((</span><span class="s">'red'</span><span class="p">,</span> <span class="s">'green'</span><span class="p">,</span> <span class="s">'blue'</span><span class="p">)):</span>
+        <span class="n">cdict</span><span class="p">[</span><span class="n">key</span><span class="p">]</span> <span class="o">=</span> <span class="p">[(</span><span class="n">indices</span><span class="p">[</span><span class="n">i</span><span class="p">],</span> <span class="n">colors_rgba</span><span class="p">[</span><span class="n">i</span> <span class="o">-</span> <span class="mi">1</span><span class="p">,</span> <span class="n">ki</span><span class="p">],</span> <span class="n">colors_rgba</span><span class="p">[</span><span class="n">i</span><span class="p">,</span> <span class="n">ki</span><span class="p">])</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">xrange</span><span class="p">(</span><span class="n">N</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)]</span>
+    <span class="k">return</span> <span class="n">matplotlib</span><span class="o">.</span><span class="n">colors</span><span class="o">.</span><span class="n">LinearSegmentedColormap</span><span class="p">(</span><span class="n">cmap</span><span class="o">.</span><span class="n">name</span> <span class="o">+</span> <span class="s">"_</span><span class="si">%d</span><span class="s">"</span> <span class="o">%</span> <span class="n">N</span><span class="p">,</span> <span class="n">cdict</span><span class="p">,</span> <span class="mi">1024</span><span class="p">)</span>
+</pre></div>
+
+
+<h2>Let’s make a scatter plot</h2>
+<div class="highlight"><pre><span class="c"># draw ward patches from polygons</span>
+<span class="n">df_map</span><span class="p">[</span><span class="s">'patches'</span><span class="p">]</span> <span class="o">=</span> <span class="n">df_map</span><span class="p">[</span><span class="s">'poly'</span><span class="p">]</span><span class="o">.</span><span class="n">map</span><span class="p">(</span><span class="k">lambda</span> <span class="n">x</span><span class="p">:</span> <span class="n">PolygonPatch</span><span class="p">(</span>
+    <span class="n">x</span><span class="p">,</span>
+    <span class="n">fc</span><span class="o">=</span><span class="s">'#555555'</span><span class="p">,</span>
+    <span class="n">ec</span><span class="o">=</span><span class="s">'#787878'</span><span class="p">,</span> <span class="n">lw</span><span class="o">=.</span><span class="mi">25</span><span class="p">,</span> <span class="n">alpha</span><span class="o">=.</span><span class="mi">9</span><span class="p">,</span>
+    <span class="n">zorder</span><span class="o">=</span><span class="mi">4</span><span class="p">))</span>
+
+<span class="n">plt</span><span class="o">.</span><span class="n">clf</span><span class="p">()</span>
+<span class="n">fig</span> <span class="o">=</span> <span class="n">plt</span><span class="o">.</span><span class="n">figure</span><span class="p">()</span>
+<span class="n">ax</span> <span class="o">=</span> <span class="n">fig</span><span class="o">.</span><span class="n">add_subplot</span><span class="p">(</span><span class="mi">111</span><span class="p">,</span> <span class="n">axisbg</span><span class="o">=</span><span class="s">'w'</span><span class="p">,</span> <span class="n">frame_on</span><span class="o">=</span><span class="bp">False</span><span class="p">)</span>
+
+<span class="c"># we don't need to pass points to m() because we calculated using map_points and shapefile polygons</span>
+<span class="n">dev</span> <span class="o">=</span> <span class="n">m</span><span class="o">.</span><span class="n">scatter</span><span class="p">(</span>
+    <span class="p">[</span><span class="n">geom</span><span class="o">.</span><span class="n">x</span> <span class="k">for</span> <span class="n">geom</span> <span class="ow">in</span> <span class="n">ldn_points</span><span class="p">],</span>
+    <span class="p">[</span><span class="n">geom</span><span class="o">.</span><span class="n">y</span> <span class="k">for</span> <span class="n">geom</span> <span class="ow">in</span> <span class="n">ldn_points</span><span class="p">],</span>
+    <span class="mi">5</span><span class="p">,</span> <span class="n">marker</span><span class="o">=</span><span class="s">'o'</span><span class="p">,</span> <span class="n">lw</span><span class="o">=.</span><span class="mi">25</span><span class="p">,</span>
+    <span class="n">facecolor</span><span class="o">=</span><span class="s">'#33ccff'</span><span class="p">,</span> <span class="n">edgecolor</span><span class="o">=</span><span class="s">'w'</span><span class="p">,</span>
+    <span class="n">alpha</span><span class="o">=</span><span class="mf">0.9</span><span class="p">,</span> <span class="n">antialiased</span><span class="o">=</span><span class="bp">True</span><span class="p">,</span>
+    <span class="n">label</span><span class="o">=</span><span class="s">'Blue Plaque Locations'</span><span class="p">,</span> <span class="n">zorder</span><span class="o">=</span><span class="mi">3</span><span class="p">)</span>
+<span class="c"># plot boroughs by adding the PatchCollection to the axes instance</span>
+<span class="n">ax</span><span class="o">.</span><span class="n">add_collection</span><span class="p">(</span><span class="n">PatchCollection</span><span class="p">(</span><span class="n">df_map</span><span class="p">[</span><span class="s">'patches'</span><span class="p">]</span><span class="o">.</span><span class="n">values</span><span class="p">,</span> <span class="n">match_original</span><span class="o">=</span><span class="bp">True</span><span class="p">))</span>
+<span class="c"># copyright and source data info</span>
+<span class="n">smallprint</span> <span class="o">=</span> <span class="n">ax</span><span class="o">.</span><span class="n">text</span><span class="p">(</span>
+    <span class="mf">1.03</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span>
+    <span class="s">'Total points: </span><span class="si">%s</span><span class="se">\n</span><span class="s">Contains Ordnance Survey data</span><span class="se">\n</span><span class="s">$\copyright$ Crown copyright and database right 2013</span><span class="se">\n</span><span class="s">Plaque data from http://openplaques.org'</span> <span class="o">%</span> <span class="nb">len</span><span class="p">(</span><span class="n">ldn_points</span><span class="p">),</span>
+    <span class="n">ha</span><span class="o">=</span><span class="s">'right'</span><span class="p">,</span> <span class="n">va</span><span class="o">=</span><span class="s">'bottom'</span><span class="p">,</span>
+    <span class="n">size</span><span class="o">=</span><span class="mi">4</span><span class="p">,</span>
+    <span class="n">color</span><span class="o">=</span><span class="s">'#555555'</span><span class="p">,</span>
+    <span class="n">transform</span><span class="o">=</span><span class="n">ax</span><span class="o">.</span><span class="n">transAxes</span><span class="p">)</span>
+
+<span class="c"># Draw a map scale</span>
+<span class="n">m</span><span class="o">.</span><span class="n">drawmapscale</span><span class="p">(</span>
+    <span class="n">coords</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">+</span> <span class="mf">0.08</span><span class="p">,</span> <span class="n">coords</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">+</span> <span class="mf">0.015</span><span class="p">,</span>
+    <span class="n">coords</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">coords</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span>
+    <span class="mf">10.</span><span class="p">,</span>
+    <span class="n">barstyle</span><span class="o">=</span><span class="s">'fancy'</span><span class="p">,</span> <span class="n">labelstyle</span><span class="o">=</span><span class="s">'simple'</span><span class="p">,</span>
+    <span class="n">fillcolor1</span><span class="o">=</span><span class="s">'w'</span><span class="p">,</span> <span class="n">fillcolor2</span><span class="o">=</span><span class="s">'#555555'</span><span class="p">,</span>
+    <span class="n">fontcolor</span><span class="o">=</span><span class="s">'#555555'</span><span class="p">,</span>
+    <span class="n">zorder</span><span class="o">=</span><span class="mi">5</span><span class="p">)</span>
+<span class="n">plt</span><span class="o">.</span><span class="n">title</span><span class="p">(</span><span class="s">"Blue Plaque Locations, London"</span><span class="p">)</span>
+<span class="n">plt</span><span class="o">.</span><span class="n">tight_layout</span><span class="p">()</span>
+<span class="c"># this will set the image width to 722px at 100dpi</span>
+<span class="n">fig</span><span class="o">.</span><span class="n">set_size_inches</span><span class="p">(</span><span class="mf">7.22</span><span class="p">,</span> <span class="mf">5.25</span><span class="p">)</span>
+<span class="n">plt</span><span class="o">.</span><span class="n">savefig</span><span class="p">(</span><span class="s">'data/london_plaques.png'</span><span class="p">,</span> <span class="n">dpi</span><span class="o">=</span><span class="mi">100</span><span class="p">,</span> <span class="n">alpha</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+<span class="n">plt</span><span class="o">.</span><span class="n">show</span><span class="p">()</span>
+</pre></div>
+
+
+<p><img alt="Scatter Plot" src="http://sensitivecities.com/images/london_plaques.png" title="Plaque Locations"/></p>
+<p>We’ve drawn a scatter plot on our map, containing points with a 50 metre diameter, corresponding to each point in our dataframe.</p>
+<p>This is <span class="caps">OK</span> as a first step, but doesn’t really tell us anything interesting about the density <em>per ward</em> – merely that there are more plaques found in central London than in the outer wards.</p>
+<h2>Creating a Choropleth Map, Normalised by Ward Area</h2>
+<div class="highlight"><pre><span class="n">df_map</span><span class="p">[</span><span class="s">'count'</span><span class="p">]</span> <span class="o">=</span> <span class="n">df_map</span><span class="p">[</span><span class="s">'poly'</span><span class="p">]</span><span class="o">.</span><span class="n">map</span><span class="p">(</span><span class="k">lambda</span> <span class="n">x</span><span class="p">:</span> <span class="nb">int</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="nb">filter</span><span class="p">(</span><span class="n">prep</span><span class="p">(</span><span class="n">x</span><span class="p">)</span><span class="o">.</span><span class="n">contains</span><span class="p">,</span> <span class="n">ldn_points</span><span class="p">))))</span>
+<span class="n">df_map</span><span class="p">[</span><span class="s">'density_m'</span><span class="p">]</span> <span class="o">=</span> <span class="n">df_map</span><span class="p">[</span><span class="s">'count'</span><span class="p">]</span> <span class="o">/</span> <span class="n">df_map</span><span class="p">[</span><span class="s">'area_m'</span><span class="p">]</span>
+<span class="n">df_map</span><span class="p">[</span><span class="s">'density_km'</span><span class="p">]</span> <span class="o">=</span> <span class="n">df_map</span><span class="p">[</span><span class="s">'count'</span><span class="p">]</span> <span class="o">/</span> <span class="n">df_map</span><span class="p">[</span><span class="s">'area_km'</span><span class="p">]</span>
+<span class="c"># it's easier to work with NaN values when classifying</span>
+<span class="n">df_map</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="n">to_replace</span><span class="o">=</span><span class="p">{</span><span class="s">'density_m'</span><span class="p">:</span> <span class="p">{</span><span class="mi">0</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">nan</span><span class="p">},</span> <span class="s">'density_km'</span><span class="p">:</span> <span class="p">{</span><span class="mi">0</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">nan</span><span class="p">}},</span> <span class="n">inplace</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+</pre></div>
+
+
+<p>We’ve now created some additional columns, containing the number of points in each ward, and the <em>density</em> per square metre and square kilometre, for each ward. Normalising like this allows us to compare wards.</p>
+<p>We’re almost ready to make a choropleth map, but first, we have to divide our wards into classes, in order to easily distinguish them. We’re going to accomplish this using an iterative method called <a href="http://en.wikipedia.org/wiki/Jenks_natural_breaks_optimization">Jenks Natural Breaks</a>.</p>
+<div class="highlight"><pre><span class="c"># Calculate Jenks natural breaks for density</span>
+<span class="n">breaks</span> <span class="o">=</span> <span class="n">nb</span><span class="p">(</span>
+    <span class="n">df_map</span><span class="p">[</span><span class="n">df_map</span><span class="p">[</span><span class="s">'density_km'</span><span class="p">]</span><span class="o">.</span><span class="n">notnull</span><span class="p">()]</span><span class="o">.</span><span class="n">density_km</span><span class="o">.</span><span class="n">values</span><span class="p">,</span>
+    <span class="n">initial</span><span class="o">=</span><span class="mi">300</span><span class="p">,</span>
+    <span class="n">k</span><span class="o">=</span><span class="mi">5</span><span class="p">)</span>
+<span class="c"># the notnull method lets us match indices when joining</span>
+<span class="n">jb</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">({</span><span class="s">'jenks_bins'</span><span class="p">:</span> <span class="n">breaks</span><span class="o">.</span><span class="n">yb</span><span class="p">},</span> <span class="n">index</span><span class="o">=</span><span class="n">df_map</span><span class="p">[</span><span class="n">df_map</span><span class="p">[</span><span class="s">'density_km'</span><span class="p">]</span><span class="o">.</span><span class="n">notnull</span><span class="p">()]</span><span class="o">.</span><span class="n">index</span><span class="p">)</span>
+<span class="n">df_map</span> <span class="o">=</span> <span class="n">df_map</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">jb</span><span class="p">)</span>
+<span class="n">df_map</span><span class="o">.</span><span class="n">jenks_bins</span><span class="o">.</span><span class="n">fillna</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="n">inplace</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+</pre></div>
+
+
+<p>We’ve calculated the classes (five, in this case) for all the wards containing <em>one or more</em> plaques (<code>density_km</code> is not <code>Null</code>), and created a new dataframe containing the class number (0 - 4), with the same index as the non-null density values. This makes it easy to join it to the existing dataframe. The final step involves assigning the bin class <code>-1</code> to all non-valued rows (wards), in order to create a separate zero-density class.</p>
+<p>We also want to create a sensible label for our classes:</p>
+<div class="highlight"><pre><span class="n">jenks_labels</span> <span class="o">=</span> <span class="p">[</span><span class="s">"&lt;= </span><span class="si">%0.1f</span><span class="s">/km$^2$(</span><span class="si">%s</span><span class="s"> wards)"</span> <span class="o">%</span> <span class="p">(</span><span class="n">b</span><span class="p">,</span> <span class="n">c</span><span class="p">)</span> <span class="k">for</span> <span class="n">b</span><span class="p">,</span> <span class="n">c</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span>
+    <span class="n">breaks</span><span class="o">.</span><span class="n">bins</span><span class="p">,</span> <span class="n">breaks</span><span class="o">.</span><span class="n">counts</span><span class="p">)]</span>
+<span class="n">jenks_labels</span><span class="o">.</span><span class="n">insert</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="s">'No plaques (</span><span class="si">%s</span><span class="s"> wards)'</span> <span class="o">%</span> <span class="nb">len</span><span class="p">(</span><span class="n">df_map</span><span class="p">[</span><span class="n">df_map</span><span class="p">[</span><span class="s">'density_km'</span><span class="p">]</span><span class="o">.</span><span class="n">isnull</span><span class="p">()]))</span>
+</pre></div>
+
+
+<p>This will show density/square km, as well as the number of wards in the class.</p>
+<p>We’re now ready to plot our choropleth map:</p>
+<div class="highlight"><pre><span class="n">plt</span><span class="o">.</span><span class="n">clf</span><span class="p">()</span>
+<span class="n">fig</span> <span class="o">=</span> <span class="n">plt</span><span class="o">.</span><span class="n">figure</span><span class="p">()</span>
+<span class="n">ax</span> <span class="o">=</span> <span class="n">fig</span><span class="o">.</span><span class="n">add_subplot</span><span class="p">(</span><span class="mi">111</span><span class="p">,</span> <span class="n">axisbg</span><span class="o">=</span><span class="s">'w'</span><span class="p">,</span> <span class="n">frame_on</span><span class="o">=</span><span class="bp">False</span><span class="p">)</span>
+
+<span class="c"># use a blue colour ramp - we'll be converting it to a map using cmap()</span>
+<span class="n">cmap</span> <span class="o">=</span> <span class="n">plt</span><span class="o">.</span><span class="n">get_cmap</span><span class="p">(</span><span class="s">'Blues'</span><span class="p">)</span>
+<span class="c"># draw wards with grey outlines</span>
+<span class="n">df_map</span><span class="p">[</span><span class="s">'patches'</span><span class="p">]</span> <span class="o">=</span> <span class="n">df_map</span><span class="p">[</span><span class="s">'poly'</span><span class="p">]</span><span class="o">.</span><span class="n">map</span><span class="p">(</span><span class="k">lambda</span> <span class="n">x</span><span class="p">:</span> <span class="n">PolygonPatch</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">ec</span><span class="o">=</span><span class="s">'#555555'</span><span class="p">,</span> <span class="n">lw</span><span class="o">=.</span><span class="mi">2</span><span class="p">,</span> <span class="n">alpha</span><span class="o">=</span><span class="mf">1.</span><span class="p">,</span> <span class="n">zorder</span><span class="o">=</span><span class="mi">4</span><span class="p">))</span>
+<span class="n">pc</span> <span class="o">=</span> <span class="n">PatchCollection</span><span class="p">(</span><span class="n">df_map</span><span class="p">[</span><span class="s">'patches'</span><span class="p">],</span> <span class="n">match_original</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+<span class="c"># impose our colour map onto the patch collection</span>
+<span class="n">norm</span> <span class="o">=</span> <span class="n">Normalize</span><span class="p">()</span>
+<span class="n">pc</span><span class="o">.</span><span class="n">set_facecolor</span><span class="p">(</span><span class="n">cmap</span><span class="p">(</span><span class="n">norm</span><span class="p">(</span><span class="n">df_map</span><span class="p">[</span><span class="s">'jenks_bins'</span><span class="p">]</span><span class="o">.</span><span class="n">values</span><span class="p">)))</span>
+<span class="n">ax</span><span class="o">.</span><span class="n">add_collection</span><span class="p">(</span><span class="n">pc</span><span class="p">)</span>
+
+<span class="c"># Add a colour bar</span>
+<span class="n">cb</span> <span class="o">=</span> <span class="n">colorbar_index</span><span class="p">(</span><span class="n">ncolors</span><span class="o">=</span><span class="nb">len</span><span class="p">(</span><span class="n">jenks_labels</span><span class="p">),</span> <span class="n">cmap</span><span class="o">=</span><span class="n">cmap</span><span class="p">,</span> <span class="n">shrink</span><span class="o">=</span><span class="mf">0.5</span><span class="p">,</span> <span class="n">labels</span><span class="o">=</span><span class="n">jenks_labels</span><span class="p">)</span>
+<span class="n">cb</span><span class="o">.</span><span class="n">ax</span><span class="o">.</span><span class="n">tick_params</span><span class="p">(</span><span class="n">labelsize</span><span class="o">=</span><span class="mi">6</span><span class="p">)</span>
+
+<span class="c"># Show highest densities, in descending order</span>
+<span class="n">highest</span> <span class="o">=</span> <span class="s">'</span><span class="se">\n</span><span class="s">'</span><span class="o">.</span><span class="n">join</span><span class="p">(</span>
+    <span class="n">value</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="k">for</span> <span class="n">_</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">df_map</span><span class="p">[(</span><span class="n">df_map</span><span class="p">[</span><span class="s">'jenks_bins'</span><span class="p">]</span> <span class="o">==</span> <span class="mi">4</span><span class="p">)][:</span><span class="mi">10</span><span class="p">]</span><span class="o">.</span><span class="n">sort</span><span class="p">()</span><span class="o">.</span><span class="n">iterrows</span><span class="p">())</span>
+<span class="n">highest</span> <span class="o">=</span> <span class="s">'Most Dense Wards:</span><span class="se">\n\n</span><span class="s">'</span> <span class="o">+</span> <span class="n">highest</span>
+<span class="c"># Subtraction is necessary for precise y coordinate alignment</span>
+<span class="n">details</span> <span class="o">=</span> <span class="n">cb</span><span class="o">.</span><span class="n">ax</span><span class="o">.</span><span class="n">text</span><span class="p">(</span>
+    <span class="o">-</span><span class="mf">1.</span><span class="p">,</span> <span class="mi">0</span> <span class="o">-</span> <span class="mf">0.007</span><span class="p">,</span>
+    <span class="n">highest</span><span class="p">,</span>
+    <span class="n">ha</span><span class="o">=</span><span class="s">'right'</span><span class="p">,</span> <span class="n">va</span><span class="o">=</span><span class="s">'bottom'</span><span class="p">,</span>
+    <span class="n">size</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span>
+    <span class="n">color</span><span class="o">=</span><span class="s">'#555555'</span><span class="p">)</span>
+
+<span class="c"># Bin method, copyright and source data info</span>
+<span class="n">smallprint</span> <span class="o">=</span> <span class="n">ax</span><span class="o">.</span><span class="n">text</span><span class="p">(</span>
+    <span class="mf">1.03</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span>
+    <span class="s">'Classification method: natural breaks</span><span class="se">\n</span><span class="s">Contains Ordnance Survey data</span><span class="se">\n</span><span class="s">$\copyright$ Crown copyright and database right 2013</span><span class="se">\n</span><span class="s">Plaque data from http://openplaques.org'</span><span class="p">,</span>
+    <span class="n">ha</span><span class="o">=</span><span class="s">'right'</span><span class="p">,</span> <span class="n">va</span><span class="o">=</span><span class="s">'bottom'</span><span class="p">,</span>
+    <span class="n">size</span><span class="o">=</span><span class="mi">4</span><span class="p">,</span>
+    <span class="n">color</span><span class="o">=</span><span class="s">'#555555'</span><span class="p">,</span>
+    <span class="n">transform</span><span class="o">=</span><span class="n">ax</span><span class="o">.</span><span class="n">transAxes</span><span class="p">)</span>
+
+<span class="c"># Draw a map scale</span>
+<span class="n">m</span><span class="o">.</span><span class="n">drawmapscale</span><span class="p">(</span>
+    <span class="n">coords</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">+</span> <span class="mf">0.08</span><span class="p">,</span> <span class="n">coords</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">+</span> <span class="mf">0.015</span><span class="p">,</span>
+    <span class="n">coords</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">coords</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span>
+    <span class="mf">10.</span><span class="p">,</span>
+    <span class="n">barstyle</span><span class="o">=</span><span class="s">'fancy'</span><span class="p">,</span> <span class="n">labelstyle</span><span class="o">=</span><span class="s">'simple'</span><span class="p">,</span>
+    <span class="n">fillcolor1</span><span class="o">=</span><span class="s">'w'</span><span class="p">,</span> <span class="n">fillcolor2</span><span class="o">=</span><span class="s">'#555555'</span><span class="p">,</span>
+    <span class="n">fontcolor</span><span class="o">=</span><span class="s">'#555555'</span><span class="p">,</span>
+    <span class="n">zorder</span><span class="o">=</span><span class="mi">5</span><span class="p">)</span>
+<span class="c"># this will set the image width to 722px at 100dpi</span>
+<span class="n">plt</span><span class="o">.</span><span class="n">tight_layout</span><span class="p">()</span>
+<span class="n">fig</span><span class="o">.</span><span class="n">set_size_inches</span><span class="p">(</span><span class="mf">7.22</span><span class="p">,</span> <span class="mf">5.25</span><span class="p">)</span>
+<span class="n">plt</span><span class="o">.</span><span class="n">savefig</span><span class="p">(</span><span class="s">'data/london_plaques.png'</span><span class="p">,</span> <span class="n">dpi</span><span class="o">=</span><span class="mi">100</span><span class="p">,</span> <span class="n">alpha</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+<span class="n">plt</span><span class="o">.</span><span class="n">show</span><span class="p">()</span>
+</pre></div>
+
+
+<p><img alt="Choropleth" src="http://sensitivecities.com/images/london_plaque_density.png" title="Density Per Ward"/></p>
+<p>Finally, we can create an alternative map using <a href="https://www.mapbox.com/blog/binning-alternative-point-maps/">hex bins</a>. These are a more informative alternative to point maps, as we shall see. The Basemap package provides a hex-binning method, and we require a few pieces of extra information in order to use it:</p>
+<ol>
+<li>the longitude and latitude coordinates of the points which will be used must be provided as numpy arrays.</li>
+<li>We have to specify a grid size, in metres. You can experiment with this setting; I’ve chosen 125.</li>
+<li>setting the <code>mincnt</code> value to <code>1</code> means that no bins will be drawn in areas where there are no plaques within the grid.</li>
+<li>You can specify the bin type. In this case, I’ve chosen <code>log</code>, which uses a logarithmic scale for the colour map. This more clearly emphasises minor differences in the densities of each bin.</li>
+</ol>
+<p>The code:</p>
+<div class="highlight"><pre><span class="c"># draw ward patches from polygons</span>
+<span class="n">df_map</span><span class="p">[</span><span class="s">'patches'</span><span class="p">]</span> <span class="o">=</span> <span class="n">df_map</span><span class="p">[</span><span class="s">'poly'</span><span class="p">]</span><span class="o">.</span><span class="n">map</span><span class="p">(</span><span class="k">lambda</span> <span class="n">x</span><span class="p">:</span> <span class="n">PolygonPatch</span><span class="p">(</span>
+    <span class="n">x</span><span class="p">,</span> <span class="n">fc</span><span class="o">=</span><span class="s">'#555555'</span><span class="p">,</span> <span class="n">ec</span><span class="o">=</span><span class="s">'#787878'</span><span class="p">,</span> <span class="n">lw</span><span class="o">=.</span><span class="mi">25</span><span class="p">,</span> <span class="n">alpha</span><span class="o">=.</span><span class="mi">9</span><span class="p">,</span> <span class="n">zorder</span><span class="o">=</span><span class="mi">0</span><span class="p">))</span>
+
+<span class="n">plt</span><span class="o">.</span><span class="n">clf</span><span class="p">()</span>
+<span class="n">fig</span> <span class="o">=</span> <span class="n">plt</span><span class="o">.</span><span class="n">figure</span><span class="p">()</span>
+<span class="n">ax</span> <span class="o">=</span> <span class="n">fig</span><span class="o">.</span><span class="n">add_subplot</span><span class="p">(</span><span class="mi">111</span><span class="p">,</span> <span class="n">axisbg</span><span class="o">=</span><span class="s">'w'</span><span class="p">,</span> <span class="n">frame_on</span><span class="o">=</span><span class="bp">False</span><span class="p">)</span>
+
+<span class="c"># plot boroughs by adding the PatchCollection to the axes instance</span>
+<span class="n">ax</span><span class="o">.</span><span class="n">add_collection</span><span class="p">(</span><span class="n">PatchCollection</span><span class="p">(</span><span class="n">df_map</span><span class="p">[</span><span class="s">'patches'</span><span class="p">]</span><span class="o">.</span><span class="n">values</span><span class="p">,</span> <span class="n">match_original</span><span class="o">=</span><span class="bp">True</span><span class="p">))</span>
+
+<span class="n">df_london</span> <span class="o">=</span> <span class="n">df</span><span class="p">[</span>
+    <span class="p">(</span><span class="n">df</span><span class="p">[</span><span class="s">'lon'</span><span class="p">]</span> <span class="o">&gt;=</span> <span class="n">ll</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span> <span class="o">&amp;</span>
+    <span class="p">(</span><span class="n">df</span><span class="p">[</span><span class="s">'lon'</span><span class="p">]</span> <span class="o">&lt;=</span> <span class="n">ur</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span> <span class="o">&amp;</span>
+    <span class="p">(</span><span class="n">df</span><span class="p">[</span><span class="s">'lat'</span><span class="p">]</span> <span class="o">&gt;=</span> <span class="n">ll</span><span class="p">[</span><span class="mi">1</span><span class="p">])</span> <span class="o">&amp;</span>
+    <span class="p">(</span><span class="n">df</span><span class="p">[</span><span class="s">'lat'</span><span class="p">]</span> <span class="o">&lt;=</span> <span class="n">ur</span><span class="p">[</span><span class="mi">1</span><span class="p">])]</span>
+
+<span class="n">lon_ldn</span> <span class="o">=</span> <span class="n">df_london</span><span class="o">.</span><span class="n">lon</span><span class="o">.</span><span class="n">values</span>
+<span class="n">lat_ldn</span> <span class="o">=</span> <span class="n">df_london</span><span class="o">.</span><span class="n">lat</span><span class="o">.</span><span class="n">values</span>
+
+<span class="c"># the mincnt argument only shows cells with a value &gt;= 1</span>
+<span class="c"># hexbin wants np arrays, not plain lists</span>
+<span class="n">hx</span> <span class="o">=</span> <span class="n">m</span><span class="o">.</span><span class="n">hexbin</span><span class="p">(</span>
+    <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="n">geom</span><span class="o">.</span><span class="n">x</span> <span class="k">for</span> <span class="n">geom</span> <span class="ow">in</span> <span class="n">ldn_points</span><span class="p">]),</span>
+    <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="n">geom</span><span class="o">.</span><span class="n">y</span> <span class="k">for</span> <span class="n">geom</span> <span class="ow">in</span> <span class="n">ldn_points</span><span class="p">]),</span>
+    <span class="n">gridsize</span><span class="o">=</span><span class="mi">125</span><span class="p">,</span>
+    <span class="n">bins</span><span class="o">=</span><span class="s">'log'</span><span class="p">,</span>
+    <span class="n">mincnt</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span>
+    <span class="n">edgecolor</span><span class="o">=</span><span class="s">'none'</span><span class="p">,</span>
+    <span class="n">alpha</span><span class="o">=</span><span class="mf">1.</span><span class="p">,</span>
+    <span class="n">lw</span><span class="o">=</span><span class="mf">0.2</span><span class="p">,</span>
+    <span class="n">cmap</span><span class="o">=</span><span class="n">plt</span><span class="o">.</span><span class="n">get_cmap</span><span class="p">(</span><span class="s">'Blues'</span><span class="p">))</span>
+
+<span class="c"># copyright and source data info</span>
+<span class="n">smallprint</span> <span class="o">=</span> <span class="n">ax</span><span class="o">.</span><span class="n">text</span><span class="p">(</span>
+    <span class="mf">1.03</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span>
+    <span class="s">'Total points: </span><span class="si">%s</span><span class="se">\n</span><span class="s">Contains Ordnance Survey data</span><span class="se">\n</span><span class="s">$\copyright$ Crown copyright and database right 2013</span><span class="se">\n</span><span class="s">Plaque data from http://openplaques.org'</span> <span class="o">%</span> <span class="nb">len</span><span class="p">(</span><span class="n">ldn_points</span><span class="p">),</span>
+    <span class="n">ha</span><span class="o">=</span><span class="s">'right'</span><span class="p">,</span> <span class="n">va</span><span class="o">=</span><span class="s">'bottom'</span><span class="p">,</span>
+    <span class="n">size</span><span class="o">=</span><span class="mi">4</span><span class="p">,</span>
+    <span class="n">color</span><span class="o">=</span><span class="s">'#555555'</span><span class="p">,</span>
+    <span class="n">transform</span><span class="o">=</span><span class="n">ax</span><span class="o">.</span><span class="n">transAxes</span><span class="p">)</span>
+
+<span class="c"># Draw a map scale</span>
+<span class="n">m</span><span class="o">.</span><span class="n">drawmapscale</span><span class="p">(</span>
+    <span class="n">coords</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">+</span> <span class="mf">0.08</span><span class="p">,</span> <span class="n">coords</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">+</span> <span class="mf">0.015</span><span class="p">,</span>
+    <span class="n">coords</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">coords</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span>
+    <span class="mf">10.</span><span class="p">,</span>
+    <span class="n">barstyle</span><span class="o">=</span><span class="s">'fancy'</span><span class="p">,</span> <span class="n">labelstyle</span><span class="o">=</span><span class="s">'simple'</span><span class="p">,</span>
+    <span class="n">fillcolor1</span><span class="o">=</span><span class="s">'w'</span><span class="p">,</span> <span class="n">fillcolor2</span><span class="o">=</span><span class="s">'#555555'</span><span class="p">,</span>
+    <span class="n">fontcolor</span><span class="o">=</span><span class="s">'#555555'</span><span class="p">,</span>
+    <span class="n">zorder</span><span class="o">=</span><span class="mi">5</span><span class="p">)</span>
+
+<span class="n">plt</span><span class="o">.</span><span class="n">title</span><span class="p">(</span><span class="s">"Blue Plaque Density, London"</span><span class="p">)</span>
+<span class="n">plt</span><span class="o">.</span><span class="n">tight_layout</span><span class="p">()</span>
+<span class="c"># this will set the image width to 722px at 100dpi</span>
+<span class="n">fig</span><span class="o">.</span><span class="n">set_size_inches</span><span class="p">(</span><span class="mf">7.22</span><span class="p">,</span> <span class="mf">5.25</span><span class="p">)</span>
+<span class="n">plt</span><span class="o">.</span><span class="n">savefig</span><span class="p">(</span><span class="s">'data/london_plaques.png'</span><span class="p">,</span> <span class="n">dpi</span><span class="o">=</span><span class="mi">100</span><span class="p">,</span> <span class="n">alpha</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+<span class="n">plt</span><span class="o">.</span><span class="n">show</span><span class="p">()</span>
+</pre></div>
+
+
+<p><img alt="Hexbin" src="http://sensitivecities.com/images/london_plaques_kde.png" title="Hex-binned Plaque Density"/></p>
+<p>You can view and download a working copy of the code using the IPython Notebook Viewer <a href="http://nbviewer.ipython.org/74c6223d9f6a5dea4e75">here</a>. Note that you’ll have to have a subdirectory named <code>data</code>, containing both the <span class="caps">XML</span> data source and Shapefile in order to run it.</p>
+<p>In a future post, I’ll be discussing <a href="https://github.com/kjordahl/geopandas">Geopandas</a>…</p>
+            </div>
+            
+    </div></body></html>

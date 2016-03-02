@@ -1,0 +1,173 @@
+<html><body><div><div class="content html_format"><p>
+      Подобно многим стихийным и сезонным любителям астрофотографии, в этом августе я ловил ночью </p><a href="https://ru.wikipedia.org/wiki/%D0%9F%D0%B5%D1%80%D1%81%D0%B5%D0%B8%D0%B4%D1%8B">Персеиды</a><p>. Улов небольшой есть, но сейчас не о нём, а о том, что побочным результатом такого лова стала серия фотографий, которые напрашивались на то, чтобы сделать из них таймлапс. Но вот незадача: установка камеры оказалась не столь уж жесткой, как хотелось бы, и между кадрами появилось небольшое смещение. Попытался исправить его плагином дешейкинга в VirtualDub, но результаты не порадовали. Тогда было решено сделать свой велосипед: подробнее о результатах и том как они получены — под катом.
+</p><a name="habracut"/><p>
+Традиционное «до» и «после» (тут показан небольшой фрагмент). Картинка уменьшена, но даже тут видно «дрожание камеры»:
+
+</p><img src="https://habrastorage.org/files/c76/97d/6b6/c7697d6b6e9a4ff0bab94f0955341f9a.gif"/>
+<p>
+После обработки:
+
+</p><img src="https://habrastorage.org/files/f7a/bb7/a32/f7abb7a326ff436782f154f42dddb2cc.gif"/>
+<p>
+На чём всё будет делаться: IPython notebook+NumPy+OpenCV.
+</p><p>
+Необходимое предупреждение: в посте не будет ни нового слова в обработке сигналов, ни нового про означенные язык и библиотеки; разве что новички найдут тут пример «как не надо программировать», но зато «как можно быстро придумать и опробовать свой алгоритм в IPython notebook». Профессионалам же предлагаю полюбоваться на звёздочки.
+
+</p><div class="spoiler"><b class="spoiler_title">Почему "калькулятор", а также о том зачем мне было делать свой велосипед — лирическое отступление</b><p class="spoiler_text">Решив отказываться, по возможности, от платных программ, для которых есть бесплатные аналоги, я начал искать, среди прочего, замену матлабу. И остановился на связке IPython+SciPy[+OpenCV]. Однако использую их именно в роли большого и очень удобного, но калькулятора: для быстрого прототипирования каких-либо идей и решений или для одноразовой обработки, когда проще самому объяснить компьютеру что мне от него требуется, чем искать для этого подходящую программу, которая может ещё оказаться платной или делать немножко не то, что мне надо — вот про этот случай я и хочу рассказать в посте.<br/>
+</p></div>
+<h5>Предварительная подготовка данных</h5><p>
+Для улучшения различимости неподвижных объектов решено было создать специальную версию всех изображений и в дальнейшем находить смещение уже по ней. Что в каждом кадре было сделано:
+</p><ul>
+<li>повышена яркость фона и контраст между ним и тёмными неподвижными объектами </li>
+<li>обрезкой кадра исключены деревья- они уж совсем не образец неподвижности </li>
+<li>имена файлов остались без изменений- просто для удобства </li>
+</ul><p>
+Вот так выглядели предварительно обработанные кадры (справа) по сравнению с исходными (слева):
+
+</p><img src="https://habrastorage.org/files/bd3/6a8/3a8/bd36a83a8d934773b22c18b66fc970a0.png"/>
+
+<h5>Чтение и предварительная обработка кадров</h5><p>
+Прочитаем исходные файлы (которые были предварительно подготовлены для оценки по ним смещения). Рабочим каталогом для простоты был выбран тот же самый где лежат эти кадры, так что просто прочитаем их имена в массив sampledata. Подробности такого вот обслуживающего кода я не буду приводить в посте, чтобы не загромождать. Их, а также некоторые написанные в процессе работы функции-макросы, можно посмотреть </p><a href="#ipnb">в исходном документе IPython notebook</a><p>.
+</p><p>
+Возьмём пару кадров для того чтобы на них всё тестировать (пусть 0 и 4). Покажем эти кадры и разницу между ними простым вычитанием cv2.absdiff():
+
+</p><img src="https://habrastorage.org/files/28e/b58/b3a/28eb58b3a4144fb8aca6e435b5a2ca1d.png"/>
+<p>
+Сдвиг кадра виден по тому, как проявились края неподвижных объектов, а вот движущиеся звёзды — не помощники в оценке сдвига камеры. Так что избавимся по возможности от них с помощью операции erode. Размер ядра подобран опытным путём
+</p><div class="spoiler"><b class="spoiler_title">вот так</b><div class="spoiler_text"><pre><code class="python">qx,qy=4,4
+k=ones((qx,qy))
+im1g=cv2.erode(im1g,k)
+im2g=cv2.erode(im2g,k)
+show1(im1g,u"после обработки")
+</code></pre>
+</div></div>
+<img src="https://habrastorage.org/files/4b9/285/ff4/4b9285ff47144f8ba8c471340bc411d9.png"/>
+<p>
+Видно, что на кадре хорошо выделились неподвижные объекты, к которым можно будет привязаться.
+
+</p><h5>Оценка сдвига между изображениями</h5><p>
+Поиск соответствующих друг другу точек на соседних изображениях сделаем, как показано в примере </p><a href="https://github.com/Itseez/opencv/blob/master/samples/python2/find_obj.py">find_obj.py</a><p> из opencv: найдём различимые фрагменты с помощью </p><a href="http://docs.opencv.org/modules/nonfree/doc/feature_detection.html?highlight=sift#sift">Scale Invariant Feature Transform (SIFT)</a><p>, а потом сопоставим и отфильтруем полученный массив.
+</p><div class="spoiler"><b class="spoiler_title">откуда что берётся</b><div class="spoiler_text"><p> функция `filter_matches` непосредственно использована из </p><a href="https://github.com/Itseez/opencv/blob/master/samples/python2/find_obj.py">примера</a><p>, `detectandselectmatches` тоже во многом заимствует его функциональность. Все права на них — за соответствующими авторами. Подробно на их работе я останавливаться сейчас не буду, желающие всегда могут посмотреть </p><a href="http://docs.opencv.org/modules/nonfree/doc/feature_detection.html?highlight=sift#sift">хелп</a><p> — там всё написано, и погонять </p><a href="https://github.com/Itseez/opencv/blob/master/samples/python2/find_obj.py">пример</a><p> — он довольно нагляден.
+</p><pre><code class="python">detector = cv2.SIFT()
+norm = cv2.NORM_L2
+matcher = cv2.BFMatcher(norm)
+
+def filter_matches(kp1, kp2, matches, ratio = 0.75):
+    mkp1, mkp2 = [], []
+    for m in matches:
+        if len(m) == 2 and m[0].distance &lt; m[1].distance * ratio:
+            m = m[0]
+            mkp1.append( kp1[m.queryIdx] )
+            mkp2.append( kp2[m.trainIdx] )
+    p1 = np.float32([kp.pt for kp in mkp1])
+    p2 = np.float32([kp.pt for kp in mkp2])
+    kp_pairs = zip(mkp1, mkp2)
+    return p1, p2, kp_pairs
+
+def detectandselectmatches(fr1a,fr2a):
+    kp1, desc1 = detector.detectAndCompute(fr1a, None)
+    kp2, desc2 = detector.detectAndCompute(fr2a, None)
+    raw_matches = matcher.knnMatch(desc1, trainDescriptors = desc2, k = 2) #2
+    p1, p2, kp_pairs = filter_matches(kp1, kp2, raw_matches)
+    return p1, p2
+</code></pre> </div></div> <pre><code class="python">p1, p2 = detectandselectmatches(im1g,im2g)
+</code></pre><p>
+Полученные массивы p1, p2 представляют собой наборы координат x,y совпадающих точек на 1 и 2 кадре соответственно.
+</p><div class="spoiler"><b class="spoiler_title">Например</b><div class="spoiler_text"><pre>
+[665.927307129,17.939201355] 	 [668.513000488,19.468919754]
+[744.969177246,60.6581344604] 	 [747.49786377,61.8129844666]
+[746.388549805,77.1945953369] 	 [749.15411377,78.5462799072]
+[892.944763184,169.295532227] 	 [895.570373535,170.530929565]
+[906.57824707,185.634231567] 	 [908.093933105,186.593307495]
+...
+</pre></div></div><p>
+Если взять между ними разницу, то получим массив смещений кадра по версии каждой из точек. На этом этапе можно сделать ещё одну фильтрацию (иногда некоторые точки из-за ошибочного соответствия весьма сильно выбиваются из ряда), но если использовать медиану вместо среднего, то все эти ошибочные значения просто не важны. Это хорошо видно на картинке: синим представлено смещение для кажой из пар точек, выбранное значение обозначенно красным, а для сравнения зелёным — простое среднее.
+</p><pre><code class="python">dp=p2-p1
+mx,my=np.median(dp[:,0]),np.median(dp[:,1])
+</code></pre>
+<img src="https://habrastorage.org/files/575/723/3a0/5757233a0c1f4e48b73c8359d4028d7e.png"/>
+
+<pre>dx=2.68393 dy=1.34059 </pre>
+
+<h5>Выполнение обратного сдвига</h5><p>
+Осталось произвести собственно смещение. Построим матрицу </p><a href="http://docs.opencv.org/modules/imgproc/doc/geometric_transformations.html?highlight=warpaffine">афинного преобразования</a><p> вручную, просто внеся соответствующие величины на нужное место. Можно было бы воспользоваться для этого специальными функциями из opencv, но для вращения и смещения матрица выглядит совсем просто:
+
+</p><p>
+где </p><img src="http://tex.s2cms.ru/svg/%5Cphi" alt="\phi"/><p> — угол поворота, а </p><img src="http://tex.s2cms.ru/svg/dx" alt="dx"/><p> и </p><img src="http://tex.s2cms.ru/svg/dy" alt="dy"/><p> — соответствующие величины смещения
+</p><pre><code class="python">def getshiftmatrix( (dx,dy)):
+    return array([[ 1.,  0,   dx],
+                  [ 0,  1.,   dy]])
+</code></pre><p>
+и собственно запустим преобразование
+</p><pre><code class="python">def shiftimg(im2,shift):
+    tr1=getshiftmatrix(shift)
+    return cv2.warpAffine(im2,tr1,tuple(reversed(im2.shape[:2]) ))
+im2r= shiftimg(im2,tuple(-array(shift)))
+</code></pre><p>
+На результат посмотрим, сравнив, как и в начале, простым вычитанием:
+
+</p><img src="https://habrastorage.org/files/e6a/304/2a6/e6a3042a6f7a49bc87f7c053c5c1cf3d.png"/>
+<p>
+Вуаля! То, что требовалось — на месте всех неподвижных объектов чернота. Значит кадры совместились.
+
+</p><h5>Обработка всех кадров</h5><p>
+Всё работает. Можно оформлять обработку… или ещё нет? Остались несколько деталей:
+</p><ul>
+<li>смещение-то было подсчитано на специально обработанном и обрезанном кадре, а производить его надо уже на основном;</li>
+<li>после смещения по краям кадра останутся черные полосы там, откуда картинку сдвинули. Их можно замазать из соседнего кадра.</li>
+</ul><p>
+Учтём всё это и напишем.
+
+</p><pre><code class="python"># в переменной basepath4orig сообщим где брать основые кадры для коррекции
+
+arshifts=[]
+
+im1= cv2.imread(sampledata[0]) # base frame
+im1g = preprocess(im1)
+kp1, desc1 = detector.detectAndCompute(im1g, None)
+
+imgprev=cv2.imread(basepath4orig+sampledata[0]) #base original frame
+
+for i,x in enumerate(sampledata):
+    print x,
+    im2g = preprocess(cv2.imread(x))    
+    kp2, desc2 = detector.detectAndCompute(im2g, None)
+    
+    raw_matches = matcher.knnMatch(desc1, trainDescriptors = desc2, k = 2) #2
+    p1, p2, kp_pairs = filter_matches(kp1, kp2, raw_matches)
+    dp=p2-p1
+    
+    if len(dp)&lt;=0: shift=0,0 
+    else: dx,dy=np.median(dp[:,0]),np.median(dp[:,1])
+    print dx,dy    
+    
+    #process original frame
+    imgr= shiftimg(cv2.imread(basepath4orig+x),(-dx,-dy))
+
+    if -dy&gt;0: imgr[:int(ceil(abs(dy))),:,:] = imgprev[:int(ceil(abs(dy))),:,:]
+    if -dy&lt;0: imgr[-int(ceil(abs(dy))):,:,:] = imgprev[-int(ceil(abs(dy))):,:,:]
+    if -dx&gt;0: imgr[:,:int(ceil(abs(dx))),:] = imgprev[:,:int(ceil(abs(dx))),:]
+    if -dx&lt;0: imgr[:,-int(ceil(abs(dx))):,:] = imgprev[:,-int(ceil(abs(dx))):,:]
+    
+    imgprev=imgr
+    
+    cv2.imwrite('shifted_'+x+'.JPG',imgr)
+</code></pre><p>
+Вот и всё — результат получен: неподвижные объекты — как приклеенные, звёзды вертятся как им и положено, облака плывут по своим делам, а я раздумываю что бы ещё такого снять — уже специально для таймлапса.
+</p><p>
+Результат на youtube.com:
+
+</p><iframe src="https://www.youtube.com/embed/j4JJIajjrAc?feature=oembed" frameborder="0" allowfullscreen="">VIDEO</iframe>
+
+<font><div class="spoiler"><b class="spoiler_title">***</b><p class="spoiler_text">Самые внимательные могли заметить что в youtube попала предыдущая версия- без коррекции чёрных полос по краям- заменять уже не буду, в gifках в посте уже дана нормальная версия </p></div></font>
+
+<a name="ipnb"/><p>Ссылка на </p><a href="http://nbviewer.ipython.org/urls/dl.dropbox.com/s/y7uop7mlp2x466p/deshake_calc_2%D1%81_4pub-clear1.ipynb">копию документа IPython notebook, в котором всё и делалось</a>
+
+<h5>Использованные материалы и средства:</h5>
+<p>
+Также мои благодарности </p>
+      <p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

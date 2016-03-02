@@ -1,0 +1,157 @@
+<html><body><div><div class="content html_format"><p>
+      В небольшом цикле статей будет описано использование WxPython для решения вполне конкретной задачи по разработке пользовательского интерфейса, да еще и то, как сделать это решение универсальным. Туториал этот расчитан на тех, кто уже начал изучать эту библиотеку и хочет увидеть что-то более сложное и целостное, чем простейшие примеры (хотя начнется все с относительно простых вещей).</p>
+<p>
+А начиналось все так: понадобилось мне для одного проекта сделать UI, где надо последовательность обработки сообщений редактировать. Что-то наподобии Simulink'а. Соответственно, полез искать готовые либы/фреймворки. Поначалу подумал, что задачка популярная и кто-нибудь уже сделал это велосипед, поискал, поискал и… не нашел. Точнее нашел много антикварных велосипедов, но кто же будет пользоваться чужим старым велосипедом, если можно сделать свой новый. Но раз уж делать новый велосипед, почему бы не сделать его универсальным, мало ли, где еще пригодится.
+</p><p>
+Так что попробую в нескольких статья описать процесс разработки с нуля до работающего примера. Ну и чтобы было интересно, а ферймворк был универсален, первая задача для него будет не подобие Simulink'а, а софтина для рисования блок-схем а-ля Visio, но со своим блек-джеком и остальными участниками:)
+
+</p><a href="http://habrahabr.ru/post/201336/">Часть 1: Учимся рисовать</a>
+<a href="http://habrahabr.ru/post/201538/">Часть 2: Обработка событий мыши</a>
+<a href="http://habrahabr.ru/post/201608/">Часть 3: Продолжаем добавлять фичи + обработка клавиатуры</a>
+<a href="http://habrahabr.ru/post/201784/">Часть 4: Реализуем Drag&amp;Drop</a>
+<a href="http://habrahabr.ru/post/201930/">Часть 5: Соединяем ноды</a>
+<p>
+Кому интересно, добро пожаловать под кат…
+</p><a name="habracut"/>
+
+<i>Маленький комментарий: я буду использовать английские имена в коде и часто буду использовать транслитерацию, т.е. вместо того, чтобы писать «canvas» или «холст», я буду писать «канвас». Да, я знаю, что это может выглядеть плохо и не правильно, но идеального способа смешивать русский и английский не существует, у всех способов есть свои недостатки (мое личное мнение).</i>
+
+<h4>1. Первый тест</h4><p>
+Начнем с простых банальных вещей. Раз это фреймворк, значит кто-то будет на его основе делать приложения или части приложений, которые будут делать. Т.е. для простейшего теста, нам нужно изготовить простейшее приложение. Не сильно долго думая, я решил, что буду рисовать соединенные друг с другом прямоугольники и начал с такого кода (он будет жить в файле «ConnectedBoxes.py»):
+</p><pre><code class="python">import wx
+from MoveMe.Canvas.Canvas import Canvas
+
+class CanvasWindow(wx.Frame):
+    def __init__(self, *args, **kw):
+        wx.Frame.__init__(self, *args, **kw)
+        s = wx.BoxSizer(wx.VERTICAL)
+        s.Add(Canvas(self), 1, wx.EXPAND)
+        self.SetSizer(s)
+
+if __name__ == '__main__':
+    app = wx.PySimpleApp()
+    CanvasWindow(None).Show()
+    app.MainLoop()
+</code></pre><p>
+Тут все достаточно тривиально и очевидно, кроме пары моментов: MoveMe — это имя нашего фреймворка, а Canvas — это главный класс нашего фреймворка, отвечающий за рендеринг всего этого дела. 
+
+</p><h4>2. Учимся рисовать</h4><p>
+Собственно с канваса и начинается наш фреймворк. Он отвечает за хранение объектов (будем называть их нодами), их рендеринг и обработку взаимодействия с пользователем. Соответственно, начнем с простенького рисования.
+</p><pre><code class="python">import wx
+
+class Canvas(wx.PyScrolledWindow):
+    """
+    Canvas stores and renders all nodes and node connections.
+    It also handles all user interaction.
+    """
+    def __init__(self, *args, **kw):
+        super(Canvas, self).__init__(*args, **kw)
+        self.scrollStep = kw.get("scrollStep", 10)
+        self.canvasDimensions = kw.get("canvasDimensions", [800, 800])
+        self.SetScrollbars(self.scrollStep, 
+                           self.scrollStep, 
+                           self.canvasDimensions[0]/self.scrollStep, 
+                           self.canvasDimensions[1]/self.scrollStep)
+
+        self._dcBuffer = wx.EmptyBitmap(*self.canvasDimensions)
+        self.Render()
+        self.Bind(wx.EVT_PAINT, 
+                  lambda evt: wx.BufferedPaintDC(self, self._dcBuffer, wx.BUFFER_VIRTUAL_AREA)
+                  )
+
+    def Render(self):
+        """Render all nodes and their connection in depth order."""
+        cdc = wx.ClientDC(self)
+        self.PrepareDC(cdc)
+        dc = wx.BufferedDC(cdc, self._dcBuffer)
+        dc.Clear()
+        gc = wx.GraphicsContext.Create(dc)
+        
+        gc.SetPen(wx.Pen('#000000', 2, wx.SOLID))
+        gc.DrawRoundedRectangle(12, 34, 56, 78, 10)
+        gc.DrawRoundedRectangle(112, 134, 156, 178, 10)
+</code></pre><p>
+Тут все становится немного интереснее:
+</p><ul>
+<li>Во-первых мы наследуем «wx.PyScrolledWindow» чтобы наше окно можно было скролить и задаем параметры скрола в «self.SetScrollbars».</li>
+<li>Во-вторых, рисовать мы будем не напрямую, а в буфер, чтобы все это происходило быстрее и без мерцаний. Для этого используется «wx.BufferedDC» и буфер, который является битмэпой.</li>
+<li>Ну и в-третьих, мы будем использовать «wx.GraphicsContext» для удобного сохранения состояния. Оно имеет методы «PushState» и «PopState», которые сохраняют настройки кистей, шрифтов, итд итп, что особенно полезно, так как рисовать блоки на экране будет пользовательский код и никто не гаррантирует, что пользователь вернет все на место.</li>
+</ul><p>Если запустить код сейчас, то мы сможем увидеть пару </p><s>айфонов</s><p>прямоугольников с закругленными углами в окошке, которое можно скролить.
+</p><img src="https://habrastorage.org/getpro/habr/post_images/aed/1da/f7c/aed1daf7c44f379d7caaa6b1d64ee674.png"/>
+
+<h4>3. Упорядочиваем сцену</h4><p>
+С простейшим рисованием разобрались, пора как-то упорядочить этот процесс и ввести понятие объекта на сцене. Все видимые объекты будут храниться в списке, который и будет определять порядок расположения объектов. Для поддержки этого, мы добавим поле "_canvasObjects" в класс канваса и немного изменим процесс рендеринга, т.е. вместо рисования напрямую, мы будем вызывать метод «Render» всех объектов на сцене. Теперь код выглядит так:
+</p><pre><code class="python">import wx
+from MoveMe.Canvas.Objects.SimpleBoxNode import SimpleBoxNode
+
+class Canvas(wx.PyScrolledWindow):
+    """
+    Canvas stores and renders all nodes and node connections.
+    It also handles all user interaction.
+    """
+    def __init__(self, *args, **kw):
+        super(Canvas, self).__init__(*args, **kw)
+        self.scrollStep = kw.get("scrollStep", 10)
+        self.canvasDimensions = kw.get("canvasDimensions", [800, 800])
+        self.SetScrollbars(self.scrollStep, 
+                           self.scrollStep, 
+                           self.canvasDimensions[0]/self.scrollStep, 
+                           self.canvasDimensions[1]/self.scrollStep)
+        
+        self._canvasObjects = [SimpleBoxNode([20,20]), SimpleBoxNode([140,40]), SimpleBoxNode([60,120])]
+
+        self._dcBuffer = wx.EmptyBitmap(*self.canvasDimensions)
+        self.Render()
+        self.Bind(wx.EVT_PAINT, 
+                  lambda evt: wx.BufferedPaintDC(self, self._dcBuffer, wx.BUFFER_VIRTUAL_AREA)
+                  )
+
+    def Render(self):
+        """Render all nodes and their connection in depth order."""
+        cdc = wx.ClientDC(self)
+        self.PrepareDC(cdc)
+        dc = wx.BufferedDC(cdc, self._dcBuffer)
+        dc.Clear()
+        gc = wx.GraphicsContext.Create(dc)
+        
+        for obj in self._canvasObjects:
+            gc.PushState()
+            obj.Render(gc)
+            gc.PopState()
+</code></pre><p>
+Кстати список объектов сцены сразу содержит несколько объектов класса «SimpleBoxNode», который пока что будет просто рисовать прямоугольники, с координатами объектов.
+</p><pre><code class="python">import wx
+
+class SimpleBoxNode(object):
+    """
+    SimpleBoxNode class represents a simplest possible canvas object 
+    that is basically a rectangular box.
+    """
+    def __init__(self, pos):
+        self.position = pos
+        self.boundingBoxDimensions = [90, 60]
+
+    def Render(self, gc):
+        gc.SetPen(wx.Pen('#000000', 2, wx.SOLID))
+        gc.DrawRoundedRectangle(self.position[0], 
+                                self.position[1], 
+                                self.boundingBoxDimensions[0], 
+                                self.boundingBoxDimensions[1], 10)
+        gc.SetFont(wx.SystemSettings.GetFont(wx.SYS_DEFAULT_GUI_FONT))
+        gc.DrawText("(%d, %d)"%(self.position[0], self.position[1]), self.position[0]+10, self.position[1]+10)
+</code></pre><p>
+Тут вроде все достаточно тривиально. Разве что надо обязательно указывать шрифт, так как «GraphicsContext» не имеет настроек по умолчанию (к этому факту и его исправлению мы еще вернемся). На данный момент, наш код рисует вот такую картинку:
+</p><img src="https://habrastorage.org/getpro/habr/post_images/a9c/b96/64f/a9cb9664f5c397553acf4797a5c73d05.png"/><p>
+Никаких чудес, но для начала хватит. На этом первая часть заканчивается, а в следующей части мы добавим обработку событий мыши и клавиатуры и дадим пользователю возможность наши прямоугольники перемещать, соединять и удалять.
+</p><p>
+Продолжение следует…
+</p><p>
+PS1: Код можно найти на </p><a href="https://github.com/Akson/MoveMe/tree/6066ae9c1792c4d540e2c3741d12bbba0e6f4834">GitHub'е</a><p>
+PS2: Об опечатках пишите в личку.
+
+      
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

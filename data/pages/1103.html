@@ -1,0 +1,162 @@
+<html><body><div><section class="post-content">
+                <p>Whew! It's been awhile since my last post, huh? So much for my "...vow to keep up with this blog" and bold statement that "everyone else can do it, so damnit I can too" mentioned in the <a href="http://blog.iambob.me/inaugural-address/">inaugoral post</a>. But - in my defense - I have been really busy. Like, actually busy, not playing videogames on the couch in my underwear busy. I started working full-time at <a href="http://www.rukkus.com">Rukkus</a>, built a pretty sweet <a href="https://github.com/steinbachr/django-js-variable-injector">injector</a> for smartly managing Django template variables in external Javascript files, and otherwise kept myself fully booked. Anyways, today I'm going to talk about how to query the Google Analytics API from a Django app, a task I was presented with recently and hit a few major pain points tackling. So here goes.  </p>
+
+<div>  
+<img alt="not me" src="http://i.imgur.com/GN1BC1P.gif"/>  
+<span>Because Bean</span>  
+</div>
+
+<hr/>
+
+<p>In the age of API's, we've come to expect instant access to data on demand. When discussing a Google service, this expectation holds even firmer. Yet, querying the Google Analytics API has a few gotchas that can easily turn into major timesucks if not properly handled and while the official <a href="https://developers.google.com/analytics/solutions/articles/hello-analytics-api">tutorial</a> is, by and large, a good start, it skims over some vital details.</p>
+
+<h2 id="configuringtheapp">Configuring the app</h2>
+
+<h4 id="1createanapiproject">1. Create an API project</h4>
+
+<p>To start the process, go to <a href="https://code.google.com/apis/console/">https://code.google.com/apis/console/</a> and create a project if you don't already have one. Important to note is that the Google account under which you create the project should be the same one which you used to sign up for <a href="http://www.google.com/analytics/">Google Analytics</a>.</p>
+
+<hr/>
+
+<h4 id="2turnontheanalyticsapi">2. Turn on the Analytics API</h4>
+
+<p><img src="/content/images/2014/Aug/Screen-Shot-2014-08-03-at-7-21-12-PM.png" alt="analytics"/></p>
+
+<hr/>
+
+<h4 id="3gotothecredentialstabandunderoauthclickcreatenewclientid">3. Go to the "Credentials" tab and under OAuth, click "Create new Client ID"</h4>
+
+<p>And this is where some of the trickiness comes into play. If building a web app which will be making requests on behalf of a logged in user, this step is trivial - choose <strong>Web Application</strong>. However, if - like me - you are building a backend service which is responsible for querying the API as part of a cron job or some other server side task, you must select <strong>Installed Application</strong> and <strong>other</strong> for application type. More on this later. <br/>
+<img src="/content/images/2014/Aug/Screen-Shot-2014-08-03-at-7-23-32-PM.png" alt=""/></p>
+
+<hr/>
+
+<h4 id="4downloadthejsonandsaveitasclient_secretsjson">4. Download the JSON and save it as <code>client_secrets.json</code></h4>
+
+<p><img src="/content/images/2014/Aug/Screen-Shot-2014-08-03-at-7-42-14-PM.png" alt=""/></p>
+
+<h2 id="authentication">Authentication</h2>
+
+<p>By and large, the authentication step follows what is specified in the official tutorial with a few key exceptions. But heck, we're feeling pretty bad-ass, so let's just take it from the top.</p>
+
+<hr/>
+
+<h4 id="1installthegoogleapipythonbindings">1. Install the Google API Python Bindings</h4>
+
+<p><code>pip install --upgrade google-api-python-client</code></p>
+
+<hr/>
+
+<h4 id="2importsomepackages">2. Import some packages</h4>
+
+<pre><code>import httplib2  
+from apiclient.discovery import build  
+from oauth2client.client import flow_from_clientsecrets  
+from oauth2client.file import Storage  
+from oauth2client.tools import run_flow  
+</code></pre>
+
+<p>..like a boss</p>
+
+<hr/>
+
+<h4 id="3createacontainerclasswithsomeclasslevelfields">3. Create a container class with some class-level fields</h4>
+
+<pre><code>class GoogleAnalytics(object):  
+    CLIENT_SECRETS = "client_secrets.json"
+    FLOW = flow_from_clientsecrets(CLIENT_SECRETS, scope='https://www.googleapis.com/auth/analytics.readonly')
+    TOKEN_FILE_NAME = 'analytics.dat'
+    VIEW_ID = '/* Your Profile View Id */'
+</code></pre>
+
+<p>Some important things to note here:</p>
+
+<ol>
+<li>Your <code>VIEW_ID</code> can be found in your analytics console's admin page. <img src="/content/images/2014/Aug/Screen-Shot-2014-08-03-at-7-37-27-PM.png" alt="" title=""/>  </li>
+<li><code>CLIENT_SECRETS</code> should be the absolute path of the file JSON file downloaded earlier.</li>
+</ol>
+
+<hr/>
+
+<h4 id="4addtheboilerplateauthenticationcode">4. Add the boilerplate authentication code</h4>
+
+<pre><code>def __init__(self):  
+    self.service = None
+
+def _authenticate(self):  
+  # Retrieve existing credendials
+  storage = Storage(self.TOKEN_FILE_NAME)
+  credentials = storage.get()
+
+  if credentials is None or credentials.invalid:
+      credentials = run_flow(self.FLOW, storage, self.GAFlags())
+
+  return credentials
+
+def _create_service(self):  
+  # 1. Create an http object
+  http = httplib2.Http()
+
+  # 2. Authorize the http object
+  credentials = self._authenticate()
+  http = credentials.authorize(http) 
+
+  # 3. Build the Analytics Service Object with the authorized http object
+  return build('analytics', 'v3', http=http)
+
+def start_service(self):  
+  """
+  :return: ``this`` Google analytics object with the service set
+
+  start the service which may be used to query the google analytics api
+  """
+  if not self.service:
+      self.service = self._create_service()
+  return self
+</code></pre>
+
+<p>most of this is ripped wholesale from the official <a href="https://developers.google.com/analytics/solutions/articles/hello-analytics-api">tutorial</a>. However, if you were to run this right now you would notice you get an error that <code>self.GAFlags</code> isn't defined, and this is indeed the case. So let's add it and then I'll explain why we need it. </p>
+
+<hr/>
+
+<h4 id="4addagaflagsclass">4. Add a GAFlags class</h4>
+
+<pre><code>class GAFlags():  
+  """
+  total hack. If you want to see why, examine apiclient.sample_tools. The python bindings as well as the documentation kind've forgot to mention this...which is a big deal..but actually though.
+  """
+  noauth_local_webserver = True
+  logging_level = "DEBUG"
+</code></pre>
+
+<p>What this flags class is allowing us to do is run the authentication flow in <code>noauth_local_webserver</code> mode. Basically, this means that we don't want to start a webserver for authentication because we're already running one. </p>
+
+<h2 id="makingqueries">Making Queries</h2>
+
+<p>Now that you've successfully authenticated, it's on to the fun stuff, actually accessing your GA data. My generic query method looks as follows:  </p>
+
+<pre><code>def query(self, **kwargs):  
+  kwargs.update({
+  'ids': "ga:{id}".format(id=self.VIEW_ID),
+  })
+
+  result = self.service.data().ga().get(**kwargs)
+  return result
+</code></pre>
+
+<p>So to get - for instance - the number of sessions, organic searches, and page views in the past day, we would run:  </p>
+
+<pre><code>GoogleAnalytics().start_service().query(start_date=str((datetime.datetime.now() - datetime.timedelta(days=1)).date()), end_date=str(datetime.datetime.now().date()), metrics='ga:organicSearches,ga:sessions,ga:pageviews'  
+</code></pre>
+
+<hr/>
+
+<p>Ahhh! Feels good to finally be writing again. After reading this post, hopefully you now know how to create an API project on Google, authenticate using OAuth, and query your sites GA data.</p>
+
+<div>  
+<img alt="not me" src="http://i.imgur.com/M8S4vuG.jpg"/>  
+<span>You after plotting GA session information in a time series graph. Nerd!</span>  
+</div>                
+            </section>
+
+            </div></body></html>

@@ -1,0 +1,108 @@
+<html><body><div><div class="content html_format"><p>
+      Не раз слышал от своих знакомых, что было бы неплохо увидеть сайт который будет мониторить наличие свободных мест на </p><a href="http://rzd.ru">ржд</a><p>. Про себя я думал — «да неплохо бы» и благополучно забывал, но </p><a href="http://habrahabr.ru/post/206146/">пост</a><p> заставил меня вспомнить навыки копи паста, которыми я владею в совершенстве и обернуть это дело в питонячий код. Сразу оговорюсь что именно про мониторинг будет во второй части, а в этой будет про то: как ходить на РЖД из питона, что это за загадочный </p><b>sleep</b><p> про который писали в предыдущем посту и как живется на Google App Engine. Итак приступим:
+</p><img src="https://habrastorage.org/getpro/habr/post_images/5bc/c9d/e46/5bcc9de463f52e1591b33a6ba2bbb278.jpg" alt="image"/>
+<a name="habracut"/><p>
+Сначала я написал код, а потом задумался о хостинге, естественно сайт не предполагал никакой наживы, а был лишь 4 fun, поэтому и хостинг должен быть бесплатным и тут я вспомнил про </p><a href="http://appengine.google.com">App Engine</a><p>. Для начала работы стоит скачать </p><a href="https://developers.google.com/appengine/downloads?hl=ru">SDK</a><p>. Запускаем, указываем путь к будущему приложению: 
+</p><img src="https://habrastorage.org/getpro/habr/post_images/8dc/528/292/8dc528292644b9def66c103ea8df6ee3.jpg" alt="image"/> 
+<p>
+В указанной рабочей директории создаем файл настроек </p><i>app.yaml</i><p> содержащий примерно следующее: 
+
+</p><pre><code class="bash">application: rzdzstan1
+version: 1
+runtime: python27
+threadsafe: false
+api_version: 1
+
+handlers:
+- url: /favicon.ico
+  static_files: favicon.ico
+  upload: favicon.ico
+
+- url: /.*
+  script: web.py
+
+libraries:
+- name: webapp2
+  version: "latest"
+</code></pre>
+<p>
+Дальше в вышеобозначенной рабочей директории создаем, </p><i>web.py</i><p> и тут уже можно начинать </p><s>писать код</s><p> копипастить. Приложение будем строить на легковесном </p><a href="http://webapp-improved.appspot.com/index.html">WebApp2</a><p>. Итак пишем основные обработчики:
+
+</p><pre><code class="python">import webapp2
+
+application = webapp2.WSGIApplication([
+    ('/', MainPage),
+    ('/trains', TrainListPage),
+    ('/suggester', SuggesterPage),
+], debug=True)
+
+def main():
+    application.run()
+
+if __name__ == "__main__":
+    main()
+</code></pre>
+<p>
+Далее, как и говорилось в базовой статье, нам понадобятся коды городов для создания запроса:
+
+</p><pre><code class="python">def getCityId(city, s):
+  req = 'http://pass.rzd.ru/suggester?lang=ru&amp;stationNamePart=' + urllib.quote(city.encode('utf-8'))
+  city = city.lower()
+  respData = getResponse(req)
+  rJson = json.loads(respData)
+  for item in rJson:
+    if item['name'].lower() == city:
+      s.response.out.write(u'Найден: '+item['name']+' -&gt; '+str(item['id'])+'&lt;br&gt;')
+      return str(item['id'])
+  s.response.out.write(u'Не найден: '+city+'&lt;br&gt;')
+  s.response.out.write(u'Выбранный вами город не найден, попробуйте найти в списке и ввести еще раз:&lt;a href="../"&gt;Вернуться&lt;/a&gt;&lt;br&gt;')
+  for item in rJson:
+    s.response.out.write(item['name']+'&lt;br&gt;')
+  return None
+</code></pre>
+<p>
+Ну а дальше остается получить </p><i>rid</i><p>, </p><i>SESSION_ID</i><p> и сформировать окончательный запрос, не забывая что часто РЖД рвет соединения, отвечает 500 кодом и т.д. чтобы это замаскировать напишем пару костылей-обработчиков:
+
+</p><pre><code class="python">def getResponse(url):
+  good = False
+  while not good:
+    try:
+      resp = opener.open(url, timeout=5)
+      if resp.getcode() in [httplib.OK, httplib.CREATED, httplib.ACCEPTED]:
+        good = True
+    except (urllib2.HTTPError, HTTPException):
+      pass
+  return resp.read()
+
+def getResponseStub(url):
+  r = json.loads(getResponse(url))
+  cnt = 0
+  while (r['result']!='OK' and cnt &lt; 5):
+    sleep(1)
+    cnt+=1
+    r = json.loads(getResponse(url))
+  return r
+
+def getFinalRequest():
+  req1 = 'http://pass.rzd.ru/timetable/public/ru?STRUCTURE_ID=735&amp;layer_id=5371&amp;dir=0&amp;tfl=3&amp;checkSeats=1&amp;\
+st0='+st0+'&amp;code0='+id0+'&amp;dt0='+date+'&amp;st1='+st1+'&amp;code1='+id1+'&amp;dt1='+date
+
+  r = json.loads(getResponse(req1))
+  if (r['result']=='OK'):
+    s.response.out.write(r['tp'][0]['msgList'][0]['message']) #errType
+    s.response.out.write('&lt;br&gt;')
+    return
+  sid = str(r['SESSION_ID'])
+  rid = str(r['rid'])
+  req2 = 'http://pass.rzd.ru/timetable/public/ru?STRUCTURE_ID=735&amp;layer_id=5371&amp;dir=0&amp;tfl=3&amp;checkSeats=1&amp;\
+st0='+st0+'&amp;code0='+id0+'&amp;dt0='+date+'&amp;st1='+st1+'&amp;code1='+id1+'&amp;dt1='+date+'&amp;rid='+rid+'&amp;SESSION_ID='+sid
+
+  r = getResponseStub(req2)
+</code></pre>
+<p>
+И в получившемся ответе — лежит все необходимое для финального парсинга. Теперь о загадочном </p><b>sleep</b><p>, он переехал в функцию: getResponseStub, дело в том что когда мы запрашиваем </p><i>req1</i><p> му таким образом просим поставить нас в очередь исполнения, и если сразу спросить </p><i>req2</i><p> — результат может быть еще не получен. Радиоактивные исходники доступны тут </p><a href="https://github.com/zstan/rzd">качать осторожно</a><p>. Попробовать в действии можно </p><a href="http://rzdzstan1.appspot.com/">тут</a><p> и </p><a href="http://rzdzstan0.appspot.com/">тут</a><p> ибо квоты там небольшие и под известным эффектом быстро закончатся, а пока эта статья проходит премодерацию попробую закинуть немного денег чтобы страница продержалась продолжительное время. В следующей части будем приделывать собственно саму нотификацию по емайлу.
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

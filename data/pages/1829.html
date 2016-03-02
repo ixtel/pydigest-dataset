@@ -1,0 +1,320 @@
+<html><body><div><div class="content html_format"><p>
+      В </p><a href="http://habrahabr.ru/post/239081/">прошлой статье</a><p> мы познакомились с удобной библиотекой синтаксического анализа Pyparsing и написали парсер для выражения </p><code>'import matplotlib.pyplot as plt'</code><p>.
+</p><p>
+В этой статье мы начнём погружение в Pyparsing на примере задачи парсинга единиц измерения. Шаг за шагом мы создадим рекурсивный парсер, который умеет искать символы на русском языке, проверять допустимость названия единицы измерения, а также группировать те из них, которые пользователь заключил в скобки.
+</p><a name="habracut"/>
+<b>Примечание:</b><p> Код этой статьи протестирован и выложен на </p><a href="https://cloud.sagemath.com/projects/1989e6b8-a109-487e-986a-df54caf96191/files/Вглубь%20Pyparsing:%20парсим%20единицы%20измерения%20на%20Python.sagews">Sagemathclod</a><p>. Если у Вас вдруг что-то не работает (скорее всего из-за кодировки текста), обязательно сообщите мне об этом в личку, в комментариях или напишите мне на </p><a href="mailto:sh.andr.gen@yandex.ru">почту</a><p> или в </p><a href="http://vk.com/im?sel=87466231">ВК</a><p>.
+
+</p><h2>Начало работы. Исходные данные и задача.</h2><p>
+В качестве примера будем парсить выражение:
+
+</p><pre><code class="python">s = "Н*м^2/(кг*с^2)"
+</code></pre><p>
+Эта единица измерения была взята из головы с целью получить строку, анализ которой задействовал бы все возможности нашего парсера. Нам нужно получить:
+
+</p><pre><code class="python">res = [('Н',1.0), ('м',2.0), ('кг',-1.0), ('с',-2.0)]
+</code></pre><p>
+Заменив в строке </p><code>s</code><p> деление умножением, раскрыв скобки и явно проставив степени у единиц измерения, получим: Н*м^2/(кг*с^2) = Н^1 * м^2 * кг^-1 * с^-2.
+</p><p>
+Таким образом, каждый кортеж в переменной </p><code>res</code><p> содержит название единицы измерения и степень, в которую её необходимо возвести. Между кортежами можно мысленно поставить знаки умножения.
+</p><p>
+Перед тем, как использовать pyparsing, его необходимо импортировать:
+
+</p><pre><code class="python">from pyparsing import *
+</code></pre><p>
+Когда мы напишем парсер, мы заменим * на использованные нами классы.
+
+</p><h2> Методика написания парсера на Pyparsing </h2><p>
+При использовании pyparsing следует придерживаться следующей методики написания парсера:
+</p><ol>
+<li>Сначала из текстовой строки выделяются ключевые слова или отдельные важные символы, которые являются «кирпичиками» для построения конечной строки.</li>
+<li>Пишем отдельные парсеры для «кирпичиков».</li>
+<li>«Собираем» парсер для конечной строки.</li>
+</ol><p>
+В нашем случае основными «кирпичиками» являются названия отдельных единиц измерения и их степени.
+
+</p><h2> Написание парсера для единицы измерения. Парсинг русских букв. </h2><p>
+Единица измерения — это слово, которое начинается с буквы и состоит из букв и точек (например мм.рт.ст.). В pyparsing мы можем записать:
+
+</p><pre><code class="python">ph_unit = Word(alphas, alphas+'.')
+</code></pre><p>
+Обратите внимание, что у класса </p><code>Word</code><p> теперь 2 аргумента. Первый аргумент отвечает за то, что должно быть первым символом у слова, второй аргумент — за то, какими могут быть остальные символы слова. Единица измерения обязательно начинается с буквы, поэтому мы поставили первым аргументом </p><code>alphas</code><p>. Помимо букв единица измерения может содержать точку (например, мм.рт.ст), поэтому второй аргумент у </p><code>Word</code><p> – </p><code>alphas + '.'</code><p>.
+</p><p>
+К сожалению, если мы попробуем распарсить любую единицу измерения, мы обнаружим, что парсер работает только для единиц измерения на английском языке. Это потому, что </p><code>alphas</code><p> подразумевает не просто буквы, а буквы английского алфавита.
+</p><p>
+Данная проблема обходится очень легко. Сначала создадим строку, перечисляющую все буквы на русском:
+
+</p><pre><code class="python">rus_alphas = 'йцукенгшщзхъфывапролджэячсмитьбюЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮ'
+</code></pre><p>
+И код парсера для отдельной единицы измерения следует изменить на:
+
+</p><pre><code class="python">ph_unit = Word(alphas+rus_alphas, alphas+rus_alphas+'.')
+</code></pre><p>
+Теперь наш парсер понимает единицы измерения на русском и английском языках. Для других языков код парсера пишется аналогично.
+
+</p><h2> Коррекция кодировки результата работы парсера. </h2><p>
+При тестировании парсера для единицы измерения Вы можете получить результат, в котором русские символы заменены их кодовым обозначением. Например, на Sage:
+
+</p><pre><code class="python">ph_unit.parseString("мм").asList()
+# Получим: ['\xd0\xbc\xd0\xbc']
+</code></pre><p>
+Если Вы получили такой же результат, значит, всё работает правильно, но нужно поправить кодировку. В моём случае (sage) работает использование «самодельной» функции </p><code>bprint</code><p> (better print):
+
+</p><pre><code class="python">def bprint(obj):
+    print(obj.__repr__().decode('string_escape'))
+</code></pre><p>
+Используя эту функцию, мы получим вывод в Sage в правильной кодировке:
+
+</p><pre><code class="python">bprint(ph_unit.parseString("мм").asList())
+# Получим: ['мм']
+</code></pre>
+<h2> Написание парсера для степени. Парсинг произвольного числа.</h2><p>
+Научимся парсить степень. Обычно степень — это целое число. Однако в редких случаях степень может содержать дробную часть или быть записанной в экспоненциальной нотации. Поэтому мы напишем парсер для обычного числа, например, такого:
+
+</p><pre><code class="python">test_num = "-123.456e-3"
+</code></pre><p>
+«Кирпичиком» произвольного числа является натуральное число, которое состоит из цифр:
+
+</p><pre><code class="python">int_num = Word(nums)
+</code></pre><p>
+Перед числом может стоять знак плюс или минус. При этом знак плюс выводить в результат не надо (используем </p><code>Suppress()</code><p>).
+
+</p><pre><code class="python">pm_sign = Optional(Suppress("+") | Literal("-"))
+</code></pre><p>
+Вертикальная черта означает «или» (плюс или минус). </p><code>Literal()</code><p> означает точное соответствие текстовой строке. Таким образом, выражение для </p><code>pm_sign</code><p> означает, что надо найти в тексте необязательный символ +, который не надо выводить в результат парсинга, или необязательный символ минус.
+</p><p>
+Теперь мы можем написать парсер для всего числа. Число начинается с необязательного знака плюс или минус, потом идут цифры, потом необязательная точка — разделитель дробной части, потом цифры, потом может идти символ e, после которого — снова число: необязательный плюс-минус и цифры. У числа после e дробной части уже нет. На pyparsing:
+
+</p><pre><code class="python">float_num = pm_sign + int_num + Optional('.' + int_num) + Optional('e' + pm_sign + int_num)
+</code></pre><p>
+У нас теперь есть парсер для числа. Посмотрим, как работает парсер:
+
+</p><pre><code class="python">float_num.parseString('-123.456e-3').asList()
+# Получим ['-', '123', '.', '456', 'e', '-', '3']
+</code></pre><p>
+Как мы видим, число разбито на отдельные составляющие. Нам это ни к чему, и мы бы хотели «собрать» число обратно. Это делается при помощи </p><code>Combine()</code><p>:
+
+</p><pre><code class="python">float_num = Combine(pm_sign + int_num + Optional('.' + int_num) + Optional('e' + pm_sign + int_num))
+</code></pre><p>
+Проверим:
+
+</p><pre><code class="python">float_num.parseString('-123.456e-3').asList()
+# Получим ['-123.456e-3']
+</code></pre><p>
+Отлично! Но… На выходе по-прежнему строка, а нам нужно число. Добавим преобразование строки в число, используя </p><code>ParseAction()</code><p>:
+
+</p><pre><code class="python">float_num = Combine(pm_sign + int_num + Optional('.' + int_num) + Optional('e' + pm_sign + int_num)).setParseAction(lambda t: float(t.asList()[0]))
+</code></pre><p>
+Мы используем анонимную функцию </p><code>lambda</code><p>, аргументом которой является </p><code>t</code><p>. Сначала мы получаем результат в виде списка </p><code>(t.asList())</code><p>. Т.к. полученный список имеет только один элемент, его сразу можно извлечь: </p><code>t.asList()[0]</code><p>. Функция </p><code>float()</code><p> преобразует текст в число с плавающей точкой. Если вы работаете в Sage, можете заменить </p><code>float</code><p> на </p><code>RR</code><p> — конструктор класса вещественных чисел Sage.
+
+</p><h2> Парсинг единицы измерения со степенью. </h2><p>
+Отдельная единица измерения — это название единицы измерения, после которой может идти знак степени ^ и число — степень, в которую необходимо возвести. На pyparsing:
+
+</p><pre><code class="python">single_unit = ph_unit + Optional('^' + float_num)
+</code></pre><p>
+Протестируем:
+
+</p><pre><code class="python">bprint(single_unit.parseString("м^2").asList())
+# Получим: ['м', '^', 2.0]
+</code></pre><p>
+Сразу усовершенствуем вывод. Нам не нужно видеть ^ в результате парсинга, и мы хотим видеть результат в виде кортежа (см. переменную res в начале этой статьи). Для подавления вывода используем </p><code>Suppress()</code><p>, для преобразования списка в кортеж — </p><code>ParseAction()</code><p>:
+
+</p><pre><code class="python">single_unit = (ph_unit + Optional(Suppress('^') + float_num)).setParseAction(lambda t: tuple(t.asList()))
+</code></pre><p>
+Проверим:
+</p><pre><code class="python">bprint(single_unit.parseString("м^2").asList())
+# Получим: [('м', 2.0)]
+</code></pre>
+
+<h2> Парсинг единиц измерения, обрамлённых скобками. Реализация рекурсии. </h2><p>
+Мы подошли к интересному месту — описанию реализации рекурсии. При написании единицы измерения пользователь может обрамить скобками одну или несколько единиц измерения, между которыми стоят знаки умножения и деления. Выражение в скобках может содержать другое, вложенное выражение, обрамлённое скобками (например </p><code>"(м^2/ (с^2 * кг))"</code><p>). Возможность вложения одних выражений со скобками в другие и есть источник рекурсии. Перейдём к Pyparsing.
+</p><p>
+Вначале напишем выражение, не обращая внимание, что у нас есть рекурсия:
+
+</p><pre><code class="python">unit_expr = Suppress('(') + single_unit + Optional(OneOrMore((Literal("*") | Literal("/")) + (single_unit | unit_expr))) + Suppress(")")
+</code></pre>
+<code>Optional</code><p> содержит ту часть строки, которая может присутствовать, а может отсутствовать. </p><code>OneOrMore</code><p> (переводится как «один или больше») содержит ту часть строки, которая должна встретиться в тексте не менее одного раза. </p><code>OneOrMore</code><p> содержит два «слагаемых»: сначала мы ищем знак умножения и деления, потом единицу измерения или вложенное выражение.
+</p><p>
+В том виде, как сейчас, оставлять </p><code>unit_expr</code><p> нельзя: слева и справа от знака равенства есть </p><code>unit_expr</code><p>, что однозначно свидетельствует о рекурсии. Решается эта проблема очень просто: надо поменять знак присваивания на &lt;&lt;, а в строке перед </p><code>unit_expr</code><p> добавить присваивание специального класса </p><code>Forward()</code><p>:
+
+</p><pre><code class="python">unit_expr = Forward()
+unit_expr &lt;&lt; Suppress('(') + single_unit + Optional(OneOrMore((Literal("*") | Literal("/")) + (single_unit | unit_expr))) + Suppress(")")
+</code></pre><p>
+Таким образом, при написании парсера нет необходимости заранее предвидеть рекурсию. Сначала пишите выражение так, как будто в нём не будет рекурсии, а когда увидите, что она появилась, просто замените знак = на &lt;&lt; и строкой выше добавьте присваивание класса </p><code>Forward()</code><p>.
+</p><p>
+Проверим:
+
+</p><pre><code class="python">bprint(unit_expr.parseString("(Н*м/с^2)").asList())
+# Получим: [('Н',), '*', ('м',), '/', ('с', 2.0)]
+</code></pre>
+
+<h2> Парсинг общего выражения для единицы измерения. </h2><p>
+У нас остался последний шаг: общее выражение для единицы измерения. На pyparsing:
+
+</p><pre><code class="python">parse_unit = (unit_expr | single_unit) + Optional(OneOrMore((Literal("*") | Literal("/")) + (single_unit | unit_expr)))
+</code></pre><p>
+Обратите внимание, что выражение имеет вид </p><code>(a | b) + (c | d)</code><p>. Скобки здесь обязательны и имеют ту же роль, что и в математике. Используя скобки, мы хотим указать, что вначале надо проверить, что первое слагаемое — </p><code>unit_expr</code><p> или </p><code>single_unit</code><p>, а второе слагаемое — необязательное выражение. Если скобки убрать, то получится, что </p><code>parse_unit</code><p> – это </p><code>unit_expr</code><p> или </p><code>single_unit</code><p> + необязательное выражение, что не совсем то, что мы задумывали. Те же рассуждения применимы и к выражению внутри </p><code>Optional()</code><p>.
+
+</p><h2> Черновой вариант парсера. Коррекция кодировки результата. </h2><p>
+Итак, мы написали черновой вариант парсера:
+
+</p><pre><code class="python">from pyparsing import *
+rus_alphas = 'йцукенгшщзхъфывапролджэячсмитьбюЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮ'
+ph_unit = Word(rus_alphas+alphas, rus_alphas+alphas+'.')
+int_num = Word(nums)
+pm_sign = Optional(Suppress("+") | Literal("-"))
+float_num = Combine(pm_sign + int_num + Optional('.' + int_num) + Optional('e' + pm_sign + int_num)).setParseAction(lambda t: float(t.asList()[0]))
+single_unit = (ph_unit + Optional(Suppress('^') + float_num)).setParseAction(lambda t: tuple(t.asList()))
+unit_expr = Forward()
+unit_expr &lt;&lt; Suppress('(') + single_unit + Optional(OneOrMore((Literal("*") | Literal("/")) + (single_unit | unit_expr))) + Suppress(")")
+parse_unit = (unit_expr | single_unit) + Optional(OneOrMore((Literal("*") | Literal("/")) + (single_unit | unit_expr)))
+</code></pre><p>
+Проверим:
+
+</p><pre><code class="python">print(s) # s = "Н*м^2/(кг*с^2)" — см. начало статьи.
+bprint(parse_unit.parseString(s).asList())
+# Получим: [('Н',), '*', ('м', 2.0), '/', ('кг',), '*', ('с', 2.0)]
+</code></pre>
+<h2> Группировка единиц измерения, обрамлённых скобками. </h2><p>
+Мы уже близко к тому результату, который хотим получить. Первое, что нам нужно реализовать — группировка тех единиц измерения, которых пользователь обрамил скобками. Для этого в Pyparsing используется </p><code>Group()</code><p>, который мы применим к </p><code>unit_expr</code><p>:
+
+</p><pre><code class="python">unit_expr = Forward()
+unit_expr &lt;&lt; Group(Suppress('(') + single_unit + Optional(OneOrMore((Literal("*") | Literal("/")) + (single_unit | unit_expr))) + Suppress(")"))
+</code></pre><p>
+Посмотрим, что изменилось:
+
+</p><pre><code class="python">bprint(parse_unit.parseString(s).asList())
+# Получим: [('Н',), '*', ('м', 2.0), '/', [('кг',), '*', ('с', 2.0)]]
+</code></pre>
+
+<h2> Ставим степень 1 в тех кортежах, где степень отсутствует. </h2><p>
+В некоторых кортежах после запятой ничего не стоит. Напомню, что кортеж соответствует единице измерения и имеет вид (единица измерения, степень). Вспомним, что мы можем давать имена определённым кусочкам результата работы парсера (описано в </p><a href="http://habrahabr.ru/post/239081/">прошлой статье</a><p>). В частности, назовём найденную единицу измерения как </p><code>'unit_name'</code><p>, а её степень как </p><code>'unit_degree'</code><p>. В </p><code>setParseAction()</code><p> напишем анонимную функцию </p><code>lambda()</code><p>, которая будет ставить 1 там, где пользователь не указал степень единицы измерения). На pyparsing:
+
+</p><pre><code class="python">single_unit = (ph_unit('unit_name') + Optional(Suppress('^') + float_num('unit_degree'))).setParseAction(lambda t: (t.unit_name, float(1) if t.unit_degree == "" else t.unit_degree))
+</code></pre><p>
+Теперь весь наш парсер выдаёт следующий результат:
+
+</p><pre><code class="python">bprint(parse_unit.parseString(s).asList())
+# Получим: [('Н', 1.0), '*', ('м', 2.0), '/', [('кг', 1.0), '*', ('с', 2.0)]]
+</code></pre><p>
+В коде выше вместо </p><code>float(1)</code><p> можно было бы написать просто </p><code>1.0</code><p>, но в Sage в таком случае получится не тип </p><code>float</code><p>, а собственный тип Sage для вещественных чисел.
+ 
+</p><h2> Убираем из результата парсера знаки * и /, раскрываем скобки. </h2><p>
+Всё, что нам осталось сделать — это убрать в результате парсера знаки * и /, а также вложенные квадратные скобки. Если перед вложенным списком (т. е. перед [) стоит деление, знак степени у единиц измерения во вложенном списке надо поменять на противоположный. Для этого напишем отдельную функцию </p><code>transform_unit()</code><p>, которую будем использовать в </p><code>setParseAction()</code><p> для </p><code>parse_unit</code><p>:
+
+</p><pre><code class="python">def transform_unit(unit_list, k=1):
+    res = []
+    for v in unit_list:
+        if isinstance(v, tuple):
+            res.append(tuple((v[0], v[1]*k)))
+        elif v == "/":
+            k = -k
+        elif isinstance(v, list):
+            res += transform_unit(v, k=k)
+    return(res)
+parse_unit = ((unit_expr | single_unit) + Optional(OneOrMore((Literal("*") | Literal("/")) + (single_unit | unit_expr)))).setParseAction(lambda t: transform_unit(t.asList()))
+</code></pre><p>
+После этого наш парсер возвращает единицу измерения в нужном формате:
+
+</p><pre><code class="python">bprint(transform_unit(parse_unit.parseString(s).asList()))
+# Получим: [('Н', 1.0), ('м', 2.0), ('кг', -1.0), ('с', -2.0)]
+</code></pre><p>
+Обратите внимание, что функция </p><code>transform_unit()</code><p> убирает вложенность. В процессе преобразования все скобки раскрываются. Если перед скобкой стоит знак деления, знак степени единиц измерения в скобках меняется на противоположный.
+
+</p><h2> Реализация проверки единиц измерения непосредственно в процессе парсинга. </h2><p>
+Последнее, что было обещано сделать — внедрить раннюю проверку единиц измерения. Другими словами, как только парсер найдёт единицу измерения, он сразу проверит её по нашей базе данных.
+</p><p>
+В качестве базы данных будем использовать словарь Python:
+
+</p><pre><code class="python">unit_db = {'Длина':{'м':1, 'дм':1/10, 'см':1/100, 'мм':1/1000, 'км':1000, 'мкм':1/1000000}, 'Сила':{'Н':1}, 'Мощность':{'Вт':1, 'кВт':1000}, 'Время':{'с':1}, 'Масса':{'кг':1, 'г':0.001}}
+</code></pre><p>
+Чтобы быстро проверить единицу измерения, хорошо было бы создать множество Python, поместив в него единицы измерения:
+
+</p><pre><code class="python">unit_set = set([t for vals in unit_db.values() for t in vals])
+</code></pre><p>
+Напишем функцию </p><code>check_unit</code><p>, которая будет проверять единицу измерения, и вставим её в </p><code>setParseAction</code><p> для </p><code>ph_unit</code><p>:
+
+</p><pre><code class="python">def check_unit(unit_name):
+    if not unit_name in unit_set:
+        raise ValueError("Единица измерения указана неверно или отсутствует в базе данных: " + unit_name)
+    return(unit_name)
+ph_unit = Word(rus_alphas+alphas, rus_alphas+alphas+'.').setParseAction(lambda t: check_unit(t.asList()[0]))
+</code></pre><p>
+Вывод парсера не изменится, но, если попадётся единица измерения, которая отсутствует в базе данных или в науке, то пользователь получит сообщение об ошибке. Пример:
+
+</p><pre><code class="python">ph_unit.parseString("дюйм")
+# Получим сообщение об ошибке:
+Error in lines 1-1
+Traceback (most recent call last):
+…
+File "", line 1, in &lt;lambda&gt;
+File "", line 3, in check_unit
+ValueError: Единица измерения указана неверно или отсутствует в базе данных: дюйм
+</code></pre><p>
+Последняя строчка и есть наше сообщение пользователю об ошибке.
+
+</p><h2> Полный код парсера. Заключение. </h2><p>
+В заключение приведу полный код парсера. Не забудьте в строке импорта </p><code>"from pyparsing import *"</code><p> заменить * на использованные классы.
+
+</p><pre><code class="python">from pyparsing import nums, alphas, Word, Literal, Optional, Combine, Forward, Group, Suppress, OneOrMore
+
+def bprint(obj):
+    print(obj.__repr__().decode('string_escape'))
+
+# База данных единиц измерения
+unit_db = {'Длина':{'м':1, 'дм':1/10, 'см':1/100, 'мм':1/1000, 'км':1000, 'мкм':1/1000000}, 'Сила':{'Н':1}, 'Мощность':{'Вт':1, 'кВт':1000}, 'Время':{'с':1}, 'Масса':{'кг':1, 'г':0.001}}
+unit_set = set([t for vals in unit_db.values() for t in vals])
+
+# Парсер для единицы измерения с проверкой её по базе данных
+rus_alphas = 'йцукенгшщзхъфывапролджэячсмитьбюЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮ'
+def check_unit(unit_name):
+    """
+    Проверка единицы измерения по базе данных.
+    """
+    if not unit_name in unit_set:
+        raise ValueError("Единица измерения указана неверно или отсутствует в базе данных: " + unit_name)
+    return(unit_name)
+ph_unit = Word(rus_alphas+alphas, rus_alphas+alphas+'.').setParseAction(lambda t: check_unit(t.asList()[0]))
+
+# Парсер для степени
+int_num = Word(nums)
+pm_sign = Optional(Suppress("+") | Literal("-"))
+float_num = Combine(pm_sign + int_num + Optional('.' + int_num) + Optional('e' + pm_sign + int_num)).setParseAction(lambda t: float(t.asList()[0]))
+
+# Парсер для единицы измерения со степенью
+single_unit = (ph_unit('unit_name') + Optional(Suppress('^') + float_num('unit_degree'))).setParseAction(lambda t: (t.unit_name, float(1) if t.unit_degree == "" else t.unit_degree))
+
+# Парсер для выражения в скобках
+unit_expr = Forward()
+unit_expr &lt;&lt; Group(Suppress('(') + single_unit + Optional(OneOrMore((Literal("*") | Literal("/")) + (single_unit | unit_expr))) + Suppress(")"))
+
+# Парсер для общего выражения единицы измерения
+def transform_unit(unit_list, k=1):
+    """
+    Функция раскрывает скобки в результате, выданном парсером, корректирует знак степени и убирает знаки * и /
+    """
+    res = []
+    for v in unit_list:
+        if isinstance(v, tuple):
+            res.append(tuple((v[0], v[1]*k)))
+        elif v == "/":
+            k = -k
+        elif isinstance(v, list):
+            res += transform_unit(v, k=k)
+    return(res)
+parse_unit = ((unit_expr | single_unit) + Optional(OneOrMore((Literal("*") | Literal("/")) + (single_unit | unit_expr)))).setParseAction(lambda t: transform_unit(t.asList()))
+
+#Проверка
+s = "Н*м^2/(кг*с^2)"
+bprint(parse_unit.parseString(s).asList())
+</code></pre><p>
+Благодарю вас за терпение, с которым вы прочитали мою статью. Напомню, что код, представленный в этой статье, выложен на </p><a href="https://cloud.sagemath.com/projects/1989e6b8-a109-487e-986a-df54caf96191/files/Вглубь%20Pyparsing:%20парсим%20единицы%20измерения%20на%20Python.sagews">Sagemathcloud</a><p>. Если вы не зарегистрированы на Хабре, вы можете прислать мне вопрос на </p><a href="mailto:sh.andr.gen@yandex.ru">почту</a><p> или написать в </p><a href="http://vk.com/im?sel=87466231">ВК</a><p>. В следующей статье я хочу познакомить вас с </p><a href="https://cloud.sagemath.com/">Sagemathcloud</a><p>, показать, насколько сильно он может упростить вашу работу на Python. После этого я вернусь к теме парсинга на Pyparsing на качественно новом уровне.
+</p><p>
+Благодарю </p><a href="http://vk.com/id837282">Дарью Фролову</a><p> и Никиту Коновалова за помощь в проверке статьи перед её публикацией.
+
+      
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

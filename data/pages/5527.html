@@ -1,0 +1,129 @@
+<html><body><div><div class="post-content" itemprop="articleBody">
+    <p>Here at HumanGeo we use a lot of Python, and it is tons of fun. Python is a great language for writing beautiful and functional code amazingly fast, and it is most definitely my favorite language to use both privately and professionally. However, even though it is a wonderful language, Python can be painfully slow. Luckily, there are some amazing tools to help profile your code so that you can keep your beautiful code fast.</p>
+<p>When I started working here at HumanGeo, I was tasked with taking a program that took many hours to run, finding the bottlenecks, and then doing whatever I could to make it run faster. I used many tools, including <a href="https://docs.python.org/2/library/profile.html" target="_blank"><code>cProfile</code></a>, <a href="https://pycallgraph.readthedocs.org/en/master/" target="_blank">PyCallGraph</a> (<a href="https://github.com/gak/pycallgraph" target="_blank">source</a>), and even PyPy (an alternate, fast, interpreter for Python), to determine the best ways to optimize the program. I will go through how I used all of these programs, except for PyPy (which I ruled out to maintain interpreter consistency in production), and how they can help even the most seasoned developers find ways to better optimize their code.</p>
+<p>Disclaimer: do <strong><em>not</em></strong> prematurely optimize! <a href="http://c2.com/cgi/wiki?PrematureOptimization" target="_blank">I'll just leave this here.</a></p>
+<h2>Tools</h2>
+<p>Lets talk about some of the handy tools that you can use to profile Python code.</p>
+<h3>cProfile</h3>
+<p>The CPython distribution comes with two profiling tools, <code>profile</code> and <code>cProfile</code>. Both share the same API, and should act the same, however the former has greater runtime overhead, so we shall stick with <code>cProfile</code> for this post.</p>
+<p><code>cProfile</code> is a handy tool for getting a nice greppable profile of your code, and for getting a good idea of where the hot parts of your code are. Lets look at some sample slow code:</p>
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><span class="o">--&gt;</span> <span class="o">%</span> <span class="n">cat</span> <span class="n">slow</span><span class="o">.</span><span class="n">py</span>
+<span class="kn">import</span> <span class="nn">time</span>
+
+<span class="k">def</span> <span class="nf">main</span><span class="p">():</span>
+    <span class="nb">sum</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">10</span><span class="p">):</span>
+    	<span class="nb">sum</span> <span class="o">+=</span> <span class="n">expensive</span><span class="p">(</span><span class="n">i</span> <span class="o">//</span> <span class="mi">2</span><span class="p">)</span>
+    <span class="k">return</span> <span class="nb">sum</span>
+
+<span class="k">def</span> <span class="nf">expensive</span><span class="p">(</span><span class="n">t</span><span class="p">):</span>
+    <span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="n">t</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">t</span>
+
+<span class="k">if</span> <span class="n">__name__</span> <span class="o">==</span> <span class="s">'__main__'</span><span class="p">:</span>
+    <span class="k">print</span><span class="p">(</span><span class="n">main</span><span class="p">())</span></code></pre></figure>
+<p>Here we are simulating a long running program by calling <code>time.sleep</code>, and pretending that the result matters. Lets profile this and see what we find:</p>
+<figure class="highlight"><pre><code class="language-shell-session" data-lang="shell-session">--&gt; % python -m cProfile slow.py
+20
+         34 function calls in 20.030 seconds
+
+   Ordered by: standard name
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1    0.000    0.000    0.000    0.000 __future__.py:48(&lt;module&gt;)
+        1    0.000    0.000    0.000    0.000 __future__.py:74(_Feature)
+        7    0.000    0.000    0.000    0.000 __future__.py:75(__init__)
+       10    0.000    0.000   20.027    2.003 slow.py:11(expensive)
+        1    0.002    0.002   20.030   20.030 slow.py:2(&lt;module&gt;)
+        1    0.000    0.000   20.027   20.027 slow.py:5(main)
+        1    0.000    0.000    0.000    0.000 {method 'disable' of '_lsprof.Profiler' objects}
+        1    0.000    0.000    0.000    0.000 {print}
+        1    0.000    0.000    0.000    0.000 {range}
+       10   20.027    2.003   20.027    2.003 {time.sleep}</code></pre></figure>
+<p>Now this is very trivial code, but I find this not as helpful as it could be. The list of calls is sorted alphabetically, which has no importance to us, and I would much rather see the list sorted by number of calls, or by cumulative run time. Luckily, the <code>-s</code> argument exists, and we can sort the list and see the hot parts of our code right now!</p>
+<figure class="highlight"><pre><code class="language-shell-session" data-lang="shell-session">--&gt; % python -m cProfile -s calls slow.py
+20
+         34 function calls in 20.028 seconds
+
+   Ordered by: call count
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+       10    0.000    0.000   20.025    2.003 slow.py:11(expensive)
+       10   20.025    2.003   20.025    2.003 {time.sleep}
+        7    0.000    0.000    0.000    0.000 __future__.py:75(__init__)
+        1    0.000    0.000   20.026   20.026 slow.py:5(main)
+        1    0.000    0.000    0.000    0.000 __future__.py:74(_Feature)
+        1    0.000    0.000    0.000    0.000 {print}
+        1    0.000    0.000    0.000    0.000 __future__.py:48(&lt;module&gt;)
+        1    0.003    0.003   20.028   20.028 slow.py:2(&lt;module&gt;)
+        1    0.000    0.000    0.000    0.000 {method 'disable' of '_lsprof.Profiler' objects}
+        1    0.000    0.000    0.000    0.000 {range}</code></pre></figure>
+<p>Ah! Now we see that the hot code is in our <code>expensive</code> function, which ends up being calling <code>time.sleep</code> enough times to cause an annoying slowdown.</p>
+<p>The list of valid arguments to the <code>-s</code> parameter can be found in the <a href="https://docs.python.org/2/library/profile.html#pstats.Stats.sort_stats" target="_blank">Python documentation</a>.  Make sure to use the output option, <code>-o</code>, if you want to save these results to a file!</p>
+<p>With the basics down, lets look at some other ways that we can find hot code using profiling tools.</p>
+<h3>PyCallGraph</h3>
+<p>PyCallGraph can be seen as a visual extension of <code>cProfile</code>, where we can follow the flow of the code with a nice <a href="http://www.graphviz.org/" target="_blank">Graphviz</a> image to look through. PyCallGraph is not part of the standard Python installation, and therefore can be simply installed with:</p>
+<figure class="highlight"><pre><code class="language-shell-session" data-lang="shell-session">-&gt; % pip install pycallgraph</code></pre></figure>
+
+<p>We can run this graphical application with the following command:</p>
+<figure class="highlight"><pre><code class="language-shell-session" data-lang="shell-session">-&gt; % pycallgraph graphviz -- python slow.py</code></pre></figure>
+<div class="uyb8Gf">
+<p class="F3hlO">A pycallgraph.png file should be created in the directory where you ran the script, and it should give you some familiar results (if you have already run <code>cProfile</code>). The numbers should be the same as the data we got from <code>cProfile</code>, however, the benefit of PyCallGraph is in its ability to show the relationships of functions being called.</p>
+</div>
+<p>Let us look at what that graph looks like</p>
+<p><img src="/assets/V1xNO7P.png" alt=""/></p>
+<p>This is so handy! It shows the flow of the program, and nicely notifies us of each function, module, and file that the program runs through, along with runtime and number of calls. Running this in a big application generates a large image, but with the coloring, it is quite easy to find the code that matters. Here is a graph from the PyCallGraph documentation, showing the flow of code involving complex regular expression calls:</p>
+<p><img src="/assets/regexp_grouped.png" alt=""/></p>
+<p><a href="https://pycallgraph.readthedocs.org/en/master/examples/regexp_grouped.html#regexp-grouped-example" target="_blank">source code of graph</a></p>
+<h2>What can we do with this information?</h2>
+<p>Once we determine the cause of the slow code, we can then properly choose a course of action to speed up our code. Lets talk about some possible solutions to slow code, given an issue.</p>
+<h4>I/O</h4>
+<p>If you find your code is heavily input/output dependant, including sending many web requests, then you may be able to solve this problem by using Python's standard <a href="https://docs.python.org/2/library/threading.html" target="_blank">threading</a> module. Non I/O related threading is not suited for Python, due to  CPython's GIL, which precludes it from using more than one core at a time for code centric tasks.</p>
+<h4>Regex</h4>
+<p>You know what they say, once you decide to use regular expressions to fix a problem, <a href="http://regex.info/blog/2006-09-15/247" target="_blank">you now have two problems</a>. Regular expressions are hard to get right, and hard to maintain. I could write a whole separate blog post on this (and I will not, regexes are hard, and there are much better posts than one that I could write), but I will give a few quick tips:</p>
+<ol>
+<li>Avoid <code>.*</code>, greedy catchalls are slow, and using character classes as much as possible can help with this</li>
+<li>Do not use regex! many regexes can be solved with simple string methods anyways, such as <code>str.startswith</code>, and <code>str.endswith</code>. Check out the <a href="https://docs.python.org/2/library/stdtypes.html?highlight=startswith#string-methods" target="_blank"><code>str </code>documentation</a> for tons of great info.</li>
+<li>Use <a href="https://docs.python.org/2/howto/regex.html" target="_blank"><code>re.VERBOSE</code></a>! Python's Regex engine is great and super helpful, use it!</li>
+</ol>
+<p>Thats all I will say on Regex, there are some great posts all over the internet if you want more information.</p>
+<h4>Python Code</h4>
+<p>In the case of the code I was profiling, we were running a Python function tens of thousands of times in order to <a href="https://en.wikipedia.org/wiki/Stemming" target="_blank">stem</a> English words. The best part about finding that this was the culprit was that this kind of operation is easily cachable. We were able to save the results of this function, and in the end, the code ran 10 times as fast as it did before. Creating a cache in Python is super easy:</p>
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><span class="kn">from</span> <span class="nn">functools</span> <span class="kn">import</span> <span class="n">wraps</span>
+<span class="k">def</span> <span class="nf">memoize</span><span class="p">(</span><span class="n">f</span><span class="p">):</span>
+    <span class="n">cache</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="nd">@wraps</span><span class="p">(</span><span class="n">f</span><span class="p">)</span>
+    <span class="k">def</span> <span class="nf">inner</span><span class="p">(</span><span class="n">arg</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">arg</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">cache</span><span class="p">:</span>
+            <span class="n">cache</span><span class="p">[</span><span class="n">arg</span><span class="p">]</span> <span class="o">=</span> <span class="n">f</span><span class="p">(</span><span class="n">arg</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">cache</span><span class="p">[</span><span class="n">arg</span><span class="p">]</span>
+    <span class="k">return</span> <span class="n">inner</span></code></pre></figure>
+<p>This technique is called <a href="https://en.wikipedia.org/wiki/Memoization" target="_blank">memoization</a>, and is shown being implemented as a decorator, which can be easily applied to Python functions as so:</p>
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><span class="kn">import</span> <span class="nn">time</span>
+<span class="nd">@memoize</span>
+<span class="k">def</span> <span class="nf">slow</span><span class="p">(</span><span class="n">you</span><span class="p">):</span>
+    <span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="mi">3</span><span class="p">)</span>
+    <span class="k">print</span><span class="p">(</span><span class="s">"Hello after 3 seconds, {}!"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">you</span><span class="p">))</span>
+    <span class="k">return</span> <span class="mi">3</span></code></pre></figure>
+<p>Now if we run this function multiple times, then the result will only be computed once.</p>
+<figure class="highlight"><pre><code class="language-pycon" data-lang="pycon">&gt;&gt;&gt; slow("Davis")
+Hello after 3 seconds, Davis!
+3
+&gt;&gt;&gt; slow("Davis")
+3
+&gt;&gt;&gt; slow("Visitor")
+Hello after 3 seconds, Visitor!
+3
+&gt;&gt;&gt; slow("Visitor")
+3</code></pre></figure>
+<p>This was a great speedup for the project, and the code runs without a hitch.</p>
+<p>disclaimer: make sure this is only used for <code>pure</code> functions! If memoization is used for functions with side effects such as I/O, then caching can have unintended results.</p>
+<h4>Other cases</h4>
+<p>If your code is not readily memoizable, your algorithm is not something crazy like <code>O(n!)</code>, or your profile is 'flat', as in there are no obvious hot sections of code, then maybe you should look into another runtime or language. PyPy is a great option, along with possibly writing a C-extension for the meat of your algorithm. Luckily, what I was working on did not come to this, but the option is there if it is needed.</p>
+<h3>Conclusion</h3>
+<p>Profiling code can help you understand the flow of the project, where the hot code is, and what you can do as a developer to speed it up. Python profiling tools are great, super easy to use, and in depth enough to help you get to the root of the cause fast. Python is not meant to be a fast language, but that does not mean that you should be writing slow code! Take charge of your algorithms, do not forget to profile, and never prematurely optimize.</p>
+<p><em>We’re hiring!  If you’re interested in geospatial, big data, social media analytics, Amazon Web Services (AWS), visualization, and/or the latest UI and server technologies, drop us an e-mail at <a href="mailto:info@thehumangeo.com">info@thehumangeo.com</a>.</em></p>
+
+  </div>
+
+</div></body></html>

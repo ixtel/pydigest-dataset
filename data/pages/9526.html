@@ -1,0 +1,292 @@
+<html><body><div><div class="starter-template">
+          <div class="post-title">
+  
+    
+  
+  
+  
+  <h1>Making faces with Haar cascades and mixed integer linear programming</h1>
+  
+  
+</div>
+
+<h2 id="introduction">Introduction</h2>
+
+<p>I’ve previously mentioned face detection in my <a href="/2015/07/28/switching-eds-with-python/">Face swapping
+post</a>. The face detection step there
+uses the popular “cascade of Haar-like features” algorithm to get initial
+bounds for faces in an image.</p>
+
+<p>In this post I describe a script I wrote to invert this face detection
+algorithm: Instead of taking an image and telling you whether it contains a
+face, it will generate an image of a face, using nothing more than cascade
+data.</p>
+
+<p>As always, full source code is <a href="https://github.com/&#10;matthewearl/inversehaar">available on GitHub</a>.</p>
+
+<h2 id="haar-cascades">Haar Cascades</h2>
+
+<p>In 2001 Viola and Jones introduced their revolutionary <a href="https://en.wikipedia.org/wiki/&#10;Viola%E2%80%93Jones_object_detection_framework">object detection
+algorithm based on cascades of Haar-like
+features</a>, enabling for the first time
+real-time detection of faces (and other objects) in video data.</p>
+
+<p>At its core, the algorithm accepts a small (typically 20x20) image along with
+some precomputed cascade data (described below), and returns whether or not the
+object of interest is present there.  One can then just apply the core
+algorithm to the full image in multiple windows, with the windows at various
+scales and positions, returning any where the core algorithm detected the
+object:</p>
+
+<p><img src="/assets/inverse-haar/major_opt.gif" alt="Header" class="img-responsive"/></p>
+
+<p>It is this core algorithm that I’m attempting to invert in this post. But how
+does it work? Well, it’s based on so called Haar-like features:</p>
+
+<p><img src="/assets/inverse-haar/feature1.png" alt="Feature 1"/>
+<img src="/assets/inverse-haar/feature2.png" alt="Feature 2"/>
+<img src="/assets/inverse-haar/feature3.png" alt="Feature 3"/>
+<img src="/assets/inverse-haar/feature4.png" alt="Feature 4"/></p>
+
+<p>Each feature is associated with a threshold to form a so-called <em>weak
+classifer</em>.  If the sum of the pixel values in the black region subtracted 
+from the sum of the pixel values in the white region exceed the threshold then
+the weak classifier is said to have passed. For example, the weak classifier in
+the first image is detecting a dark area around the eyes compared to above the
+cheeks.</p>
+
+<p>Features are all defined with axially aligned rectangles and take one of a
+few basic forms, as shown above. They are defined on the same small (eg. 20x20)
+grid as the input image.</p>
+
+<p>Weak classifiers are combined into <em>stages</em>. A stage passes based on which
+weak classifiers associated with the stage pass; each weak classifier has a
+weight associated with it, and if the sum of all the passing weak classifiers’
+weights exceeds a <em>stage threshold</em> then the stage is said to have passed.</p>
+
+<p>The stages, weak classifiers and associated weights are calculated by running a
+training algorithm on thousands of positive and negative training images. See
+the <a href="https://www.cs.cmu.edu/~efros/courses/LBMV07/Papers/&#10;viola-cvpr-01.pdf">Viola-Jones paper</a> for more details.</p>
+
+<p>If all the stages in the cascade data pass then the algorithm returns that an
+object has been detected.</p>
+
+<p>This can be written in Python like:</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="k">def</span> <span class="nf">detect</span><span class="p">(</span><span class="n">cascade</span><span class="p">,</span> <span class="n">im</span><span class="p">):</span>
+    <span class="k">for</span> <span class="n">stage</span> <span class="ow">in</span> <span class="n">cascade</span><span class="o">.</span><span class="n">stages</span><span class="p">:</span>
+        <span class="n">total</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="k">for</span> <span class="n">classifier</span> <span class="ow">in</span> <span class="n">stage</span><span class="o">.</span><span class="n">weak_classifiers</span><span class="p">:</span>
+            <span class="k">if</span> <span class="n">numpy</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">classifier</span><span class="o">.</span><span class="n">feature</span> <span class="o">*</span> <span class="n">im</span><span class="p">)</span> <span class="o">&gt;=</span> <span class="n">classifier</span><span class="o">.</span><span class="n">threshold</span><span class="p">:</span>
+                <span class="n">total</span> <span class="o">+=</span> <span class="n">classifier</span><span class="o">.</span><span class="n">weight</span>
+        <span class="k">if</span> <span class="n">total</span> <span class="o">&lt;</span> <span class="n">stage</span><span class="o">.</span><span class="n">threshold</span><span class="p">:</span>
+            <span class="k">return</span> <span class="bp">False</span>
+    <span class="k">return</span> <span class="bp">True</span></code></pre></div>
+
+<p>The input image <code>im</code> is assumed to already have been resized to the small
+cascade size.  <code>classifier.feature</code> is an array the same shape as <code>im</code>, with
+<code>1</code>s at points corresponding with white areas of the feature, <code>-1</code>s at points
+corresponding with black areas of the feature, and <code>0</code>s elsewhere.  Note the
+actual algorithm as described by Viola and Jones uses integral images to add up
+pixel values, one of the reasons for the algorithm’s fast operation.</p>
+
+<p>The main reason for the multiple stages is efficiency: Typically the first
+stage will contain only a handful of features, but can reject a large
+proportion of negative images. There are typically hundreds of features in a
+particular cascade, and a dozen or more stages.</p>
+
+<h2 id="mixed-integer-linear-programming">Mixed integer linear programming</h2>
+
+<p>In order to invert the <code>detect</code> function described above, I express the 
+problem in terms of <a href="https://&#10;en.wikipedia.org/wiki/Integer_programming">Mixed integer linear programming</a>, and then apply a MILP solver to the
+linear program.</p>
+
+<p>Here’s the <code>detect</code> function described in terms of MILP constraints. First the
+constraints to ensure a weak classifer passes, if it is required to. Lets call
+these <em>feature constraints</em>:</p>
+
+
+
+
+
+<p>…and a set of constraints to ensure that each stage passes. Let’s call these
+<em>stage constraints</em>:</p>
+
+
+
+<p>Where:</p>
+
+<ul>
+  <li> are the pixel values of the
+input image. (Corresponds with <code>im</code> in the code.)</li>
+  <li> are the weight values of the feature associated with
+weak classifier .  (Corresponds with <code>classifier.feature</code> in the
+code.)</li>
+  <li> is the threshold value of weak classifier .
+(<code>classifier.threshold</code> in the code.)</li>
+  <li> is the weight of weak classifier . (Corresponds
+with <code>classifier.weight</code> in the code.)</li>
+  <li> is the set of classifier indices with
+positive weights, ie. </li>
+  <li> is the set of classifier indices with
+negative weights, ie. .</li>
+  <li> is a binary indicator variable, corresponding
+with whether weak classifier  has passed.</li>
+  <li> are numbers chosen to be large enough such that if the term they
+appear in is non-zero, then the inequality holds true.</li>
+  <li> is the set of weak classifier indices associated with
+stage .</li>
+  <li> is the stage threshold of stage .
+(Corresponds with <code>stage.threshold</code> in the code.)</li>
+</ul>
+
+<p>The variables to be sought by the MILP solver are the  and
+ values. The rest of the values are derived from the cascade
+definition itself.</p>
+
+<p>The main thing to note is the use of  as an indicator variable,
+ie. how its state can turn on or off one of the feature constraints.  For
+example, take . If a particular solution has
+ as 1, then we better be sure that the feature  actually
+exceeds the classifier’s threshold, as it is contributing positively towards
+the stage constraint passing. In this case the 
+term in the relevant feature constraint is zero, ie. the constraint is “on”.</p>
+
+<p>Conversely, for a classifier  with a negative weight, we only care that
+the feature <em>doesn’t</em> pass its classifier threshold if  is 0.</p>
+
+<p>With this in mind, it’s clear that <code>detect(cascade, im)</code> is <code>True</code> if and only
+if there’s a solution to the linear program derived from <code>cascade</code> where the  variables take on the corresponding pixel values in <code>im</code>.</p>
+
+<h2 id="milps-in-python">MILPs in Python</h2>
+
+<p>I chose to use the <a href="https://pypi.python.org/pypi/docplex">docplex</a> module to
+write the above constraints in Python. With this module constraints can be
+written in a natural way, which are then dispatched to <a href="https://developer.ibm.com/docloud/">IBM’s DoCloud
+Service</a> for solving remotely. Note DoCloud
+requires registration and is not free, although they offer a free month’s
+trial which is what I used for this project.  I did initially try solving the
+problem with the free <a href="https://pypi.python.org/pypi/PuLP">PuLP</a> module, with
+which I had limited success either due to the underlying solver being less
+sophisticated or limitations of my machine.</p>
+
+<p>As an example, here’s how the variables are defined:</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="kn">from</span> <span class="nn">docplex.mp.model</span> <span class="kn">import</span> <span class="n">Model</span>
+
+<span class="n">model</span> <span class="o">=</span> <span class="n">Model</span><span class="p">(</span><span class="s">"Inverse haar cascade"</span><span class="p">,</span> <span class="n">docloud_context</span><span class="o">=</span><span class="n">docloud_context</span><span class="p">)</span>
+
+<span class="n">pixel_vars</span> <span class="o">=</span> <span class="p">{(</span><span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">):</span> <span class="n">model</span><span class="o">.</span><span class="n">continuous_var</span><span class="p">(</span>
+                <span class="n">name</span><span class="o">=</span><span class="s">"pixel_{}_{}"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">)</span>
+                <span class="n">lb</span><span class="o">=</span><span class="mf">0.</span><span class="p">,</span> <span class="n">ub</span><span class="o">=</span><span class="mf">1.0</span><span class="p">)</span>
+                <span class="k">for</span> <span class="n">y</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">cascade</span><span class="o">.</span><span class="n">height</span><span class="p">)</span>
+                <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">cascade</span><span class="o">.</span><span class="n">width</span><span class="p">)}</span>
+<span class="n">passed_vars</span> <span class="o">=</span> <span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">binary_var</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s">"passed_{}"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">idx</span><span class="p">))</span>
+                                       <span class="k">for</span> <span class="n">idx</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">cascade</span><span class="o">.</span><span class="n">features</span><span class="p">))]</span></code></pre></div>
+
+<p>And an (abridged) snippet which adds the stage constraint:</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="k">for</span> <span class="n">stage</span> <span class="ow">in</span> <span class="n">cascade</span><span class="o">.</span><span class="n">stages</span><span class="p">:</span>
+    <span class="n">model</span><span class="o">.</span><span class="n">add_constraint</span><span class="p">(</span><span class="nb">sum</span><span class="p">(</span><span class="n">c</span><span class="o">.</span><span class="n">weight</span> <span class="o">*</span> <span class="n">passed_vars</span><span class="p">[</span><span class="n">c</span><span class="o">.</span><span class="n">feature_idx</span><span class="p">]</span>
+                                        <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="n">stage</span><span class="o">.</span><span class="n">weak_classifiers</span><span class="p">)</span> <span class="o">&gt;=</span>
+                                                               <span class="n">stage</span><span class="o">.</span><span class="n">threshold</span><span class="p">)</span></code></pre></div>
+
+<p>The problem is then solved by calling <code>model.solve()</code>.</p>
+
+<p>If succesful, the pixel variable values are extracted from the solution, and
+converted into an image (a <code>numpy</code> array) which can then be written to disk
+using <code>cv2</code> (or similar).</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">im</span> <span class="o">=</span> <span class="n">numpy</span><span class="o">.</span><span class="n">array</span><span class="p">([[</span><span class="n">pixel_vars</span><span class="p">[</span><span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">]</span><span class="o">.</span><span class="n">solution_value</span>
+                    <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">cascade</span><span class="o">.</span><span class="n">width</span><span class="p">)]</span>
+                  <span class="k">for</span> <span class="n">y</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">cascade</span><span class="o">.</span><span class="n">width</span><span class="p">)])</span>
+<span class="n">cv2</span><span class="o">.</span><span class="n">imwrite</span><span class="p">(</span><span class="s">"out.png"</span><span class="p">,</span> <span class="n">im</span> <span class="o">*</span> <span class="mf">255.</span><span class="p">)</span></code></pre></div>
+
+<p>By default, <code>docplex</code> will just search for a feasible solution. However, one
+can set an objective like so:</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">model</span><span class="o">.</span><span class="n">set_objective</span><span class="p">(</span><span class="s">"max"</span><span class="p">,</span>
+    <span class="nb">sum</span><span class="p">((</span><span class="n">c</span><span class="o">.</span><span class="n">weight</span> <span class="o">*</span> <span class="n">passed_vars</span><span class="p">[</span><span class="n">c</span><span class="o">.</span><span class="n">feature_idx</span><span class="p">]</span> 
+            <span class="k">for</span> <span class="n">s</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">cascade</span><span class="o">.</span><span class="n">stages</span>
+            <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="n">s</span><span class="o">.</span><span class="n">weak_classifiers</span><span class="p">)))</span></code></pre></div>
+
+<p>This objective will try and find the solution which most exceeds the stage
+constraints. It can take an unreasonably long time to find the true maximum, so
+we can set a time limit:</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">model</span><span class="o">.</span><span class="n">set_time_limit</span><span class="p">(</span><span class="mi">60</span> <span class="o">*</span> <span class="mi">60</span><span class="p">)</span></code></pre></div>
+
+<p>This line instructs the solver to stop after an hour and output the best
+solution found so far (if any).</p>
+
+<p>See the <a href="https://github.com/matthewearl/inversehaar">source code</a> for the full
+details. Note the code there is a little more complex due to supporting tilted
+features and also because of the format of the cascade data in OpenCV, but the
+essence is the same.</p>
+
+<h2 id="results">Results</h2>
+
+<p>Here’s the output of running the program on OpenCV’s
+<code>haarcascade_frontalface_alt.xml</code> cascade for an hour:</p>
+
+<p><img src="/assets/inverse-haar/face_max_3600.png" alt="Face max" class="img-responsive"/></p>
+
+<p>Not bad. Shame about the low resolution, but that’s unavoidable given the
+features are only defined on a 20x20 grid. Here is the same image blurred,
+which is more convincingly face-like:</p>
+
+<p><img src="/assets/inverse-haar/face_max_3600_blurred.png" alt="Face max blurred" class="img-responsive"/></p>
+
+<p>And to test the limits of the detector, lets minimize the stage constraint
+instead of maximising:</p>
+
+<p><img src="/assets/inverse-haar/face_min_3600.png" alt="Face min"/>
+<img src="/assets/inverse-haar/face_min_3600_blurred.png" alt="Face min blurred"/></p>
+
+<p>Decidedly less face-like, but should still be detected by OpenCV.</p>
+
+<p>Here’s the best eye image (based on <code>haarcascade_eye.xml</code>)</p>
+
+<p><img src="/assets/inverse-haar/eye_max_3600.png" alt="Eye max"/>
+<img src="/assets/inverse-haar/eye_max_3600_blurred.png" alt="Eye max blurred"/></p>
+
+<p>…and the worst:</p>
+
+<p><img src="/assets/inverse-haar/eye_min_3600.png" alt="Eye min"/>
+<img src="/assets/inverse-haar/eye_min_3600_blurred.png" alt="Eye min blurred"/></p>
+
+<p>Here’s the best profile face image (based on <code>haarcascade_profileface.xml</code>):</p>
+
+<p><img src="/assets/inverse-haar/profileface_max_3600.png" alt="Profile face max"/>
+<img src="/assets/inverse-haar/profileface_max_3600_blurred.png" alt="Profile face max blurred"/></p>
+
+<p>…and the worst:</p>
+
+<p><img src="/assets/inverse-haar/profileface_min_3600.png" alt="Profile face min"/>
+<img src="/assets/inverse-haar/profileface_min_3600_blurred.png" alt="Profile face min blurred"/></p>
+
+
+          <hr/>
+          
+          
+          
+
+          
+            <nav>
+              
+            </nav>
+          
+          
+
+
+
+
+
+
+
+
+
+
+
+      </div>
+    </div></body></html>

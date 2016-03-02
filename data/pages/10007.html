@@ -1,0 +1,224 @@
+<html><body><div><div class="post shortcuts_item" id="post_276495">
+    <p class="published"> 3 февраля в 13:16</p>
+    <h1 class="title">
+      
+        <span class="post_title">Импорт словаря в Lingualeo.com</span>
+
+      <a href="/sandbox/" class="flag flag_sandbox" title="Перейти в песочницу">из песочницы</a>
+
+
+    </h1>
+
+      
+
+
+    <div class="content html_format">
+      <img src="https://habrastorage.org/files/e90/1ca/050/e901ca0507db4e8cb28c33da72b06f3d.jpg"/>
+
+<h4>Предыстория</h4><p>
+Для импорта слов в </p><a href="http://lingualeo.com/">Lingualeo.com</a><p> есть несколько решений:
+
+</p><ul>
+<li>Приложения для браузера или телефонов:</li>
+<li>Добавление слов на сайте.</li>
+</ul><p>
+Минусы этих способов в том, что вносить слова можно только по одному. Нам необходима реализация, которая позволит добавлять несколько слов за раз.
+</p><a name="habracut"/>
+<h4>Должно же быть API?</h4><p>
+Официального api найти не удалось. НО! Есть расширения для браузера, а это отличный способ найти внутренний api для сервиса.</p><p>
+Заходим в Google Chrome и топаем на сайт сервиса. Внизу страницы предлагаются приложения и расширения. Выбираем для Chrome. Браузер устанавливает расширение в папку Extensions (полный путь не указываю, зависит от OS). Внутри директории будет несколько папок с хешами в виде названий. Выбираем последнюю по дате. Внутри можно найти файл config.js — в нем и хранятся все пути к API проекта. Нас интересуют только три из них:
+
+</p><ul>
+<li>/api/login</li>
+<li>/gettranslates</li>
+<li>/addword</li>
+</ul>
+<h4>На чем писать?</h4><p>
+Выбрал python, т.к. устанавливается по умолчанию на большинство OS. Модули берем те, которые не требуют дополнительной установки. Реализуем решение для работы с api. 
+
+</p><div class="spoiler"><b class="spoiler_title">service.py</b><div class="spoiler_text"><pre><code class="python">import urllib
+import urllib2
+import json
+from cookielib import CookieJar
+
+
+class Lingualeo:
+    def __init__(self, email, password):
+        self.email = email
+        self.password = password
+        self.cj = CookieJar()
+
+    def auth(self):
+        url = "http://api.lingualeo.com/api/login"
+        values = {
+            "email": self.email,
+            "password": self.password
+        }
+
+        return self.get_content(url, values)
+
+    def add_word(self, word, tword, context):
+        url = "http://api.lingualeo.com/addword"
+        values = {
+            "word": word,
+            "tword": tword,
+            "context": context,
+        }
+        self.get_content(url, values)
+
+    def get_translates(self, word):
+        url = "http://api.lingualeo.com/gettranslates?word=" + urllib.quote_plus(word)
+
+        try:
+            result = self.get_content(url, {})
+            translate = result["translate"][0]
+            return {
+                "is_exist": translate["is_user"],
+                "word": word,
+                "tword": translate["value"].encode("utf-8")
+            }
+        except Exception as e:
+            return e.message
+
+    def get_content(self, url, values):
+        data = urllib.urlencode(values)
+
+        opener = urllib2.build_opener(urllib2.HTTPCookieProcessor(self.cj))
+        req = opener.open(url, data)
+
+        return json.loads(req.read())
+</code></pre>
+</div></div><p>
+Изначальное решение было только для текстовых файлов. Каждое слово должно быть на новой строке. Но в процессе написания кода, решил добавить реализацию для Kindle, т.к. переодически с него тоже необходимо забирать слова.
+
+</p><div class="spoiler"><b class="spoiler_title">handler.py</b><div class="spoiler_text"><pre><code class="python">class Word:
+    text = '';
+    context = '';
+
+    def __init__(self, text):
+        self.text = text
+
+class Base(object):
+    data = []
+
+    def __init__(self, source):
+        self.source = source
+
+    def get(self):
+        return self.data
+
+    def read(self):
+        raise NotImplementedError('Not implemented yet')
+
+
+class Kindle(Base):
+    def read(self):
+        conn = sqlite3.connect(self.source)
+        sql = 'select word, usage from words LEFT JOIN LOOKUPS ON words.id = LOOKUPS.word_key where words.lang="en" GROUP BY word ORDER BY word;'
+        for row in conn.execute(sql):
+            if isinstance(row[0], unicode):
+                word = Word(row[0])
+                if isinstance(row[1], unicode):
+                    word.context = row[1]
+                self.data.append(word)
+        conn.close()
+
+
+class Text(Base):
+    def read(self):
+        f = open(self.source)
+        for word in f.readlines():
+            self.data.append(Word(word))
+        f.close()
+</code></pre>
+</div></div><p>
+И реализация самого скрипта для экспорта/импорта слов:
+
+</p><div class="spoiler"><b class="spoiler_title">export.py</b><div class="spoiler_text"><pre><code class="python">import handler
+import config
+import service
+import sys
+
+email = config.auth.get('email')
+password = config.auth.get('password')
+
+export_type = sys.argv[1]
+
+if export_type == 'text':
+    word_handler = handler.Text(config.sources.get('text'))
+elif export_type == 'kindle':
+    word_handler = handler.Kindle(config.sources.get('kindle'))
+else:
+    raise Exception('unsupported type')
+
+word_handler.read()
+
+lingualeo = service.Lingualeo(email, password)
+lingualeo.auth()
+
+for word_dto in word_handler.get():
+    word = word_dto.text.lower().encode('utf-8')
+    translate = lingualeo.get_translates(word)
+
+    if translate["is_exist"]:
+        print "Already exists: " + word.strip()
+    else:
+        context = word_dto.context.encode('utf-8')
+        lingualeo.add_word(word, translate["tword"], context)
+        print "Add word: " + word.strip()
+</code></pre>
+</div></div>
+<h4>Запуск и установка</h4><p>
+Скачиваем код с github. Создаем файл config.py из config.py.dist. Прописываем путь до файла со словами. В случаем с kindle до sqlite базы внутри kindle.
+
+</p><pre><code class="bash">python export.py text #Для текстовых файлов
+python export.py kindle #Для kindle
+</code></pre>
+<h4>Исходники</h4><p>
+GitHub: </p><a href="https://github.com/relaxart/lingualeo.export">lingualeo.export</a><p>.
+      </p><p class="clear"/>
+    </div>
+
+    
+  
+
+      <div class="infopanel_wrapper js-user_177577">
+    <ul class="postinfo-panel postinfo-panel_post" id="infopanel_post_276495">
+
+          <li class="postinfo-panel__item">
+            
+          </li>
+
+      <li class="postinfo-panel__item">
+        <p class="views-count_post" title="Просмотры публикации">6,2k</p>
+      </li>
+
+      <li class="postinfo-panel__item">
+        <p class="favorite-wjt favorite">
+            <button type="button" disabled="disabled" class="favorite-wjt__button favorite-wjt__button_disabled" title="Только зарегистрированные пользователи могут добавлять публикации в избранное">
+              <span>Добавить в избранное</span>
+            </button>
+          <span class="favorite-wjt__counter js-favs_count" title="Количество пользователей, добавивших публикацию в избранное">93</span>
+        </p>
+      </li>
+
+
+
+
+      
+        <li class="postinfo-panel__item postinfo-panel__item_socials  postinfo-panel__item_socials_right ">
+          
+        </li>
+
+      
+    </ul>
+  </div>
+
+        
+
+  
+
+  </div>
+
+
+      </div></body></html>

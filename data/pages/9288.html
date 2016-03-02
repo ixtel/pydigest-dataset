@@ -1,0 +1,726 @@
+<html><body><div><div class="entry-content clearfix">
+
+
+
+
+
+
+
+<p>In the last <a href="https://realpython.com/blog/python/handling-email-confirmation-in-flask/">post</a> we detailed how to validate email addresses during user registration.</p>
+
+<p><strong>This time, we’ll add unit and integration tests (yay!) to our application using the <a href="http://pythonhosted.org/Flask-Testing/">Flask-Testing</a> extension, covering the most important features. This type of testing is called Minimum Viable Testing (or <a href="http://en.wikipedia.org/wiki/Risk-based_testing">Risk-based Testing</a>) and is designed to test the high-risk functionality, centered around the application’s features.</strong></p>
+
+<blockquote><p>Did you miss the first post? Grab the code from the <a href="https://github.com/realpython/flask-registration/releases/tag/v1">project repo</a> to quickly get started.</p></blockquote>
+
+<a name="Unit.and.Integration.Tests.-.defined"/>
+<h2>Unit and Integration Tests – defined</h2>
+
+<p>For those new to testing, it’s vital to test your applications since “untested applications make it hard to improve existing code and developers of untested applications tend to become pretty paranoid. If an application has automated tests, you can safely make changes and instantly know if anything breaks” (<a href="http://flask.pocoo.org/docs/0.10/testing/">source</a>).</p>
+
+<p>Unit tests, by nature, test isolated units of code – i.e., individual functions – to ensure that the actual output is the same as the expected output. In many cases, since you often have to make external API calls or touch a database, unit tests can rely heavily on mocking fake data. By simulating the tests, they may run faster, but they can also be less effective and are harder to maintain. Because of this, we will not be using mocks unless we absolutely have to; instead we will read and write to the database as needed.</p>
+
+<p>Keep in mind that when a database is touched in a specific test, it is technically an integration test since the test itself is not isolated to a specific unit. Also, if you run your tests through the Flask app, using the test helper test <a href="http://werkzeug.pocoo.org/docs/0.10/test/#werkzeug.test.Client">client</a>, they are considered integration tests as well.</p>
+
+<a name="Getting.Started"/>
+<h2>Getting Started</h2>
+
+<p>It’s often difficult to determine how to start testing an application. One solution to this problem is to think about your app in terms of end user functionality:</p>
+
+<ol>
+<li>Unregistered users must sign up before accessing the app.</li>
+<li>After users register, a confirmation email is sent – and they are considered “unconfirmed” users.</li>
+<li>Unconfirmed users can log in but they are immediately redirected to a page reminding them to confirm their account via email before they can access the app.</li>
+<li>Once confirmed, users have full access to the site, where they can view the main page, update their password on the profile page, and logout.</li>
+</ol>
+
+
+<p>Like stated in the beginning, we’ll write just enough tests to cover this main functionality. Testing is hard; we are hyper aware of that, so if you’re only keen on writing a few tests, test what matters the most. This, coupled with coverage testing via <a href="http://nedbatchelder.com/code/coverage/">coverage.py</a>, which we’ll detail in the next article in this series, will make it much easier to structure a robust test suite.</p>
+
+<a name="Setup"/>
+<h2>Setup</h2>
+
+<p>Activate your virtualenv, then make sure the following environment variables are set:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span><span class="nb">export </span><span class="nv">APP_SETTINGS</span><span class="o">=</span><span class="s2">"project.config.DevelopmentConfig"</span>
+</span><span class="line"><span class="nv">$ </span><span class="nb">export </span><span class="nv">APP_MAIL_USERNAME</span><span class="o">=</span><span class="s2">"foo"</span>
+</span><span class="line"><span class="nv">$ </span><span class="nb">export </span><span class="nv">APP_MAIL_PASSWORD</span><span class="o">=</span><span class="s2">"bar"</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Then run the current test suite:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>python manage.py <span class="nb">test</span>
+</span><span class="line">test_app_is_development <span class="o">(</span>test_config.TestDevelopmentConfig<span class="o">)</span> ... ok
+</span><span class="line">test_app_is_production <span class="o">(</span>test_config.TestProductionConfig<span class="o">)</span> ... ok
+</span><span class="line">test_app_is_testing <span class="o">(</span>test_config.TestTestingConfig<span class="o">)</span> ... ok
+</span><span class="line">
+</span><span class="line">----------------------------------------------------------------------
+</span><span class="line">Ran 3 tests in 0.003s
+</span><span class="line">
+</span><span class="line">OK
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>These tests simply test the configuration and environment variables. They should be fairly straightforward.</p>
+
+<p>To expand the suite, we need to start with an organized structure to keep everything nice and neat. Since the app is already structured around blueprints, let’s do the same for the test suite. So create two new test files in the “tests” directory – <em>test_main.py</em> and <em>test_user.py</em> – and add the following code to each:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="kn">import</span> <span class="nn">unittest</span>
+</span><span class="line">
+</span><span class="line"><span class="kn">from</span> <span class="nn">flask.ext.login</span> <span class="kn">import</span> <span class="n">current_user</span>
+</span><span class="line">
+</span><span class="line"><span class="kn">from</span> <span class="nn">project.util</span> <span class="kn">import</span> <span class="n">BaseTestCase</span>
+</span><span class="line">
+</span><span class="line">
+</span><span class="line"><span class="c"># tests go here</span>
+</span><span class="line">
+</span><span class="line">
+</span><span class="line"><span class="k">if</span> <span class="n">__name__</span> <span class="o">==</span> <span class="s">'__main__'</span><span class="p">:</span>
+</span><span class="line">    <span class="n">unittest</span><span class="o">.</span><span class="n">main</span><span class="p">()</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<blockquote><p><strong>NOTE</strong>: You could also structure your tests around test type – unit, integration, functional, etc..</p></blockquote>
+
+<a name="Part.1.-.Main.Blueprint"/>
+<h2>Part 1 – Main Blueprint</h2>
+
+<p>Looking at the code in the <em>views.py</em> file (in the “project/main” folder), along with the end user workflow, we can see that we just need to test that the main route, <code>/</code>, requires the user to be logged in. So add the following code to <em>test_main.py</em>:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="k">def</span> <span class="nf">test_main_route_requires_login</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+</span><span class="line">    <span class="c"># Ensure main route requires a logged in user.</span>
+</span><span class="line">    <span class="n">response</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">client</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'/'</span><span class="p">,</span> <span class="n">follow_redirects</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">assertTrue</span><span class="p">(</span><span class="n">response</span><span class="o">.</span><span class="n">status_code</span> <span class="o">==</span> <span class="mi">200</span><span class="p">)</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">assertTemplateUsed</span><span class="p">(</span><span class="s">'user/login.html'</span><span class="p">)</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Here, we’re asserting that the response status code is <code>200</code> and that the correct template is used. Run the test suite. All 4 tests should pass.</p>
+
+<a name="Part.2.-.User.Blueprint"/>
+<h2>Part 2 – User Blueprint</h2>
+
+<p>There’s quite a bit more going on in this blueprint, so the testing required is far more intensive. Essentially, we need to test the views and  – so, we’ll break apart our test suite accordingly. Don’t worry I will guide you through it. Let’s create the 2 classes to ensure our tests are logically divided.</p>
+
+<p>Add the following code to <em>test_user.py</em> so we can start testing the many functions required.</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="k">class</span> <span class="nc">TestUserForms</span><span class="p">(</span><span class="n">BaseTestCase</span><span class="p">):</span>
+</span><span class="line">    <span class="k">pass</span>
+</span><span class="line">
+</span><span class="line">
+</span><span class="line"><span class="k">class</span> <span class="nc">TestUserViews</span><span class="p">(</span><span class="n">BaseTestCase</span><span class="p">):</span>
+</span><span class="line">    <span class="k">pass</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<a name="Forms"/>
+<h3>Forms</h3>
+
+<p>Having a user register is a core concept in a log in based program, without it we have an “open door” to trouble. This must work as designed. So, following the user workflow, let’s start with the <strong>registration form</strong>. Add this code to the <code>TestUserForms()</code> class.</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+<span class="line-number">14</span>
+<span class="line-number">15</span>
+<span class="line-number">16</span>
+<span class="line-number">17</span>
+<span class="line-number">18</span>
+<span class="line-number">19</span>
+<span class="line-number">20</span>
+<span class="line-number">21</span>
+<span class="line-number">22</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="k">def</span> <span class="nf">test_validate_success_register_form</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+</span><span class="line">    <span class="c"># Ensure correct data validates.</span>
+</span><span class="line">    <span class="n">form</span> <span class="o">=</span> <span class="n">RegisterForm</span><span class="p">(</span>
+</span><span class="line">        <span class="n">email</span><span class="o">=</span><span class="s">'new@test.test'</span><span class="p">,</span>
+</span><span class="line">        <span class="n">password</span><span class="o">=</span><span class="s">'example'</span><span class="p">,</span> <span class="n">confirm</span><span class="o">=</span><span class="s">'example'</span><span class="p">)</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">assertTrue</span><span class="p">(</span><span class="n">form</span><span class="o">.</span><span class="n">validate</span><span class="p">())</span>
+</span><span class="line">
+</span><span class="line"><span class="k">def</span> <span class="nf">test_validate_invalid_password_format</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+</span><span class="line">    <span class="c"># Ensure incorrect data does not validate.</span>
+</span><span class="line">    <span class="n">form</span> <span class="o">=</span> <span class="n">RegisterForm</span><span class="p">(</span>
+</span><span class="line">        <span class="n">email</span><span class="o">=</span><span class="s">'new@test.test'</span><span class="p">,</span>
+</span><span class="line">        <span class="n">password</span><span class="o">=</span><span class="s">'example'</span><span class="p">,</span> <span class="n">confirm</span><span class="o">=</span><span class="s">''</span><span class="p">)</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">assertFalse</span><span class="p">(</span><span class="n">form</span><span class="o">.</span><span class="n">validate</span><span class="p">())</span>
+</span><span class="line">
+</span><span class="line"><span class="k">def</span> <span class="nf">test_validate_email_already_registered</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+</span><span class="line">    <span class="c"># Ensure user can't register when a duplicate email is used</span>
+</span><span class="line">    <span class="n">form</span> <span class="o">=</span> <span class="n">RegisterForm</span><span class="p">(</span>
+</span><span class="line">        <span class="n">email</span><span class="o">=</span><span class="s">'test@user.com'</span><span class="p">,</span>
+</span><span class="line">        <span class="n">password</span><span class="o">=</span><span class="s">'just_a_test_user'</span><span class="p">,</span>
+</span><span class="line">        <span class="n">confirm</span><span class="o">=</span><span class="s">'just_a_test_user'</span>
+</span><span class="line">    <span class="p">)</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">assertFalse</span><span class="p">(</span><span class="n">form</span><span class="o">.</span><span class="n">validate</span><span class="p">())</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>In these tests, we’re ensuring that the form either passes or fails validation based on the data entered. Compare this to the <em>forms.py</em> file in the “project/user” folder. In the last test, we’re simply registering the same user from the <code>setUpClass()</code> method from our <code>BaseTestCase</code> in the <em>util.py</em> file.</p>
+
+<p>While we’re testing the forms, let’s go ahead and test the <strong>login form</strong> as well:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="k">def</span> <span class="nf">test_validate_success_login_form</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+</span><span class="line">    <span class="c"># Ensure correct data validates.</span>
+</span><span class="line">    <span class="n">form</span> <span class="o">=</span> <span class="n">LoginForm</span><span class="p">(</span><span class="n">email</span><span class="o">=</span><span class="s">'test@user.com'</span><span class="p">,</span> <span class="n">password</span><span class="o">=</span><span class="s">'just_a_test_user'</span><span class="p">)</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">assertTrue</span><span class="p">(</span><span class="n">form</span><span class="o">.</span><span class="n">validate</span><span class="p">())</span>
+</span><span class="line">
+</span><span class="line"><span class="k">def</span> <span class="nf">test_validate_invalid_email_format</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+</span><span class="line">    <span class="c"># Ensure invalid email format throws error.</span>
+</span><span class="line">    <span class="n">form</span> <span class="o">=</span> <span class="n">LoginForm</span><span class="p">(</span><span class="n">email</span><span class="o">=</span><span class="s">'unknown'</span><span class="p">,</span> <span class="n">password</span><span class="o">=</span><span class="s">'example'</span><span class="p">)</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">assertFalse</span><span class="p">(</span><span class="n">form</span><span class="o">.</span><span class="n">validate</span><span class="p">())</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Finally, let’s test the change password form:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+<span class="line-number">14</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="k">def</span> <span class="nf">test_validate_success_change_password_form</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+</span><span class="line">    <span class="c"># Ensure correct data validates.</span>
+</span><span class="line">    <span class="n">form</span> <span class="o">=</span> <span class="n">ChangePasswordForm</span><span class="p">(</span><span class="n">password</span><span class="o">=</span><span class="s">'update'</span><span class="p">,</span> <span class="n">confirm</span><span class="o">=</span><span class="s">'update'</span><span class="p">)</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">assertTrue</span><span class="p">(</span><span class="n">form</span><span class="o">.</span><span class="n">validate</span><span class="p">())</span>
+</span><span class="line">
+</span><span class="line"><span class="k">def</span> <span class="nf">test_validate_invalid_change_password</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+</span><span class="line">    <span class="c"># Ensure passwords must match.</span>
+</span><span class="line">    <span class="n">form</span> <span class="o">=</span> <span class="n">ChangePasswordForm</span><span class="p">(</span><span class="n">password</span><span class="o">=</span><span class="s">'update'</span><span class="p">,</span> <span class="n">confirm</span><span class="o">=</span><span class="s">'unknown'</span><span class="p">)</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">assertFalse</span><span class="p">(</span><span class="n">form</span><span class="o">.</span><span class="n">validate</span><span class="p">())</span>
+</span><span class="line">
+</span><span class="line"><span class="k">def</span> <span class="nf">test_validate_invalid_change_password_format</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+</span><span class="line">    <span class="c"># Ensure invalid email format throws error.</span>
+</span><span class="line">    <span class="n">form</span> <span class="o">=</span> <span class="n">ChangePasswordForm</span><span class="p">(</span><span class="n">password</span><span class="o">=</span><span class="s">'123'</span><span class="p">,</span> <span class="n">confirm</span><span class="o">=</span><span class="s">'123'</span><span class="p">)</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">assertFalse</span><span class="p">(</span><span class="n">form</span><span class="o">.</span><span class="n">validate</span><span class="p">())</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Make sure to add the required imports:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="kn">from</span> <span class="nn">project.user.forms</span> <span class="kn">import</span> <span class="n">RegisterForm</span><span class="p">,</span> \
+</span><span class="line">    <span class="n">LoginForm</span><span class="p">,</span> <span class="n">ChangePasswordForm</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>And then run the tests!</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+<span class="line-number">14</span>
+<span class="line-number">15</span>
+<span class="line-number">16</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>python manage.py <span class="nb">test</span>
+</span><span class="line">test_app_is_development <span class="o">(</span>test_config.TestDevelopmentConfig<span class="o">)</span> ... ok
+</span><span class="line">test_app_is_production <span class="o">(</span>test_config.TestProductionConfig<span class="o">)</span> ... ok
+</span><span class="line">test_app_is_testing <span class="o">(</span>test_config.TestTestingConfig<span class="o">)</span> ... ok
+</span><span class="line">test_main_route_requires_login <span class="o">(</span>test_main.TestMainViews<span class="o">)</span> ... ok
+</span><span class="line">test_validate_email_already_registered <span class="o">(</span>test_user.TestUserForms<span class="o">)</span> ... ok
+</span><span class="line">test_validate_invalid_change_password <span class="o">(</span>test_user.TestUserForms<span class="o">)</span> ... ok
+</span><span class="line">test_validate_invalid_change_password_format <span class="o">(</span>test_user.TestUserForms<span class="o">)</span> ... ok
+</span><span class="line">test_validate_invalid_email_format <span class="o">(</span>test_user.TestUserForms<span class="o">)</span> ... ok
+</span><span class="line">test_validate_invalid_password_format <span class="o">(</span>test_user.TestUserForms<span class="o">)</span> ... ok
+</span><span class="line">test_validate_success_change_password_form <span class="o">(</span>test_user.TestUserForms<span class="o">)</span> ... ok
+</span><span class="line">test_validate_success_login_form <span class="o">(</span>test_user.TestUserForms<span class="o">)</span> ... ok
+</span><span class="line">test_validate_success_register_form <span class="o">(</span>test_user.TestUserForms<span class="o">)</span> ... ok
+</span><span class="line">
+</span><span class="line">----------------------------------------------------------------------
+</span><span class="line">Ran 12 tests in 1.656s
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>For the form tests, we basically just instantiated the form and called the validate function which will trigger all validation, including our custom validation and return a boolean indicating if the form data is indeed valid or not.</p>
+
+<p>With our forms tested, let’s move on to the Views…</p>
+
+<a name="Views"/>
+<h3>Views</h3>
+
+<p>Logging in and viewing the profile are critical parts of security so we want to make certain this is thoroughly tested.</p>
+
+<p><strong><code>login</code></strong></p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+<span class="line-number">14</span>
+<span class="line-number">15</span>
+<span class="line-number">16</span>
+<span class="line-number">17</span>
+<span class="line-number">18</span>
+<span class="line-number">19</span>
+<span class="line-number">20</span>
+<span class="line-number">21</span>
+<span class="line-number">22</span>
+<span class="line-number">23</span>
+<span class="line-number">24</span>
+<span class="line-number">25</span>
+<span class="line-number">26</span>
+<span class="line-number">27</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="k">def</span> <span class="nf">test_correct_login</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+</span><span class="line">    <span class="c"># Ensure login behaves correctly with correct credentials.</span>
+</span><span class="line">    <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">client</span><span class="p">:</span>
+</span><span class="line">        <span class="n">response</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">client</span><span class="o">.</span><span class="n">post</span><span class="p">(</span>
+</span><span class="line">            <span class="s">'/login'</span><span class="p">,</span>
+</span><span class="line">            <span class="n">data</span><span class="o">=</span><span class="nb">dict</span><span class="p">(</span><span class="n">email</span><span class="o">=</span><span class="s">"test@user.com"</span><span class="p">,</span> <span class="n">password</span><span class="o">=</span><span class="s">"just_a_test_user"</span><span class="p">),</span>
+</span><span class="line">            <span class="n">follow_redirects</span><span class="o">=</span><span class="bp">True</span>
+</span><span class="line">        <span class="p">)</span>
+</span><span class="line">        <span class="bp">self</span><span class="o">.</span><span class="n">assertTrue</span><span class="p">(</span><span class="n">response</span><span class="o">.</span><span class="n">status_code</span> <span class="o">==</span> <span class="mi">200</span><span class="p">)</span>
+</span><span class="line">        <span class="bp">self</span><span class="o">.</span><span class="n">assertTrue</span><span class="p">(</span><span class="n">current_user</span><span class="o">.</span><span class="n">email</span> <span class="o">==</span> <span class="s">"test@user.com"</span><span class="p">)</span>
+</span><span class="line">        <span class="bp">self</span><span class="o">.</span><span class="n">assertTrue</span><span class="p">(</span><span class="n">current_user</span><span class="o">.</span><span class="n">is_active</span><span class="p">())</span>
+</span><span class="line">        <span class="bp">self</span><span class="o">.</span><span class="n">assertTrue</span><span class="p">(</span><span class="n">current_user</span><span class="o">.</span><span class="n">is_authenticated</span><span class="p">())</span>
+</span><span class="line">        <span class="bp">self</span><span class="o">.</span><span class="n">assertTemplateUsed</span><span class="p">(</span><span class="s">'main/index.html'</span><span class="p">)</span>
+</span><span class="line">
+</span><span class="line"><span class="k">def</span> <span class="nf">test_incorrect_login</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+</span><span class="line">    <span class="c"># Ensure login behaves correctly with incorrect credentials.</span>
+</span><span class="line">    <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">client</span><span class="p">:</span>
+</span><span class="line">        <span class="n">response</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">client</span><span class="o">.</span><span class="n">post</span><span class="p">(</span>
+</span><span class="line">            <span class="s">'/login'</span><span class="p">,</span>
+</span><span class="line">            <span class="n">data</span><span class="o">=</span><span class="nb">dict</span><span class="p">(</span><span class="n">email</span><span class="o">=</span><span class="s">"not@correct.com"</span><span class="p">,</span> <span class="n">password</span><span class="o">=</span><span class="s">"incorrect"</span><span class="p">),</span>
+</span><span class="line">            <span class="n">follow_redirects</span><span class="o">=</span><span class="bp">True</span>
+</span><span class="line">        <span class="p">)</span>
+</span><span class="line">        <span class="bp">self</span><span class="o">.</span><span class="n">assertTrue</span><span class="p">(</span><span class="n">response</span><span class="o">.</span><span class="n">status_code</span> <span class="o">==</span> <span class="mi">200</span><span class="p">)</span>
+</span><span class="line">        <span class="bp">self</span><span class="o">.</span><span class="n">assertIn</span><span class="p">(</span><span class="n">b</span><span class="s">'Invalid email and/or password.'</span><span class="p">,</span> <span class="n">response</span><span class="o">.</span><span class="n">data</span><span class="p">)</span>
+</span><span class="line">        <span class="bp">self</span><span class="o">.</span><span class="n">assertFalse</span><span class="p">(</span><span class="n">current_user</span><span class="o">.</span><span class="n">is_active</span><span class="p">())</span>
+</span><span class="line">        <span class="bp">self</span><span class="o">.</span><span class="n">assertFalse</span><span class="p">(</span><span class="n">current_user</span><span class="o">.</span><span class="n">is_authenticated</span><span class="p">())</span>
+</span><span class="line">        <span class="bp">self</span><span class="o">.</span><span class="n">assertTemplateUsed</span><span class="p">(</span><span class="s">'user/login.html'</span><span class="p">)</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p><strong><code>profile</code></strong></p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="k">def</span> <span class="nf">test_profile_route_requires_login</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+</span><span class="line">    <span class="c"># Ensure profile route requires logged in user.</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">client</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'/profile'</span><span class="p">,</span> <span class="n">follow_redirects</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">assertTemplateUsed</span><span class="p">(</span><span class="s">'user/login.html'</span><span class="p">)</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Add the required imports as well:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="kn">from</span> <span class="nn">project</span> <span class="kn">import</span> <span class="n">db</span>
+</span><span class="line"><span class="kn">from</span> <span class="nn">project.models</span> <span class="kn">import</span> <span class="n">User</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p><strong><code>register</code></strong> and <strong><code>resend_confirmation</code></strong></p>
+
+<p>Before writing tests to cover the <code>register</code> and <code>resend_confirmation</code> views, take a look at the <a href="https://github.com/realpython/flask-registration/blob/v1/project/user/views.py">code</a>. Notice how we’re utilizing the <code>send_email()</code> function from the <em>email.py</em> file, which sends the confirmation email. Do we really want to send this email or should we fake it using a mocking library? Even if we do send it, it’s very difficult to assert that an actual email shows up in a dummy inbox without utilizing Selenium to pull up the actual inbox in the browser. So, let’s mock the sending of the email, which we’ll handle in a subsequent article.</p>
+
+<p><strong><code>confirm/&lt;token&gt;</code></strong></p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="k">def</span> <span class="nf">test_confirm_token_route_requires_login</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+</span><span class="line">    <span class="c"># Ensure confirm/&lt;token&gt; route requires logged in user.</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">client</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'/confirm/blah'</span><span class="p">,</span> <span class="n">follow_redirects</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">assertTemplateUsed</span><span class="p">(</span><span class="s">'user/login.html'</span><span class="p">)</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Like the last two views, the remaining parts of this view could be mocked since a confirmation token needs to be generated. However, we can just generate a token using the utility function from the <em>token.py</em> file, <code>generate_confirmation_token()</code>:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+<span class="line-number">14</span>
+<span class="line-number">15</span>
+<span class="line-number">16</span>
+<span class="line-number">17</span>
+<span class="line-number">18</span>
+<span class="line-number">19</span>
+<span class="line-number">20</span>
+<span class="line-number">21</span>
+<span class="line-number">22</span>
+<span class="line-number">23</span>
+<span class="line-number">24</span>
+<span class="line-number">25</span>
+<span class="line-number">26</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="k">def</span> <span class="nf">test_confirm_token_route_valid_token</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+</span><span class="line">    <span class="c"># Ensure user can confirm account with valid token.</span>
+</span><span class="line">    <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">client</span><span class="p">:</span>
+</span><span class="line">        <span class="bp">self</span><span class="o">.</span><span class="n">client</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s">'/login'</span><span class="p">,</span> <span class="n">data</span><span class="o">=</span><span class="nb">dict</span><span class="p">(</span>
+</span><span class="line">            <span class="n">email</span><span class="o">=</span><span class="s">'test@user.com'</span><span class="p">,</span> <span class="n">password</span><span class="o">=</span><span class="s">'just_a_test_user'</span>
+</span><span class="line">        <span class="p">),</span> <span class="n">follow_redirects</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+</span><span class="line">        <span class="n">token</span> <span class="o">=</span> <span class="n">generate_confirmation_token</span><span class="p">(</span><span class="s">'test@user.com'</span><span class="p">)</span>
+</span><span class="line">        <span class="n">response</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">client</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'/confirm/'</span><span class="o">+</span><span class="n">token</span><span class="p">,</span> <span class="n">follow_redirects</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+</span><span class="line">        <span class="bp">self</span><span class="o">.</span><span class="n">assertIn</span><span class="p">(</span><span class="n">b</span><span class="s">'You have confirmed your account. Thanks!'</span><span class="p">,</span> <span class="n">response</span><span class="o">.</span><span class="n">data</span><span class="p">)</span>
+</span><span class="line">        <span class="bp">self</span><span class="o">.</span><span class="n">assertTemplateUsed</span><span class="p">(</span><span class="s">'main/index.html'</span><span class="p">)</span>
+</span><span class="line">        <span class="n">user</span> <span class="o">=</span> <span class="n">User</span><span class="o">.</span><span class="n">query</span><span class="o">.</span><span class="n">filter_by</span><span class="p">(</span><span class="n">email</span><span class="o">=</span><span class="s">'test@user.com'</span><span class="p">)</span><span class="o">.</span><span class="n">first_or_404</span><span class="p">()</span>
+</span><span class="line">        <span class="bp">self</span><span class="o">.</span><span class="n">assertIsInstance</span><span class="p">(</span><span class="n">user</span><span class="o">.</span><span class="n">confirmed_on</span><span class="p">,</span> <span class="n">datetime</span><span class="o">.</span><span class="n">datetime</span><span class="p">)</span>
+</span><span class="line">        <span class="bp">self</span><span class="o">.</span><span class="n">assertTrue</span><span class="p">(</span><span class="n">user</span><span class="o">.</span><span class="n">confirmed</span><span class="p">)</span>
+</span><span class="line">
+</span><span class="line"><span class="k">def</span> <span class="nf">test_confirm_token_route_invalid_token</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+</span><span class="line">    <span class="c"># Ensure user cannot confirm account with invalid token.</span>
+</span><span class="line">    <span class="n">token</span> <span class="o">=</span> <span class="n">generate_confirmation_token</span><span class="p">(</span><span class="s">'test@test1.com'</span><span class="p">)</span>
+</span><span class="line">    <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">client</span><span class="p">:</span>
+</span><span class="line">        <span class="bp">self</span><span class="o">.</span><span class="n">client</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s">'/login'</span><span class="p">,</span> <span class="n">data</span><span class="o">=</span><span class="nb">dict</span><span class="p">(</span>
+</span><span class="line">            <span class="n">email</span><span class="o">=</span><span class="s">'test@user.com'</span><span class="p">,</span> <span class="n">password</span><span class="o">=</span><span class="s">'just_a_test_user'</span>
+</span><span class="line">        <span class="p">),</span> <span class="n">follow_redirects</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+</span><span class="line">        <span class="n">response</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">client</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'/confirm/'</span><span class="o">+</span><span class="n">token</span><span class="p">,</span> <span class="n">follow_redirects</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+</span><span class="line">        <span class="bp">self</span><span class="o">.</span><span class="n">assertIn</span><span class="p">(</span>
+</span><span class="line">            <span class="n">b</span><span class="s">'The confirmation link is invalid or has expired.'</span><span class="p">,</span>
+</span><span class="line">            <span class="n">response</span><span class="o">.</span><span class="n">data</span>
+</span><span class="line">        <span class="p">)</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Add the imports:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line">import datetime
+</span><span class="line">from project.token import generate_confirmation_token, confirm_token
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>And then run the tests. One should fail:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line">Ran 18 tests in 4.666s
+</span><span class="line">
+</span><span class="line">FAILED <span class="o">(</span><span class="nv">failures</span><span class="o">=</span>1<span class="o">)</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>This test failed – <code>test_confirm_token_route_invalid_token()</code>. Why? Because there’s an error in the view:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+<span class="line-number">14</span>
+<span class="line-number">15</span>
+<span class="line-number">16</span>
+<span class="line-number">17</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="nd">@user_blueprint.route</span><span class="p">(</span><span class="s">'/confirm/&lt;token&gt;'</span><span class="p">)</span>
+</span><span class="line"><span class="nd">@login_required</span>
+</span><span class="line"><span class="k">def</span> <span class="nf">confirm_email</span><span class="p">(</span><span class="n">token</span><span class="p">):</span>
+</span><span class="line">    <span class="k">try</span><span class="p">:</span>
+</span><span class="line">        <span class="n">email</span> <span class="o">=</span> <span class="n">confirm_token</span><span class="p">(</span><span class="n">token</span><span class="p">)</span>
+</span><span class="line">    <span class="k">except</span><span class="p">:</span>
+</span><span class="line">        <span class="n">flash</span><span class="p">(</span><span class="s">'The confirmation link is invalid or has expired.'</span><span class="p">,</span> <span class="s">'danger'</span><span class="p">)</span>
+</span><span class="line">    <span class="n">user</span> <span class="o">=</span> <span class="n">User</span><span class="o">.</span><span class="n">query</span><span class="o">.</span><span class="n">filter_by</span><span class="p">(</span><span class="n">email</span><span class="o">=</span><span class="n">email</span><span class="p">)</span><span class="o">.</span><span class="n">first_or_404</span><span class="p">()</span>
+</span><span class="line">    <span class="k">if</span> <span class="n">user</span><span class="o">.</span><span class="n">confirmed</span><span class="p">:</span>
+</span><span class="line">        <span class="n">flash</span><span class="p">(</span><span class="s">'Account already confirmed. Please login.'</span><span class="p">,</span> <span class="s">'success'</span><span class="p">)</span>
+</span><span class="line">    <span class="k">else</span><span class="p">:</span>
+</span><span class="line">        <span class="n">user</span><span class="o">.</span><span class="n">confirmed</span> <span class="o">=</span> <span class="bp">True</span>
+</span><span class="line">        <span class="n">user</span><span class="o">.</span><span class="n">confirmed_on</span> <span class="o">=</span> <span class="n">datetime</span><span class="o">.</span><span class="n">datetime</span><span class="o">.</span><span class="n">now</span><span class="p">()</span>
+</span><span class="line">        <span class="n">db</span><span class="o">.</span><span class="n">session</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">user</span><span class="p">)</span>
+</span><span class="line">        <span class="n">db</span><span class="o">.</span><span class="n">session</span><span class="o">.</span><span class="n">commit</span><span class="p">()</span>
+</span><span class="line">        <span class="n">flash</span><span class="p">(</span><span class="s">'You have confirmed your account. Thanks!'</span><span class="p">,</span> <span class="s">'success'</span><span class="p">)</span>
+</span><span class="line">    <span class="k">return</span> <span class="n">redirect</span><span class="p">(</span><span class="n">url_for</span><span class="p">(</span><span class="s">'main.home'</span><span class="p">))</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>What’s wrong?</p>
+
+<p>Right now the <code>flash</code> call – e.g., <code>flash('The confirmation link is invalid or has expired.', 'danger')</code> – does not cause the function to exit, so it will fall through to the if/else and confirm the user even if the token is invalid. <em>This is why you write tests.</em></p>
+
+<p>Let’s rewrite the function:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+<span class="line-number">14</span>
+<span class="line-number">15</span>
+<span class="line-number">16</span>
+<span class="line-number">17</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="nd">@user_blueprint.route</span><span class="p">(</span><span class="s">'/confirm/&lt;token&gt;'</span><span class="p">)</span>
+</span><span class="line"><span class="nd">@login_required</span>
+</span><span class="line"><span class="k">def</span> <span class="nf">confirm_email</span><span class="p">(</span><span class="n">token</span><span class="p">):</span>
+</span><span class="line">    <span class="k">if</span> <span class="n">current_user</span><span class="o">.</span><span class="n">confirmed</span><span class="p">:</span>
+</span><span class="line">        <span class="n">flash</span><span class="p">(</span><span class="s">'Account already confirmed. Please login.'</span><span class="p">,</span> <span class="s">'success'</span><span class="p">)</span>
+</span><span class="line">        <span class="k">return</span> <span class="n">redirect</span><span class="p">(</span><span class="n">url_for</span><span class="p">(</span><span class="s">'main.home'</span><span class="p">))</span>
+</span><span class="line">    <span class="n">email</span> <span class="o">=</span> <span class="n">confirm_token</span><span class="p">(</span><span class="n">token</span><span class="p">)</span>
+</span><span class="line">    <span class="n">user</span> <span class="o">=</span> <span class="n">User</span><span class="o">.</span><span class="n">query</span><span class="o">.</span><span class="n">filter_by</span><span class="p">(</span><span class="n">email</span><span class="o">=</span><span class="n">current_user</span><span class="o">.</span><span class="n">email</span><span class="p">)</span><span class="o">.</span><span class="n">first_or_404</span><span class="p">()</span>
+</span><span class="line">    <span class="k">if</span> <span class="n">user</span><span class="o">.</span><span class="n">email</span> <span class="o">==</span> <span class="n">email</span><span class="p">:</span>
+</span><span class="line">        <span class="n">user</span><span class="o">.</span><span class="n">confirmed</span> <span class="o">=</span> <span class="bp">True</span>
+</span><span class="line">        <span class="n">user</span><span class="o">.</span><span class="n">confirmed_on</span> <span class="o">=</span> <span class="n">datetime</span><span class="o">.</span><span class="n">datetime</span><span class="o">.</span><span class="n">now</span><span class="p">()</span>
+</span><span class="line">        <span class="n">db</span><span class="o">.</span><span class="n">session</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">user</span><span class="p">)</span>
+</span><span class="line">        <span class="n">db</span><span class="o">.</span><span class="n">session</span><span class="o">.</span><span class="n">commit</span><span class="p">()</span>
+</span><span class="line">        <span class="n">flash</span><span class="p">(</span><span class="s">'You have confirmed your account. Thanks!'</span><span class="p">,</span> <span class="s">'success'</span><span class="p">)</span>
+</span><span class="line">    <span class="k">else</span><span class="p">:</span>
+</span><span class="line">        <span class="n">flash</span><span class="p">(</span><span class="s">'The confirmation link is invalid or has expired.'</span><span class="p">,</span> <span class="s">'danger'</span><span class="p">)</span>
+</span><span class="line">    <span class="k">return</span> <span class="n">redirect</span><span class="p">(</span><span class="n">url_for</span><span class="p">(</span><span class="s">'main.home'</span><span class="p">))</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Run the tests again. All 18 should pass.</p>
+
+<p>What happens if a token expires? Write a test.</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="k">def</span> <span class="nf">test_confirm_token_route_expired_token</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+</span><span class="line">    <span class="c"># Ensure user cannot confirm account with expired token.</span>
+</span><span class="line">    <span class="n">user</span> <span class="o">=</span> <span class="n">User</span><span class="p">(</span><span class="n">email</span><span class="o">=</span><span class="s">'test@test1.com'</span><span class="p">,</span> <span class="n">password</span><span class="o">=</span><span class="s">'test1'</span><span class="p">,</span> <span class="n">confirmed</span><span class="o">=</span><span class="bp">False</span><span class="p">)</span>
+</span><span class="line">    <span class="n">db</span><span class="o">.</span><span class="n">session</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">user</span><span class="p">)</span>
+</span><span class="line">    <span class="n">db</span><span class="o">.</span><span class="n">session</span><span class="o">.</span><span class="n">commit</span><span class="p">()</span>
+</span><span class="line">    <span class="n">token</span> <span class="o">=</span> <span class="n">generate_confirmation_token</span><span class="p">(</span><span class="s">'test@test1.com'</span><span class="p">)</span>
+</span><span class="line">    <span class="bp">self</span><span class="o">.</span><span class="n">assertFalse</span><span class="p">(</span><span class="n">confirm_token</span><span class="p">(</span><span class="n">token</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">))</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Run the tests again:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+<span class="line-number">14</span>
+<span class="line-number">15</span>
+<span class="line-number">16</span>
+<span class="line-number">17</span>
+<span class="line-number">18</span>
+<span class="line-number">19</span>
+<span class="line-number">20</span>
+<span class="line-number">21</span>
+<span class="line-number">22</span>
+<span class="line-number">23</span>
+<span class="line-number">24</span>
+<span class="line-number">25</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="err">$</span> <span class="n">python</span> <span class="n">manage</span><span class="o">.</span><span class="n">py</span> <span class="n">test</span>
+</span><span class="line"><span class="n">test_app_is_development</span> <span class="p">(</span><span class="n">test_config</span><span class="o">.</span><span class="n">TestDevelopmentConfig</span><span class="p">)</span> <span class="o">...</span> <span class="n">ok</span>
+</span><span class="line"><span class="n">test_app_is_production</span> <span class="p">(</span><span class="n">test_config</span><span class="o">.</span><span class="n">TestProductionConfig</span><span class="p">)</span> <span class="o">...</span> <span class="n">ok</span>
+</span><span class="line"><span class="n">test_app_is_testing</span> <span class="p">(</span><span class="n">test_config</span><span class="o">.</span><span class="n">TestTestingConfig</span><span class="p">)</span> <span class="o">...</span> <span class="n">ok</span>
+</span><span class="line"><span class="n">test_main_route_requires_login</span> <span class="p">(</span><span class="n">test_main</span><span class="o">.</span><span class="n">TestMainViews</span><span class="p">)</span> <span class="o">...</span> <span class="n">ok</span>
+</span><span class="line"><span class="n">test_validate_email_already_registered</span> <span class="p">(</span><span class="n">test_user</span><span class="o">.</span><span class="n">TestUserForms</span><span class="p">)</span> <span class="o">...</span> <span class="n">ok</span>
+</span><span class="line"><span class="n">test_validate_invalid_change_password</span> <span class="p">(</span><span class="n">test_user</span><span class="o">.</span><span class="n">TestUserForms</span><span class="p">)</span> <span class="o">...</span> <span class="n">ok</span>
+</span><span class="line"><span class="n">test_validate_invalid_change_password_format</span> <span class="p">(</span><span class="n">test_user</span><span class="o">.</span><span class="n">TestUserForms</span><span class="p">)</span> <span class="o">...</span> <span class="n">ok</span>
+</span><span class="line"><span class="n">test_validate_invalid_email_format</span> <span class="p">(</span><span class="n">test_user</span><span class="o">.</span><span class="n">TestUserForms</span><span class="p">)</span> <span class="o">...</span> <span class="n">ok</span>
+</span><span class="line"><span class="n">test_validate_invalid_password_format</span> <span class="p">(</span><span class="n">test_user</span><span class="o">.</span><span class="n">TestUserForms</span><span class="p">)</span> <span class="o">...</span> <span class="n">ok</span>
+</span><span class="line"><span class="n">test_validate_success_change_password_form</span> <span class="p">(</span><span class="n">test_user</span><span class="o">.</span><span class="n">TestUserForms</span><span class="p">)</span> <span class="o">...</span> <span class="n">ok</span>
+</span><span class="line"><span class="n">test_validate_success_login_form</span> <span class="p">(</span><span class="n">test_user</span><span class="o">.</span><span class="n">TestUserForms</span><span class="p">)</span> <span class="o">...</span> <span class="n">ok</span>
+</span><span class="line"><span class="n">test_validate_success_register_form</span> <span class="p">(</span><span class="n">test_user</span><span class="o">.</span><span class="n">TestUserForms</span><span class="p">)</span> <span class="o">...</span> <span class="n">ok</span>
+</span><span class="line"><span class="n">test_confirm_token_route_expired_token</span> <span class="p">(</span><span class="n">test_user</span><span class="o">.</span><span class="n">TestUserViews</span><span class="p">)</span> <span class="o">...</span> <span class="n">ok</span>
+</span><span class="line"><span class="n">test_confirm_token_route_invalid_token</span> <span class="p">(</span><span class="n">test_user</span><span class="o">.</span><span class="n">TestUserViews</span><span class="p">)</span> <span class="o">...</span> <span class="n">ok</span>
+</span><span class="line"><span class="n">test_confirm_token_route_requires_login</span> <span class="p">(</span><span class="n">test_user</span><span class="o">.</span><span class="n">TestUserViews</span><span class="p">)</span> <span class="o">...</span> <span class="n">ok</span>
+</span><span class="line"><span class="n">test_confirm_token_route_valid_token</span> <span class="p">(</span><span class="n">test_user</span><span class="o">.</span><span class="n">TestUserViews</span><span class="p">)</span> <span class="o">...</span> <span class="n">ok</span>
+</span><span class="line"><span class="n">test_correct_login</span> <span class="p">(</span><span class="n">test_user</span><span class="o">.</span><span class="n">TestUserViews</span><span class="p">)</span> <span class="o">...</span> <span class="n">ok</span>
+</span><span class="line"><span class="n">test_incorrect_login</span> <span class="p">(</span><span class="n">test_user</span><span class="o">.</span><span class="n">TestUserViews</span><span class="p">)</span> <span class="o">...</span> <span class="n">ok</span>
+</span><span class="line"><span class="n">test_profile_route_requires_login</span> <span class="p">(</span><span class="n">test_user</span><span class="o">.</span><span class="n">TestUserViews</span><span class="p">)</span> <span class="o">...</span> <span class="n">ok</span>
+</span><span class="line">
+</span><span class="line"><span class="o">----------------------------------------------------------------------</span>
+</span><span class="line"><span class="n">Ran</span> <span class="mi">19</span> <span class="n">tests</span> <span class="ow">in</span> <span class="mf">5.306</span><span class="n">s</span>
+</span><span class="line">
+</span><span class="line"><span class="n">OK</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<a name="Reflection"/>
+<h2>Reflection</h2>
+
+<p>This is probably a good time to stop and reflect, especially since we are focusing on minimal testing. Remember our core features?</p>
+
+<ol>
+<li>Unregistered users must sign up before accessing the app.</li>
+<li>After users register, a confirmation email is sent – and they are considered “unconfirmed” users.</li>
+<li>Unconfirmed users can log in but they are immediately redirected to a page reminding them to confirm their account via email before they can access the app.</li>
+<li>Once confirmed, users have full access to the site, where they can view the main page, update their password on the profile page, and logout.</li>
+</ol>
+
+
+<p>Are we covering each of these? Let’s look:</p>
+
+<p><strong>Unregistered users must sign up before accessing the app</strong></p>
+
+<ul>
+<li><code>test_main_route_requires_login</code></li>
+<li><code>test_validate_email_already_registered</code></li>
+<li><code>test_validate_invalid_email_format</code></li>
+<li><code>test_validate_invalid_password_format</code></li>
+<li><code>test_validate_success_register_form</code></li>
+</ul>
+
+
+<p><strong>After users register, a confirmation email is sent – and they are considered “unconfirmed” users.</strong> and <strong>Unconfirmed users can log in but they are immediately redirected to a page reminding them to confirm their account via email before they can access the app.</strong></p>
+
+<ul>
+<li><code>test_validate_success_login_form</code></li>
+<li><code>test_confirm_token_route_expired_token</code></li>
+<li><code>test_confirm_token_route_invalid_token</code></li>
+<li><code>test_confirm_token_route_requires_login</code></li>
+<li><code>test_confirm_token_route_valid_token</code></li>
+<li><code>test_correct_login</code></li>
+<li><code>test_incorrect_login</code></li>
+<li><code>test_profile_route_requires_login</code></li>
+</ul>
+
+
+<p><strong>Once confirmed, users have full access to the site, where they can view the main page, update their password on the profile page, and logout.</strong></p>
+
+<ul>
+<li><code>test_validate_invalid_change_password</code></li>
+<li><code>test_validate_invalid_change_password_format</code></li>
+<li><code>test_validate_success_change_password_form</code></li>
+</ul>
+
+
+<p>In the above tests we tested the forms directly, and then <em>also</em> created tests for the views (which exercise <em>much</em> of the same code as in the form tests). What are the tradeoffs of this type of approach? We’ll address this when we tie in coverage testing.</p>
+
+<a name="Next.Time"/>
+<h2>Next Time</h2>
+
+<p>That’s it for this post. In the next few posts we’ll-</p>
+
+<ol>
+<li>Mock all or parts of the following functions from the <code>user</code> blueprint to finalize unit/integration testing – <code>register()</code> and <code>resend_confirmation()</code></li>
+<li>Add coverage testing via <a href="http://nedbatchelder.com/code/coverage/">coverage.py</a> to help ensure that our code base is adequately being tested.</li>
+<li>Expand the test suite by adding functional tests with Selenium.</li>
+</ol>
+
+
+<p>Happy testing!</p>
+
+
+
+
+
+
+<p>
+  <em>Edits made by <a href="https://twitter.com/diek007">Derrick Kearney</a>. Thank you!</em>
+</p>
+
+</div>
+
+
+      </div></body></html>

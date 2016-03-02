@@ -1,0 +1,215 @@
+<html><body><div><body id="readabilityBody">
+   <h1>[Python-ideas] Proposal: Use mypy syntax for function annotations</h1>
+    <b>Guido van Rossum</b> 
+    <a href="mailto:python-ideas%40python.org?Subject=Re%3A%20%5BPython-ideas%5D%20Proposal%3A%20Use%20mypy%20syntax%20for%20function%20annotations&amp;In-Reply-To=%3CCAP7%2BvJ%2BHouBUzaATiFnqGDT4WX99qt4k8X4jaT4T%2BRLuOO9Deg%40mail.gmail.com%3E" title="[Python-ideas] Proposal: Use mypy syntax for function annotations">guido at python.org
+       </a><br/>
+    <i>Wed Aug 13 21:44:21 CEST 2014</i>
+    <p/>
+    <hr/>  
+
+<pre>[There is no TL;DR other than the subject line. Please read the whole thing
+before replying. I do have an appendix with some motivations for adding
+type annotations at the end.]
+
+Yesterday afternoon I had an inspiring conversation with Bob Ippolito (man
+of many trades, author of simplejson) and Jukka Lehtosalo (author of mypy:
+<a href="http://mypy-lang.org/">http://mypy-lang.org/</a>). Bob gave a talk at EuroPython about what Python can
+learn from Haskell (and other languages); yesterday he gave the same talk
+at Dropbox. The talk is online (
+<a href="https://ep2014.europython.eu/en/schedule/sessions/121/">https://ep2014.europython.eu/en/schedule/sessions/121/</a>) and in broad
+strokes comes down to three suggestions:
+
+  (a) Python should adopt mypy's syntax for function annotations
+  (b) Python's use of mutabe containers by default is wrong
+  (c) Python should adopt some kind of Abstract Data Types
+
+Proposals (b) and (c) don't feel particularly actionable (if you disagree
+please start a new thread, I'd be happy to discuss these further if there's
+interest) but proposal (a) feels right to me.
+
+So what is mypy?  It is a static type checker for Python written by Jukka
+for his Ph.D. thesis. The basic idea is that you add type annotations to
+your program using some custom syntax, and when running your program using
+the mypy interpreter, type errors will be found during compilation (i.e.,
+before the program starts running).
+
+The clever thing here is that the custom syntax is actually valid Python 3,
+using (mostly) function annotations: your annotated program will still run
+with the regular Python 3 interpreter. In the latter case there will be no
+type checking, and no runtime overhead, except to evaluate the function
+annotations (which are evaluated at function definition time but don't have
+any effect when the function is called).
+
+In fact, it is probably more useful to think of mypy as a heavy-duty linter
+than as a compiler or interpreter; leave the type checking to mypy, and the
+execution to Python. It is easy to integrate mypy into a continuous
+integration setup, for example.
+
+To read up on mypy's annotation syntax, please see the mypy-lang.org
+website. Here's just one complete example, to give a flavor:
+
+  from typing import List, Dict
+
+  def word_count(input: List[str]) -&gt; Dict[str, int]:
+      result = {}  #type: Dict[str, int]
+      for line in input:
+          for word in line.split():
+              result[word] = result.get(word, 0) + 1
+      return result
+
+Note that the #type: comment is part of the mypy syntax; mypy uses comments
+to declare types in situations where no syntax is available -- although
+this particular line could also be written as follows:
+
+    result = Dict[str, int]()
+
+Either way the entire function is syntactically valid Python 3, and a
+suitable implementation of typing.py (containing class definitions for List
+and Dict, for example) can be written to make the program run correctly.
+One is provided as part of the mypy project.
+
+I should add that many of mypy's syntactic choices aren't actually new. The
+basis of many of its ideas go back at least a decade: I blogged about this
+topic in 2004 (<a href="http://www.artima.com/weblogs/viewpost.jsp?thread=85551">http://www.artima.com/weblogs/viewpost.jsp?thread=85551</a> --
+see also the two followup posts linked from the top there).
+
+I'll emphasize once more that mypy's type checking happens in a separate
+pass: no type checking happens at run time (other than what the interpreter
+already does, like raising TypeError on expressions like 1+"1").
+
+There's a lot to this proposal, but I think it's possible to get a PEP
+written, accepted and implemented in time for Python 3.5, if people are
+supportive. I'll go briefly over some of the action items.
+
+*(1) A change of direction for function annotations*
+
+PEP 3107 &lt;<a href="http://legacy.python.org/dev/peps/pep-3107/">http://legacy.python.org/dev/peps/pep-3107/</a>&gt;, which introduced
+function annotations, is intentional non-committal about how function
+annotations should be used. It lists a number of use cases, including but
+not limited to type checking. It also mentions some rejected proposals that
+would have standardized either a syntax for indicating types and/or a way
+for multiple frameworks to attach different annotations to the same
+function. AFAIK in practice there is little use of function annotations in
+mainstream code, and I propose a conscious change of course here by stating
+that annotations should be used to indicate types and to propose a standard
+notation for them.
+
+(We may have to have some backwards compatibility provision to avoid
+breaking code that currently uses annotations for some other purpose.
+Fortunately the only issue, at least initially, will be that when running
+mypy to type check such code it will produce complaints about the
+annotations; it will not affect how such code is executed by the Python
+interpreter. Nevertheless, it would be good to deprecate such alternative
+uses of annotations.)
+
+*(2) A specification for what to add to Python 3.5*
+
+There needs to be at least a rough consensus on the syntax for annotations,
+and the syntax must cover a large enough set of use cases to be useful.
+Mypy is still under development, and some of its features are still
+evolving (e.g. unions were only added a few weeks ago). It would be
+possible to argue endlessly about details of the notation, e.g. whether to
+use 'list' or 'List', what either of those means (is a duck-typed list-like
+type acceptable?) or how to declare and use type variables, and what to do
+with functions that have no annotations at all (mypy currently skips those
+completely).
+
+I am proposing that we adopt whatever mypy uses here, keeping discussion of
+the details (mostly) out of the PEP. The goal is to make it possible to add
+type checking annotations to 3rd party modules (and even to the stdlib)
+while allowing unaltered execution of the program by the (unmodified)
+Python 3.5 interpreter. The actual type checker will not be integrated with
+the Python interpreter, and it will not be checked into the CPython
+repository. The only thing that needs to be added to the stdlib is a copy
+of mypy's typing.py module. This module defines several dozen new classes
+(and a few decorators and other helpers) that can be used in expressing
+argument types. If you want to type-check your code you have to download
+and install mypy and run it separately.
+
+The curious thing here is that while standardizing a syntax for type
+annotations, we technically still won't be adopting standard rules for type
+checking. This is intentional. First of all, fully specifying all the type
+checking rules would make for a really long and boring PEP (a much better
+specification would probably be the mypy source code). Second, I think it's
+fine if the type checking algorithm evolves over time, or if variations
+emerge. The worst that can happen is that you consider your code correct
+but mypy disagrees; your code will still run.
+
+That said, I don't want to *completely* leave out any specification. I want
+the contents of the typing.py module to be specified in the PEP, so that it
+can be used with confidence. But whether mypy will complain about your
+particular form of duck typing doesn't have to be specified by the PEP.
+Perhaps as mypy evolves it will take options to tell it how to handle
+certain edge cases. Forks of mypy (or entirely different implementations of
+type checking based on the same annotation syntax) are also a possibility.
+Maybe in the distant future a version of Python will take a different
+stance, once we have more experience with how this works out in practice,
+but for Python 3.5 I want to restrict the scope of the upheaval.
+
+
+*Appendix -- Why Add Type Annotations?*
+The argument between proponents of static typing and dynamic typing has
+been going on for many decades. Neither side is all wrong or all right.
+Python has traditionally fallen in the camp of extremely dynamic typing,
+and this has worked well for most users, but there are definitely some
+areas where adding type annotations would help.
+
+- Editors (IDEs) can benefit from type annotations; they can call out
+obvious mistakes (like misspelled method names or inapplicable operations)
+and suggest possible method names. Anyone who has used IntelliJ or Xcode
+will recognize how powerful these features are, and type annotations will
+make such features more useful when editing Python source code.
+
+- Linters are an important tool for teams developing software. A linter
+doesn't replace a unittest, but can find certain types of errors better or
+quicker. The kind of type checking offered by mypy works much like a
+linter, and has similar benefits; but it can find problems that are beyond
+the capabilities of most linters.
+
+- Type annotations are useful for the human reader as well! Take the above
+word_count() example. How long would it have taken you to figure out the
+types of the argument and return value without annotations? Currently most
+people put the types in their docstrings; developing a standard notation
+for type annotations will reduce the amount of documentation that needs to
+be written, and running the type checker might find bugs in the
+documentation, too. Once a standard type annotation syntax is introduced,
+it should be simple to add support for this notation to documentation
+generators like Sphinx.
+
+- Refactoring. Bob's talk has a convincing example of how type annotations
+help in (manually) refactoring code. I also expect that certain automatic
+refactorings will benefit from type annotations -- imagine a tool like 2to3
+(but used for some other transformation) augmented by type annotations, so
+it will know whether e.g. x.keys() is referring to the keys of a dictionary
+or not.
+
+- Optimizers. I believe this is actually the least important application,
+certainly initially. Optimizers like PyPy or Pyston
+&lt;<a href="https://github.com/dropbox/pyston">https://github.com/dropbox/pyston</a>&gt; wouldn't be able to fully trust the
+type annotations, and they are better off using their current strategy of
+optimizing code based on the types actually observed at run time. But it's
+certainly feasible to imagine a future optimizer also taking type
+annotations into account.
+
+-- 
+--Guido "I need a new hobby" van Rossum (python.org/~guido)
+-------------- next part --------------
+An HTML attachment was scrubbed...
+URL: &lt;<a href="http://mail.python.org/pipermail/python-ideas/attachments/20140813/2b249ded/attachment-0001.html">http://mail.python.org/pipermail/python-ideas/attachments/20140813/2b249ded/attachment-0001.html</a>&gt;
+</pre>
+
+
+
+
+
+
+
+
+
+    <hr/>
+    <p/>
+
+<hr/>
+<a href="https://mail.python.org/mailman/listinfo/python-ideas">More information about the Python-ideas
+mailing list</a><br/>
+</body></div></body></html>

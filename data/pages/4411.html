@@ -1,0 +1,107 @@
+<html><body><div><div class="post-text" itemprop="text">
+
+<p>I'm attempting to rename the images that are downloaded by my Scrapy 0.24 spider. Right now the downloaded images are stored with a SHA1 hash of their URLs as the file names. I'd like to instead name them the value I extract with <code>item['model']</code>. <a href="http://stackoverflow.com/questions/6194041/scrapy-image-download-how-to-use-custom-filename">This question from 2011 outlines what I want</a>, but the answers are for previous versions of Scrapy and don't work with the latest version.</p>
+
+<p>Once I manage to get this working I'll also need to make sure I account for different images being downloaded with the same filename. So I'll need to download each image to its own uniquely named folder, presumably based on the original URL.</p>
+
+<p>Here is a copy of the code I am using in my pipeline. <a href="http://stackoverflow.com/a/22263951/556079">I got this code from a more recent answer</a> in the link above, but it's not working for me. Nothing errors out and the images are downloaded as normal. It doesn't seem my extra code has any effect on the filenames as they still appear as SHA1 hashes.</p>
+
+<p><strong>pipelines.py</strong></p>
+
+<pre><code>class AllenheathPipeline(object):
+    def process_item(self, item, spider):
+        return item
+
+import scrapy
+from scrapy.contrib.pipeline.images import ImagesPipeline
+from scrapy.http import Request
+from scrapy.exceptions import DropItem
+
+class MyImagesPipeline(ImagesPipeline):
+
+    #Name download version
+    def file_path(self, request, response=None, info=None):
+        item=request.meta['item'] # Like this you can use all from item, not just url.
+        image_guid = request.url.split('/')[-1]
+        return 'full/%s' % (image_guid)
+
+    #Name thumbnail version
+    def thumb_path(self, request, thumb_id, response=None, info=None):
+        image_guid = thumb_id + request.url.split('/')[-1]
+        return 'thumbs/%s/%s.jpg' % (thumb_id, image_guid)
+
+    def get_media_requests(self, item, info):
+        #yield Request(item['images']) # Adding meta. Dunno how to put it in one line :-)
+        for image in item['images']:
+            yield Request(image)
+
+    def item_completed(self, results, item, info):
+        image_paths = [x['path'] for ok, x in results if ok]
+        if not image_paths:
+            raise DropItem("Item contains no images")
+        item['image_paths'] = image_paths
+        return item
+</code></pre>
+
+<p><strong>settings.py</strong></p>
+
+<pre><code>BOT_NAME = 'allenheath'
+
+SPIDER_MODULES = ['allenheath.spiders']
+NEWSPIDER_MODULE = 'allenheath.spiders'
+
+ITEM_PIPELINES = {'scrapy.contrib.pipeline.images.ImagesPipeline': 1}
+
+IMAGES_STORE = 'c:/allenheath/images'
+</code></pre>
+
+<p><strong>products.py</strong> (my spider)</p>
+
+<pre><code>import scrapy
+import urlparse
+
+from allenheath.items import ProductItem
+from scrapy.selector import Selector
+from scrapy.http import HtmlResponse
+
+class productsSpider(scrapy.Spider):
+    name = "products"
+    allowed_domains = ["http://www.allen-heath.com/"]
+    start_urls = [
+        "http://www.allen-heath.com/ahproducts/ilive-80/",
+        "http://www.allen-heath.com/ahproducts/ilive-112/"
+    ]
+
+    def parse(self, response):
+        for sel in response.xpath('/html'):
+            item = ProductItem()
+            item['model'] = sel.css('#prodsingleouter &gt; div &gt; div &gt; h2::text').extract() # The value I'd like to use to name my images.
+            item['shortdesc'] = sel.css('#prodsingleouter &gt; div &gt; div &gt; h3::text').extract()
+            item['desc'] = sel.css('#tab1 #productcontent').extract()
+            item['series'] = sel.css('#pagestrip &gt; div &gt; div &gt; a:nth-child(3)::text').extract()
+            item['imageorig'] = sel.css('#prodsingleouter &gt; div &gt; div &gt; h2::text').extract()
+            item['image_urls'] = sel.css('#tab1 #productcontent .col-sm-9 img').xpath('./@src').extract()
+            item['image_urls'] = [urlparse.urljoin(response.url, url) for url in item['image_urls']]
+            yield item
+</code></pre>
+
+<p><strong>items.py</strong></p>
+
+<pre><code>import scrapy
+
+class ProductItem(scrapy.Item):
+    model = scrapy.Field()
+    itemcode = scrapy.Field()
+    shortdesc = scrapy.Field()
+    desc = scrapy.Field()
+    series = scrapy.Field()
+    imageorig = scrapy.Field()
+    image_urls = scrapy.Field()
+    images = scrapy.Field()
+</code></pre>
+
+<p>Here's a pastebin of the output I get from the command prompt when I run the spider: <a href="http://pastebin.com/ir7YZFqf">http://pastebin.com/ir7YZFqf</a></p>
+
+<p>Any help would be greatly appreciated!</p>
+    </div>
+    </div></body></html>

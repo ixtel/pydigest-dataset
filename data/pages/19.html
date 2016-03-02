@@ -1,0 +1,369 @@
+<html><body><div><div class="content html_format"><p>
+      Пакеты numpy и scipy предоставляют прекрасные возможности для быстрого решения различных вычислительных задач. Концепция универсальных функций (ufunc), работающих как со скалярными значениями, так и с массивами различных размерностей, позволяет получить высокую производительность при сохранении присущей языку Python простоты и элегантности. Универсальная функция обычно используются для выполнения одной операции над большим массивом данных, что идеально подходит для оптимизации с помощью </p><a href="http://ru.wikipedia.org/wiki/SIMD">SIMD-инструкций</a><p>, однако мне не удалось найти готового решения, основанного на свободном программном обеспечении и позволяющего использовать SIMD для вычисления в numpy таких математических функций, как синус, косинус и экспонента. Реализовывать алгоритмы вычисления этих функций с нуля совсем не хотелось, но к счастью в интернете нашлось несколько свободных библиотек на языке «С». Преодолев </p><s>лень</s><p> сомнения, я решил написать собственный numpy-модуль, предлагающий универсальные функции для синуса, косинуса и экспоненты. За подробностями и результатами тестов добро пожаловать под кат.
+</p><a name="habracut"/>
+
+<h2>Немного о SIMD-инструкциях</h2><p>
+SIMD-инструкции позволяют одновременно производить один и тот же набор операций над несколькими числами, записанными в одном регистре. Таким образом, за один такт можно обрабатывать сразу несколько чисел и потенциально увеличить производительность в несколько раз. </p><p>
+Например, набор SIMD-инструкций </p><a href="http://ru.wikipedia.org/wiki/AVX">Advanced Vector Extensions (AVX)</a><p> позволяет выполнять операции с 256-битными регистрами, каждый из которых может включать восемь 32-разрядных чисел с плавающей точкой (числа одинарной точности), либо четыре 64-разрядных (числа двойной точности). Набор операций довольно скромный, в основном это сложение, вычитание, умножение и деление. Точная и быстрая реализация тригонометрических функций с помощью этих операций — задача нетривиальная и, чтобы не изобретать велосипед, стоит использовать какую-нибудь готовую библиотеку. Помимо проприетарной </p><a href="http://en.wikipedia.org/wiki/Intel_MKL">Intel MKL</a><p>(которая уже умеет работать с numpy) вариантов нашлось всего три (</p><a href="http://software-lisc.fbk.eu/avx_mathfun/">раз</a><p>, </p><a href="https://bitbucket.org/eschnett/vecmathlib/wiki/Home">два</a><p>, </p><a href="http://shibatch.sourceforge.net/">три</a><p>). </p><p>
+Первый вариант представляет собой заголовочный файл с очень скромным набором функций, практически без документации и тестов. Второй вариант — С++ библиотека vecmathlib, которая у меня почему-то упорно отказывалась компилироваться, несмотря на использование рекомендованного компилятора GCC-4.7. Вариант перспективный, но пока еще похоже сырой. Третий вариант — библиотеку SLEEF — удалось найти именно благодаря vecmathlib, которая использует его кодовую базу. Вариант мне сразу понравился простотой и ясностью кода, а также обилием тестов.
+
+</p><h2>Небольшой тест для мотивации</h2><p>
+Чтобы получить достаточную мотивацию для написания модуля, а заодно разобраться с использованием SLEEF, я решил сравнить скорость вычисления синуса на языке «C» при использовании SLEEF со стандартной </p><code>math.h</code><p>. Естественно, речь идет о поэлементном вычислении синуса для большого массива данных.</p><p>
+К сожалению, документации и примеров в SLEEF практически нет, но зато есть вполне понятно написанные тесты, так что разобраться с использованием библиотеки было не сложно. </p><a href="http://shibatch.sourceforge.net/download/sleef-2.80.tar.gz">Исходный код SLEEF</a><p> состоит из четырех директорий: </p><code>java</code><p>, </p><code>purec</code><p>, </p><code>simd</code><p> и </p><code>tester</code><p>. Кроме этого, там лежит файл README с кратким описанием библиотеки и общий Makefile, дергающий Makefile из перечисленных директорий. Меня естественно больше всего заинтересовала директория </p><code>simd</code><p>, в которой, как можно догадаться из названия, содержались оптимизированные с помощью SIMD-инструкций функции. </p><p>
+Из Makefile в директории </p><code>simd</code><p> понятно, что поддерживаются 4 варианта SIMD-инструкций: </p><a href="http://en.wikipedia.org/wiki/SSE2">SSE2</a><p>, </p><a href="http://en.wikipedia.org/wiki/Advanced_Vector_Extensions">AVX</a><p>, </p><a href="http://en.wikipedia.org/wiki/AVX2#Advanced_Vector_Extensions_2">AVX2</a><p> и </p><a href="http://en.wikipedia.org/wiki/FMA4">FMA4</a><p>. Прототипы функций определены в файле </p><code>sleefsimd.h</code><p>, а нужный набор инструкций выбирается при компиляции с помощью флагов </p><code>-DENABLE_SSE2</code><p>, </p><code>-DENABLE_AVX</code><p>, </p><code>-DENABLE_AVX2</code><p> или </p><code>-DENABLE_FMA4</code><p>. Makefile собирает исполняемые файлы для тестирования функций с использованием каждого из наборов инструкций: </p><code>iutsse2</code><p>, </p><code>iutavx</code><p>, </p><code>iutavx2</code><p> или </p><code>iutfma4</code><p>. Эти файлы вызываются из универсальной программы tester (из директории </p><code>tester</code><p>) и осуществляют выполнение получаемых от tester команд. Реализация команд находится в файле </p><code>iut.c</code><p>, откуда становится очевидным способ использования библиотеки.
+</p><div class="spoiler"><b class="spoiler_title">Функция тестирования синуса из файла simd/iut.c исходного кода SLEEF</b><div class="spoiler_text"><pre><code class="cpp">double xxsin(double d) { 
+  double s[VECTLENDP];
+  int i;
+  for(i=0;i&lt;VECTLENDP;i++) {
+    s[i] = random()/(double)RAND_MAX*20000-10000;
+  }
+  int idx = random() &amp; (VECTLENDP-1);
+  s[idx] = d; 
+
+  vdouble a = vloadu(s);
+  a = xsin(a);
+  vstoreu(s, a);
+
+  return s[idx];
+}
+</code></pre>
+</div></div><p>
+Для чисел двойной точности (</p><code>double</code><p>) нужно определить массив длиной </p><code>VECTLENDP</code><p>, заполнить аргументами интересующей нас функции и передать в функцию </p><code>vloadu</code><p>, которая скопирует их в необходимое для использования SIMD место и вернет значение типа </p><code>vdouble</code><p>. Значение </p><code>vdouble</code><p> мы передаем функции </p><code>xsin</code><p>, которая вычисляет значение синуса сразу для всех </p><code>VECLENDP</code><p> аргументов и возвращает опять же </p><code>vdouble</code><p>. Результат распаковывается в массив из </p><code>double</code><p> с помощью функции </p><code>vstoreu</code><p>.</p><p>
+Для желающих проверить SLEEF на своей машине привожу полный исходный код программы, которую написал для оценки потенциального ускорения от использования SIMD с помощью SLEEF.
+</p><div class="spoiler"><b class="spoiler_title">Программа для оценки скорости вычисления синуса с помощью SLEEF</b><div class="spoiler_text"><pre><code class="cpp">#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;time.h&gt;
+#include &lt;math.h&gt;
+#include "sleefsimd.h"
+
+#define TESTSIZE (VECTLENDP*10000000)
+double s[TESTSIZE];
+double r1[TESTSIZE];
+double r2[TESTSIZE];
+#define COUNT 10
+int main(int argc, char *argv[])
+{
+	int k, i;
+    clock_t t1, t2;
+    double time1, time2;
+    double max, rmax;
+
+    srandom(time(NULL));
+	for(i = 0; i &lt; TESTSIZE; i++) 
+    {
+		s[i] = random()/(double)RAND_MAX*20000-10000;
+	}
+
+	printf("Testing sin, %d values\n", TESTSIZE*COUNT);
+	t1 = clock();
+	for(k = 0; k &lt; COUNT; k++)
+	{
+		for(i = 0; i &lt; TESTSIZE; i++) 
+        {
+			r1[i] = sin(s[i]);
+		}
+	}
+    t2 = clock();
+    time1 = (double)(t2 - t1)/CLOCKS_PER_SEC;
+	printf("Finish sin, spent time = %lg sec\n\n", time1);
+
+	printf("Testing xsin\n");
+	t1 = clock();
+	for(k = 0; k &lt; COUNT; k++)
+	{
+		for(i = 0; i &lt; TESTSIZE; i += VECTLENDP) 
+        {
+			vdouble a = vloadu(s+i);
+			a = xsin(a);
+			vstoreu(r2+i, a);
+		}
+	}
+    t2 = clock();
+    time2 = (double)(t2 - t1)/CLOCKS_PER_SEC;
+	printf("Finish xsin, spent time = %lg sec\n\n", time2);
+
+	printf("Speed ratio: %lf\n", time1/time2);
+
+	max = r1[0] - r2[0];
+    rmax = (r1[0] - r2[0])/r1[0];
+	for(i = 0; i &lt; TESTSIZE; i++) 
+    {
+		double delta = (r1[i] - r2[i]);
+		if(abs(delta) &gt; abs(max)) max = delta;
+        delta = (r1[i] - r2[i])/r1[i];
+		if(abs(delta) &gt; abs(max)) rmax = delta;
+	}
+
+	printf("Max absolute delta: %lg, relative delta %lg\n", max, rmax);
+	return 0;
+}
+</code></pre>
+</div></div><p>
+Самый продвинутый из поддерживаемых на моем компьютере набор команд — это AVX, поэтому я компилировал программу (записанную в файл </p><code>simd/speedtest.c</code><p> в исходниках SLEEF) следующей командой:
+</p><pre><code class="bash">gcc -O3 -Wall -Wno-unused -Wno-attributes -DENABLE_AVX -mavx speedtest.c sleefsimddp.c sleefsimdsp.c -o speedtest -lm
+</code></pre><p>
+Я ожидал ускорения примерно в 4 раза, но результат превзошел все мои ожидания:
+</p><pre><code>Testing sin, 400000000 values
+Finish sin, spent time = 14.95 sec
+
+Testing xsin
+Finish xsin, spent time = 1.31 sec
+
+Speed ratio: 11.412214
+Max absolute delta: 5.55112e-17, relative delta 1.58441e-16
+</code></pre><p>
+Ускорение более чем в </p><b>10 раз</b><p>, при относительной погрешности вычисления менее </p><b>2·10<sup>-16</sup></b><p> (порядка точности самого </p><code>double</code><p>), на одном ядре процессора! Конечно, в реальном приложении ускорение будет меньше, но мотивации для написания своего numpy-модуля уже достаточно.
+
+</p><h2>Пару слов об универсальных функциях</h2><p>
+В numpy данные представляются в виде многомерных массивов. Универсальные функции поэлементно работают с массивами любой размерности, причем в случае нескольких параметров их размерность может не совпадать. Параметры универсальной функции сначала приводятся к одной размерности в соответствии со специальными правилами (это называется </p><a href="http://docs.scipy.org/doc/numpy/reference/ufuncs.html#broadcasting">Broadcasting</a><p>), а затем необходимые вычисления проводятся поэлементно. На выходе получается массив наибольшей из размерностей. </p><p>
+Например, одна и та же функция add (которая автоматически применяется при использовании оператора "+" для numpy-массивов) позволяет сложить как два числа или одномерных массива, так и добавить число к массиву или одномерный массив к двумерному.
+</p><div class="spoiler"><b class="spoiler_title">Пример</b><div class="spoiler_text"><pre><code class="python">&gt;&gt;&gt; from numpy import array, add
+
+&gt;&gt;&gt; add(1, 2)
+3
+
+&gt;&gt;&gt; add(array([1,2]), array([4,5])) # поэлементно складываем два массива одинаковой размерности
+array([5, 7])
+
+&gt;&gt;&gt; add(array([1,2]), 1) # добавляем к одномерному массиву число (т.е. массив нулевой размерности)
+array([2, 3])
+
+&gt;&gt;&gt; add(array([[1,2],[3,4]]), array([1,2])) # добавляем к двумерному массиву одномерный (построчно)
+array([[2, 4],
+       [4, 6]])
+</code></pre>
+</div></div><p>
+Более подробную информацию по numpy на английском можно найти в </p><a href="http://docs.scipy.org/doc/numpy/reference/">официальной документации</a><p>, на русском — </p><a href="http://pyviy.blogspot.ru/2009/09/numpy.html">например здесь</a><p>.
+
+</p><h2>Пишем свой numpy-модуль с универсальной функцией и SIMD-инструкциями</h2><p>
+У numpy и skipy довольно удобный API и неплохая документация, в которой для желающих написать собственный numpy-модуль с универсальной функцией есть соответствующий </p><a href="http://docs.scipy.org/doc/numpy/user/c-info.ufunc-tutorial.html#example-numpy-ufunc-for-one-dtype">tutorial</a><p>. Сначала мы пишем C-функцию, в линейном цикле вычисляющую значение интересующей нас математической функции от скалярного аргумента:
+</p><div class="spoiler"><b class="spoiler_title">Фукнция для вычисления синуса в numpy-модуле</b><div class="spoiler_text"><pre><code class="cpp">static void double_xsin(char **args, npy_intp *dimensions,
+                            npy_intp* steps, void* data)
+{
+    npy_intp i;
+    npy_intp n = dimensions[0];
+    char *in = args[0], *out = args[1];
+    npy_intp in_step = steps[0], out_step = steps[1];
+    double tmp[VECTLENDP];
+    vdouble a;
+    int slow_n = n % VECTLENDP;
+    if(in_step != sizeof(double) || out_step != sizeof(double))
+        slow_n = n;
+    for(i = 0; i &lt; slow_n; i += VECTLENDP)
+    {
+        int j;
+        for(j = 0; j &lt; VECTLENDP &amp;&amp; i + j &lt; slow_n; j++)
+        {
+            tmp[j] = *(double *)in;
+            in += in_step;            
+        }
+        a = vloadu(tmp);
+        a = xsin(a);
+        vstoreu(tmp, a);
+        for(j = 0; j &lt; VECTLENDP &amp;&amp; i + j &lt; slow_n; j++)
+        {
+            *(double *)out = tmp[j];
+            out += out_step;
+        }        
+    }
+    if(n &gt; slow_n)
+    {
+        double *in_array = (double *)in;
+        double *out_array = (double *)out;
+        for(i = 0; i &lt; n - slow_n; i += VECTLENDP)
+        {
+            a = vloadu(in_array + i);
+        	a = xsin(a);
+	        vstoreu(out_array + i, a);    
+        }
+    }
+}
+</code></pre>
+</div></div><p>
+Указатели на входные и выходные данные numpy передает нам в массиве </p><code>args</code><p>. В нашем случае у функции один вход и один выход, поэтому адрес входных данных </p><code>args[0]</code><p>, выходных — </p><code>args[1]</code><p>. Количество элементов передается в </p><code>dimensions[0]</code><p>. Для перемещения по входным данным нужно увеличивать указатель на </p><code>steps[0]</code><p>, по выходным — на </p><code>steps[1]</code><p> (важно, что указатель имеет тип </p><code>char</code><p>, поскольку в </p><code>steps</code><p> указаны значения в байтах). К сожалению, мне не удалось найти в документации numpy утверждения, что значения в </p><code>steps</code><p> должны быть равны размерам соответствующих типов данных, хотя эксперимент показал, что на моей системе для массивов ненулевой размерности это правило выполняется. В случае его нарушения вычисления будут медленнее, поскольку потребуется дополнительное копирование элементов в массив </p><code>tmp</code><p> и из него.</p><p>
+Одна и та же универсальная функция в numpy может работать с различными типами данных, но для каждого типа данных пишется отдельная C-функция. При регистрации универсальной функции мы указываем поддерживаемые типы и для каждой комбинации входных и выходных типов передаем указатель на С-функцию, которая будет с этой комбинацией работать:
+</p><pre><code class="cpp">static PyUFuncGenericFunction funcs[] = {&amp;double_xsin};
+static char types[] = {NPY_DOUBLE, NPY_DOUBLE};
+static void *data[] = {NULL};
+</code></pre><p>
+В массиве </p><code>types</code><p> указываются как входные, так и выходные типы, поэтому он длиннее массивов </p><code>funcs</code><p> и </p><code>data</code><p>. Массив указателей </p><code>data</code><p> позволяет для каждой комбинации типов указать свой дополнительный параметр, который будет передан в C-фунцкию в качестве последнего аргумента </p><code>void* data</code><p>. В частности, это можно использовать для реализации разных универсальных функций с помощью одной C-функции.</p><p>
+Чтобы зарегистрировать нашу универсальную функцию, нужно вызвать </p><code>PyUFunc_FromFuncAndData</code><p> и передать ей описанные выше массивы (</p><code>funcs</code><p>, </p><code>data</code><p> и </p><code>types</code><p>), а также количество входных и выходных аргументов универсальной функции, количество поддерживаемых комбинаций типов, имя функции в модуле и строку документации.
+</p><div class="spoiler"><b class="spoiler_title">Полный исходный код модуля</b><div class="spoiler_text"><pre><code class="cpp">#include "Python.h"
+#include "numpy/ndarraytypes.h"
+#include "numpy/ufuncobject.h"
+#include "numpy/npy_3kcompat.h"
+#include "sleef/sleefsimd.h"
+
+/* The loop definition must precede the PyMODINIT_FUNC. */
+static void double_xsin(char **args, npy_intp *dimensions,
+                            npy_intp* steps, void* data)
+{
+    npy_intp i;
+    npy_intp n = dimensions[0];
+    char *in = args[0], *out = args[1];
+    npy_intp in_step = steps[0], out_step = steps[1];
+    double tmp[VECTLENDP];
+    vdouble a;
+    int slow_n = n % VECTLENDP;
+    if(in_step != sizeof(double) || out_step != sizeof(double))
+        slow_n = n;
+    for(i = 0; i &lt; slow_n; i += VECTLENDP)
+    {
+        int j;
+        for(j = 0; j &lt; VECTLENDP &amp;&amp; i + j &lt; slow_n; j++)
+        {
+            tmp[j] = *(double *)in;
+            in += in_step;            
+        }
+        a = vloadu(tmp);
+        a = xsin(a);
+        vstoreu(tmp, a);
+        for(j = 0; j &lt; VECTLENDP &amp;&amp; i + j &lt; slow_n; j++)
+        {
+            *(double *)out = tmp[j];
+            out += out_step;
+        }        
+    }
+    if(n &gt; slow_n)
+    {
+        double *in_array = (double *)in;
+        double *out_array = (double *)out;
+        for(i = 0; i &lt; n - slow_n; i += VECTLENDP)
+        {
+            a = vloadu(in_array + i);
+        	a = xsin(a);
+	        vstoreu(out_array + i, a);    
+        }
+    }
+}
+
+static PyMethodDef AvxmathMethods[] = {
+        {NULL, NULL, 0, NULL}
+};
+
+static PyUFuncGenericFunction funcs[1] = {&amp;double_xsin};
+static char types[] = {NPY_DOUBLE, NPY_DOUBLE};
+static void *data[] = {NULL};
+
+void register_xsin(PyObject *module)
+{
+    PyObject *xsin, *d;
+    import_array();
+    import_umath();
+
+    xsin = PyUFunc_FromFuncAndData(funcs, data, types, 1, 1, 1,
+                                    PyUFunc_None, "sin",
+                                    "AVX-accelerated sine calculation", 0);
+    d = PyModule_GetDict(module);
+    PyDict_SetItemString(d, "sin", xsin);
+    Py_DECREF(xsin);
+}
+
+#if PY_VERSION_HEX &gt;= 0x03000000
+static struct PyModuleDef moduledef = {
+    PyModuleDef_HEAD_INIT,
+    "avxmath",
+    NULL,
+    -1,
+    AvxmathMethods,
+    NULL,
+    NULL,
+    NULL,
+    NULL
+};
+
+PyMODINIT_FUNC PyInit_avxmath(void)
+{
+    PyObject *m;
+    m = PyModule_Create(&amp;moduledef);
+    if (!m) {
+        return NULL;
+    }
+    register_xsin(m);
+    return m;
+}
+#else
+PyMODINIT_FUNC initavxmath(void)
+{
+    PyObject *m;
+    m = Py_InitModule("avxmath", AvxmathMethods);
+    if (m == NULL) {
+        return;
+    }
+    register_xsin(m);
+}
+#endif
+</code></pre>
+</div></div><p>
+Для сборки модуля я использовал стандартный </p><code>setup.py</code><p> из </p><a href="http://docs.scipy.org/doc/numpy/user/c-info.ufunc-tutorial.html#example-numpy-ufunc-for-one-dtype">документации</a><p>, заменив название модуля и добавив C-файлы библиотеки SLEEF, флаги компилятора и линковщика. Приведенный выше исходный код модуля я сохранил рядом с </p><code>setup.py</code><p> в файле с именем </p><code>avxmath.c</code><p>, директорию </p><code>simd</code><p> из исходного кода SLEEF переименовал в </p><code>sleef</code><p> и также положил рядом с </p><code>setup.py</code><p>.
+</p><div class="spoiler"><b class="spoiler_title">Файл setup.py для сборки модуля avxmath</b><div class="spoiler_text"><pre><code class="python">def configuration(parent_package='', top_path=None):
+    import numpy
+    from numpy.distutils.misc_util import Configuration
+
+    config = Configuration('',
+                           parent_package,
+                           top_path)
+    config.add_extension('avxmath', ['avxmath.c', 'sleef/sleefsimddp.c', 'sleef/sleefsimdsp.c'], 
+                         extra_compile_args=['-O3', '-Wall', '-Wno-unused', '-Wno-attributes', '-DENABLE_AVX','-mavx'], 
+                         extra_link_args=['-lm'])
+
+    return config
+
+if __name__ == "__main__":
+    from numpy.distutils.core import setup
+    setup(configuration=configuration)
+</code></pre>
+</div></div><p>
+Для компиляции без установки в систему нужно выполнить команду </p><code>python setup.py build_ext --inplace</code><p>, результатом успешного выполнения которой должен стать готовый модуль в файле </p><code>avxmath.so</code><p>. Теперь можно проверить работоспособность нашей функции. Запускаем python в той же директории, где находится файл </p><code>avxmath.so</code><p>, и проверяем:
+</p><pre><code class="python">&gt;&gt;&gt; from numpy import array, pi
+&gt;&gt;&gt; import avxmath
+&gt;&gt;&gt; avxmath.sin(0)
+0.0
+&gt;&gt;&gt; avxmath.sin(pi)
+1.2246467991473532e-16
+&gt;&gt;&gt; avxmath.sin([0, pi/2, pi, 3*pi/2, 2*pi])
+array([  0.00000000e+00,   1.00000000e+00,   1.22464680e-16,
+        -1.00000000e+00,  -2.44929360e-16])
+&gt;&gt;&gt; 
+</code></pre><p>
+Убедившись, что модуль </p><code>avxmath</code><p> импортируется и работает без ошибок, можно сделать небольшой тест производительности и точности новой функции.
+</p><div class="spoiler"><b class="spoiler_title">Программа проверки функции sin модуля avxmath и результат ее выполнения</b><div class="spoiler_text"><pre><code class="python">import numpy 
+import avxmath
+import time
+from numpy import random, pi
+
+COUNT=10
+
+x = 2e4*random.random(40000000) - 1e4
+t = time.clock()
+for i in xrange(COUNT):
+    y1 = numpy.sin(x)
+duration1 = time.clock() - t
+print "numpy.sin %f sec" % duration1
+
+t = time.clock()
+for i in xrange(COUNT):
+    y2 = avxmath.sin(x)
+duration2 = time.clock() - t
+print "avxmath.sin %f sec" % duration2
+
+delta = y2 - y1
+rdelta = delta/y1
+print "max absolute difference is %lg, relative %lg" % (
+        delta[abs(delta).argmax()], rdelta[abs(rdelta).argmax()])
+print "speedup is %lg" % (duration1/duration2)
+</code></pre>
+<pre><code>numpy.sin 15.510000 sec
+avxmath.sin 2.260000 sec
+max absolute difference is 2.22045e-16, relative 2.63873e-16
+speedup is 6.86283
+</code></pre>
+</div></div><p>
+Итак, мы получили ускорение более чем в </p><b>6 раз</b><p> при точности вычислений не хуже </p><b>3·10<sup>-16</sup></b><p>! Заменив вызовы функции </p><code>xsin</code><p> на простое копирование памяти, нетрудно убедиться, что ускорение в 10 раз не получилось из-за того, что около 1 секунды из полученных нами 2.26 секунд выполнения ушло на накладные расходы. Аналогично, заменив функцию </p><code>xsin</code><p> на обычный синус из </p><code>math.h</code><p>, мы обнаружим, что времена вычислений с помощью </p><code>avxmath.sin</code><p> и </p><code>numpy.sin</code><p> в нашем тесте с высокой точностью совпадут.</p><p>
+Таким образом, с помощью SIMD инструкций можно добиться значительного ускорения выполняемых с помощью numpy и scipy вычислений, просто заменив импорты обычных функций на оптимизированные. Ну и конечно исходные коды несколько расширенного по сравнению с данной статьей модуля </p><code>avxmath</code><p> доступны на Github по </p><a href="https://github.com/nikolaynag/avxmath">ссылке</a><p>.
+</p><b>Upd</b><p>: Не используйте синус из SLEEF для значений аргумента порядка 1e10 и больше (см. </p><a href="http://habrahabr.ru/post/198916/#comment_6917974">комментарий</a><p>)
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

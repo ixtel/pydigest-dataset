@@ -1,0 +1,136 @@
+<html><body><div><div class="entry-content">
+						<p><a href="http://kafka.apache.org">Apache Kafka</a> is being used a fair amount these days and where I work is no exception. Kafka is getting a lot done in the highly scaled ‘Cloud’ and elsewhere. Getting a developer instance of Kafka up and running can be a little daunting for those new to it so I’ve come up with an easy way to get your development environment up and running in very little time. We will test out the single node Kafka server using <a href="http://python.org">Python</a> 3 and <a href="https://github.com/mumrah/kafka-python">kafka-python</a>.</p>
+<p><span id="more-5541"/></p>
+<p>The first step is to get the single node Kafka server running with the help of <a href="https://www.vagrantup.com/">Vagrant</a> and <a href="https://www.virtualbox.org/">Virtualbox</a>. I have a <a href="https://github.com/chadlung/vagrant-kafka">Github repo</a> setup that you can use to get everything running pretty easily.</p>
+<p><strong>Note:</strong> I’ve tested these steps on Mac OS X (Yosemite).</p>
+<pre class="brush: plain; title: ; notranslate" title="">
+$ git clone https://github.com/chadlung/vagrant-kafka.git
+$ cd vagrant-kafka
+$ vagrant up
+</pre>
+<p>This will take a little while to fetch and download all the required packages, etc. When it completes you should see a message like:</p>
+<pre class="brush: plain; title: ; notranslate" title="">
+==&gt; default: Installation complete!
+</pre>
+<p>Once you see the above message go ahead and log into the new server:</p>
+<pre class="brush: plain; title: ; notranslate" title="">
+$ vagrant ssh
+</pre>
+<p>Once your logged in you can quickly verify Zookeeper and Kafka are running by:</p>
+<pre class="brush: plain; title: ; notranslate" title="">
+$ ps -aux | grep java
+</pre>
+<p>Let’s create a <strong>topic</strong>. Still inside the Kafka VM run the following from the command line:</p>
+<pre class="brush: plain; title: ; notranslate" title="">
+$ cd kafka_2.10-0.8.2.1/
+$ bin/kafka-topics.sh --create --zookeeper localhost:2181 --replication-factor 1 --partitions 1 --topic test
+$ bin/kafka-topics.sh --list --zookeeper localhost:2181
+</pre>
+<p>First we create a new topic called <strong>test</strong> and then we list to ensure its there.</p>
+<p>Time to send and receive some messages with Python. First we will create our project.</p>
+<p><strong>Note:</strong> I keep all my Python projects inside a folder in my home folder called <strong>PythonProjects</strong></p>
+<pre class="brush: plain; title: ; notranslate" title="">
+$ cd ~/PythonProjects
+$ python3 -m venv kafka-example
+$ cd kafka-example
+$ source bin/activate
+$ mkdir src &amp;&amp; cd src
+$ touch consumer.py
+$ touch producer.py
+$ pip install kafka-python
+</pre>
+<p>Inside the <strong>producer.py</strong> file add the following:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+import time
+
+from kafka import SimpleProducer, KafkaClient
+from kafka.common import LeaderNotAvailableError
+
+
+def print_response(response=None):
+    if response:
+        print('Error: {0}'.format(response[0].error))
+        print('Offset: {0}'.format(response[0].offset))
+
+
+def main():
+    kafka = KafkaClient("192.168.33.10:9092")
+    producer = SimpleProducer(kafka)
+
+    topic = b'test'
+    msg = b'Hello World'
+
+    try:
+        print_response(producer.send_messages(topic, msg))
+    except LeaderNotAvailableError:
+        # https://github.com/mumrah/kafka-python/issues/249
+        time.sleep(1)
+        print_response(producer.send_messages(topic, msg))
+
+    kafka.close()
+
+if __name__ == "__main__":
+    main()
+</pre>
+<p>I’ve added a link in the code comments to <a href="https://github.com/mumrah/kafka-python/issues/249">an issue</a> regarding the <strong>LeaderNotAvailableError</strong>. You will see this typically when you attempt to send a message to a topic that doesn’t yet exist. At that point the message appears to get lost – but the topic gets created, the exception is triggered, and the message is sent again. A better feature I think would be to allow creation of the topic prior to sending messages (this would assume <strong>auto.create.topics.enable</strong> <a href="https://kafka.apache.org/08/configuration.html">is set</a>), if the topic exists then just skip, else create it. You will also find that the consumer code (coming up) if started and the topic doesn’t exist will also error. So always ensure the topic exists then you don’t need the hack shown above.</p>
+<p><strong>Note:</strong> I’ve found that <a href="https://kafka.apache.org/08/configuration.html">auto.create.topics.enable</a> doesn’t work as I expected it to so I’ve left it out of the Vagrant recipe.</p>
+<p>Inside the <strong>consumer.py</strong> file add the following:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+from kafka import KafkaConsumer
+
+
+def main():
+    consumer = KafkaConsumer(b"test", group_id=b"my_group_id",
+                             metadata_broker_list=["192.168.33.10:9092"])
+    for message in consumer:
+        # This will wait and print messages as they become available
+        print(message)
+
+
+if __name__ == "__main__":
+    main()
+</pre>
+<p>Run the <strong>consumer.py</strong> file:</p>
+<pre class="brush: plain; title: ; notranslate" title="">
+$ python consumer.py
+</pre>
+<p>Now run the <strong>consumer.py</strong> file (in another terminal tab, make sure to source bin/activate):</p>
+<pre class="brush: plain; title: ; notranslate" title="">
+$ python producer.py
+</pre>
+<p>The <strong>producer</strong> will output:</p>
+<pre class="brush: plain; title: ; notranslate" title="">
+Error: 0
+Offset: 0
+</pre>
+<p>The <strong>consumer</strong> will output:</p>
+<pre class="brush: plain; title: ; notranslate" title="">
+KafkaMessage(topic=b'test3', partition=0, offset=0, key=None, value=b'Hello World')
+</pre>
+<p>The are other options for each the producers and consumers. Another (simplistic) consumer may look like this:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+from kafka import KafkaClient, SimpleConsumer
+
+
+kafka_client = KafkaClient("192.168.33.10:9092")
+consumer = SimpleConsumer(kafka_client, b"hello_group_consumer", b"topic1")
+
+# Start at a specic offset
+# consumer.seek(25, 0)
+
+for message in consumer:
+    print(message)
+</pre>
+<p>When you halt the Vagrant Kafka VM and then start it at some other point you can easily get your Kafka server running again. Simply log back into the Kafka VM and run the following:</p>
+<pre class="brush: plain; title: ; notranslate" title="">
+cd kafka_2.10-0.8.2.1/
+$ bin/zookeeper-server-start.sh config/zookeeper.properties &amp;
+$ bin/kafka-server-start.sh config/server.properties
+</pre>
+<p>For more commands see the <a href="http://kafka.apache.org/documentation.html#quickstart">quickstart guide</a>.</p>
+
+
+											</div>
+
+
+					</div></body></html>

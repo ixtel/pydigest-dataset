@@ -1,0 +1,205 @@
+<html><body><div><article class="post-content">
+    <p>The company that I’m working for wanted us to write a project which includes parsing the Amazon pages, specifically the book pages. We needed to extract the information of books like title, authors, cover image, price, publisher, etc. from a given url.</p>
+
+<p>There are lots of parsing and scraping libraries in Python world. The most popular ones are <a href="http://www.crummy.com/software/BeautifulSoup/">BeautifulSoup</a>, <a href="https://docs.python.org/2/library/htmlparser.html">HtmlParser</a> and <a href="http://scrapy.org/">Scrapy</a>. But I needed something which has rather slightly gentle learning curve because I just wanted to get things done as quickly as possible.</p>
+
+<p>With the advice of a colleague, I discovered <a href="https://pypi.python.org/pypi/pyquery">PyQuery</a> which is a jquery-like library which allows you to access html elements with their types, ids and classes. I jumped right into it, because I thought using this will bring me some speed as a guy who has a jquery background even just a little. </p>
+
+<p>We can divide this problem of parsing Amazon in to two different parts. The first one is getting the data and the second is processing over that data to get information out of it.</p>
+
+<h2 id="making-a-request">Making A Request</h2>
+<p>Python comes with a handy url opener called <a href="https://docs.python.org/2/library/urllib2.html">urllib2</a>. But I decided to use <a href="http://docs.python-requests.org/">requests</a> for this little project just because to see its interface and to get involved with it. The thing that we are going to use requests for is pretty straightforward and it could’ve been done easily with urllib2 too. But again, it’s your decision to choose whatever you prefer. By the way requests make a difference in the API side when comparing to urllib2.</p>
+
+<p>First we need to make a request to an Amazon link than get the html source of the web page. And that will be the data that we mentioned as a first step of this project. Let’s gets started!</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="kn">import</span> <span class="nn">requests</span>
+
+<span class="c"># The url of the first book of the Harry Potter series as an example</span>
+<span class="n">url</span> <span class="o">=</span> <span class="s">"http://www.amazon.com/dp/059035342X/"</span>
+
+<span class="c"># Make a request and store the result in the variable called response</span>
+<span class="n">response</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">url</span><span class="p">)</span>
+
+<span class="c"># Get the content of the response</span>
+<span class="n">html</span> <span class="o">=</span> <span class="n">response</span><span class="o">.</span><span class="n">content</span>
+
+<span class="c"># Print the source to see everything's right</span>
+<span class="k">print</span> <span class="n">html</span></code></pre></div>
+
+<p>Oops! When we look closely at the output of the program which is the html source code we get from Amazon, we will see that something’s not right. This is because Amazon thought that our request is made by a bot not an actual person. And it has a point, right? That’s why it didn’t send the original response, instead it sends a message that it detects that the request is not made form a web browser. In order to solve this problem, first let’s take a look at the concept of header of a request.</p>
+
+<h2 id="all-we-need-is-header">All We Need is Header</h2>
+<p>When we type some link in our browser and hit enter, our browser creates a packet that includes variety of information about us like response type that we are going to accept, cookie that is sent previously by the server, user agent string that identifies ourselves and many many more. This is called request header. The most vital one of its fields for us is user-agent. By injecting that information to our code, Amazon will think that our request is made by a real web browser. And now let’s see what a header looks like.</p>
+
+<p>If you’re using Chrome, we can view that info by using Chrome Developer Tools. First start your Chrome browser and open developer tools window by pressing Ctrl + Shift + I (or Cmd + Opt + I on Mac). Go to Network tab and enter a random website. When the website starts to load, you will see network window will be filled with some data. Go on top of the list that is located on the left side and click the uppermost one. We will see the request header and its fields in this window.</p>
+
+<p><a href="http://i.imgur.com/1guaWoI.png"><img src="http://i.imgur.com/1guaWoI.png" alt="Request header example" title="Amazon request header"/></a></p>
+
+<p>Let’s add this user-agent to our code and move on.</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">headers</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s">'User-Agent'</span><span class="p">:</span> <span class="s">'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_9_4) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/37.0.2062.94 Safari/537.36'</span><span class="p">,</span>
+<span class="p">}</span> <span class="c"># sorry pep8</span>
+
+<span class="n">url</span> <span class="o">=</span> <span class="s">"http://www.amazon.com/dp/059035342X/"</span>
+<span class="n">response</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">url</span><span class="p">,</span> <span class="n">headers</span><span class="o">=</span><span class="n">headers</span><span class="p">)</span>
+<span class="n">html</span> <span class="o">=</span> <span class="n">response</span><span class="o">.</span><span class="n">content</span>
+
+<span class="k">print</span> <span class="n">html</span></code></pre></div>
+
+<p>The result is streaming like in The Matrix which is a good sign that indicates we’re getting what we want.</p>
+
+<h2 id="and-parsing-begins">And, Parsing Begins…</h2>
+<p>I’m one of those who believes practicing is the best way to learn new things. That’s why we are going to cover the second step of the project which is parsing the html by doing an example. Let’s assume that we have an html file like the one below (I know it has some weird points in it) and we are going to extract all the fields it has. Let’s start!</p>
+
+<div class="highlight"><pre><code class="language-html" data-lang="html"><span class="nt">&lt;div</span> <span class="na">class=</span><span class="s">"book-info"</span><span class="nt">&gt;</span>
+    <span class="nt">&lt;h2&gt;</span>Book Info<span class="nt">&lt;/h2&gt;</span>
+    <span class="nt">&lt;h2</span> <span class="na">id=</span><span class="s">"title"</span><span class="nt">&gt;</span>Programming in Scala<span class="nt">&lt;/h2&gt;</span>
+    <span class="nt">&lt;ul</span> <span class="na">id=</span><span class="s">"author"</span><span class="nt">&gt;</span>
+        <span class="nt">&lt;li</span> <span class="na">id=</span><span class="s">"main"</span><span class="nt">&gt;</span>Martin Odersky<span class="nt">&lt;/li&gt;</span>
+        <span class="nt">&lt;li&gt;</span>Lex Spoon<span class="nt">&lt;/li&gt;</span>
+        <span class="nt">&lt;li&gt;</span>Bill Venners<span class="nt">&lt;/li&gt;</span>
+    <span class="nt">&lt;/ul&gt;</span>
+    <span class="nt">&lt;p</span> <span class="na">class=</span><span class="s">"center highlighted"</span> <span class="na">id=</span><span class="s">"money-field"</span><span class="nt">&gt;</span>$37.66<span class="nt">&lt;/p&gt;</span>
+    <span class="nt">&lt;p</span> <span class="na">class=</span><span class="s">"center"</span><span class="nt">&gt;</span>Paperback<span class="nt">&lt;/p&gt;</span>
+    <span class="nt">&lt;p</span> <span class="na">class=</span><span class="s">"center"</span><span class="nt">&gt;</span>January 4, 2011<span class="nt">&lt;/p&gt;</span>
+<span class="nt">&lt;/div&gt;</span></code></pre></div>
+
+<p>First of all, there’s not exactly one way to extract the information we need. For the sake of learning different aspects of PyQuery, we are going to extract the information in different ways. First target: book title. (I’m going to use <a href="http://ipython.org/">IPython</a> which is an advanced version of Python shell. It has tab completion and you can run system shell commands, and many more cool features.)</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">In</span> <span class="p">[</span><span class="mi">1</span><span class="p">]:</span> <span class="kn">from</span> <span class="nn">pyquery</span> <span class="kn">import</span> <span class="n">PyQuery</span> <span class="k">as</span> <span class="n">pq</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">2</span><span class="p">]:</span> <span class="n">html</span> <span class="o">=</span> <span class="s">'''</span>
+<span class="s">  ...:     &lt;div class="book-info"&gt;</span>
+<span class="s">  ...:         &lt;h2&gt;Book Info&lt;/h2&gt;</span>
+<span class="s">  ...:         &lt;h2 id="title"&gt;Programming in Scala&lt;/h2&gt;</span>
+<span class="s">  ...:         &lt;ul id="author"&gt;</span>
+<span class="s">  ...:             &lt;li id="main"&gt;Martin Odersky&lt;/li&gt;</span>
+<span class="s">  ...:             &lt;li&gt;Lex Spoon&lt;/li&gt;</span>
+<span class="s">  ...:             &lt;li&gt;Bill Venners&lt;/li&gt;</span>
+<span class="s">  ...:         &lt;/ul&gt;</span>
+<span class="s">  ...:         &lt;p class="center highlighted" id="money-field"&gt;$37.66&lt;/p&gt;</span>
+<span class="s">  ...:         &lt;p class="center"&gt;Paperback&lt;/p&gt;</span>
+<span class="s">  ...:         &lt;p class="center"&gt;January 4, 2011&lt;/p&gt;</span>
+<span class="s">  ...:     &lt;/div&gt;</span>
+<span class="s">  ...: '''</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">3</span><span class="p">]:</span> <span class="n">doc</span> <span class="o">=</span> <span class="n">pq</span><span class="p">(</span><span class="n">html</span><span class="p">)</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">4</span><span class="p">]:</span> <span class="n">doc</span><span class="p">(</span><span class="s">'h2'</span><span class="p">)</span> <span class="c"># we can access the elements by giving element type like in jquery. As a result we have a list of elements with h2 tag.</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">4</span><span class="p">]:</span> <span class="p">[</span><span class="o">&lt;</span><span class="n">h2</span><span class="o">&gt;</span><span class="p">,</span> <span class="o">&lt;</span><span class="n">h2</span><span class="c">#title&gt;]</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">5</span><span class="p">]:</span> <span class="n">doc</span><span class="p">(</span><span class="s">'h2#title'</span><span class="p">)</span> <span class="c"># since the book title has id 'title' we can narrow down the query.</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">5</span><span class="p">]:</span> <span class="p">[</span><span class="o">&lt;</span><span class="n">h2</span><span class="c">#title&gt;]</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">6</span><span class="p">]:</span> <span class="n">doc</span><span class="p">(</span><span class="s">'h2#title'</span><span class="p">)</span><span class="o">.</span><span class="n">text</span><span class="p">()</span> <span class="c"># we need to call 'text' method to get the content, without it we get object representation.</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">6</span><span class="p">]:</span> <span class="s">'Programming in Scala'</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">7</span><span class="p">]:</span> <span class="n">doc</span><span class="p">(</span><span class="s">'h2'</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="o">.</span><span class="n">text</span><span class="p">()</span> <span class="c"># since there are two elements with h2 tag we can get the second one with eq method. It accepts 0-based index as a parameter.</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">7</span><span class="p">]:</span> <span class="s">'Programming in Scala'</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">8</span><span class="p">]:</span> <span class="n">doc</span><span class="p">(</span><span class="s">'#title'</span><span class="p">)</span><span class="o">.</span><span class="n">text</span><span class="p">()</span> <span class="c"># since there are no other elements with id 'title', it is sufficient in the query just by itself.</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">8</span><span class="p">]:</span> <span class="s">'Programming in Scala'</span></code></pre></div>
+
+<p>We did pretty good job on getting title. Now our mission is to extract the authors. This is a little bit different because it has a nested structure.</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">In</span> <span class="p">[</span><span class="mi">9</span><span class="p">]:</span> <span class="n">doc</span><span class="p">(</span><span class="s">'ul'</span><span class="p">)</span><span class="o">.</span><span class="n">children</span><span class="p">()</span> <span class="c"># get the children elements of 'ul'</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">9</span><span class="p">]:</span> <span class="p">[</span><span class="o">&lt;</span><span class="n">li</span><span class="c">#main&gt;, &lt;li&gt;, &lt;li&gt;]</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">10</span><span class="p">]:</span> <span class="n">doc</span><span class="p">(</span><span class="s">'ul'</span><span class="p">)</span><span class="o">.</span><span class="n">children</span><span class="p">()</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">.</span><span class="n">text</span><span class="p">()</span> <span class="c"># we can combine it with 'eq' to say get the element with index zero.</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">10</span><span class="p">]:</span> <span class="s">'Martin Odersky'</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">11</span><span class="p">]:</span> <span class="n">doc</span><span class="p">(</span><span class="s">'ul'</span><span class="p">)</span><span class="o">.</span><span class="n">children</span><span class="p">()</span><span class="o">.</span><span class="n">text</span><span class="p">()</span> <span class="c"># we can get the content of all children like this. But as you can see we didn't take the authors separately. Instead we took as a whole string. We may want to change our approach.</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">11</span><span class="p">]:</span> <span class="s">'Martin Odersky Lex Spoon Bill Venners'</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">12</span><span class="p">]:</span> <span class="k">for</span> <span class="n">li</span> <span class="ow">in</span> <span class="n">doc</span><span class="p">(</span><span class="s">'ul'</span><span class="p">)</span><span class="o">.</span><span class="n">children</span><span class="p">():</span> <span class="c"># the solution is iterating all children with a for loop.</span>
+	<span class="k">print</span> <span class="n">li</span><span class="o">.</span><span class="n">text</span>
+	<span class="o">.....</span><span class="p">:</span>
+<span class="n">Martin</span> <span class="n">Odersky</span>
+<span class="n">Lex</span> <span class="n">Spoon</span>
+<span class="n">Bill</span> <span class="n">Venners</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">13</span><span class="p">]:</span> <span class="p">[</span><span class="n">li</span><span class="o">.</span><span class="n">text</span> <span class="k">for</span> <span class="n">li</span> <span class="ow">in</span> <span class="n">doc</span><span class="p">(</span><span class="s">'ul'</span><span class="p">)</span><span class="o">.</span><span class="n">children</span><span class="p">()]</span> <span class="c"># we can add all authors to a list in a very pythonic way.</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">13</span><span class="p">]:</span> <span class="p">[</span><span class="s">'Martin Odersky'</span><span class="p">,</span> <span class="s">'Lex Spoon'</span><span class="p">,</span> <span class="s">'Bill Venners'</span><span class="p">]</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">14</span><span class="p">]:</span> <span class="n">doc</span><span class="p">(</span><span class="s">'ul#author'</span><span class="p">)</span> <span class="c"># let's say there are many ul elements in an html file. We can specify it by adding its id to the query.</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">14</span><span class="p">]:</span> <span class="p">[</span><span class="o">&lt;</span><span class="n">ul</span><span class="c">#author&gt;]</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">15</span><span class="p">]:</span> <span class="n">doc</span><span class="p">(</span><span class="s">'ul'</span><span class="p">)</span><span class="o">.</span><span class="n">find</span><span class="p">(</span><span class="s">'li#main'</span><span class="p">)</span><span class="o">.</span><span class="n">text</span><span class="p">()</span> <span class="c"># we can find nested elements with 'find'</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">15</span><span class="p">]:</span> <span class="s">'Martin Odersky'</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">16</span><span class="p">]:</span> <span class="n">doc</span><span class="p">(</span><span class="s">'ul li#main'</span><span class="p">)</span><span class="o">.</span><span class="n">text</span><span class="p">()</span> <span class="c"># or with less verbose by leaving space between elements.</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">16</span><span class="p">]:</span> <span class="s">'Martin Odersky'</span></code></pre></div>
+
+<p>Authors: done. Now we are moving on to price of the book.</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">In</span> <span class="p">[</span><span class="mi">17</span><span class="p">]:</span> <span class="n">doc</span><span class="p">(</span><span class="s">'p.center'</span><span class="p">)</span> <span class="c"># there are three &lt;p&gt; tags with the class 'center' but we need the one with 'money-field'</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">17</span><span class="p">]:</span> <span class="p">[</span><span class="o">&lt;</span><span class="n">p</span><span class="c">#money-field.center.highlighted&gt;, &lt;p.center&gt;, &lt;p.center&gt;]</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">18</span><span class="p">]:</span> <span class="n">doc</span><span class="p">(</span><span class="s">'p.center'</span><span class="p">)</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="s">'#money-field'</span><span class="p">)</span><span class="o">.</span><span class="n">text</span><span class="p">()</span> <span class="c"># for that reason we need to filter out the one with 'money-field'. That's where 'filter' gives a hand.</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">18</span><span class="p">]:</span> <span class="s">'$37.66'</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">19</span><span class="p">]:</span> <span class="n">doc</span><span class="p">(</span><span class="s">'p.center.highlighted'</span><span class="p">)</span><span class="o">.</span><span class="n">text</span><span class="p">()</span> <span class="c"># or we can get price easily by giving two class names.</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">19</span><span class="p">]:</span> <span class="s">'$37.66'</span></code></pre></div>
+
+<p>Up to this point, we learned a lot. We accessed elements through their types, ids, classes also indices, we handled the nested structures, we filtered out the results to get what we want, etc. </p>
+
+<p>I’m aware that we didn’t do the extraction of last two pieces of information: cover type and publishing date. I want to leave those to you as a little task to learn PyQuery better.</p>
+
+<h2 id="how-about-parsing-amazon">How About Parsing Amazon?</h2>
+<p>Now that we have the data and practical knowledge to process it, parsing Amazon becomes relatively easier. All we need to do is analyzing the html source code and finding the patterns to extract book information. In other words, we have to find the tags (it will be possibly nested and not as simple as our example) that a particular book info got enclosed. </p>
+
+<p>Moving on with the previous Harry Potter url, when we inspect the html of the page, we are going to see the line where title is located at:</p>
+
+<div class="highlight"><pre><code class="language-html" data-lang="html"><span class="nt">&lt;span</span> <span class="na">id=</span><span class="s">"productTitle"</span> <span class="na">class=</span><span class="s">"a-size-large"</span><span class="nt">&gt;</span>Harry Potter and the Sorcerer's Stone (Harry Potters)<span class="nt">&lt;/span&gt;</span></code></pre></div>
+
+<p>This line for the author:</p>
+
+<div class="highlight"><pre><code class="language-html" data-lang="html"><span class="nt">&lt;a</span> <span class="na">data-asin=</span><span class="s">"B000AP9A6K"</span> <span class="na">class=</span><span class="s">"a-link-normal contributorNameID"</span> <span class="na">href=</span><span class="s">"/J.K.-Rowling/e/B000AP9A6K/ref=dp_byline_cont_book_1"</span><span class="nt">&gt;</span>J.K. Rowling<span class="nt">&lt;/a&gt;</span></code></pre></div>
+
+<p>And this line for the price:</p>
+
+<div class="highlight"><pre><code class="language-html" data-lang="html"><span class="nt">&lt;span</span> <span class="na">class=</span><span class="s">"a-size-medium a-color-price offer-price a-text-normal"</span><span class="nt">&gt;</span>$6.92<span class="nt">&lt;/span&gt;</span></code></pre></div>
+
+<p>Let’s write the whole code to extract those information.</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="kn">from</span> <span class="nn">pyquery</span> <span class="kn">import</span> <span class="n">PyQuery</span> <span class="k">as</span> <span class="n">pq</span>
+<span class="kn">import</span> <span class="nn">requests</span>
+
+<span class="n">headers</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s">'User-Agent'</span><span class="p">:</span> <span class="s">'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_9_4) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/37.0.2062.94 Safari/537.36'</span><span class="p">,</span>
+<span class="p">}</span>
+
+<span class="k">def</span> <span class="nf">get_book_info</span><span class="p">(</span><span class="n">url</span><span class="p">):</span>
+    <span class="n">response</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">url</span><span class="p">,</span> <span class="n">headers</span><span class="o">=</span><span class="n">headers</span><span class="p">)</span>
+    <span class="n">doc</span> <span class="o">=</span> <span class="n">pq</span><span class="p">(</span><span class="n">response</span><span class="o">.</span><span class="n">content</span><span class="p">)</span>
+
+    <span class="n">book</span> <span class="o">=</span> <span class="p">{}</span>
+
+    <span class="n">title</span> <span class="o">=</span> <span class="n">doc</span><span class="p">(</span><span class="s">'#productTitle'</span><span class="p">)</span><span class="o">.</span><span class="n">text</span><span class="p">()</span>
+    <span class="n">book</span><span class="p">[</span><span class="s">'title'</span><span class="p">]</span> <span class="o">=</span> <span class="n">title</span>
+
+    <span class="n">author</span> <span class="o">=</span> <span class="n">doc</span><span class="p">(</span><span class="s">'.contributorNameID'</span><span class="p">)</span><span class="o">.</span><span class="n">text</span><span class="p">()</span>
+    <span class="n">book</span><span class="p">[</span><span class="s">'author'</span><span class="p">]</span> <span class="o">=</span> <span class="n">author</span>
+
+    <span class="n">price_text</span> <span class="o">=</span> <span class="n">doc</span><span class="p">(</span><span class="s">"span.offer-price.a-color-price"</span><span class="p">)</span><span class="o">.</span><span class="n">text</span><span class="p">()</span>
+    <span class="n">price</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">price_text</span><span class="p">[</span><span class="mi">1</span><span class="p">:])</span> <span class="c"># get rid of the dollar sign</span>
+    <span class="n">book</span><span class="p">[</span><span class="s">'price'</span><span class="p">]</span> <span class="o">=</span> <span class="n">price</span>
+
+    <span class="k">return</span> <span class="n">book</span>
+
+<span class="k">def</span> <span class="nf">main</span><span class="p">():</span>
+    <span class="k">print</span> <span class="n">get_book_info</span><span class="p">(</span><span class="s">'http://www.amazon.com/dp/059035342X/'</span><span class="p">)</span>
+
+<span class="k">if</span> <span class="n">__name__</span> <span class="o">==</span> <span class="s">"__main__"</span><span class="p">:</span>
+    <span class="n">main</span><span class="p">()</span>
+
+<span class="c"># output: {'price': 6.92, 'author': 'J.K. Rowling', 'title': "Harry Potter and the Sorcerer's Stone (Harry Potters)"}</span></code></pre></div>
+
+<p>That’s it! Finally we achived what we want. But we didn’t cover the all the scenerios. For example, there are books written by more than one authors. In that case, our code will find only one of them. Also we didn’t extract the cover image, publishing date, publisher, etc. These won’t be a big problem, because now we know the tools to implement those too. For the sake of keeping the post no more longer I won’t go over those details. </p>
+
+<p>I hope you find the post helpful. Please share your thoughts and everyhing on the comment section below. Have a good one :)</p>
+
+  </article>
+
+</div></body></html>

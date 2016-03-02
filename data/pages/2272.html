@@ -1,0 +1,336 @@
+<html><body><div><div class="content">
+      
+        <h1 class="content-title">Extending SQLite with Python</h1>
+      
+      
+      
+  <div class="post-info"><p>
+    
+    
+      December 02, 2014 21:33
+      </p><span class="separator">/</span>
+      <a href="#comments">1 comments</a>
+      <span class="separator">/</span>
+      
+        <a href="/blog/tags/peewee/">peewee</a>
+      
+        <a href="/blog/tags/python/">python</a>
+      
+        <a href="/blog/tags/sqlite/">sqlite</a>
+      
+    
+  </div>
+  
+  
+    <p><a href="http://media.charlesleifer.com/blog/photos/sqlite-and-python.png" title="photos/sqlite-and-python.png"><img alt="photos/sqlite-and-python.png" class="img-responsive" src="http://m.charlesleifer.com/t/800x-/blog/photos/sqlite-and-python.png?key=Wzttsugs8C-eLnyKmb3nDw"/></a></p>
+<p>SQLite is an embedded database, which means that instead of running as a separate server process, the actual database engine resides within the application. This makes it possible for the database to call directly into the application when it would be beneficial to add some low-level, application-specific functionality. SQLite provides numerous hooks for inserting user code and callbacks, and, through virtual tables, it is even possible to construct a completely user-defined table. By extending the SQL language with Python, it is often possible to express things more elegantly than if we were to perform calculations after the fact.</p>
+<p>In this post I'll describe how to extend SQLite with Python, adding functions and aggregates that will be callable directly from any SQL queries you execute. We'll wrap up by looking at SQLite's <a href="http://sqlite.org/vtab.html">virtual table</a> mechanism and seeing how to expose a SQL interface over external data sources.</p>
+<h3>Getting started</h3>
+<p>The following examples will use <a href="http://docs.peewee-orm.com">peewee ORM</a>. If you're new to peewee, it's a lightweight ORM that aims to provide an expressive, Pythonic interface for executing SQL queries. In order to get started, we will use the peewee ORM <a href="http://docs.peewee-orm.com/en/latest/peewee/playhouse.html#sqlite-ext">sqlite extension</a>. This extension provides a database class that exposes the SQLite hooks for registering custom functions and aggregates.</p>
+<p>If you'd like to follow along, you can install peewee using <code>pip</code>:</p>
+
+<p>Then start an interactive shell and import the SQLite extension module. We will use an in-memory SQLite database:</p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">playhouse.sqlite_ext</span> <span class="kn">import</span> <span class="o">*</span>
+
+<span class="n">db</span> <span class="o">=</span> <span class="n">SqliteExtDatabase</span><span class="p">(</span><span class="s1">':memory:'</span><span class="p">)</span>
+</pre></div>
+<h3>Functions</h3>
+<p>The simplest way we can extend the SQL language is by defining our own functions. A function operates on a single row of data and returns a single value. Many databases provide a standard set of functions for performing operations like transforming text to upper or lower-case, extracting substrings, generating random numbers, and manipulating dates.</p>
+<p>Examples of SQL functions:</p>
+<div class="highlight"><pre><span class="k">print</span> <span class="n">db</span><span class="o">.</span><span class="n">execute_sql</span><span class="p">(</span><span class="s1">'SELECT random()'</span><span class="p">)</span><span class="o">.</span><span class="n">fetchone</span><span class="p">()</span>
+<span class="c1"># OUTPUT: (-2523015414799391104,)</span>
+
+<span class="k">print</span> <span class="n">db</span><span class="o">.</span><span class="n">execute_sql</span><span class="p">(</span><span class="s1">'SELECT strftime("%Y-%m-</span><span class="si">%d</span><span class="s1">", "now")'</span><span class="p">)</span><span class="o">.</span><span class="n">fetchone</span><span class="p">()</span>
+<span class="c1"># OUTPUT: ('2014-12-02',)</span>
+</pre></div>
+<p>You can also integrate SQL functions with peewee models:</p>
+<div class="highlight"><pre><span class="k">class</span> <span class="nc">TextData</span><span class="p">(</span><span class="n">Model</span><span class="p">):</span>
+    <span class="n">value</span> <span class="o">=</span> <span class="n">TextField</span><span class="p">()</span>
+
+    <span class="k">class</span> <span class="nc">Meta</span><span class="p">:</span>
+        <span class="n">database</span> <span class="o">=</span> <span class="n">db</span>
+
+<span class="n">TextData</span><span class="o">.</span><span class="n">create_table</span><span class="p">()</span>
+
+<span class="c1"># Populate the table with some strings.</span>
+<span class="k">for</span> <span class="n">value</span> <span class="ow">in</span> <span class="p">[</span><span class="s1">'Foo'</span><span class="p">,</span> <span class="s1">'Bar'</span><span class="p">]:</span>
+    <span class="n">TextData</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">value</span><span class="o">=</span><span class="n">value</span><span class="p">)</span>
+
+<span class="c1"># Use SQLite's lower-case and upper-case functions:</span>
+<span class="n">query</span> <span class="o">=</span> <span class="p">(</span><span class="n">TextData</span>
+         <span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">fn</span><span class="o">.</span><span class="n">lower</span><span class="p">(</span><span class="n">TextData</span><span class="o">.</span><span class="n">value</span><span class="p">),</span> <span class="n">fn</span><span class="o">.</span><span class="n">upper</span><span class="p">(</span><span class="n">TextData</span><span class="o">.</span><span class="n">value</span><span class="p">))</span>
+         <span class="o">.</span><span class="n">tuples</span><span class="p">())</span>
+<span class="k">print</span> <span class="p">[</span><span class="n">row</span> <span class="k">for</span> <span class="n">row</span> <span class="ow">in</span> <span class="n">query</span><span class="p">]</span>
+<span class="c1"># OUTPUT: [('foo', 'FOO'), ('bar', 'BAR')]</span>
+</pre></div>
+<h3>Creating our own functions</h3>
+<p>SQLite provides a hook for registering our own functions. Using the peewee ORM, let's take a look at how easy it is to add a new function to SQLite. For our example, we will create a function that generates a URL-friendly representation of a title string, a process called <em>slugifying</em>.</p>
+<div class="highlight"><pre><span class="kn">import</span> <span class="nn">re</span>
+
+<span class="nd">@db.func</span><span class="p">()</span>
+<span class="k">def</span> <span class="nf">slugify</span><span class="p">(</span><span class="n">title</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">re</span><span class="o">.</span><span class="n">sub</span><span class="p">(</span><span class="s1">'[^\w]+'</span><span class="p">,</span> <span class="s1">'-'</span><span class="p">,</span> <span class="n">title</span><span class="o">.</span><span class="n">lower</span><span class="p">())</span><span class="o">.</span><span class="n">strip</span><span class="p">(</span><span class="s1">'-'</span><span class="p">)</span>
+</pre></div>
+<p>The <code>slugify</code> function will take any non-alphanumeric characters, and replace them with a dash. Finally, any leading or trailing dashes are removed. Here are some example function calls:</p>
+<ul>
+<li><code>slugify('Hello world')</code> becomes <code>'hello-world'</code></li>
+<li><code>slugify('My Awesome Post!')</code> becomes <code>'my-awesome-post'</code></li>
+</ul>
+<p>This function can be used to <em>select</em>, along with the title, the slugified version, which can be used in HTML templates to generate a URL-friendly link to the post. Similarly, we can use the function in the <em>where</em> clause to locate a post matching a given slug.</p>
+<div class="highlight"><pre><span class="k">class</span> <span class="nc">Post</span><span class="p">(</span><span class="n">Model</span><span class="p">):</span>
+    <span class="n">title</span> <span class="o">=</span> <span class="n">CharField</span><span class="p">()</span>
+    <span class="n">content</span> <span class="o">=</span> <span class="n">TextField</span><span class="p">(</span><span class="n">default</span><span class="o">=</span><span class="s1">''</span><span class="p">)</span>
+
+    <span class="k">class</span> <span class="nc">Meta</span><span class="p">:</span>
+        <span class="n">database</span> <span class="o">=</span> <span class="n">db</span>
+
+<span class="n">Post</span><span class="o">.</span><span class="n">create_table</span><span class="p">()</span>
+<span class="n">Post</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">title</span><span class="o">=</span><span class="s1">'Extending SQLite with Python'</span><span class="p">)</span>
+<span class="n">Post</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">title</span><span class="o">=</span><span class="s1">'SQLite: Small. Fast. Reliable.'</span><span class="p">)</span>
+
+<span class="c1"># Get a list of posts, along with the slugified title.</span>
+<span class="n">posts</span> <span class="o">=</span> <span class="n">Post</span><span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">Post</span><span class="p">,</span> <span class="n">fn</span><span class="o">.</span><span class="n">slugify</span><span class="p">(</span><span class="n">Post</span><span class="o">.</span><span class="n">title</span><span class="p">)</span><span class="o">.</span><span class="n">alias</span><span class="p">(</span><span class="s1">'slug'</span><span class="p">))</span>
+<span class="k">for</span> <span class="n">post</span> <span class="ow">in</span> <span class="n">posts</span><span class="p">:</span>
+    <span class="k">print</span> <span class="n">post</span><span class="o">.</span><span class="n">title</span><span class="p">,</span> <span class="s1">'--&gt;'</span><span class="p">,</span> <span class="n">post</span><span class="o">.</span><span class="n">slug</span>
+
+<span class="c1"># OUTPUT:</span>
+<span class="c1"># Extending SQLite with Python --&gt; extending-sqlite-with-python</span>
+<span class="c1"># SQLite: Small. Fast. Reliable. --&gt; sqlite-small-fast-reliable</span>
+
+<span class="c1"># Find the post matching a given slug.</span>
+<span class="n">slug</span> <span class="o">=</span> <span class="s1">'sqlite-small-fast-reliable'</span>
+<span class="n">post</span> <span class="o">=</span> <span class="n">Post</span><span class="o">.</span><span class="n">select</span><span class="p">()</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">fn</span><span class="o">.</span><span class="n">slugify</span><span class="p">(</span><span class="n">Post</span><span class="o">.</span><span class="n">title</span><span class="p">)</span> <span class="o">==</span> <span class="n">slug</span><span class="p">)</span><span class="o">.</span><span class="n">get</span><span class="p">()</span>
+</pre></div>
+<p>One other cool aspect of functions is that they can be composed with other functions. Imagine we want to display a list of posts by the first letter of their title. To get the list of all posts that start with the letter <em>S</em> we could write:</p>
+<div class="highlight"><pre><span class="n">s_posts</span> <span class="o">=</span> <span class="p">(</span><span class="n">Post</span>
+           <span class="o">.</span><span class="n">select</span><span class="p">()</span>
+           <span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">fn</span><span class="o">.</span><span class="n">lower</span><span class="p">(</span><span class="n">fn</span><span class="o">.</span><span class="n">substr</span><span class="p">(</span><span class="n">Post</span><span class="o">.</span><span class="n">title</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span> <span class="o">==</span> <span class="s1">'s'</span><span class="p">))</span>
+</pre></div>
+<p>In the peewee source code you can find other examples of functions which <a href="https://github.com/coleifer/peewee/blob/db85167d93861451a1fe7cde8c4f05748b222634/peewee.py#L162-L185">perform date-manipulation</a>.</p>
+<h3>Aggregate functions</h3>
+<p>Aggregate functions operate on one or more rows of data, performing some calculation and returning a single <em>aggregate</em> value. If you've ever queried for the <em>count</em> of objects in a table, then you've used an aggregate function. The databases I'm most familiar with offer a pretty standard set of built-in aggregates:</p>
+<ul>
+<li><code>COUNT</code></li>
+<li><code>SUM</code></li>
+<li><code>MIN</code></li>
+<li><code>MAX</code></li>
+<li><code>AVG</code></li>
+<li><code>GROUP_CONCAT</code> (this joins multiple strings with a provided delimiter)</li>
+</ul>
+<p>Example code:</p>
+<div class="highlight"><pre><span class="k">class</span> <span class="nc">IntData</span><span class="p">(</span><span class="n">Model</span><span class="p">):</span>
+    <span class="n">value</span> <span class="o">=</span> <span class="n">IntegerField</span><span class="p">()</span>
+
+    <span class="k">class</span> <span class="nc">Meta</span><span class="p">:</span>
+        <span class="n">database</span> <span class="o">=</span> <span class="n">db</span>
+
+<span class="n">IntData</span><span class="o">.</span><span class="n">create_table</span><span class="p">()</span>
+
+<span class="c1"># Populate the table with numbers 1 - 10.</span>
+<span class="p">(</span><span class="n">IntData</span>
+ <span class="o">.</span><span class="n">insert_many</span><span class="p">({</span><span class="s1">'value'</span><span class="p">:</span> <span class="n">value</span><span class="p">}</span> <span class="k">for</span> <span class="n">value</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">11</span><span class="p">))</span>
+ <span class="o">.</span><span class="n">execute</span><span class="p">())</span>
+
+<span class="c1"># Perform some simple aggregate queries.</span>
+<span class="k">print</span> <span class="n">IntData</span><span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">fn</span><span class="o">.</span><span class="n">Min</span><span class="p">(</span><span class="n">IntData</span><span class="o">.</span><span class="n">value</span><span class="p">))</span><span class="o">.</span><span class="n">scalar</span><span class="p">()</span>
+<span class="c1"># OUTPUT: 1</span>
+
+<span class="k">print</span> <span class="n">IntData</span><span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">fn</span><span class="o">.</span><span class="n">Max</span><span class="p">(</span><span class="n">IntData</span><span class="o">.</span><span class="n">value</span><span class="p">))</span><span class="o">.</span><span class="n">scalar</span><span class="p">()</span>
+<span class="c1"># OUTPUT: 10</span>
+
+<span class="k">print</span> <span class="n">IntData</span><span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">fn</span><span class="o">.</span><span class="n">Sum</span><span class="p">(</span><span class="n">IntData</span><span class="o">.</span><span class="n">value</span><span class="p">))</span><span class="o">.</span><span class="n">scalar</span><span class="p">()</span>
+<span class="c1"># OUTPUT: 55</span>
+
+<span class="k">print</span> <span class="n">IntData</span><span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">fn</span><span class="o">.</span><span class="n">Group_Concat</span><span class="p">(</span><span class="n">IntData</span><span class="o">.</span><span class="n">value</span><span class="p">,</span> <span class="s1">'--'</span><span class="p">))</span><span class="o">.</span><span class="n">scalar</span><span class="p">()</span>
+<span class="c1"># OUTPUT: 1--2--3--4--5--6--7--8--9--10</span>
+</pre></div>
+<h3>Creating our own aggregates</h3>
+<p>With SQLite, it is very easy to define custom aggregate functions. We only need to create a class that implements two methods, and then register the class with our peewee database instance.</p>
+<p>Let's see how this is done by writing an aggregate function to calculate the <em>mode</em> for a list of values. If it's been a while since your 8th grade math class, the mode is the most common value in a list.</p>
+<p>We'll begin by defining our class. To do the actual calculation we'll use a handy container object from the standard library, <code>collections.Counter</code>.</p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">collections</span> <span class="kn">import</span> <span class="n">Counter</span>
+
+<span class="k">class</span> <span class="nc">Mode</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">counter</span> <span class="o">=</span> <span class="n">Counter</span><span class="p">()</span>
+</pre></div>
+<p>The aggregate interface specifies two methods, <code>step()</code> and <code>finalize()</code>. <em>step</em> is called once for each row in the result set, and we will use this method to update the counter with the incoming value. <em>finalize</em> is called once when there are no more rows and we are ready to yield a final result. This method will find the most common value in the counter and return it.</p>
+<div class="highlight"><pre><span class="nd">@db.aggregate</span><span class="p">()</span>
+<span class="k">class</span> <span class="nc">Mode</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">counter</span> <span class="o">=</span> <span class="n">Counter</span><span class="p">()</span>
+
+    <span class="k">def</span> <span class="nf">step</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">values</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">counter</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">values</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">finalize</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="c1"># If there are no items in the counter, we'll return None.</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">counter</span><span class="p">:</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">counter</span><span class="o">.</span><span class="n">most_common</span><span class="p">(</span><span class="mi">1</span><span class="p">)[</span><span class="mi">0</span><span class="p">][</span><span class="mi">0</span><span class="p">]</span>
+</pre></div>
+<p>We can now use the new aggregate function just like any other built-in aggregate. The following code example shows how to calculate the mode for a table of values. We will add some new rows to the <code>IntData</code> table we created in the previous example:</p>
+<div class="highlight"><pre><span class="n">values</span> <span class="o">=</span> <span class="p">[</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="mi">5</span><span class="p">,</span> <span class="mi">5</span><span class="p">]</span>
+<span class="p">(</span><span class="n">IntData</span>
+ <span class="o">.</span><span class="n">insert_many</span><span class="p">({</span><span class="s1">'value'</span><span class="p">:</span> <span class="n">value</span><span class="p">}</span> <span class="k">for</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">values</span><span class="p">)</span>
+ <span class="o">.</span><span class="n">execute</span><span class="p">())</span>
+
+<span class="c1"># Call the mode function.</span>
+<span class="k">print</span> <span class="n">IntData</span><span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">fn</span><span class="o">.</span><span class="n">Mode</span><span class="p">(</span><span class="n">IntData</span><span class="o">.</span><span class="n">value</span><span class="p">))</span><span class="o">.</span><span class="n">scalar</span><span class="p">()</span>
+<span class="c1"># OUTPUT: 3</span>
+</pre></div>
+<p>If you prefer not to use a decorator, you can also call <code>db.register_aggregate()</code>, passing in the class.</p>
+<h4>Ideas for useful aggregates</h4>
+<p>I thought I'd share some ideas for other custom aggregations you might add:</p>
+<ul>
+<li><code>Variance</code> and <code>StdDev</code>, which exist in PostgreSQL but are not included with SQLite.</li>
+<li><code>MD5Sum</code> or <code>SHA1Sum</code> for calculating a checksum.</li>
+<li><code>First</code> and <code>Last</code>.</li>
+<li>Bitwise and logical operators that <em>AND</em> or <em>OR</em> together multiple values.</li>
+</ul>
+<h2>Experimenting with Virtual Tables</h2>
+<p>By far the most interesting hook provided by SQLite is the <a href="http://sqlite.org/vtab.html">virtual table mechanism</a>. SQLite virtual tables allow you to expose a SQL query interface over literally any tabular data source. For instance, you could write a virtual table to <a href="https://github.com/rogerbinns/apsw/blob/8d589c247faedcacf03ce0c58449ebdb8f686003/example-code.py#L326-L413">expose the filesystem as a database table</a>, <a href="https://gist.github.com/coleifer/ad0c610b0575db71cfcd">query a 3rd party RESTful API</a>, or <a href="https://github.com/coleifer/peewee/blob/master/examples/redis_vtable/redis_vtab.py">expose your Redis instance as a SQLite table</a>. In my post last week, the <a href="http://charlesleifer.com/blog/querying-tree-structures-in-sqlite-using-python-and-the-transitive-closure-extension/">transitive closure extension</a> provides a virtual table for querying hierarchical data, but the actual data is stored behind-the-scenes in an AVL tree.</p>
+<p>Unfortunately, the standard-library SQLite driver does not come with support for creating virtual tables. Luckily, there is a more powerful SQLite library <a href="https://github.com/rogerbinns/apsw">APSW</a> that makes this functionality available to Python programmers. Peewee comes with an <a href="http://docs.peewee-orm.com/en/latest/peewee/playhouse.html#apsw-an-advanced-sqlite-driver">APSW database driver</a>, so you can use APSW to create virtual tables in Python, then use Peewee models to work with the virtual tables.</p>
+<h3>Exposing Redis as a Virtual Table</h3>
+<p>Virtual tables, because they provide so much functionality, are rather complex beasts to implement. For that reason, rather than providing the entire code to the <a href="https://github.com/coleifer/peewee/blob/master/examples/redis_vtable/redis_vtab.py">redis example</a>, I'll try to provide an overview of the important methods with an explanation of what's going on.</p>
+<p>When implementing a virtual table, we need to write three classes which will answer the following questions:</p>
+<ul>
+<li>What does our data look like? If our data were an actual SQL table, how would we declare it?</li>
+<li>How will we map data into rows and columns?</li>
+<li>How will we iterate through the data?</li>
+<li>How will we apply filters from the <em>WHERE</em> clause, particularly if this would lead to implementation-specific optimizations?</li>
+<li>How do we update, insert or delete rows?</li>
+</ul>
+<p>Through the <code>Module</code>, <code>Table</code> and <code>Cursor</code> classes, we will provide the answers to these questions.</p>
+<h4>The Module Class</h4>
+<p>At the highest-level, we have the module class, which is responsible for describing the table structure. The module class contains a <code>Create</code> method, which provides a table definition and returns an instance of the user-defined Table object. Here is the <code>Create</code> method for the redis module:</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">Create</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">db</span><span class="p">,</span> <span class="n">modulename</span><span class="p">,</span> <span class="n">dbname</span><span class="p">,</span> <span class="n">tablename</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">):</span>
+    <span class="n">schema</span> <span class="o">=</span> <span class="s1">'CREATE TABLE </span><span class="si">%s</span><span class="s1"> (rowid, key, value, type, parent);'</span>
+    <span class="k">return</span> <span class="n">schema</span> <span class="o">%</span> <span class="n">tablename</span><span class="p">,</span> <span class="n">RedisTable</span><span class="p">(</span><span class="n">tablename</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">db</span><span class="p">)</span>
+</pre></div>
+<p>The module is the visible portion of your virtual table API, and is registered with the database connection when one is opened.</p>
+<h4>The Table Class</h4>
+<p>The next class describes the virtual table (<code>RedisTable</code>), which is instantiated by the module's <code>Create</code> method. The table class receives queries from SQLite and determines which indexes (if any) to use to efficiently generate results. If your data-source supports writes, the table also handles inserts, updates and deletes.</p>
+<p>For the <code>RedisTable</code>, we are primarily interested in whether we are searching the entire list of keys, or whether we are searching for items located at a key, such as the key/value pairs of a <em>hash</em>, or the keys and scores of a <em>zset</em>. The table's <code>BestIndex</code> method can be simple or complex, depending on your needs. Here is the <code>BestIndex</code> method for the <code>RedisTable</code> class:</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">BestIndex</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">constraints</span><span class="p">,</span> <span class="n">orderbys</span><span class="p">):</span>
+    <span class="sd">"""</span>
+<span class="sd">    Example query:</span>
+
+<span class="sd">    SELECT * FROM redis_tbl</span>
+<span class="sd">    WHERE parent = 'my-hash' AND type = 'hash';</span>
+
+<span class="sd">    Since parent is column 4 and type is colum 3, the constraints will be:</span>
+
+<span class="sd">    (4, apsw.SQLITE_INDEX_CONSTRAINT_EQ),</span>
+<span class="sd">    (3, apsw.SQLITE_INDEX_CONSTRAINT_EQ)</span>
+
+<span class="sd">    Ordering will be a list of 2-tuples consisting of the column index</span>
+<span class="sd">    and boolean for descending.</span>
+
+<span class="sd">    Return values are:</span>
+
+<span class="sd">    * Constraints used, which for each constraint, must be either None,</span>
+<span class="sd">      an integer (the argument number for the constraints passed into the</span>
+<span class="sd">      Filter() method), or (int, bool) tuple.</span>
+<span class="sd">    * Index number (default zero).</span>
+<span class="sd">    * Index string (default None).</span>
+<span class="sd">    * Boolean whether output will be in same order as the ordering specified.</span>
+<span class="sd">    * Estimated cost in disk operations.</span>
+<span class="sd">    """</span>
+    <span class="n">constraints_used</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="n">columns</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="p">(</span><span class="n">column_idx</span><span class="p">,</span> <span class="n">comparison</span><span class="p">)</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">constraints</span><span class="p">):</span>
+        <span class="n">constraints_used</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">i</span><span class="p">)</span>
+        <span class="n">columns</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_columns</span><span class="p">[</span><span class="n">column_idx</span><span class="p">])</span>
+
+    <span class="k">return</span> <span class="p">[</span>
+        <span class="n">constraints_used</span><span class="p">,</span>  <span class="c1"># Indices of constraints we are interested in.</span>
+        <span class="mi">0</span><span class="p">,</span>  <span class="c1"># The index number, not used by us.</span>
+        <span class="s1">','</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">columns</span><span class="p">),</span>  <span class="c1"># The index name, a list of filter columns.</span>
+        <span class="bp">False</span><span class="p">,</span>  <span class="c1"># Whether the results are ordered.</span>
+        <span class="mi">1000</span> <span class="k">if</span> <span class="s1">'parent'</span> <span class="ow">in</span> <span class="n">columns</span> <span class="k">else</span> <span class="mi">10000</span><span class="p">]</span>
+</pre></div>
+<p>If you like, you can also leave off the <code>BestIndex</code> method and let SQLite perform the filtering manually (using a table scan). For large amounts of data, or for data which may change depending on the filters (as is the case with our Redis virtual table), the <code>BestIndex</code> method provides a way to control what data is passed to SQLite.</p>
+<h4>The Cursor Class</h4>
+<p>The final class is the cursor, which we will use to actually extract data from Redis and apply the appropriate filters. The cursor implements a <code>Filter</code> method which receives the data specified by the return value of <code>BestIndex</code>. For our Redis example, we will use the following logic:</p>
+<ul>
+<li>If no parent key is specified, our base data-set will be all keys in the database.</li>
+<li>If a parent key is specified, depending on the type of data stored in the key, generate appropriate tabular data.</li>
+</ul>
+<p>The important thing to note is that we do not need to do all the processing in our virtual table -- SQLite will actually do most of the work for us, so long as we give it some tabular data. Here is the <code>Filter</code> method, and the <code>get_data_for_key</code> helper:</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">Filter</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">indexnum</span><span class="p">,</span> <span class="n">indexname</span><span class="p">,</span> <span class="n">constraintargs</span><span class="p">):</span>
+    <span class="sd">"""</span>
+<span class="sd">    This method is always called first to initialize an iteration to the</span>
+<span class="sd">    first row of the table. The arguments come from the BestIndex() method</span>
+<span class="sd">    in the table object with constraintargs being a tuple of the</span>
+<span class="sd">    constraints you requested.</span>
+<span class="sd">    """</span>
+    <span class="n">columns</span> <span class="o">=</span> <span class="n">indexname</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s1">','</span><span class="p">)</span>
+    <span class="n">column_to_value</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="nb">zip</span><span class="p">(</span><span class="n">columns</span><span class="p">,</span> <span class="n">constraintargs</span><span class="p">))</span>
+    <span class="k">if</span> <span class="s1">'parent'</span> <span class="ow">in</span> <span class="n">column_to_value</span><span class="p">:</span>
+        <span class="n">initial_key</span> <span class="o">=</span> <span class="n">column_to_value</span><span class="p">[</span><span class="s1">'parent'</span><span class="p">]</span>
+        <span class="n">data</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">get_data_for_key</span><span class="p">(</span><span class="n">initial_key</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">data</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">key</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">db</span><span class="o">.</span><span class="n">keys</span><span class="p">()):</span>
+            <span class="n">key_type</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">db</span><span class="o">.</span><span class="n">type</span><span class="p">(</span><span class="n">key</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">key_type</span> <span class="o">==</span> <span class="s1">'string'</span><span class="p">:</span>
+                <span class="n">value</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">db</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">key</span><span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">value</span> <span class="o">=</span> <span class="bp">None</span>
+            <span class="n">data</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">i</span><span class="p">,</span> <span class="n">key</span><span class="p">,</span> <span class="n">value</span><span class="p">,</span> <span class="bp">None</span><span class="p">,</span> <span class="n">key_type</span><span class="p">))</span>
+
+    <span class="bp">self</span><span class="o">.</span><span class="n">data</span> <span class="o">=</span> <span class="n">data</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">index</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">nrows</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">get_data_for_key</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">key</span><span class="p">):</span>
+    <span class="c1"># 'rowid', 'key', 'value', 'type', 'parent'</span>
+    <span class="n">key_type</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">db</span><span class="o">.</span><span class="n">type</span><span class="p">(</span><span class="n">key</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">key_type</span> <span class="o">==</span> <span class="s1">'list'</span><span class="p">:</span>
+        <span class="k">return</span> <span class="p">[</span>
+            <span class="p">(</span><span class="n">i</span><span class="p">,</span> <span class="n">i</span><span class="p">,</span> <span class="n">value</span><span class="p">,</span> <span class="s1">'list'</span><span class="p">,</span> <span class="n">key</span><span class="p">)</span>
+            <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">db</span><span class="o">.</span><span class="n">lrange</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">))]</span>
+    <span class="k">elif</span> <span class="n">key_type</span> <span class="o">==</span> <span class="s1">'set'</span><span class="p">:</span>
+        <span class="k">return</span> <span class="p">[</span>
+            <span class="p">(</span><span class="n">i</span><span class="p">,</span> <span class="n">value</span><span class="p">,</span> <span class="bp">None</span><span class="p">,</span> <span class="s1">'set'</span><span class="p">,</span> <span class="n">key</span><span class="p">)</span>
+            <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">db</span><span class="o">.</span><span class="n">smembers</span><span class="p">(</span><span class="n">key</span><span class="p">))]</span>
+    <span class="k">elif</span> <span class="n">key_type</span> <span class="o">==</span> <span class="s1">'zset'</span><span class="p">:</span>
+        <span class="n">all_members</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">db</span><span class="o">.</span><span class="n">zrange</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="n">withscores</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+        <span class="k">return</span> <span class="p">[</span>
+            <span class="p">(</span><span class="n">i</span><span class="p">,</span> <span class="n">value</span><span class="p">,</span> <span class="n">score</span><span class="p">,</span> <span class="s1">'zset'</span><span class="p">,</span> <span class="n">key</span><span class="p">)</span>
+            <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">score</span><span class="p">)</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">all_members</span><span class="p">)]</span>
+    <span class="k">elif</span> <span class="n">key_type</span> <span class="o">==</span> <span class="s1">'hash'</span><span class="p">:</span>
+        <span class="k">return</span> <span class="p">[</span>
+            <span class="p">(</span><span class="n">i</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">,</span> <span class="s1">'hash'</span><span class="p">,</span> <span class="n">key</span><span class="p">)</span>
+            <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="p">(</span><span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">)</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">db</span><span class="o">.</span><span class="n">hgetall</span><span class="p">(</span><span class="n">key</span><span class="p">)</span><span class="o">.</span><span class="n">iteritems</span><span class="p">())]</span>
+    <span class="k">elif</span> <span class="n">key_type</span> <span class="o">==</span> <span class="s1">'none'</span><span class="p">:</span>
+        <span class="k">return</span> <span class="p">[]</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">return</span> <span class="p">[(</span><span class="mi">1</span><span class="p">,</span> <span class="n">key</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">db</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">key</span><span class="p">),</span> <span class="s1">'string'</span><span class="p">,</span> <span class="n">key</span><span class="p">)]</span>
+</pre></div>
+<p>This is pretty much all of the code! The rest is just book-keeping and stubbed-out methods. Of course, the sky's the limit with virtual tables. I'm only just beginning to learn how to work with them, but they seem like a great way to create some truly ridiculous hacks.</p>
+<p>For more information on virtual tables, here are some links you might find useful:</p>
+
+<h2>Thanks for reading</h2>
+<p>Thanks for taking the time to read this post, I hope you found it interesting. Feel free to <a href="#comments">leave a comment</a> below if you have any comments or questions.</p>
+<h2>Links</h2>
+<p>Here are some links which you may find helpful:</p>
+
+<p>Here are some blog posts on related topics:</p>
+
+  
+  
+
+  
+  
+  
+
+
+<hr/>
+
+  <p>Commenting has been closed, but please feel free to <a href="/contact/">contact me</a></p>
+
+
+    </div>
+
+    </div></body></html>

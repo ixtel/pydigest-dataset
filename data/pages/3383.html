@@ -1,0 +1,60 @@
+<html><body><div><p>
+PyPy's numpy support has matured enough that it can now support the  lapack/blas libraries through the numpy.linalg module. To install the  version of numpy this blog post refers to, install PyPy version 2.5.0 or  newer, and run this:
+
+</p><p>
+This update is a major step forward for PyPy's numpy support. Many of  the basic matrix operations depend on linalg, even matplotlib requires  it to display legends (a pypy-friendly version of matplotlib 1.3 is  available  at </p><p>).
+</p><p>
+A number of improvements and adaptations, some of which are in the newly-released PyPy 2.5.0, made this possible:
+</p><div>
+<h1>
+<a class="anchor" href="https://gist.github.com/mattip/25680e68fe7e2856fe0c#howto-for-pypys-extended-frompyfunc" name="user-content-howto-for-pypys-extended-frompyfunc" rel="noreferrer"/>HowTo for PyPy's extended <tt>frompyfunc</tt> </h1><p>
+The magic enabling blas support is a rewrite of the </p><tt>_umath_linalg</tt><p> c-based module as a cffi-python module that creates ufuncs via </p><tt>frompyfunc</tt><p>. We extended the numpy </p><tt>frompyfunc</tt><p> to allow it to function as a replacement for the generic ufunc available in numpy only through the c-api.
+</p><p>
+We start with the basic </p><tt>frompyfunc</tt><p>, which wraps a python function into a ufunc:
+</p><pre> </pre>
+<pre>def times2(in0):
+    return in0 * 2
+ufunc = frompyfunc(times2, 1, 1)
+</pre>
+<p>
+In cpython's numpy the dtype of the result is always object, which is  not implemented (yet) in PyPy, so this example will fail. While the  utility of object dtypes can be debated, in the meantime we add a  non-numpy-compatible keyword argument </p><tt>dtypes</tt><p> to </p><tt>frompyfunc</tt><p>. If </p><tt>dtype=['match']</tt><p> the output dtype will match the dtype of the first input ndarray:
+
+</p><pre>ufunc = frompyfunc(times2, 1, 1, dtype=['match'])
+ai = arange(24).reshape(3, 4, 2)
+ao = ufunc(ai)
+assert  (ao == ai * 2).all()
+</pre>
+<p>
+I hear you ask "why is the dtypes keyword argument a list?" This is so we can support the </p><a href="http://docs.scipy.org/doc/numpy/reference/c-api.generalized-ufuncs.html" rel="noreferrer">Generalized Universal Function API</a><p>, which allows specifying a number of specialized functions and the input-output dtypes each specialized function accepts.</p><p>
+Note that the function feeds the values of </p><tt>ai</tt><p> one at a time,  the function operates on scalar values. To support more complicated  ufunc calls, the generalized ufunc API allows defining a signature,  which specifies the layout of the ndarray inputs and outputs. So we extended </p><tt>frompyfunc </tt><p>with a signature keyword as well.</p><p>
+We add one further extension to </p><tt>frompyfunc</tt><p>: we allow a Boolean keyword </p><tt>stack_inputs</tt><p> to specify the argument layout of the function itself. If the function is of the form:
+</p><pre> </pre>
+<pre>out0, out1, ... = func(in0, in1,...)
+</pre>
+<p>
+then stack_inputs is False. If it is True the function is of the form:
+</p><pre> </pre>
+<pre>func(in0, in1, ... out0, out1, ...)
+</pre>
+<p>
+Here is a complete example of using </p><tt>frompyfunc</tt><p> to create a ufunc, based on </p><a href="http://docs.scipy.org/doc/numpy/user/c-info.ufunc-tutorial.html" rel="noreferrer">this link</a><p>:
+</p><pre> </pre>
+<pre>def times2(in_array, out_array):
+    in_flat = in_array.flat
+    out_flat = out_array.flat
+    for i in range(in_array.size):
+        out_flat[i] = in_flat[i] * 2
+ufunc = frompyfunc([times2, times2], 1, 1,
+                signature='(i)-&gt;(i)',
+                dtypes=[dtype(int), dtype(int),
+                        dtype(float), dtype(float),
+                       ],
+                stack_inputs=True,
+                )
+ai = arange(10, dtype=int)
+ai2 = ufunc(ai)
+assert all(ai2 == ai * 2)
+</pre>
+<p>
+Using this extended syntax, we rewrote the lapack calls into the blas  functions in pure python, no c needed. Benchmarking this approach  actually was </p><b>much slower</b><p> than using the upstream </p><tt>umath_linalg</tt><p>  module via cpyext, as can be seen in the following benchmarks. This is  due to the need to copy c-aligned data into Fortran-aligned format. Our </p><tt>__getitem__</tt><p> and </p><tt>__setitem__</tt><p> iterators are not as fast as pointer arithmetic in C. So we next tried a hybrid approach: compile and use numpy's </p><tt>umath_linalg</tt><p> python module as a shared object, and call the optimized specific wrapper function from it.</p></div>
+</div></body></html>

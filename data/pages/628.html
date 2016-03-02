@@ -1,0 +1,271 @@
+<html><body><div><div class="entry-content" itemprop="articleBody">
+    
+        <p>Jump to other posts in this series </p>
+<ol>
+<li><a href="http://jeffknupp.com/blog/2014/03/12/what-is-a-web-server/">Part 1</a></li>
+</ol>
+<p>In <a href="http://jeffknupp.com/blog/2014/03/12/what-is-a-web-server/">part one</a> we created a super-simple web server capable of handling a
+simple subset of HTTP requests. In this post, we'll flesh out our web server a
+bit more, adding support for header parsing, content negotiation, and cookies.
+</p>
+<h2>Parsing headers</h2>
+<p>Recall that HTTP <em>headers</em> are Key =&gt; Value pairs that contain
+"meta-information" about the request or response they are sent on. Just as 
+with HTTP methods, some header fields are used more often than others. Three in
+particular are included in almost every request:</p>
+<ol>
+<li>User-Agent</li>
+<li>Host</li>
+<li>Accept</li>
+</ol>
+<p>Let's examine these in a bit more detail.</p>
+<h3>User-Agent</h3>
+<p>The <em>User-Agent</em> header is used to give the server information about the <em>agent</em>
+a user (or system) is using to make the request. In normal web browsing, the
+agent is your browser itself; the browser makes HTTP requests on your behalf.
+For programmatic HTTP requests, the User-Agent is normally the name of whatever
+HTTP library the application is using. If we use the program <code>curl</code> to make a
+request to our server (start the server by typing <code>python &lt;name_of_script.py&gt;
+8080 /tmp</code> and make sure you have a file named <code>hello.txt</code> in your <code>/tmp</code>
+directory) by typing <code>curl --verbose localhost:8080/hello.txt</code>, we see the 
+User-Agent is reported as <code>curl/7.30.0</code>. This indicates to the server that the
+request was made by a client using version <code>7.30.0</code> of <code>curl</code> (or <code>libcurl</code>, the
+<code>curl</code> library).</p>
+<p>This information is especially useful when the request is sent by a browser.
+When I point Chrome at <code>localhost:8080/hello.txt</code> and ask our server to print
+out the User-Agent header (more on how to do that in a bit), I get the following
+string:</p>
+<blockquote>
+<p>Mozilla/5.0 (Macintosh; Intel Mac OS X 10_9_2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/33.0.1750.152 Safari/537.36</p>
+</blockquote>
+<p>You can see that not only is the type of browser I'm using sent, the rendering
+library ("AppleWebKit") and OS are also specified. Since different versions of
+different browsers support different HTML/CSS features, a web application may
+use this information to modify a page so that it renders properly on the
+client's browser, regardless of which browser they're using.</p>
+<h3>Host</h3>
+<p>The <em>Host</em> header is used to let the server know what address the request is
+bound for (i.e. the IP address or Fully Qualified Domain Name and port). This is
+mostly used by HTTP proxies to determine how to route the message and isn't of
+much interest to us, aside from the fact that this header is <em>required</em> on all
+HTTP/1.1 requests.</p>
+<h3>Accept</h3>
+<p>The <em>Accept</em> header is used to signal to the server what sort of media types are
+acceptable for the response. In this way, the client can issue requests that are
+limited to a small set of media types. If this header isn't present (it almost
+always, is, however) then the client is assumed to accept all media types.</p>
+<p>Choosing the appropriate representation for a resource with multiple representations
+(both <em>format</em> like JSON vs. HTML and <em>content</em> like languages) is called <em>Content Negotiation</em>.
+If the server chooses a representation, it's performing <em>Server-driven Negotiation</em>. This 
+is most often the case, since clients have a number of header fields to describe
+their capabilities and preferences. </p>
+<p>Chief among these is the Accept header. By specifying "application/json", for example, in the Accept header of a request
+for a resource that has both HTML and JSON representations, I'm essentially
+forcing the server to send me the JSON representation (since that's all I
+accept, as far as the server knows). Content Negotiation is most important when
+dealing with REST APIs, as it's important that programmatic access to a resource
+receive the proper representation (like JSON).</p>
+<p>If, after examining the Accept header, the server determines it cannot fulfill
+the request (because, while the resource exists, it doesn't exist in any of the
+media types specified), an error is returned. Specifically, HTTP error code 406,
+"Not Acceptable" is returned.</p>
+<h2>Parsing Headers</h2>
+<p>Let's augment our initial implementation to properly parse headers and preform
+rudimentary content negotiation. Take a look at the following, updated version
+of the code:</p>
+<div class="codehilite"><pre><span class="sd">"""A web server capable of serving files from a given directory."""</span>
+
+<span class="kn">import</span> <span class="nn">logging</span>
+<span class="kn">import</span> <span class="nn">os.path</span>
+<span class="kn">import</span> <span class="nn">socket</span>
+<span class="kn">import</span> <span class="nn">sys</span>
+
+<span class="n">RESPONSE_TEMPLATE</span> <span class="o">=</span> <span class="s">"""HTTP/1.1 200 OK</span>
+
+<span class="s">{}"""</span>
+
+<span class="n">HTML_CONTENT_TYPES</span> <span class="o">=</span> <span class="p">(</span><span class="s">'text/html'</span><span class="p">)</span>
+<span class="n">JSON_CONTENT_TYPES</span> <span class="o">=</span> <span class="p">(</span><span class="s">'application/json'</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">parse_headers</span><span class="p">(</span><span class="n">request</span><span class="p">):</span>
+    <span class="sd">"""Return a dictionary in the form Header =&gt; Value for all headers in</span>
+<span class="sd">    *request*."""</span>
+    <span class="n">headers</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="k">for</span> <span class="n">line</span> <span class="ow">in</span> <span class="n">request</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s">'</span><span class="se">\n</span><span class="s">'</span><span class="p">)[</span><span class="mi">1</span><span class="p">:]:</span>
+        <span class="c"># blank line separates headers from content</span>
+        <span class="k">if</span> <span class="n">line</span> <span class="o">==</span> <span class="s">'</span><span class="se">\r</span><span class="s">'</span><span class="p">:</span>
+            <span class="k">break</span>
+        <span class="n">header_line</span> <span class="o">=</span> <span class="n">line</span><span class="o">.</span><span class="n">partition</span><span class="p">(</span><span class="s">':'</span><span class="p">)</span>
+        <span class="n">headers</span><span class="p">[</span><span class="n">header_line</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">lower</span><span class="p">()]</span> <span class="o">=</span> <span class="n">header_line</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+    <span class="k">return</span> <span class="n">headers</span>
+
+<span class="k">def</span> <span class="nf">is_content_type_negotiable</span><span class="p">(</span><span class="n">accepts</span><span class="p">,</span> <span class="n">extension</span><span class="p">):</span>
+    <span class="sd">"""Return the content-type we must reply with or None if no acceptable</span>
+<span class="sd">    content-type can be chosen."""</span>
+
+    <span class="c"># For now, just check if the extensions is included somewhere in the Accepts</span>
+    <span class="c"># header, or that Accepts is "*/*"</span>
+    <span class="k">return</span> <span class="n">extension</span> <span class="ow">in</span> <span class="n">accepts</span> <span class="ow">or</span> <span class="n">accepts</span> <span class="o">==</span> <span class="s">'*/*'</span>
+
+
+<span class="k">def</span> <span class="nf">main</span><span class="p">():</span>
+    <span class="sd">"""Main entry point for script."""</span>
+    <span class="n">listen_socket</span> <span class="o">=</span> <span class="n">socket</span><span class="o">.</span><span class="n">socket</span><span class="p">(</span><span class="n">socket</span><span class="o">.</span><span class="n">AF_INET</span><span class="p">,</span> <span class="n">socket</span><span class="o">.</span><span class="n">SOCK_STREAM</span><span class="p">)</span>
+    <span class="n">listen_socket</span><span class="o">.</span><span class="n">bind</span><span class="p">((</span><span class="s">''</span><span class="p">,</span> <span class="nb">int</span><span class="p">(</span><span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">])))</span>
+    <span class="n">listen_socket</span><span class="o">.</span><span class="n">listen</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+    <span class="n">document_root</span> <span class="o">=</span> <span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span>
+
+    <span class="k">while</span> <span class="bp">True</span><span class="p">:</span>
+        <span class="n">connection</span><span class="p">,</span> <span class="n">address</span> <span class="o">=</span> <span class="n">listen_socket</span><span class="o">.</span><span class="n">accept</span><span class="p">()</span>
+        <span class="n">request</span> <span class="o">=</span> <span class="n">connection</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="mi">1024</span><span class="p">)</span>
+        <span class="n">headers</span> <span class="o">=</span> <span class="n">parse_headers</span><span class="p">(</span><span class="n">request</span><span class="p">)</span>
+        <span class="n">start_line</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s">'</span><span class="se">\n</span><span class="s">'</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span>
+        <span class="n">method</span><span class="p">,</span> <span class="n">uri</span><span class="p">,</span> <span class="n">version</span> <span class="o">=</span> <span class="n">start_line</span><span class="o">.</span><span class="n">split</span><span class="p">()</span>
+        <span class="n">path</span> <span class="o">=</span> <span class="n">document_root</span> <span class="o">+</span> <span class="n">uri</span>
+        <span class="n">extension</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">splitext</span><span class="p">(</span><span class="n">path</span><span class="p">)[</span><span class="mi">1</span><span class="p">][</span><span class="mi">1</span><span class="p">:]</span>
+        <span class="k">if</span> <span class="s">'accept'</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">headers</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">is_content_type_negotiable</span><span class="p">(</span>
+                <span class="n">headers</span><span class="p">[</span><span class="s">'accept'</span><span class="p">],</span> <span class="n">extension</span><span class="p">):</span>
+            <span class="n">connection</span><span class="o">.</span><span class="n">sendall</span><span class="p">(</span><span class="s">'HTTP/1.1 406 Not Acceptable</span><span class="se">\n</span><span class="s">'</span><span class="p">)</span>
+        <span class="k">elif</span> <span class="ow">not</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">path</span><span class="p">):</span>
+            <span class="n">connection</span><span class="o">.</span><span class="n">sendall</span><span class="p">(</span><span class="s">'HTTP/1.1 404 Not Found</span><span class="se">\n</span><span class="s">'</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">path</span><span class="p">)</span> <span class="k">as</span> <span class="n">file_handle</span><span class="p">:</span>
+                <span class="n">file_contents</span> <span class="o">=</span> <span class="n">file_handle</span><span class="o">.</span><span class="n">read</span><span class="p">()</span>
+                <span class="n">response</span> <span class="o">=</span> <span class="n">RESPONSE_TEMPLATE</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">file_contents</span><span class="p">)</span>
+                <span class="n">connection</span><span class="o">.</span><span class="n">sendall</span><span class="p">(</span><span class="n">response</span><span class="p">)</span>
+        <span class="n">connection</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+
+<span class="k">if</span> <span class="n">__name__</span> <span class="o">==</span> <span class="s">'__main__'</span><span class="p">:</span>
+    <span class="n">sys</span><span class="o">.</span><span class="n">exit</span><span class="p">(</span><span class="n">main</span><span class="p">())</span>
+</pre></div>
+
+
+<p>There are two main changes to the code: a portion which parses header fields and
+another that does simple content negotiation. The <code>parse_headers</code> function
+splits each line after the start-line on the <code>:</code> character. To the left is the
+name of the header field. Everything else is the value.</p>
+<p>With the headers parsed, we can move on to content negotiation. In this
+simplified version, we check to see if the extension of the file requested
+is found within one of the values in the Accept header. <code>*/*</code> is interpreted as
+"anything", while <code>type/*</code> is meant to mean "all forms of this type". We handle
+the former (because it's easy) while ignoring the latter for the moment.</p>
+<p>If you add an <code>.html</code> file to <code>/tmp</code> and request it, you should see it properly
+returned. If, however, you manually set the Accept header to something like
+<code>application/json</code>, you'll get back a <code>406</code> error, as expected.</p>
+<h2>Cookies</h2>
+<p><em>Cookies</em> are Key =&gt; Value pairs that the <em>server</em> sets on the client. If the
+client supports cookies, any cookies set on the first request will be sent along
+with subsequent requests. For example, let's track if a user has visited the
+site before and print out a message if they have (note I'm changing from using
+<code>curl</code> to <code>httpie</code> here, as the latter has a much nicer interface for all of
+this).</p>
+<p>How can we augment our server to handle this? It's a two step process. First,
+the server must <em>set</em> the cookie on the client by sending a <em>Set-Cookie</em> header
+with the name and value of the cookie. Second, the server must <em>recognize</em> the
+cookie as one that it set on subsequent requests. An example will clear things
+up a bit.</p>
+<p>Imagine I change our server to add <code>Set-Cookie: HasVisited = 1</code> in the response headers.
+If I use Chrome to connect to our server, the first time we visit the cookie
+will get set within Chrome. The next time we use Chrome to visit the page,
+Chrome sends its cookies in the <code>Cookie:</code> header field. We can parse that and
+determine if <code>HasVisited = 1</code>, at which point we know that this user has visited
+before.</p>
+<p>Here's a quick and dirty way to accomplish that:</p>
+<div class="codehilite"><pre><span class="sd">"""A web server capable of serving files from a given directory."""</span>
+
+<span class="kn">import</span> <span class="nn">logging</span>
+<span class="kn">import</span> <span class="nn">os.path</span>
+<span class="kn">import</span> <span class="nn">socket</span>
+<span class="kn">import</span> <span class="nn">sys</span>
+
+<span class="n">RESPONSE_TEMPLATE</span> <span class="o">=</span> <span class="s">"""HTTP/1.1 200 OK</span>
+<span class="s">{headers}</span>
+
+<span class="s">{content}"""</span>
+
+<span class="n">LOGGER</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="n">__name__</span><span class="p">)</span>
+
+<span class="n">HTML_CONTENT_TYPES</span> <span class="o">=</span> <span class="p">(</span><span class="s">'text/html'</span><span class="p">)</span>
+<span class="n">JSON_CONTENT_TYPES</span> <span class="o">=</span> <span class="p">(</span><span class="s">'application/json'</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">parse_headers</span><span class="p">(</span><span class="n">request</span><span class="p">):</span>
+    <span class="sd">"""Return a dictionary in the form Header =&gt; Value for all headers in</span>
+<span class="sd">    *request*."""</span>
+    <span class="n">headers</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="k">for</span> <span class="n">line</span> <span class="ow">in</span> <span class="n">request</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s">'</span><span class="se">\n</span><span class="s">'</span><span class="p">)[</span><span class="mi">1</span><span class="p">:]:</span>
+        <span class="c"># blank line separates headers from content</span>
+        <span class="k">if</span> <span class="n">line</span> <span class="o">==</span> <span class="s">'</span><span class="se">\r</span><span class="s">'</span><span class="p">:</span>
+            <span class="k">break</span>
+        <span class="n">header_line</span> <span class="o">=</span> <span class="n">line</span><span class="o">.</span><span class="n">partition</span><span class="p">(</span><span class="s">':'</span><span class="p">)</span>
+        <span class="n">headers</span><span class="p">[</span><span class="n">header_line</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">lower</span><span class="p">()]</span> <span class="o">=</span> <span class="n">header_line</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+    <span class="k">return</span> <span class="n">headers</span>
+
+<span class="k">def</span> <span class="nf">is_content_type_negotiable</span><span class="p">(</span><span class="n">accepts</span><span class="p">,</span> <span class="n">extension</span><span class="p">):</span>
+    <span class="sd">"""Return the content-type we must reply with or None if no acceptable</span>
+<span class="sd">    content-type can be chosen."""</span>
+
+    <span class="c"># For now, just check if the extensions is included somewhere in the Accepts</span>
+    <span class="c"># header, or that Accepts is "*/*"</span>
+    <span class="k">return</span> <span class="n">extension</span> <span class="ow">in</span> <span class="n">accepts</span> <span class="ow">or</span> <span class="n">accepts</span> <span class="o">==</span> <span class="s">'*/*'</span>
+
+<span class="k">def</span> <span class="nf">response_with_cookies</span><span class="p">(</span><span class="n">content</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">RESPONSE_TEMPLATE</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">headers</span><span class="o">=</span><span class="s">'Set-Cookie: HasVisited = 1;'</span><span class="p">,</span>
+            <span class="n">content</span><span class="o">=</span><span class="n">content</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">main</span><span class="p">():</span>
+    <span class="sd">"""Main entry point for script."""</span>
+    <span class="n">listen_socket</span> <span class="o">=</span> <span class="n">socket</span><span class="o">.</span><span class="n">socket</span><span class="p">(</span><span class="n">socket</span><span class="o">.</span><span class="n">AF_INET</span><span class="p">,</span> <span class="n">socket</span><span class="o">.</span><span class="n">SOCK_STREAM</span><span class="p">)</span>
+    <span class="n">listen_socket</span><span class="o">.</span><span class="n">bind</span><span class="p">((</span><span class="s">''</span><span class="p">,</span> <span class="nb">int</span><span class="p">(</span><span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">])))</span>
+    <span class="n">listen_socket</span><span class="o">.</span><span class="n">listen</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+    <span class="n">document_root</span> <span class="o">=</span> <span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span>
+
+    <span class="k">while</span> <span class="bp">True</span><span class="p">:</span>
+        <span class="n">connection</span><span class="p">,</span> <span class="n">address</span> <span class="o">=</span> <span class="n">listen_socket</span><span class="o">.</span><span class="n">accept</span><span class="p">()</span>
+        <span class="n">request</span> <span class="o">=</span> <span class="n">connection</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="mi">1024</span><span class="p">)</span>
+        <span class="n">headers</span> <span class="o">=</span> <span class="n">parse_headers</span><span class="p">(</span><span class="n">request</span><span class="p">)</span>
+        <span class="n">cookies</span> <span class="o">=</span> <span class="bp">None</span>
+        <span class="k">if</span> <span class="s">'cookie'</span> <span class="ow">in</span> <span class="n">headers</span><span class="p">:</span>
+            <span class="n">cookies</span> <span class="o">=</span> <span class="p">{</span><span class="n">e</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s">'='</span><span class="p">)[</span><span class="mi">0</span><span class="p">]:</span> <span class="n">e</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s">'='</span><span class="p">)[</span><span class="mi">1</span><span class="p">]</span> <span class="k">for</span> <span class="n">e</span> <span class="ow">in</span> <span class="n">headers</span><span class="p">[</span><span class="s">'cookie'</span><span class="p">]</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s">';'</span><span class="p">)}</span>
+        <span class="k">if</span> <span class="s">'HasVisited'</span> <span class="ow">in</span> <span class="n">cookies</span><span class="p">:</span>
+            <span class="k">print</span> <span class="s">'User has already visited!'</span>
+        <span class="n">start_line</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s">'</span><span class="se">\n</span><span class="s">'</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span>
+        <span class="n">method</span><span class="p">,</span> <span class="n">uri</span><span class="p">,</span> <span class="n">version</span> <span class="o">=</span> <span class="n">start_line</span><span class="o">.</span><span class="n">split</span><span class="p">()</span>
+        <span class="n">path</span> <span class="o">=</span> <span class="n">document_root</span> <span class="o">+</span> <span class="n">uri</span>
+        <span class="n">extension</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">splitext</span><span class="p">(</span><span class="n">path</span><span class="p">)[</span><span class="mi">1</span><span class="p">][</span><span class="mi">1</span><span class="p">:]</span>
+        <span class="k">if</span> <span class="s">'accept'</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">headers</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">is_content_type_negotiable</span><span class="p">(</span>
+                <span class="n">headers</span><span class="p">[</span><span class="s">'accept'</span><span class="p">],</span> <span class="n">extension</span><span class="p">):</span>
+            <span class="n">connection</span><span class="o">.</span><span class="n">sendall</span><span class="p">(</span><span class="s">'HTTP/1.1 406 Not Acceptable</span><span class="se">\n</span><span class="s">'</span><span class="p">)</span>
+        <span class="k">elif</span> <span class="ow">not</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">path</span><span class="p">):</span>
+            <span class="n">connection</span><span class="o">.</span><span class="n">sendall</span><span class="p">(</span><span class="s">'HTTP/1.1 404 Not Found</span><span class="se">\n</span><span class="s">'</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">path</span><span class="p">)</span> <span class="k">as</span> <span class="n">file_handle</span><span class="p">:</span>
+                <span class="n">file_contents</span> <span class="o">=</span> <span class="n">file_handle</span><span class="o">.</span><span class="n">read</span><span class="p">()</span>
+                <span class="n">connection</span><span class="o">.</span><span class="n">sendall</span><span class="p">(</span><span class="n">response_with_cookies</span><span class="p">(</span><span class="n">file_contents</span><span class="p">))</span>
+        <span class="n">connection</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+
+<span class="k">if</span> <span class="n">__name__</span> <span class="o">==</span> <span class="s">'__main__'</span><span class="p">:</span>
+    <span class="n">sys</span><span class="o">.</span><span class="n">exit</span><span class="p">(</span><span class="n">main</span><span class="p">())</span>
+</pre></div>
+
+
+<p>As you can see, it's a two-step process: first we set the cookie on the response
+header, then we recognize the cookie on the request header. Believe it or not,
+but that's all there is to cookies. The powerful pieces of magic that allow
+you to stay logged in to certain sites are just cookies set by the site's web server. 
+Of course, they set and check them in a more robust way, but the theory is the
+same.</p>
+<h2>Summary</h2>
+<p>In part two, we added the ability to parse headers, perform content
+negotiation, and set/get cookies. Though the code could use a bit of clean-up,
+it's still only 74 lines of code. In the next post in this series, we'll touch
+on the topic of authentication and caching, as well as perform some much-needed 
+refactoring of the code. Until then, have fun playing around with your new web
+server!</p>
+        <small>Posted on <time datetime="2014-03-19 14:09:00" pubdate="" data-updated="true" itemprop="datePublished">Mar 19, 2014</time> by <span itemprop="author"> Jeff Knupp</span></small>
+    <p class="meta">
+    <a href="/blog/2014/03/17/learn-to-host-your-python-web-app-by-watching-a-pro" title="Previous Post: Learn to Host Your Python Web App by Watching a Pro">« Previous Post: Learn to Host Your Python Web App by Watching a Pro</a>
+    </p>
+      
+
+</div>
+</div></body></html>

@@ -1,0 +1,490 @@
+<html><body><div><div id="article_text">
+    <p>Caching pages, or even portions of pages is one of the easier ways to speed up a website's performance. Minifying markup can help save space in memory-based data stores. Using a CDN means your users can potentially download the content closer to where they are.</p>
+<p>In this post I'll walk through performing all the above in a Django project.</p>
+<div class="section" id="dependencies-and-boilerplate">
+<h2>Dependencies and boilerplate</h2>
+<p>The principle orchestrating package being used for crushing is <a class="reference external" href="https://github.com/django-compressor/django-compressor/">django-compressor</a>. It's a ~5-year-old project that has had 233 closed tickets and 106 contributors. It uses a lot of other packages to crush various scripts (hence the long requirements list below).</p>
+<p>Other packages that I'll use include <a class="reference external" href="https://github.com/sebleier/django-redis-cache">django-redis-cache</a> for cache storage communications and for HTML minification I'll use <a class="reference external" href="https://github.com/cobrateam/django-htmlmin">django-htmlmin</a>.</p>
+<p>The <cite>STATIC_DEPS=true</cite> prefix below is for lxml.</p>
+<div class="highlight"><pre><span class="nv">$ </span>sudo apt-get install libxml2-dev libxslt-dev <span class="se">\</span>
+               python-dev libzip-dev redis-server
+
+<span class="nv">$ STATIC_DEPS</span><span class="o">=</span><span class="nb">true </span>pip install <span class="se">\</span>
+    <span class="nv">Django</span><span class="o">==</span>1.7.1 <span class="se">\</span>
+    django-compressor<span class="o">==</span>1.4 <span class="se">\</span>
+    django-appconf<span class="o">==</span>0.6 <span class="se">\</span>
+    <span class="nv">BeautifulSoup</span><span class="o">==</span>3.2.1 <span class="se">\</span>
+    <span class="nv">html5lib</span><span class="o">==</span>0.999 <span class="se">\</span>
+    <span class="nv">slimit</span><span class="o">==</span>0.8.1 <span class="se">\</span>
+    <span class="nv">lxml</span><span class="o">==</span>3.4.0 <span class="se">\</span>
+    django-redis-cache<span class="o">==</span>0.13.0 <span class="se">\</span>
+    <span class="nv">hiredis</span><span class="o">==</span>0.1.5 <span class="se">\</span>
+    django-htmlmin<span class="o">==</span>0.7.0
+</pre></div>
+<p>As of this writing Ubuntu's repositories finally have the latest, stable version of redis, 2.8.17 in this case:</p>
+<div class="highlight"><pre><span class="nv">$ </span>redis-server --version
+Redis server <span class="nv">v</span><span class="o">=</span>2.8.17 <span class="nv">sha</span><span class="o">=</span>00000000:0 <span class="nv">malloc</span><span class="o">=</span>jemalloc-3.6.0 <span class="nv">bits</span><span class="o">=</span><span class="m">64</span> <span class="nv">build</span><span class="o">=</span>64186bb5bffe2061
+</pre></div>
+<p>I've created a new project called 'compressed', created an app called 'coupon' within it, setup the boilerplate database and finally, downloaded <a class="reference external" href="http://getbootstrap.com/2.3.2/">Twitter Bootstrap</a> and an example JPEG to an <cite>external</cite> folder. This folder will be one of the static folder's sources of content.</p>
+<div class="highlight"><pre><span class="nv">$ </span>django-admin startproject compressed
+<span class="nv">$ </span><span class="nb">cd </span>compressed/
+<span class="nv">$ </span>django-admin startapp coupon
+<span class="nv">$ </span>mkdir templates static external
+<span class="nv">$ </span>python manage.py syncdb --noinput
+
+<span class="nv">$ </span>curl -O https://github.com/twbs/bootstrap/releases/download/v3.3.1/bootstrap-3.3.1-dist.zip
+<span class="nv">$ </span>unzip bootstrap-3.3.1-dist.zip
+<span class="nv">$ </span>mv dist/* external/
+<span class="nv">$ </span>rm -r bootstrap-3.3.1-dist.zip dist
+
+<span class="nv">$ </span>mkdir external/img
+<span class="nv">$ </span>curl -o external/img/mark.jpg <span class="se">\</span>
+    http://tech.marksblogg.com/theme/images/mark.jpg
+<span class="nv">$ </span>touch templates/base.html <span class="se">\</span>
+        external/css/app.css <span class="se">\</span>
+        external/js/app.js
+</pre></div>
+<p>I've also created <cite>external/css/app.css</cite> and <cite>external/js/app.js</cite> for some small, project-specific code. The file and folder layout of this project now looks like this:</p>
+<div class="highlight"><pre>➫ tree
+.
+├── compressed
+│   ├── __init__.py
+│   ├── settings.py
+│   ├── urls.py
+│   └── wsgi.py
+├── coupon
+│   ├── admin.py
+│   ├── __init__.py
+│   ├── migrations
+│   │   └── __init__.py
+│   ├── models.py
+│   ├── tests.py
+│   └── views.py
+├── db.sqlite3
+├── external
+│   ├── css
+│   │   ├── app.css
+│   │   ├── bootstrap.css
+│   │   ├── bootstrap.css.map
+│   │   ├── bootstrap.min.css
+│   │   ├── bootstrap-theme.css
+│   │   ├── bootstrap-theme.css.map
+│   │   └── bootstrap-theme.min.css
+│   ├── fonts
+│   │   ├── glyphicons-halflings-regular.eot
+│   │   ├── glyphicons-halflings-regular.svg
+│   │   ├── glyphicons-halflings-regular.ttf
+│   │   └── glyphicons-halflings-regular.woff
+│   ├── img
+│   │   └── mark.jpg
+│   └── js
+│       ├── app.js
+│       ├── bootstrap.js
+│       ├── bootstrap.min.js
+│       └── npm.js
+├── manage.py
+├── static
+└── templates
+    └── base.html
+</pre></div>
+</div>
+<div class="section" id="the-codebase">
+<h2>The codebase</h2>
+<p>In <cite>compressed/urls.py</cite> I mapped all URLs to a single view and added in a static content endpoint for times when the code is run in debug mode. When running on production I'll change <cite>STATIC_URL</cite> to a CDN endpoint stub.</p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">django.conf</span> <span class="kn">import</span> <span class="n">settings</span>
+<span class="kn">from</span> <span class="nn">django.conf.urls</span> <span class="kn">import</span> <span class="n">patterns</span><span class="p">,</span> <span class="n">include</span><span class="p">,</span> <span class="n">url</span>
+<span class="kn">from</span> <span class="nn">django.conf.urls.static</span> <span class="kn">import</span> <span class="n">static</span>
+
+<span class="kn">from</span> <span class="nn">coupon</span> <span class="kn">import</span> <span class="n">views</span>
+
+
+<span class="n">urlpatterns</span> <span class="o">=</span> <span class="n">patterns</span><span class="p">(</span><span class="s">''</span><span class="p">,</span>
+    <span class="n">url</span><span class="p">(</span><span class="s">r'^$'</span><span class="p">,</span> <span class="n">views</span><span class="o">.</span><span class="n">home</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="s">'index'</span><span class="p">),</span>
+<span class="p">)</span>
+
+<span class="k">if</span> <span class="n">settings</span><span class="o">.</span><span class="n">DEBUG</span><span class="p">:</span>
+    <span class="n">urlpatterns</span> <span class="o">+=</span> <span class="n">static</span><span class="p">(</span><span class="n">settings</span><span class="o">.</span><span class="n">STATIC_URL</span><span class="p">,</span>
+                          <span class="n">document_root</span><span class="o">=</span><span class="n">settings</span><span class="o">.</span><span class="n">STATIC_ROOT</span><span class="p">)</span>
+</pre></div>
+<p>I created a unit test for the single view. I didn't patch the cache file generation as I'll use the test to generate the cache files on a continuous integration server. With those files generated, I'll deploy them to a CDN.</p>
+<p>A cleaner way to approach this would be to patch the unit tests so they don't create file artefacts and use a management command to generate the static cache files.</p>
+<p>coupon/tests.py:</p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">django.core.urlresolvers</span> <span class="kn">import</span> <span class="n">reverse</span>
+<span class="kn">from</span> <span class="nn">django.test</span> <span class="kn">import</span> <span class="n">TestCase</span>
+<span class="kn">from</span> <span class="nn">django.test.client</span> <span class="kn">import</span> <span class="n">Client</span>
+
+
+<span class="k">class</span> <span class="nc">ViewTest</span><span class="p">(</span><span class="n">TestCase</span><span class="p">):</span>
+
+    <span class="k">def</span> <span class="nf">setUp</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">client</span> <span class="o">=</span> <span class="n">Client</span><span class="p">()</span>
+
+    <span class="k">def</span> <span class="nf">test_index</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">resp</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">client</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">reverse</span><span class="p">(</span><span class="s">'index'</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">resp</span><span class="o">.</span><span class="n">status_code</span><span class="p">,</span> <span class="mi">200</span><span class="p">)</span>
+</pre></div>
+<p>The single view in <cite>coupon/views.py</cite> renders a template and returns it.</p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">django.shortcuts</span> <span class="kn">import</span> <span class="n">render</span>
+
+
+<span class="k">def</span> <span class="nf">home</span><span class="p">(</span><span class="n">request</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">render</span><span class="p">(</span><span class="n">request</span><span class="p">,</span> <span class="s">'base.html'</span><span class="p">)</span>
+</pre></div>
+<p>I created a <cite>templates/base.html</cite> file which is mostly an example file from the bootstrap project. I added some template tags for identifying sections of markup to minify and wrapped asset URLs with a <cite>static</cite> template tag so their path prefix can be controlled via <cite>settings.STATIC_URL</cite>.</p>
+<div class="highlight"><pre><span class="cp">{%</span> <span class="k">load</span> <span class="nv">staticfiles</span> <span class="cp">%}</span><span class="x"/>
+<span class="cp">{%</span> <span class="k">load</span> <span class="nv">compress</span> <span class="cp">%}</span><span class="x"/>
+
+<span class="x">&lt;!DOCTYPE html&gt;</span>
+<span class="x">&lt;html lang="en"&gt;</span>
+<span class="x">  &lt;head&gt;</span>
+<span class="x">    &lt;meta charset="utf-8"&gt;</span>
+<span class="x">    &lt;meta http-equiv="X-UA-Compatible" content="IE=edge"&gt;</span>
+<span class="x">    &lt;meta name="viewport" content="width=device-width, initial-scale=1"&gt;</span>
+<span class="x">    &lt;title&gt;Bootstrap 101 Template&lt;/title&gt;</span>
+
+<span class="x">    </span><span class="cp">{%</span> <span class="k">compress</span> <span class="nv">css</span> <span class="cp">%}</span><span class="x"/>
+<span class="x">    &lt;link href="</span><span class="cp">{%</span> <span class="k">static</span> <span class="s2">"css/bootstrap.min.css"</span> <span class="cp">%}</span><span class="x">" rel="stylesheet"&gt;</span>
+<span class="x">    &lt;link href="</span><span class="cp">{%</span> <span class="k">static</span> <span class="s2">"css/app.css"</span> <span class="cp">%}</span><span class="x">" rel="stylesheet"&gt;</span>
+<span class="x">    </span><span class="cp">{%</span> <span class="k">endcompress</span> <span class="cp">%}</span><span class="x"/>
+
+<span class="x">    &lt;!--[if lt IE 9]&gt;</span>
+<span class="x">      &lt;script src="https://oss.maxcdn.com/html5shiv/3.7.2/html5shiv.min.js"&gt;&lt;/script&gt;</span>
+<span class="x">      &lt;script src="https://oss.maxcdn.com/respond/1.4.2/respond.min.js"&gt;&lt;/script&gt;</span>
+<span class="x">    &lt;![endif]--&gt;</span>
+<span class="x">  &lt;/head&gt;</span>
+<span class="x">  &lt;body&gt;</span>
+<span class="x">    &lt;h1&gt;Hello, world!&lt;/h1&gt;</span>
+<span class="x">    &lt;img src="</span><span class="cp">{%</span> <span class="k">static</span> <span class="s2">"img/mark.jpg"</span> <span class="cp">%}</span><span class="x">" /&gt;</span>
+
+<span class="x">    &lt;script src="https://ajax.googleapis.com/ajax/libs/jquery/1.11.1/jquery.min.js"&gt;&lt;/script&gt;</span>
+<span class="x">    </span><span class="cp">{%</span> <span class="k">compress</span> <span class="nv">js</span> <span class="cp">%}</span><span class="x"/>
+<span class="x">    &lt;script src="</span><span class="cp">{%</span> <span class="k">static</span> <span class="s2">"js/bootstrap.min.js"</span> <span class="cp">%}</span><span class="x">"&gt;&lt;/script&gt;</span>
+<span class="x">    &lt;script src="</span><span class="cp">{%</span> <span class="k">static</span> <span class="s2">"js/app.js"</span> <span class="cp">%}</span><span class="x">"&gt;&lt;/script&gt;</span>
+<span class="x">    </span><span class="cp">{%</span> <span class="k">endcompress</span> <span class="cp">%}</span><span class="x"/>
+<span class="x">  &lt;/body&gt;</span>
+<span class="x">&lt;/html&gt;</span>
+</pre></div>
+<p>The <cite>compressed/settings.py</cite> file is the longest and probably most complicated of the project. Here is a summary of the key settings being put in place:</p>
+<blockquote>
+<ul class="simple">
+<li>Fetch the <cite>SECRET_KEY</cite> environment variable.</li>
+<li>Add <cite>compressor</cite> to the installed apps tuple.</li>
+<li>Add caching and minification middleware.</li>
+<li>Use redis as a caching backend (using database #3).</li>
+<li>Fetch the <cite>STATIC_URL</cite> environment variable and fall-back to using <cite>/static/</cite> as the default value if the environment variable is unavailable.</li>
+<li>Define the minification behaviours, key among them: <cite>KEEP_COMMENTS_ON_MINIFYING</cite> which will keep HTML comments in place so we can use conditional statements and <cite>COMPRESS_CSS_HASHING_METHOD</cite> which will cause our cache file names to be a hash of their respective contents.</li>
+</ul>
+</blockquote>
+<div class="highlight"><pre><span class="kn">import</span> <span class="nn">os</span>
+
+
+<span class="n">BASE_DIR</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">dirname</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">dirname</span><span class="p">(</span><span class="n">__file__</span><span class="p">))</span>
+
+<span class="n">SECRET_KEY</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'SECRET_KEY'</span><span class="p">,</span> <span class="bp">None</span><span class="p">)</span>
+<span class="k">assert</span> <span class="n">SECRET_KEY</span> <span class="ow">is</span> <span class="ow">not</span> <span class="bp">None</span><span class="p">,</span> \
+    <span class="s">'SECRET_KEY environment variable is needed'</span>
+
+<span class="n">DEBUG</span> <span class="o">=</span> <span class="bp">True</span>
+<span class="n">TEMPLATE_DEBUG</span> <span class="o">=</span> <span class="bp">True</span>
+
+<span class="n">INSTALLED_APPS</span> <span class="o">=</span> <span class="p">(</span>
+    <span class="s">'django.contrib.auth'</span><span class="p">,</span>
+    <span class="s">'django.contrib.contenttypes'</span><span class="p">,</span>
+    <span class="s">'django.contrib.sessions'</span><span class="p">,</span>
+    <span class="s">'django.contrib.messages'</span><span class="p">,</span>
+    <span class="s">'django.contrib.staticfiles'</span><span class="p">,</span>
+    <span class="s">'compressor'</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="n">MIDDLEWARE_CLASSES</span> <span class="o">=</span> <span class="p">(</span>
+    <span class="s">'django.middleware.cache.UpdateCacheMiddleware'</span><span class="p">,</span>
+    <span class="s">'htmlmin.middleware.HtmlMinifyMiddleware'</span><span class="p">,</span>
+    <span class="s">'django.contrib.sessions.middleware.SessionMiddleware'</span><span class="p">,</span>
+    <span class="s">'django.middleware.common.CommonMiddleware'</span><span class="p">,</span>
+    <span class="s">'django.middleware.csrf.CsrfViewMiddleware'</span><span class="p">,</span>
+    <span class="s">'django.contrib.auth.middleware.AuthenticationMiddleware'</span><span class="p">,</span>
+    <span class="s">'django.contrib.auth.middleware.SessionAuthenticationMiddleware'</span><span class="p">,</span>
+    <span class="s">'django.contrib.messages.middleware.MessageMiddleware'</span><span class="p">,</span>
+    <span class="s">'django.middleware.clickjacking.XFrameOptionsMiddleware'</span><span class="p">,</span>
+    <span class="s">'django.middleware.cache.FetchFromCacheMiddleware'</span><span class="p">,</span>
+    <span class="s">'htmlmin.middleware.MarkRequestMiddleware'</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="n">ROOT_URLCONF</span> <span class="o">=</span> <span class="s">'compressed.urls'</span>
+<span class="n">WSGI_APPLICATION</span> <span class="o">=</span> <span class="s">'compressed.wsgi.application'</span>
+
+<span class="n">DATABASES</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s">'default'</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s">'ENGINE'</span><span class="p">:</span> <span class="s">'django.db.backends.sqlite3'</span><span class="p">,</span>
+        <span class="s">'NAME'</span><span class="p">:</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">BASE_DIR</span><span class="p">,</span> <span class="s">'db.sqlite3'</span><span class="p">),</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="n">CACHES</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s">'default'</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s">'BACKEND'</span><span class="p">:</span> <span class="s">'redis_cache.RedisCache'</span><span class="p">,</span>
+        <span class="s">'LOCATION'</span><span class="p">:</span> <span class="s">'127.0.0.1:6379'</span><span class="p">,</span>
+        <span class="s">'OPTIONS'</span><span class="p">:</span> <span class="p">{</span>
+            <span class="s">'DB'</span><span class="p">:</span> <span class="mi">3</span><span class="p">,</span>
+            <span class="s">'PARSER_CLASS'</span><span class="p">:</span> <span class="s">'redis.connection.HiredisParser'</span><span class="p">,</span>
+            <span class="s">'CONNECTION_POOL_CLASS'</span><span class="p">:</span> <span class="s">'redis.BlockingConnectionPool'</span><span class="p">,</span>
+            <span class="s">'CONNECTION_POOL_CLASS_KWARGS'</span><span class="p">:</span> <span class="p">{</span>
+                <span class="s">'max_connections'</span><span class="p">:</span> <span class="mi">25</span><span class="p">,</span>
+                <span class="s">'timeout'</span><span class="p">:</span> <span class="mi">4</span><span class="p">,</span>
+            <span class="p">}</span>
+        <span class="p">},</span>
+    <span class="p">},</span>
+<span class="p">}</span>
+
+<span class="n">LANGUAGE_CODE</span> <span class="o">=</span> <span class="s">'en-us'</span>
+<span class="n">TIME_ZONE</span> <span class="o">=</span> <span class="s">'UTC'</span>
+<span class="n">USE_I18N</span> <span class="o">=</span> <span class="bp">True</span>
+<span class="n">USE_L10N</span> <span class="o">=</span> <span class="bp">True</span>
+<span class="n">USE_TZ</span> <span class="o">=</span> <span class="bp">True</span>
+
+<span class="n">STATIC_URL</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'STATIC_URL'</span><span class="p">,</span> <span class="s">'/static/'</span><span class="p">)</span>
+<span class="k">assert</span> <span class="n">STATIC_URL</span> <span class="ow">is</span> <span class="ow">not</span> <span class="bp">None</span> <span class="ow">and</span> <span class="nb">len</span><span class="p">(</span><span class="n">STATIC_URL</span><span class="p">),</span> \
+    <span class="s">'STATIC_URL environment variable is needed'</span>
+
+<span class="n">STATICFILES_DIRS</span> <span class="o">=</span> <span class="p">(</span>
+    <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">BASE_DIR</span><span class="p">,</span> <span class="s">"external"</span><span class="p">),</span>
+<span class="p">)</span>
+
+<span class="n">STATIC_ROOT</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">BASE_DIR</span><span class="p">,</span> <span class="s">"static"</span><span class="p">)</span>
+
+<span class="n">STATICFILES_FINDERS</span> <span class="o">=</span> <span class="p">(</span>
+    <span class="s">'django.contrib.staticfiles.finders.FileSystemFinder'</span><span class="p">,</span>
+    <span class="s">'django.contrib.staticfiles.finders.AppDirectoriesFinder'</span><span class="p">,</span>
+    <span class="s">'compressor.finders.CompressorFinder'</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="n">TEMPLATE_DIRS</span> <span class="o">=</span> <span class="p">[</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">BASE_DIR</span><span class="p">,</span> <span class="s">'templates'</span><span class="p">)]</span>
+
+<span class="n">COMPRESS_ENABLED</span> <span class="o">=</span> <span class="bp">True</span>
+<span class="n">COMPRESS_CSS_HASHING_METHOD</span> <span class="o">=</span> <span class="s">'content'</span>
+<span class="n">COMPRESS_CSS_FILTERS</span> <span class="o">=</span> <span class="p">[</span>
+    <span class="s">'compressor.filters.css_default.CssAbsoluteFilter'</span><span class="p">,</span>
+    <span class="s">'compressor.filters.cssmin.CSSMinFilter'</span><span class="p">,</span>
+<span class="p">]</span>
+
+<span class="n">HTML_MINIFY</span> <span class="o">=</span> <span class="bp">True</span>
+<span class="n">KEEP_COMMENTS_ON_MINIFYING</span> <span class="o">=</span> <span class="bp">True</span>
+</pre></div>
+<p>The caching system is setup to work on a per-view basis but <a class="reference external" href="https://docs.djangoproject.com/en/1.7/topics/cache/#template-fragment-caching">template fragments</a> are also supported in Django and can be useful on pages with dynamic content.</p>
+<p>Finally, to help demonstrate asset concatenation, I've added the following frontend files:</p>
+<p>external/css/app.css:</p>
+<div class="highlight"><pre><span class="nt">h1</span> <span class="p">{</span>
+    <span class="k">display</span><span class="o">:</span> <span class="k">none</span><span class="p">;</span>
+    <span class="k">text-align</span><span class="o">:</span> <span class="k">center</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>external/js/app.js:</p>
+<div class="highlight"><pre><span class="nx">$</span><span class="p">(</span> <span class="nb">document</span> <span class="p">).</span><span class="nx">ready</span><span class="p">(</span><span class="kd">function</span><span class="p">()</span> <span class="p">{</span>
+    <span class="nx">$</span><span class="p">(</span><span class="s1">'h1'</span><span class="p">).</span><span class="nx">fadeIn</span><span class="p">({</span><span class="s1">'duration'</span><span class="o">:</span> <span class="mi">2000</span><span class="p">})</span>
+<span class="p">});</span>
+</pre></div>
+</div>
+<div class="section" id="initialising-django">
+<h2>Initialising Django</h2>
+<p>When setting environment variables I like to use <cite>read</cite>. It will allow you to type or paste in values for environment variables. This means those values won't appear when you run <cite>history</cite>.</p>
+<div class="highlight"><pre><span class="nv">$ </span><span class="nb">read </span>SECRET_KEY
+0x<span class="nv">$01e345$)</span>v74-!k9gfdzhmybw0<span class="o">=</span>-0g+1jh@v#8-<span class="o">=</span>s+^_
+<span class="nv">$ </span><span class="nb">export </span>SECRET_KEY
+
+<span class="nv">$ </span><span class="nb">history</span> <span class="p">|</span> tail
+...
+ <span class="m">1320</span>  <span class="nb">read </span>SECRET_KEY
+ <span class="m">1321</span>  <span class="nb">export </span>SECRET_KEY
+</pre></div>
+<p>With the settings in place I've run <cite>collectstatic</cite> which will take static files from our <cite>external</cite> folder and any applications (such as Django's admin) and place them in the static folder.</p>
+<div class="highlight"><pre><span class="nv">$ </span>python manage.py collectstatic --noinput
+Copying <span class="s1">'/home/mark/compressed/external/img/mark.jpg'</span>
+Copying <span class="s1">'/home/mark/compressed/external/css/bootstrap.min.css'</span>
+...
+Copying <span class="s1">'/home/mark/compressed/external/fonts/glyphicons-halflings-regular.svg'</span>
+
+<span class="m">16</span> static files copied to <span class="s1">'/home/mark/compressed/static'</span>.
+</pre></div>
+</div>
+<div class="section" id="making-a-web-request">
+<h2>Making a web request</h2>
+<p>I started up the reference WSGI server, cleaned redis' database #3 and fetched the project's homepage:</p>
+<div class="highlight"><pre><span class="nv">$ </span>python manage.py runserver <span class="p">&amp;</span>
+<span class="nv">$ </span>redis-cli -n <span class="m">3</span> flushdb
+OK
+</pre></div>
+<div class="highlight"><pre>$ curl --silent localhost:8000 | fold -w50
+<span class="cp">&lt;!DOCTYPE html&gt;</span><span class="nt">&lt;html</span> <span class="na">lang=</span><span class="s">"en"</span><span class="nt">&gt;&lt;head&gt;&lt;meta</span> <span class="na">charset</span>
+<span class="na">=</span><span class="s">"utf-8"</span><span class="nt">/&gt;&lt;meta</span> <span class="na">content=</span><span class="s">"IE=edge"</span> <span class="na">http-equiv=</span><span class="s">"X-UA</span>
+<span class="s">-Compatible"</span><span class="nt">/&gt;&lt;meta</span> <span class="na">content=</span><span class="s">"width=device-width, i</span>
+<span class="s">nitial-scale=1"</span> <span class="na">name=</span><span class="s">"viewport"</span><span class="nt">/&gt;&lt;title&gt;</span>Bootstrap
+101 Template<span class="nt">&lt;/title&gt;&lt;link</span> <span class="na">href=</span><span class="s">"/static/CACHE/css/</span>
+<span class="s">1afa57f03e30.css"</span> <span class="na">rel=</span><span class="s">"stylesheet"</span> <span class="na">type=</span><span class="s">"text/css"</span>
+<span class="nt">/&gt;</span><span class="c">&lt;!--[if lt IE 9]&gt;&lt;script src="https://oss.maxcdn</span>
+<span class="c">.com/html5shiv/3.7.2/html5shiv.min.js"&gt;&lt;/script&gt; &lt;</span>
+<span class="c">script src="https://oss.maxcdn.com/respond/1.4.2/r</span>
+<span class="c">espond.min.js"&gt;&lt;/script&gt;&lt;![endif]--&gt;</span><span class="nt">&lt;/head&gt;&lt;body&gt;&lt;</span>
+<span class="nt">h1&gt;</span>Hello, world!<span class="nt">&lt;/h1&gt;&lt;img</span> <span class="na">src=</span><span class="s">"/static/img/mark.jp</span>
+<span class="s">g"</span><span class="nt">/&gt;&lt;script </span><span class="na">src=</span><span class="s">"https://ajax.googleapis.com/ajax/</span>
+<span class="s">libs/jquery/1.11.1/jquery.min.js"</span><span class="nt">&gt;&lt;/script&gt;&lt;script</span>
+<span class="nt"> </span><span class="na">src=</span><span class="s">"/static/CACHE/js/2c7f836f5f1d.js"</span> <span class="na">type=</span><span class="s">"text</span>
+<span class="s">/javascript"</span><span class="nt">&gt;&lt;/script&gt;&lt;/body&gt;&lt;/html&gt;</span>
+</pre></div>
+<p>As you can see, there is no excess white space in the HTML and the two CSS files are now concatenated together into <cite>/static/CACHE/css/
+1afa57f03e30.css</cite>.</p>
+<p>If I run the response through gzip it shows the content is only 440 bytes, about half of it's original size.</p>
+<div class="highlight"><pre><span class="nv">$ </span>curl --silent localhost:8000 <span class="p">|</span> gzip <span class="p">|</span> wc -c
+440
+</pre></div>
+<p>I ran the monitor command on redis and made a subsequent request for the homepage. I could see the caches for the headers and body fetched by Django:</p>
+<div class="highlight"><pre><span class="nv">$ </span>redis-cli -n <span class="m">3</span> monitor
+OK
+1415882400.531810 <span class="o">[</span><span class="m">3</span> 127.0.0.1:43471<span class="o">]</span> <span class="s2">"GET"</span> <span class="s2">":1:views.decorators.cache.cache_header..8f95444a9dd16027d8bb2b1e8ed2fb75.en-us.UTC"</span>
+1415882400.532644 <span class="o">[</span><span class="m">3</span> 127.0.0.1:43471<span class="o">]</span> <span class="s2">"GET"</span> <span class="s2">":1:views.decorators.cache.cache_page..GET.8f95444a9dd16027d8bb2b1e8ed2fb75.d41d8cd98f00b204e9800998ecf8427e.en-us.UTC"</span>
+</pre></div>
+</div>
+<div class="section" id="embedding-assets-within-html">
+<h2>Embedding assets within HTML</h2>
+<p>If you're running a single page application then external assets might not be faster than embedding them within the HTML. If multiple pages aren't being loaded then the web request to fetch each asset can mean more overhead. <cite>django-compressor</cite> supports an <cite>inline</cite> flag in it's template tag which will load the assets (if they're on the local system) and place them inline.</p>
+<div class="highlight"><pre><span class="cp">{%</span> <span class="k">compress</span> <span class="nv">css</span> <span class="nv">inline</span> <span class="cp">%}</span><span class="x"/>
+<span class="x">&lt;link href="</span><span class="cp">{%</span> <span class="k">static</span> <span class="s2">"css/bootstrap.min.css"</span> <span class="cp">%}</span><span class="x">" rel="stylesheet"&gt;</span>
+<span class="x">&lt;link href="</span><span class="cp">{%</span> <span class="k">static</span> <span class="s2">"css/app.css"</span> <span class="cp">%}</span><span class="x">" rel="stylesheet"&gt;</span>
+<span class="cp">{%</span> <span class="k">endcompress</span> <span class="cp">%}</span><span class="x"/>
+</pre></div>
+<p>Now the contents of <cite>css/bootstrap.min.css</cite> and <cite>css/app.css</cite> will be embedded in the page.</p>
+<div class="highlight"><pre>$ curl --silent localhost:8000 | fold -w50 | head -n20
+<span class="cp">&lt;!DOCTYPE html&gt;</span><span class="nt">&lt;html</span> <span class="na">lang=</span><span class="s">"en"</span><span class="nt">&gt;&lt;head&gt;&lt;meta</span> <span class="na">charset</span>
+<span class="na">=</span><span class="s">"utf-8"</span><span class="nt">/&gt;&lt;meta</span> <span class="na">content=</span><span class="s">"IE=edge"</span> <span class="na">http-equiv=</span><span class="s">"X-UA</span>
+<span class="s">-Compatible"</span><span class="nt">/&gt;&lt;meta</span> <span class="na">content=</span><span class="s">"width=device-width, i</span>
+<span class="s">nitial-scale=1"</span> <span class="na">name=</span><span class="s">"viewport"</span><span class="nt">/&gt;&lt;title&gt;</span>Bootstrap
+101 Template<span class="nt">&lt;/title&gt;&lt;style </span><span class="na">type=</span><span class="s">"text/css"</span><span class="nt">&gt;</span><span class="err">/*!* Bo</span>
+otstrap v3.3.1(http://getbootstrap.com) * Copyrigh
+t 2011-2014 Twitter,Inc. * Licensed under MIT(http
+s://github.com/twbs/bootstrap/blob/master/LICENSE)
+ *//*!normalize.css v3.0.2 | MIT License | git.io/
+normalize */html{font-family:sans-serif;-webkit-te
+xt-size-adjust:100%;-ms-text-size-adjust:100%}body
+{margin:0}article,aside,details,figcaption,figure,
+footer,header,hgroup,main,menu,nav,section,summary
+{display:block}audio,canvas,progress,video{display
+:inline-block;vertical-align:baseline}audio:not([c
+ontrols]){display:none;height:0}[hidden],template{
+display:none}a{background-color:transparent}a:acti
+ve,a:hover{outline:0}abbr[title]{border-bottom:1px
+ dotted}b,strong{font-weight:700}dfn{font-style:it
+alic}h1{margin:.67em 0;font-size:2em}mark{color:#0
+</pre></div>
+<p>The weight of the page totals 28,424 bytes when piped through gzip.</p>
+<div class="highlight"><pre><span class="nv">$ </span>curl --silent localhost:8000 <span class="p">|</span> gzip <span class="p">|</span> wc -c
+28424
+</pre></div>
+</div>
+<div class="section" id="batch-image-compression">
+<h2>Batch image compression</h2>
+<p>I try to always crush images before committing them to a code base rather than leave them for a request process or continuous integration server to handle. It's a CPU-intensive process that only needs to be run once and few compression tools are smart enough to know ahead of time if they'll make a significant dent in the file size or not.</p>
+<p>I have a script I use which relies on <a class="reference external" href="https://github.com/mozilla/mozjpeg">mozjpeg</a>, <a class="reference external" href="https://github.com/kohler/gifsicle">gifsicle</a> and <a class="reference external" href="http://optipng.sourceforge.net/">optipng</a> to crush JPEG, GIF and PNG-formatted images within an given folder and child folders as well.</p>
+<p>Below are some condensed installation commands. As of this writing <a class="reference external" href="https://github.com/mozilla/mozjpeg/issues/91">Mozilla doesn't provide a binary</a> for mozjpeg so I've found a community-built one instead:</p>
+<div class="highlight"><pre><span class="nv">$ </span>sudo apt-get install optipng gifsicle
+
+<span class="nv">$ </span>curl -O http://mozjpeg.codelove.de/bin/libmozjpeg_2.1_amd64.deb
+<span class="nv">$ </span>sudo dpkg -i libmozjpeg_2.1_amd64.deb
+<span class="nv">$ </span>sudo ln -s /opt/libmozjpeg/bin/jpegtran /usr/bin/mozjpeg
+</pre></div>
+<p>The image crushing script itself:</p>
+<div class="highlight"><pre>find . -iname <span class="s2">"*.jpg"</span> -type f <span class="se">\</span>
+    -exec mozjpeg -copy none -optimize -outfile <span class="o">{}</span> <span class="o">{}</span> <span class="se">\;</span>
+find . -iname <span class="s1">'*.gif'</span> -type f <span class="se">\</span>
+    -exec gifsicle -O2 -b <span class="o">{}</span> <span class="se">\;</span>
+find . -iname <span class="s1">'*.png'</span> -type f <span class="se">\</span>
+    -exec optipng -o9 -q <span class="o">{}</span> <span class="se">\;</span>
+</pre></div>
+</div>
+<div class="section" id="deploying-static-contents-to-a-cdn">
+<h2>Deploying static contents to a CDN</h2>
+<p>The <a class="reference external" href="https://github.com/django-compressor/django-compressor/">django-compressor</a> package supports working with <a class="reference external" href="https://github.com/iserko/django-storages">django-storages</a> which can upload your static contents onto various cloud platforms. Personally I'd rather this step was taken by a continuous integration system.</p>
+<p>If django-storages isn't included it means fewer packages to rely on. Even if django-storages' <cite>collectstatic</cite> command was only run on a continuous integration server it's still a package with it's own dependencies that needs to be kept in mind by developers and tested that it still works when changes are made.</p>
+<p>By relying on just changing the <cite>STATIC_URL</cite> environment variable the code base is then not only cloud-agnostic but cloud-ignorant.</p>
+<p>If a rollback was needed the continuous integration server could simply compile the assets and deploy again leaving less for a developer to do. If new buckets and distributions are created during each deployment then the addresses from previous deployments could be used as settings in the rolled-back code base's environment variables.</p>
+<p>Keep in mind this is only useful for projects that don't push user uploads onto cloud storage. If this code base were doing so then django-storages would be a necessity.</p>
+<p>Before I describe the strategy I'll point out that <cite>s3cmd</cite> version 1.1.0-beta3, which is distributed via Ubuntu's repositories has an issue in communicating with Amazon Cloudfront.</p>
+<div class="highlight"><pre><span class="nv">$ </span>s3cmd --version
+s3cmd version 1.1.0-beta3
+
+<span class="nv">$ </span>s3cmd cfcreate s3://deployment-dfshk33/
+.ERROR: S3 error: <span class="m">400</span> <span class="o">(</span>InvalidOrigin<span class="o">)</span>: The specified origin server does not exist or is not valid.
+</pre></div>
+<p>This issue has been fixed in later versions of s3cmd so I've removed the older version from my system and installed a newer version in my virtual environment (since s3cmd is written in Python). I've also installed <a class="reference external" href="https://github.com/stochastic-technologies/shortuuid">shortuuid</a> which will also be used in this deployment strategy.</p>
+<div class="highlight"><pre><span class="nv">$ </span>sudo apt-get remove s3cmd <span class="o">&amp;&amp;</span> <span class="nb">source</span> ~/.bashrc
+<span class="nv">$ </span>pip install python-dateutil<span class="o">==</span>2.2 <span class="se">\</span>
+              <span class="nv">shortuuid</span><span class="o">==</span>0.4.2 <span class="se">\</span>
+              https://github.com/s3tools/s3cmd/archive/v1.5.0-rc1.zip#egg<span class="o">=</span>s3cmd
+<span class="nv">$ </span>s3cmd --version
+s3cmd version 1.5.0-rc1
+</pre></div>
+<p>On the continuous integration server, after the code base has been checked out and requirements installed, I'll run the unit tests. This both tests the code and causes the cache files to generate:</p>
+<div class="highlight"><pre><span class="nv">$ </span>python manage.py <span class="nb">test</span>
+<span class="nv">$ </span>python manage.py collectstatic
+<span class="nv">$ </span>tree static/CACHE
+static/CACHE
+├── css
+│   └── 7aea4b813422.css
+└── js
+    └── 772c8931bdf3.js
+</pre></div>
+<p>I will then generate a short UUID that will suffix my Amazon S3 bucket name:</p>
+<div class="highlight"><pre><span class="n">In</span> <span class="p">[</span><span class="mi">1</span><span class="p">]:</span> <span class="kn">import</span> <span class="nn">shortuuid</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">2</span><span class="p">]:</span> <span class="n">shortuuid</span><span class="o">.</span><span class="n">ShortUUID</span><span class="p">()</span><span class="o">.</span><span class="n">random</span><span class="p">(</span><span class="n">length</span><span class="o">=</span><span class="mi">6</span><span class="p">)</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">2</span><span class="p">]:</span> <span class="s">'8VQUpK'</span>
+</pre></div>
+<p>I will then create a bucket using that suffix and sync my static contents into it:</p>
+<div class="highlight"><pre><span class="nv">$ </span>s3cmd mb s3://deployment-8VQUpK
+<span class="nv">$ </span>s3cmd sync static/ s3://deployment-8VQUpK <span class="se">\</span>
+  --acl-public --guess-mime-type
+</pre></div>
+<p>I will then create a Cloudfront distribution for the above S3 bucket and wait for it to deploy (it took around five minutes when I did this):</p>
+<div class="highlight"><pre><span class="nv">$ </span>s3cmd cfcreate s3://deployment-8VQUpK/
+Distribution created:
+Origin:         s3://deployment-8VQUpK/
+DistId:         cf://E19HG43AR6N7ME
+DomainName:     d2r3jcgbupqrcn.cloudfront.net
+CNAMEs:
+Comment:        http://deployment-8VQUpK.s3.amazonaws.com/
+Status:         InProgress
+Enabled:        True
+DefaultRootObject: None
+Etag:           E39EDVTTHIFEWU
+
+<span class="nv">$ </span>s3cmd cfinfo cf://E19HG43AR6N7ME <span class="p">|</span> grep -oP <span class="s1">'Status\: .*'</span>
+Status:         InProgress
+</pre></div>
+<p>Waiting, waiting, waiting...</p>
+<div class="highlight"><pre><span class="nv">$ </span>s3cmd cfinfo cf://E19HG43AR6N7ME <span class="p">|</span> grep -oP <span class="s1">'Status\: .*'</span>
+Status:         Deployed
+</pre></div>
+<p>Once that bucket and distribution are working code can be deployed to production servers with the <cite>STATIC_URL</cite> environment variable set to the relative Cloudfront URL stub. This means all URLs that use Cloudfront now have a new host name and will break older caches.</p>
+<p>On the production server(s):</p>
+<div class="highlight"><pre><span class="nv">$ </span>... install code base ...
+<span class="nv">$ STATIC_URL</span><span class="o">=</span>//d2r3jcgbupqrcn.cloudfront.net/
+<span class="nv">$ </span><span class="nb">export </span>STATIC_URL
+<span class="nv">$ </span>redis-cli -n <span class="m">3</span> flushdb
+<span class="nv">$ </span>... restart supervisor ...
+</pre></div>
+<p>The above could be wrapped up into a Fabric script that records the bucket, distribution and git commit details.</p>
+<div class="highlight"><pre>...
+0c744b6, deployment-8VQUpK, d2r3jcgbupqrcn.cloudfront.net, E19HG43AR6N7ME
+366439f, deployment-97Q3s2, feabcefghujsds.cloudfront.net, F22EE44AA66711
+</pre></div>
+<p>Keeping the buckets and distributions around for a while means a rollback would only need to be code deployed to production with <cite>STATIC_URL</cite> set to the Cloudfront URL stub of that commit ID. There would be no need to setup another bucket and distribution again.</p>
+<p>There could be a clean up script that removes older buckets and distributions once they're past their use as a roll back.</p>
+</div>
+
+  </div>
+
+   <div id="support_text"><p>
+    Thank you for taking the time to read this post. If you're considering using </p><a href="https://www.digitalocean.com/?refcode=074ce6598105">Digital Ocean</a><p>, the hosting provider this blog is hosted on, please consider using </p><a href="https://www.digitalocean.com/?refcode=074ce6598105">this link to sign up</a><p>.
+  </p></div>
+
+
+  
+</div></body></html>

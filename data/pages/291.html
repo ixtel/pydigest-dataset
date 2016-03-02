@@ -1,0 +1,286 @@
+<html><body><div><div class="content html_format">
+      <img src="https://habrastorage.org/getpro/habr/post_images/55d/ea9/8b3/55dea98b3e1964a8050a64d77f5bf4e3.png"/>
+<p>
+В предыдущей статье мы рассматривали сам язык IMP и основную структуру интерпретатора. Также, мы тщательно рассмотрели лексер. В этой статье мы будем писать небольшой парсер для нашего языка. Он будет извлекать AST (abstract syntax tree) из списка токенов, сгенерированных лексером. Библиотека комбинатора будет независимая, то есть с помощью нее можно будет написать парсер для любого языка.
+
+</p>
+<h5>Что такое комбинаторы парсеров?</h5><p>
+Есть очень много способов написать парсер. Самым простым и быстрым способом сделать это являются </p><b>комбинаторы</b><p>.
+</p><p>
+Вы можете считать парсер функцией, которая принимает поток токенов. Если успешно, то парсер будет </p><i>«съедать»</i><p> немного токенов из потока. Функция вернет часть финального AST вместе с остальными токенами. Комбинатор — это функция, которая производит парсер, как его результат, обычно после приема одного или нескольких анализаторов (парсеров) в качестве входных данных, отсюда и название — «комбинатор». Вы можете использовать комбинаторы для создания законченного парсера для языка, как IMP, путем создания множества маленьких парсеров для каждой части языка.
+</p><a name="habracut"/>
+<h5>Наш маленький комбинатор</h5><p>
+Комбинаторы анализаторов достаточно общие, </p><i>обычные</i><p>, могут быть использованы для любого языка. Мы начнем с написания агностичной библиотеки комбинаторов, как мы сделали с лексером, а затем используем это для написания парсера.
+</p><p>
+Для начала, давайте создадим класс </p><b>Result</b><p>. Каждый парсер будет возвращать экземпляр класса Result (в случае успеха), или None в случае неудачи. Result включает в себя value (значение, часть AST) и позиция (индекс следующего токена в потоке).
+
+</p><pre><code class="python">class Result:
+    def __init__(self, value, pos):
+        self.value = value
+        self.pos = pos
+
+    def __repr__(self):
+        return 'Result(%s, %d)' % (self.value, self.pos)
+</code></pre>
+<p>
+Дальше мы создадим основной класс </p><b>Parser</b><p>. Прежде, я говорил, что парсеры являются функциями, которые принимают поток токенов. На самом деле мы будем определять парсеры как объекты с методом </p><b>__call__.</b><p> Это значит, что объект парсера будет вести себя так, как будто это функция, но мы также можем предоставлять дополнительную функциональность путем создания операторов.
+
+</p><pre><code class="python">class Parser:
+    def __call__(self, tokens, pos):
+        return None  # subclasses will override this
+
+    def __add__(self, other):
+        return Concat(self, other)
+
+    def __mul__(self, other):
+        return Exp(self, other)
+
+    def __or__(self, other):
+        return Alternate(self, other)
+
+    def __xor__(self, function):
+        return Process(self, function)
+</code></pre>
+<p>
+Метод, который на самом деле выполняет парсинг — </p><b>__call__.</b><p> Входными данными является полный список токенов (созданный лексером) и индекс списка, с указанием следующего токена. Реализация по умолчанию всегда возвращает </p><b>None</b><p> (неудача). В подклассах будет собственный метод __call__.
+</p><p>
+Такие методы, как </p><b>__add__, __mul__, __or__</b><p> и </p><b>__xor__</b><p> определяют </p><b>+, *, |</b><p> и </p><b>^</b><p> операторы соответственно. Каждый оператор предоставляет шорткат для вызова определенного комбинатора. Мы рассмотрим каждый из них вкратце.
+</p><p>
+Теперь мы рассмотрим простой комбинатор под названием </p><b>Reserved.</b><p> Reserved будет использован для парсинга зарезервированных слов и операторов; он будет принимать токены с определенным значением и тег. Помните, что токены являются парой значение-тег. token[0] — значение, token[1] — тег.
+
+</p><pre><code class="python">class Reserved(Parser):
+    def __init__(self, value, tag):
+        self.value = value
+        self.tag = tag
+
+    def __call__(self, tokens, pos):
+        if pos &lt; len(tokens) and \
+           tokens[pos][0] == self.value and \
+           tokens[pos][1] is self.tag:
+            return Result(tokens[pos][0], pos + 1)
+        else:
+            return None
+</code></pre>
+<p>
+Сейчас в можете сказать: </p><i>«Я думал, что комбинаторы должны быть функциями, которые возвращают парсеры.»</i><p> Подкласс совсем не выглядит как функция. Подкласс, это </p><i>как</i><p> функция, если вы думаете о конструкторе как о функции, возвращающей объект (который в этом случае является </p><i>callable</i><p>). Создание подклассов является простым путем определения новых комбинаторов, так как нам нужно всего лишь предоставить конструктор и метод __call__, и мы по-прежнему сохраняем остальную функциональность (например, перегрузку операторов).
+</p><p>
+Двигаемся дальше. Комбинатор </p><b>Tag</b><p> очень похож на Reserved. Он находит токены, соответствующие конкретному тегу. Значение может быть чем угодно.
+
+</p><pre><code class="python">class Tag(Parser):
+    def __init__(self, tag):
+        self.tag = tag
+
+    def __call__(self, tokens, pos):
+        if pos &lt; len(tokens) and tokens[pos][1] is self.tag:
+            return Result(tokens[pos][0], pos + 1)
+        else:
+            return None
+</code></pre>
+<p>
+Комбинаторы Tag и Reserved являются нашими примитивами. Все остальные комбинаторы будут построены от них на самом базовом уровне.
+</p><p>
+Комбинатор </p><b>Concat</b><p> берет два парсера в качестве инпута (left и right). При применении парсер Concat будет применять левый парсер, а затем правый [парсер]. Если оба успешны, результирующее значение будет содержать пару левых и правых результатов. Если хотя бы один не срабатывает, то вернется None.
+
+</p><pre><code class="python">class Concat(Parser):
+    def __init__(self, left, right):
+        self.left = left
+        self.right = right
+
+    def __call__(self, tokens, pos):
+        left_result = self.left(tokens, pos)
+        if left_result:
+            right_result = self.right(tokens, left_result.pos)
+            if right_result:
+                combined_value = (left_result.value, right_result.value)
+                return Result(combined_value, right_result.pos)
+        return None
+</code></pre>
+<p>
+Concat полезен для разбора специфической последовательности токенов. Например, для разбора </p><b>1+2</b><p>, вы можете написать
+
+</p><pre><code class="python">parser = Concat(Concat(Tag(INT), Reserved('+', RESERVED)), Tag(INT))</code></pre>
+<p>
+или более кратко, используя оператор стенографии
+
+</p><pre><code class="python">parser = Tag(INT) + Reserved('+', RESERVED) + Tag(INT)</code></pre>
+<p>
+Комбинатор </p><b>Alternative</b><p> тоже очень похож на предыдущие. Он также принимает left- и right-парсеры. Если успешно, то возвращается результат, иначе — он принимает right-парсер и возвращает его результат.
+
+</p><pre><code class="python">class Alternate(Parser):
+    def __init__(self, left, right):
+        self.left = left
+        self.right = right
+
+    def __call__(self, tokens, pos):
+        left_result = self.left(tokens, pos)
+        if left_result:
+            return left_result
+        else:
+            right_result = self.right(tokens, pos)
+            return right_result
+</code></pre>
+<p>
+Alternative полезен при выборе возможных парсеров. Для примера, если нам нужно разобрать бинарный оператор:
+
+</p><pre><code class="python">parser = Reserved('+', RESERVED) |
+         Reserved('-', RESERVED) |
+         Reserved('*', RESERVED) |
+         Reserved('/', RESERVED)
+</code></pre>
+<p>
+Класс </p><b>Opt</b><p> полезен для дополнительного текста, например else. Он принимает один парсер. Если этот парсер успешен, то результат возращается нормально. Если нет, то успешный результат все-равно возвращается, но его значение равно None. Токены не потребляются в случае неудачи; позиция результата такая же, как и позиция инпута.
+
+</p><pre><code class="python">class Opt(Parser):
+    def __init__(self, parser):
+        self.parser = parser
+
+    def __call__(self, tokens, pos):
+        result = self.parser(tokens, pos)
+        if result:
+            return result
+        else:
+            return Result(None, pos)
+</code></pre>
+
+<b>Rep</b><p> принимает парсер пока он не выйдет из строя (fails). Это полезно для построения списков. Помните, что Rep будет успешно соответствовать пустому списку и не будет поглощать токены, если парсер потерпит неудачу в первый раз.
+
+</p><pre><code class="python">class Rep(Parser):
+    def __init__(self, parser):
+        self.parser = parser
+
+    def __call__(self, tokens, pos):
+        results = []
+        result = self.parser(tokens, pos)
+        while result:
+            results.append(result.value)
+            pos = result.pos
+            result = self.parser(tokens, pos)
+        return Result(results, pos)
+</code></pre>
+<p>
+Комбинатор </p><b>Process</b><p> очень полезен нам для манипулирования значениями результатов. Его инпут — парсер и функция. Когда парсер успешен, результирующее значение отправляется в функцию вместо оригинального значения возвращается значение из функции. Мы будем использовать Process для постройки AST-узлов из пар и списков (возвращаемых Concat и Rep).
+
+</p><pre><code class="python">class Process(Parser):
+    def __init__(self, parser, function):
+        self.parser = parser
+        self.function = function
+
+    def __call__(self, tokens, pos):
+        result = self.parser(tokens, pos)
+        if result:
+            result.value = self.function(result.value)
+            return result
+</code></pre>
+<p>
+В качестве примера, рассмотрим парсер, который мы построили с помощью Concat. Когда он разбирает </p><b>1+1</b><p>, результатом будет </p><b>(('1', '+'), '2')</b><p>, что не очень удобно. С Process мы можем изменить результат. Следующий код будет возвращать сумму этих двух чисел, например.
+
+</p><pre><code class="python">def process_func(parsed):
+    ((l, _), r) = parsed
+    return int(l) + int(r)
+
+better_parser = parser ^ process_func
+</code></pre>
+
+<b>Lazy</b><p> является менее очевидным комбинатором. Вместо того, чтобы взять на вход парсер, он берет функцию с нулевым аргументом, которая возвращает парсер. Комбинатор Lazy не будет вызывать функцию, чтобы получить парсер, пока он не применится. Это нужно для построения рекурсивных парсеров. Поскольку анализатор (парсер) относится к самому себе, мы не можем просто так взять, и определить его с помощью ссылки; в то время, как выражение парсера исполняется, он не продефинен. Нам это не нужно в таких языках, как Haskell или Scala, так как они используют ленивые выражения, но Python не такой.
+
+</p><pre><code class="python">class Lazy(Parser):
+    def __init__(self, parser_func):
+        self.parser = None
+        self.parser_func = parser_func
+
+    def __call__(self, tokens, pos):
+        if not self.parser:
+            self.parser = self.parser_func()
+        return self.parser(tokens, pos)
+</code></pre>
+<p>
+Следующий комбинатор </p><b>Phrase</b><p> берет одиночный парсер на вход, применяет его, и возвращает его результат. Единственная загвоздка в том, что он не выполнится, если не поглотит </p><i>все</i><p> токены. Анализатором топового уровня будет как раз таки Phrase. Он не позволяет нам мэтчить программы, у которых есть мусор в конце.
+
+</p><pre><code class="python">class Phrase(Parser):
+    def __init__(self, parser):
+        self.parser = parser
+
+    def __call__(self, tokens, pos):
+        result = self.parser(tokens, pos)
+        if result and result.pos == len(tokens):
+            return result
+        else:
+            return None
+</code></pre>
+<p>
+Последний комбинатор, к сожалению, самый сложный. Смысл </p><b>Exp</b><p> очень прост; он используется для матчинга (match) выражения, которое состоит из списка элементов, разделенных чем-то. Вот пример составных операторов:
+
+</p><pre><code class="python">a := 10;
+b := 20;
+c := 30
+</code></pre>
+<p>
+В этом случае, мы имеем список операторов, которые разделены точкой с запятой. Вы можете подумать, что нам не нужен Exp, так как можем сделать то же самое с помощью других комбинаторов. Можно вполне написать парсер для таких выражений:
+
+</p><pre><code class="python">def compound_stmt():
+    return stmt() + Reserved(';', RESERVED) + stmt()
+</code></pre>
+<p>
+Создание stmt:
+
+</p><pre><code class="python">def stmt():
+    return Lazy(compound_stmt) | assign_stmt()
+</code></pre>
+<p>
+Итак, stmt вызывает compound_stmt, который вызывает stmt. Они будут вызывать друг друга, пока мы не получим переполнение буфера. Такая проблема присуща не только составным операторам, и называется она left recursion.
+</p><p>
+Благо, Exp предоставлять возможность обойти left recursion, просто разбирая список (относительно также, как и Rep). Exp берет два парсера на вход. Первый парсер соответствует настоящим элементам списка, а второй разделителям. В случае успеха, второй парсер должен вернуть функцию, которая комбинирует разобранные элементы слева и справа в одном значении. Это значение накапливается со всего списка, слева направо, и в конечном счете возвращается.
+</p><p>
+Посмотрим на код:
+
+</p><pre><code class="python">class Exp(Parser):
+    def __init__(self, parser, separator):
+        self.parser = parser
+        self.separator = separator
+
+    def __call__(self, tokens, pos):
+        result = self.parser(tokens, pos)
+
+        def process_next(parsed):
+            (sepfunc, right) = parsed
+            return sepfunc(result.value, right)
+        next_parser = self.separator + self.parser ^ process_next
+
+        next_result = result
+        while next_result:
+            next_result = next_parser(tokens, result.pos)
+            if next_result:
+                result = next_result
+        return result
+</code></pre>
+
+<b>result</b><p> будет содержать все, что было отпарсено за все время. Функция </p><b>process_next</b><p> может быть использована с комбинатором </p><b>Process</b><p>. </p><b>next_parser</b><p> принимает </p><b>separator</b><p>, а затем </p><b>parser</b><p>, чтобы получить следующий элемент списка. </p><b>process_next</b><p> создаст новый результат путем принятия функции-сепаратора на текущий результат и на свежеспарсенный элемент. </p><b>next_parser</b><p> принимается в цикле, пока он будет в состоянии принимать элементы.
+</p><p>
+Давайте посмотрим, как Exp может быть использован для решения проблемы compound_stmt:
+
+</p><pre><code class="python">def assign_stmt():
+    ...
+
+def compound_sep():
+    def process_sep(parsed):
+        return lambda l, r: CompoundStmt(l, r)
+    return Reserved(';', RESERVED) ^ process_sep
+
+def compound_stmt():
+    return Exp(assign_stmt(), compound_sep())
+</code></pre>
+<p>
+Мы можем написать даже так:
+
+</p><pre><code class="python">def compound_stmt():
+    return assign_stmt() * compound_sep()
+</code></pre>
+<p>
+Мы углубимся в это, когда рассмотрим разбор арифметических выражений в следующей статье.
+</p><p>
+Скачать полный исходный код: </p><a href="http://www.jayconrod.com/code/imp-interpreter.tar.gz">imp-interpreter.tar.gz</a>
+      <p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

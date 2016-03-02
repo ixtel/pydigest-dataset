@@ -1,0 +1,197 @@
+<html><body><div><div itemprop="articleBody"><div class="note"><p class="first admonition-title">Note</p><p>TL;DR: In decode oriented use-case with big payloads JSON decoders often use disproportionate amounts of memory. I gave up on JSON and switched to <a class="reference external" href="http://msgpack.org/">Msgpack</a>.</p><p>You should draw your own conclusions by running the <a class="reference external" href="https://gist.github.com/ionelmc/1521c5a87df8cf49a23d">test code</a> yourself.</p><p>⸻</p><p>Based on various feedback <a class="footnote-reference" href="#id16" id="id1">[*]</a> I've did the benchmarks again, using <tt class="docutils literal">ru_maxrss</tt> instead of <a class="reference external" href="http://valgrind.org/">Valgrind</a> and with few more implementations.</p><p><span class="target" id="updated-results">Updated results:<a class="headerlink" href="#updated-results" id="updated-results" title="Permalink to this target"> *</a></span></p></div><p>I have a peculiar use-case where I need to move around big chunks of data (some client connects to some HTTP API and gets some data). For whatever reason <a class="footnote-reference" href="#id10" id="id2">[1]</a>, JSON was chosen as the transport format. And one day that big chunk became very big - around few hundred megabytes. And it turned out that processes doing the JSON decoding were using lots of RAM - 4.4GB for a mere 240MB JSON payload? Insane. <a class="footnote-reference" href="#id11" id="id3">[2]</a></p><p>I was using the builtin json library, and the first thing I thought - "there must be a better JSON parser". So I've started measuring ...</p><p>Now measuring memory usage is a tricky thing, you can look at <tt class="docutils literal">ps</tt> or look around in <tt class="docutils literal"><span class="pre">/proc/&lt;pid&gt;</span></tt> but you'd get very coarse snapshots and would be very hard to find out the real peak usage. Luckily enough <a class="reference external" href="http://valgrind.org/">Valgrind</a> can instrument any program to track allocations (as opposed to recompiling everything to use a custom memory allocator) and it has a really nice tool called <a class="reference external" href="http://valgrind.org/docs/manual/ms-manual.html">massif</a>.</p><p>So I've started building a <a class="reference external" href="https://gist.github.com/ionelmc/1521c5a87df8cf49a23d#file-memory-py">little benchmark</a> using <a class="reference external" href="http://valgrind.org/">Valgrind</a>. My input looks like this:</p><div class="highlight"><pre><span/><span class="p">{</span>
+    <span class="s2">"foo"</span><span class="p">:</span> <span class="p">[{</span>
+        <span class="s2">"bar"</span><span class="p">:</span> <span class="p">[</span>
+            <span class="s1">'A"</span><span class="se">\\</span><span class="s1"> :,;</span><span class="se">\n</span><span class="s1">1'</span> <span class="o">*</span> <span class="mi">20000000</span><span class="p">,</span>
+        <span class="p">],</span>
+        <span class="s2">"b"</span><span class="p">:</span> <span class="p">[</span>
+            <span class="mi">1</span><span class="p">,</span> <span class="mf">0.333</span><span class="p">,</span> <span class="bp">True</span><span class="p">,</span>
+        <span class="p">],</span>
+        <span class="s2">"c"</span><span class="p">:</span> <span class="bp">None</span><span class="p">,</span>
+    <span class="p">}]</span>
+<span class="p">}</span>
+</pre></div><p>That generates a 240MB JSON with a structure pretty close to my app's problematic data.</p><p>Running <tt class="docutils literal">valgrind <span class="pre">--tool=massif</span> <span class="pre">--pages-as-heap=yes</span> <span class="pre">--heap=yes</span> <span class="pre">--threshold=0</span> <span class="pre">--peak-inaccuracy=0</span> <span class="pre">--max-snapshots=1000</span> ...</tt> for each parser gets me something like this on Python 2.7 (scroll down for results on Python 3.5):</p><pre class="code term literal-block">
+Peak memory usage (Python 2.7):
+
+           cjson:   485.4 Mb
+       rapidjson:   670.5 Mb
+            yajl: 1,199.2 Mb
+           ujson: 1,862.0 Mb
+        jsonlib2: 2,882.7 Mb
+         jsonlib: 2,884.2 Mb
+      simplejson: 2,953.6 Mb
+            json: 4,397.9 Mb
+</pre><p>Would you look at that. Now you can argue that my sample data is crazy but sadly, but that's just how my data looks sometimes. Few of the strings blow up to horrid proportions once in a while.</p><p><a class="reference external" href="https://docs.python.org/3/library/json.html">json</a> has a severe weakness here, it needs a dozen more times memory than the input. WAT.</p><p><a class="reference external" href="https://pypi.python.org/pypi/python-cjson">cjson</a> is right there in my face, begging me to use it. There are some rumours that it has <em>VeryBadBugs™</em> <a class="footnote-reference" href="#id15" id="id4">[6]</a> but I think the lack of a bug tracker is what makes that project ultimately unappealing.</p><p><a class="reference external" href="https://pypi.python.org/pypi?%3Aaction=search&amp;term=rapidjson&amp;submit=search">rapidjson</a> seems to be a new player <a class="footnote-reference" href="#id12" id="id5">[3]</a>, however the <a class="reference external" href="https://github.com/hhatto/pyrapidjson">Python 2 binding</a> seems to have some <a class="reference external" href="https://github.com/hhatto/pyrapidjson/blob/4f7b8f2f7e45a9cff9b7c2671dd7233ff52b8487/pyrapidjson/_pyrapidjson.cpp#L333-L336">gaps</a><a class="reference external" href="https://github.com/hhatto/pyrapidjson/blob/4f7b8f2f7e45a9cff9b7c2671dd7233ff52b8487/pyrapidjson/_pyrapidjson.cpp#L374-L376">in</a><a class="reference external" href="https://github.com/hhatto/pyrapidjson/blob/4f7b8f2f7e45a9cff9b7c2671dd7233ff52b8487/pyrapidjson/_pyrapidjson.cpp#L144">essential</a><a class="reference external" href="https://github.com/hhatto/pyrapidjson/blob/4f7b8f2f7e45a9cff9b7c2671dd7233ff52b8487/pyrapidjson/_pyrapidjson.cpp#L187">parts</a>. Still, it's interesting to at least get an idea of how it performs. The <a class="reference external" href="https://github.com/kenrobbins/python-rapidjson">Python 3-only binding</a> looks more mature, but sadly this app only run on Python 2 right now.</p><p><a class="reference external" href="https://pypi.python.org/pypi/yajl">yajl</a> and <a class="reference external" href="https://pypi.python.org/pypi/ujson">ujson</a> appear to be mature enough but they simply still use lots of memory. There must be a better way ...</p><p>It looks like whatever I choose it's bad. There's a very good proverb <a class="footnote-reference" href="#id17" id="id6">[†]</a> that applies here:</p><blockquote class="highlights"> Best solution to problem is not having the problem in the first place.</blockquote><p>Remember that time a customer asked for <em>a thing</em> but in fact he only needed something simpler and less costly. Talking through requirements and refining them solves lots of problems right there. This is that kind of situation. I wish I had realized I don't really need JSON at all sooner ...</p><p>I have to do more changes to switch the format of the HTTP API but that can't be worse than maintaining/fixing the <tt class="docutils literal">cjson</tt> or <tt class="docutils literal">rapidjson</tt> bindings myself.</p><p>If we try <a class="reference external" href="http://msgpack.org/">msgpack</a> (and some <em>old friends</em> <a class="footnote-reference" href="#id18" id="id7">[‡]</a>, just for kicks) we get this:</p><pre class="code term literal-block">
+Peak memory usage (Python 2):
+
+          pickle:   368.9 Mb
+         marshal:   368.9 Mb
+         msgpack:   373.2 Mb
+           cjson:   485.4 Mb
+       rapidjson:   670.4 Mb
+            yajl: 1,199.2 Mb
+           ujson: 1,862.0 Mb
+        jsonlib2: 2,882.7 Mb
+         jsonlib: 2,884.2 Mb
+      simplejson: 2,953.6 Mb
+            json: 4,397.9 Mb
+</pre><p>If you look at the <a class="reference external" href="https://gist.github.com/ionelmc/1521c5a87df8cf49a23d">test code</a> you'll notice that I use msgpack with very specific options. Because the initial version of <a class="reference external" href="http://msgpack.org/">Msgpack</a> wasn't very smart about strings (it had a single string type <a class="footnote-reference" href="#id14" id="id8">[5]</a>) some specific options are needed:</p><ul><li><p class="first"><tt class="docutils literal">msgpack.dumps(obj, use_bin_type=True)</tt> - use a different type for byte-strings. By default <a class="reference external" href="http://msgpack.org/">Msgpack</a> will lump all kinds of strings into same type and you can't tell what the original type was.</p><p>On Python 2:</p><ul class="simple"><li><tt class="docutils literal">str</tt> goes into the <em>bin</em> type</li><li><tt class="docutils literal">unicode</tt> goes into the <em>string</em> type</li></ul><p>On Python 3:</p><ul class="simple"><li><tt class="docutils literal">bytes</tt> goes into the <em>bin</em> type</li><li><tt class="docutils literal">str</tt> goes into the <em>string</em> type</li></ul></li><li><p class="first"><tt class="docutils literal">msgpack.loads(payload, <span class="pre">encoding='utf8')</span></tt> - decode the strings (so you get <tt class="docutils literal">unicode</tt> back).</p></li></ul><div class="section" id="what-about-speed"><h2>What about speed?<a class="headerlink" href="#what-about-speed" title="Permalink to this headline"> *</a></h2><p>Using <a class="reference external" href="https://github.com/ionelmc/pytest-benchmark">pytest-benchmark</a> we get this <a class="footnote-reference" href="#id14" id="id9">[5]</a>:</p><pre class="term">
+Speed (Python 2.7):
+
+    <span class="ansi33">-----------------------------------------------</span>
+    Name (time in ms)              Min
+    <span class="ansi33">-----------------------------------------------</span>
+    test_speed[marshal]      <span class="ansi1 ansi32">     59.2630 (1.0)    </span>
+    test_speed[pickle]       <span class="ansi1">     59.4530 (1.00)   </span>
+    test_speed[msgpack]      <span class="ansi1">     59.7100 (1.01)   </span>
+    test_speed[rapidjson]    <span class="ansi1">    443.0561 (7.48)   </span>
+    test_speed[cjson]        <span class="ansi1">    676.6071 (11.42)  </span>
+    test_speed[ujson]        <span class="ansi1">    681.8101 (11.50)  </span>
+    test_speed[yajl]         <span class="ansi1">  1,590.4601 (26.84)  </span>
+    test_speed[jsonlib]      <span class="ansi1">  1,873.3799 (31.61)  </span>
+    test_speed[jsonlib2]     <span class="ansi1">  2,006.7949 (33.86)  </span>
+    test_speed[simplejson]   <span class="ansi1">  3,592.2401 (60.62)  </span>
+    test_speed[json]         <span class="ansi1 ansi31">  5,193.2762 (87.63)  </span>
+    <span class="ansi33">-----------------------------------------------</span>
+</pre><p>Only the minimum time is shown. This is intentional - run the <a class="reference external" href="https://gist.github.com/ionelmc/1521c5a87df8cf49a23d">test code</a> on <cite>your own hardware</cite> if you care about anything else.</p></div><div class="section" id="python-3"><h2>Python 3<a class="headerlink" href="#python-3" title="Permalink to this headline"> *</a></h2><p>This app where I had the issue runs only on Python 2 for a very good (and also sad) reason. But no reason to dig myself further into a hole - gotta see how this performs on the latest and greatest. It will get ported one day ...</p><pre class="term">
+Peak memory usage (Python 3.5):
+
+         marshal:   372.1 Mb
+          pickle:   372.9 Mb
+         msgpack:   376.6 Mb
+       rapidjson:   668.6 Mb
+            yajl:   687.3 Mb
+           ujson: 1,578.9 Mb
+            json: 3,422.3 Mb
+      simplejson: 6,681.4 Mb
+
+Speed (Python 3.5)
+
+    <span class="ansi33">-----------------------------------------------</span>
+    Name (time in ms)              Min
+    <span class="ansi33">-----------------------------------------------</span>
+    test_speed[msgpack]      <span class="ansi1 ansi32">     69.0613 (1.0)    </span>
+    test_speed[pickle]       <span class="ansi1">     69.9465 (1.01)   </span>
+    test_speed[marshal]      <span class="ansi1">     74.9914 (1.09)   </span>
+    test_speed[rapidjson]    <span class="ansi1">    337.5243 (4.89)   </span>
+    test_speed[ujson]        <span class="ansi1">    902.8647 (13.07)  </span>
+    test_speed[yajl]         <span class="ansi1">  1,195.4298 (17.31)  </span>
+    test_speed[json]         <span class="ansi1">  4,404.9523 (63.78)  </span>
+    test_speed[simplejson]   <span class="ansi1 ansi31">  6,524.9919 (94.48)  </span>
+    <span class="ansi33">-----------------------------------------------</span>
+</pre><p>No <a class="reference external" href="https://pypi.python.org/pypi/python-cjson">cjson</a> or <a class="reference external" href="https://pypi.python.org/pypi/jsonlib">jsonlib</a> on Python 3. I don't even know what's the story behind <a class="reference external" href="https://pypi.python.org/pypi/jsonlib2">jsonlib2</a>. Looks like <a class="reference external" href="http://msgpack.org/">Msgpack</a> is a safe bet here.</p></div><div class="section" id="different-kind-of-data"><h2>Different kind of data<a class="headerlink" href="#different-kind-of-data" title="Permalink to this headline"> *</a></h2><p>Now this is highly skewed towards some might call a completely atypical data shape. So I advise you take the <a class="reference external" href="https://gist.github.com/ionelmc/1521c5a87df8cf49a23d">test code</a> and run the benchmarks with your own data.</p><p>But if you're lazy here are some results with different kinds of data, just to get an idea of how much the input can change memory use and speed.</p><div class="section" id="lots-off-small-objects"><h3>Lots off small objects<a class="headerlink" href="#lots-off-small-objects" title="Permalink to this headline"> *</a></h3><p>The 189MB <a class="reference external" href="https://github.com/zemirco/sf-city-lots-json/">citylots.json</a> gets us wildly different results.</p><p>It appears <a class="reference external" href="https://pypi.python.org/pypi/simplejson">simplejson</a> works way better on small objects, and <a class="reference external" href="https://docs.python.org/3/library/json.html">json</a> is quite improved on Python 3:</p><pre class="code term literal-block">
+Peak memory usage (Python 2.7):
+
+      simplejson: 1,171.7 Mb
+           cjson: 1,304.2 Mb
+         msgpack: 1,357.2 Mb
+         marshal: 1,385.2 Mb
+            yajl: 1,457.1 Mb
+            json: 1,468.0 Mb
+       rapidjson: 1,561.6 Mb
+          pickle: 1,854.1 Mb
+        jsonlib2: 2,134.9 Mb
+         jsonlib: 2,137.0 Mb
+           ujson: 2,149.9 Mb
+
+Peak memory usage (Python 3.5):
+
+         marshal:   951.0 Mb
+            json: 1,059.8 Mb
+      simplejson: 1,063.6 Mb
+          pickle: 1,098.4 Mb
+         msgpack: 1,115.9 Mb
+            yajl: 1,226.6 Mb
+       rapidjson: 1,404.9 Mb
+           ujson: 2,077.6 Mb
+</pre><p>Speed:</p><pre class="term">
+Speed (Python 2.7):
+
+    <span class="ansi33">-----------------------------------------------</span>
+    Name (time in ms)              Min
+    <span class="ansi33">-----------------------------------------------</span>
+    test_speed[marshal]      <span class="ansi1 ansi32">   3.9999 (1.0)    </span>
+    test_speed[ujson]        <span class="ansi1">   4.2569 (1.06)   </span>
+    test_speed[simplejson]   <span class="ansi1">   5.1105 (1.28)   </span>
+    test_speed[cjson]        <span class="ansi1">   5.2355 (1.31)   </span>
+    test_speed[msgpack]      <span class="ansi1">   5.9742 (1.49)   </span>
+    test_speed[yajl]         <span class="ansi1">   6.1059 (1.53)   </span>
+    test_speed[json]         <span class="ansi1">   6.3822 (1.60)   </span>
+    test_speed[jsonlib2]     <span class="ansi1">   6.7880 (1.70)   </span>
+    test_speed[jsonlib]      <span class="ansi1">   6.9587 (1.74)   </span>
+    test_speed[rapidjson]    <span class="ansi1">   7.4734 (1.87)   </span>
+    test_speed[pickle]       <span class="ansi1 ansi31">  18.8649 (4.72)   </span>
+    <span class="ansi33">-----------------------------------------------</span>
+
+Speed (Python 3.5):
+
+    <span class="ansi33">-----------------------------------------------</span>
+    Name (time in ms)              Min
+    <span class="ansi33">-----------------------------------------------</span>
+    test_speed[marshal]      <span class="ansi1 ansi32">  1.1784 (1.0)    </span>
+    test_speed[ujson]        <span class="ansi1">  3.6378 (3.09)   </span>
+    test_speed[msgpack]      <span class="ansi1">  3.7226 (3.16)   </span>
+    test_speed[pickle]       <span class="ansi1">  3.7739 (3.20)   </span>
+    test_speed[rapidjson]    <span class="ansi1">  4.1379 (3.51)   </span>
+    test_speed[json]         <span class="ansi1">  5.1150 (4.34)   </span>
+    test_speed[simplejson]   <span class="ansi1">  5.1530 (4.37)   </span>
+    test_speed[yajl]         <span class="ansi1 ansi31">  5.9426 (5.04)   </span>
+    <span class="ansi33">-----------------------------------------------</span>
+</pre></div><div class="section" id="smaller-data"><h3>Smaller data<a class="headerlink" href="#smaller-data" title="Permalink to this headline"> *</a></h3><p>The tiny 2.2MB <a class="reference external" href="https://github.com/miloyip/nativejson-benchmark/tree/master/data">canada.json</a>, again, gives us very different results. Memory use becomes irrelevant:</p><pre class="code term literal-block">
+Peak memory usage (Python 2.7):
+
+         marshal:    35.2 Mb
+           cjson:    38.9 Mb
+            yajl:    39.0 Mb
+            json:    39.3 Mb
+         msgpack:    39.5 Mb
+      simplejson:    40.5 Mb
+          pickle:    42.1 Mb
+        jsonlib2:    47.4 Mb
+       rapidjson:    48.5 Mb
+         jsonlib:    48.8 Mb
+           ujson:    50.9 Mb
+
+Peak memory usage (Python 3.5):
+
+         marshal:    38.3 Mb
+          pickle:    40.4 Mb
+            yajl:    42.1 Mb
+            json:    42.2 Mb
+         msgpack:    42.7 Mb
+      simplejson:    45.3 Mb
+       rapidjson:    52.3 Mb
+           ujson:    55.5 Mb
+</pre><p>And speed is again different:</p><pre class="term">
+Speed (Python 2.7):
+
+    <span class="ansi33">-----------------------------------------------</span>
+    Name (time in ms)              Min
+    <span class="ansi33">-----------------------------------------------</span>
+    test_speed[msgpack]      <span class="ansi1 ansi32">   12.3210 (1.0)    </span>
+    test_speed[marshal]      <span class="ansi1">   15.1060 (1.23)   </span>
+    test_speed[ujson]        <span class="ansi1">   19.8410 (1.61)   </span>
+    test_speed[json]         <span class="ansi1">   48.0320 (3.90)   </span>
+    test_speed[cjson]        <span class="ansi1">   48.6560 (3.95)   </span>
+    test_speed[simplejson]   <span class="ansi1">   52.0709 (4.23)   </span>
+    test_speed[yajl]         <span class="ansi1">   62.1090 (5.04)   </span>
+    test_speed[jsonlib2]     <span class="ansi1">   81.6209 (6.62)   </span>
+    test_speed[jsonlib]      <span class="ansi1">   83.2670 (6.76)   </span>
+    test_speed[rapidjson]    <span class="ansi1">  102.3500 (8.31)   </span>
+    test_speed[pickle]       <span class="ansi1 ansi31">  258.6429 (20.99)  </span>
+    <span class="ansi33">-----------------------------------------------</span>
+
+Speed (Python 3.5):
+
+    <span class="ansi33">-----------------------------------------------</span>
+    Name (time in ms)              Min
+    <span class="ansi33">-----------------------------------------------</span>
+    test_speed[marshal]      <span class="ansi1 ansi32">  10.0271 (1.0)    </span>
+    test_speed[msgpack]      <span class="ansi1">  10.2731 (1.02)   </span>
+    test_speed[pickle]       <span class="ansi1">  17.2853 (1.72)   </span>
+    test_speed[ujson]        <span class="ansi1">  17.7634 (1.77)   </span>
+    test_speed[rapidjson]    <span class="ansi1">  25.6136 (2.55)   </span>
+    test_speed[json]         <span class="ansi1">  54.8634 (5.47)   </span>
+    test_speed[yajl]         <span class="ansi1">  58.3519 (5.82)   </span>
+    test_speed[simplejson]   <span class="ansi1 ansi31">  65.0913 (6.49)   </span>
+    <span class="ansi33">-----------------------------------------------</span>
+</pre><p>I suppose better use of <a class="reference external" href="http://effbot.org/pyfaq/why-doesnt-python-release-the-memory-when-i-delete-a-large-object.htm">freelists</a> happens here?</p></div></div><div class="section" id="bottom-line"><h2>Bottom line<a class="headerlink" href="#bottom-line" title="Permalink to this headline"> *</a></h2><p>Both speed and memory are affected by data shape. Speed is not always proportional to memory use.</p><p>Again, don't trust the numbers, run the benchmarks yourself, with your own data. Even if your data is identical in shape your hardware might behave differently than mine. Even the memory use can be different on your machine (example: different architecture, different shared libraries). And what's the chance your data has the exact shape as whatever was used in the benchmark?</p><hr class="docutils"/><p>Test setup:</p><ul class="simple"><li>Ubuntu 14.04 (a VM on an <em>unoccupied</em> host, at least in theory)</li><li>Sandy Bridge i7 (TurboBoost off, but frequency scaling was on)</li><li>Python 2.7.6</li><li>Python 3.5.0</li><li>Valgrind 3.11.0</li></ul><p>As you can see the setup is less then perfect. If you really care you'd run the <a class="reference external" href="https://gist.github.com/ionelmc/1521c5a87df8cf49a23d">test code</a> yourself.</p></div></div></div></body></html>

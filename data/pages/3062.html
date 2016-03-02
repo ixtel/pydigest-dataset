@@ -1,0 +1,732 @@
+<html><body><div><div id="article-content" class="article">
+    <h1 class="title">Tornado i18n and l10n</h1>
+    <p/><p/>
+
+<p><a href="http://www.lexev.org/2015/tornado-internationalization-and-localization/"><img alt="Tornado i18n and i10n" src="https://img-fotki.yandex.ru/get/4/85893628.c67/0_1715c7_738478c6_orig.png" title="Tornado i18n and i10n"/></a></p>
+<p>Статья о том, что такое i18n и i10n и как это реализовать в приложении на <a href="http://www.tornadoweb.org/en/stable/">tornado</a>. Получилось довольно много букв, но хотелось рассказать доступно обо всем процессе. Сама пошаговая инструкция - во второй половине статьи.</p>
+<h2>Общие определения</h2>
+<h4>i18n</h4>
+<p>i18n - сокращение от internationalization. Так называют процесс поддержки разных языков в приложении. Это не сам перевод, а именно техническая составляющая проекта, которая позволяет отображать текст на разных языках, в зависимости от предпочтений пользователя. Обычно реализацией занимается разработчик.</p>
+<h4>l10n</h4>
+<p>l10n - сокращение от localization. Означает сам процесс перевода текста на нужные языки. Обычно реализацией занимается переводчик.</p>
+<h4>Языковые теги (language tags)</h4>
+<p>Языковые теги (<a href="http://www.w3.org/International/articles/language-tags/">language tags</a>) указывают язык текста. Формат тегов содержит много нюансов, все они определены в <a href="http://www.rfc-editor.org/rfc/rfc5646.txt">rfc5646</a>.
+Но наиболее часто встречающийся такой:</p>
+<pre><code>en-US
+</code></pre>
+<p>Первая часть означает язык, вторая - регион применения. В данном случае тег <code>en-US</code> означает английский язык, которым пользуются в США. А скажем <code>en-GB</code> будет означать ангийский, которым пользуются в Англии (я полагаю, эти языки имеют небольшие различия). В языковом теге только одна часть обязательная - это язык. Т.е. это абсолютно нормальный тег:</p>
+<pre><code>en
+</code></pre>
+<p>Более того, когда нет особой надобности указывать регион - не указывайте его.</p>
+<h4>CLDR</h4>
+<p><a href="http://cldr.unicode.org/">CLDR</a> - Common Locale Data Repository (общее хранилище языковых данных).  <br/>
+Содержит часто используемые данные на разных языках:</p>
+<ul>
+<li>формат даты, цены в разных валютах, временных зон</li>
+<li>название стран, дней недели, месяцев</li>
+<li>правила написания чисел, формат множественного числа, направление письма, первый день недели</li>
+<li>и много всего другого</li>
+</ul>
+<h2>gettext<a name="gettext"/></h2>
+<p><a href="https://www.gnu.org/software/gettext/">gettext</a> - библиотека для реализации процесса i18n. В этой статье описывается работа именно с ней.   </p>
+<p>Tornado поддерживает так же работу и с <a href="http://www.tornadoweb.org/en/stable/locale.html#tornado.locale.load_translations">CSV файлам</a>, но этот способ имеет гораздо меньше возможностей, поэтому его рассматривать не будем.</p>
+<h4>Краткий принцип работы с gettext</h4>
+<ol>
+<li>Все текстовые строки в коде пишем на английском.</li>
+<li>
+<p>Все строки подставляем в виде аргумента одной из специальных функций, реализованных в gettext. Обычно в python'е для такого случая используют функцию с именем <code>_</code>.  <br/>
+Было:</p>
+<pre><code>"Hello world!"
+</code></pre>
+<p>Стало:</p>
+<pre><code>_("Hello world!")
+</code></pre>
+</li>
+<li>
+<p>Создаем шаблонный файл <code>.pot</code> для перевода текста.  <br/>
+Это делается с помощью команды <a href="https://www.gnu.org/software/gettext/manual/html_node/xgettext-Invocation.html#xgettext-Invocation">xgettext</a>. Она парсит указанные файлы, находит в них вызов той самой функции <code>_</code> и генерирует файл <em>messages.pot</em>.  <br/>
+В этом файле, помимо некоторых служебных данных (заголовков), будут содержаться строки, требующие перевода:    </p>
+<pre><code>msgid "Hello world!"
+msgstr ""
+</code></pre>
+<p>Этот файл не нужно редактировать, пусть он всегда будет таким. В принципе, особой нужды в этом файле нет, непосредственно в переводе он не задействован. Например скрипты django для перевода его нигде не сохраняют. Но все же лучше оставить, ведь его всегда можно дать переводчику, чтобы он мог оценить объем работы.</p>
+</li>
+<li>
+<p>Создаем файл перевода на конкретном языке.
+Для этого воспользуемся командой <a href="https://www.gnu.org/software/gettext/manual/html_node/msginit-Invocation.html">msginit</a>, которая из шаблона <em>messages.pot</em> создаст новый файл <em>messages.po</em>. По сути, это будет копия нашего шаблона, за исключением некоторых частей, специфичных для выбранного языка.</p>
+</li>
+<li>
+<p>Переводим строки в нашем новом <em>messages.po</em>, а так же заполняем заголовки нашими данными. Перевод будет выглядеть так:</p>
+<pre><code>msgid "Hello world!"
+msgstr "Привет, мир!"
+</code></pre>
+</li>
+<li>
+<p>Компилируем перевод командой <a href="https://www.gnu.org/software/gettext/manual/html_node/msgfmt-Invocation.html">msgfmt</a>. На выходе получаем <em>messages.mo</em>.</p>
+</li>
+<li>
+<p>Если где-то в коде добавились строки, которые нужно переводить, то следует лишь обновить <em>messages.po</em>, а не создавать его заново. Таким образом старые переводы сохранятся. Для этого:    </p>
+<ul>
+<li>опять создаем шаблон <em>.pot</em> (пункт 3). Да, это перезатрет предыдущий <em>messages.pot</em>, но это не страшно, ведь мы там ничего не меняем сами</li>
+<li>используем команду <a href="https://www.gnu.org/software/gettext/manual/html_node/msgmerge-Invocation.html">msgmerge</a>, которая синхронизирует файлы <em>.po</em> и <em>.pot</em></li>
+<li>повторяем пункты 5 и 6.</li>
+</ul>
+</li>
+</ol>
+<p>Все, если функция <code>_</code> в нашем проекте работает правильно, то англичанин увидит текст "Hello world!", а русский - "Привет, мир!".</p>
+<p>Пока осталось неясным, что из себя представляет эта самая функция <code>_</code> и откуда ее взять. Так же, как мы определим предпочитаемый язык пользователя, кто он - англичанин или русский? И где взять эти команды <code>xgettext</code>, <code>msginit</code>, <code>msgmerge</code>, <code>msgfmt</code>?</p>
+<p>По порядку.</p>
+<h4>Функция <code>_</code></h4>
+<p>Эту функцию можно написать самому, ведь в python уже встроена работа с <a href="https://docs.python.org/2/library/gettext.html">gettext</a>. Однако, в tornado и в django она уже определена. Надо лишь задать ей это имя. В django это выглядит так:</p>
+<pre><code>from django.utils.translation import ugettext as _
+_("Hello world!")
+</code></pre>
+<p>А в  tornado примерно так:</p>
+<pre><code>class SomeHandler(tornado.web.RequestHandler):
+    def get(self):
+        _ = self.locale.translate
+        _("Hello world!")
+</code></pre>
+<h4>Как функция <code>_</code> определяет предпочитаемый язык пользователя?</h4>
+<p>В самом простом случае в веб приложении язык узнают из HTTP заголовка Accept-Language (предпочитаемый язык задается в настройках браузера). И в django и в tornado это уже реализовано.  <br/>
+Для более сложной логики, когда например пользователь сам может задать нужный ему язык в настройках своего профиля на сайте, в обоих фреймворках есть соответствующие средства. <br/>
+Да, в отличие от django, tornado из коробки не умеет определять язык из префикса в url. Т.е. при правильной настройке django, запрос вида <code>/ru/.../</code> отобразит русский язык, а <code>/en/.../</code> - английский. Но tornado так не умеет, его этому нужно обучать вручную.</p>
+<h4>Где взять команды <code>xgettext</code>, <code>msginit</code>, <code>msgmerge</code>, <code>msgfmt</code></h4>
+<p>Их нужно установить.</p>
+<p>В некоторых версиях Ubuntu они доступны из коробки. Установить можно так:</p>
+<pre><code>sudo apt-get install gettext
+</code></pre>
+<p>На OSX:</p>
+<pre><code>brew install gettext
+brew link gettext --force
+</code></pre>
+<p>Для windows бинарники можно скачать отсюда (не проверял):  <a href="http://gnuwin32.sourceforge.net/packages/gettext.htm">http://gnuwin32.sourceforge.net/packages/gettext.htm</a></p>
+<p>Если устанавливать не хочется или нет возможности, то можно воспользоваться встроенными в python командами: <a href="https://docs.python.org/2/library/gettext.html#internationalizing-your-programs-and-modules"><code>pygettext.py</code>, <code>msgfmt.py</code></a>. Но у них гораздо меньше возможностей, чем у xgettext. К тому же нет msgmerge, который крайне удобен.</p>
+<p>Есть еще одно решение - библиотека <a href="http://babel.pocoo.org/">babel</a>. Она поддерживает многие функции xgettext, включая msgmerge. При этом не требует установленной xgettext, чистый питон. Расскажу о ней чуть позже.</p>
+<h2>Отличия tornado от django</h2>
+<p>Прежде чем приступать к инструкции по реализации i18n в tornado, хочу отметить одну особенность.  <br/>
+Она крайне важна для понимания работы tornado в целом. </p>
+<p>Основное отличие tornado от django состоит в том, что tornado выполняется в одном процессе, а django - нет. Как это влияет на перевод строк?  <br/>
+В django мы можем задать переводимые строки где угодно, хоть в моделях. Для этого в django есть понятие "ленивого" перевода, например <a href="https://docs.djangoproject.com/en/dev/topics/i18n/translation/#working-with-lazy-translation-objects">ugettext_lazy</a>:</p>
+<pre><code>from django.db import models
+from django.utils.translation import ugettext_lazy as _
+
+class SomeModel(models.Model):
+    title = models.CharField(_("Title"), max_length=50)
+</code></pre>
+<p>Функция <code>ugettext_lazy</code> возвращает строку не сразу, а в момент непосредственного обращения к ней. Только в тот момент, когда предпочитаемый язык уже будет определен. Но откуда она все-таки узнает этот язык?  <br/>
+Очевидно, что первоначально клиент должен сделать какой-то запрос, из которого мы узнаем информацию о посетителе и определим его локализацию. В этот момент django сохранит найденный язык (с помощью функции <a href="https://docs.djangoproject.com/en/dev/ref/utils/#django.utils.translation.activate">activate()</a>) в глобальную переменную для данного потока (thread). Напомню, что для обработки каждого запроса в django создается отдельный изолированный поток.  <br/>
+Вот почему функция <code>ugettext_lazy</code> может быть использована где угодно, она отобразит текст на верном языке. Ей не нужно передавать никакие данные о запросе, их она узнает из глобальной переменной.</p>
+<p>А в tornado так не получится, потому что тут нет изолированных потоков, поток всегда один. В этом и фишка асинхронности.  <br/>
+Что может получится, если мы попытаемся реализовать "ленивый" перевод в tornado?  <br/>
+Давайте рассмотрим простейший проект на tornado. Для реализации "ленивости" воспользуемся пакетом <a href="https://pypi.python.org/pypi/speaklater">speaklater</a>:</p>
+<pre><code>import os.path
+from threading import local
+import tornado.web
+from speaklater import make_lazy_gettext
+
+_active = local()
+
+def activate(current_locale):
+    _active.value = current_locale
+
+def gettext(s):
+    return _active.value.translate(s)
+
+_ = make_lazy_gettext(lambda: gettext)
+
+class HiModel(object):
+    hello = _("Hello, world!")
+
+class DoneModel(object):
+    done = _("Fuh, done")
+
+class HomeHandler(tornado.web.RequestHandler):
+    def prepare(self):
+        super(HomeHandler, self).prepare()
+        activate(self.locale)  # set globally locale from request
+
+    @tornado.gen.coroutine
+    def get(self):
+        hello_model = HiModel()
+        self.write(unicode(hello_model.hello))
+        self.write("&lt;br/&gt;")
+        done_model = DoneModel()
+        self.write(unicode(done_model.done))
+        self.write("&lt;br/&gt;")
+        self.finish()
+
+
+application = tornado.web.Application([
+    tornado.web.url(r"/", HomeHandler, name='home'),
+])
+
+if __name__ == "__main__":
+    application.listen(8888)
+    project_folder = os.path.dirname(os.path.abspath(__file__))
+    tornado.locale.load_gettext_translations(os.path.join(project_folder, 'locale'), 'messages')
+    tornado.ioloop.IOLoop.instance().start()
+</code></pre>
+<p>Тут <code>HiModel</code> и <code>DoneModel</code> подразумевают какие-то модели, неважно какие. Главное, что у них есть переводимые строки.  <br/>
+Файл перевода выглядит примерно так:</p>
+<pre><code>msgid "Hello, world!"
+msgstr "Привет, мир!"
+
+msgid "Fuh, done"
+msgstr "Фух, вроде готово"
+</code></pre>
+<p>Запустим наш маленький сервер.  <br/>
+Условимся, что в браузере "browser_en" в настройках стоит английский язык, а в браузере "browser_ru" - русский.</p>
+<p>Откроем адрес <a href="http://127.0.0.1:8888/">http://127.0.0.1:8888/</a> в browser_ru и увидим:</p>
+<pre><code>Привет, мир!
+Фух, вроде готово
+</code></pre>
+<p>То же самое в browser_en:</p>
+<pre><code>Hello, world!
+Fuh, done
+</code></pre>
+<p>Вроде все работает правильно. Но попробуем добавить асинхронную задачу. Для простоты воспользуемся <a href="http://tornado.readthedocs.org/en/latest/ioloop.html#tornado.ioloop.IOLoop.add_timeout">асинхронным таймером</a>:</p>
+<pre><code>@tornado.gen.coroutine
+def get(self):
+    hello_model = HiModel()
+    self.write(unicode(hello_model.hello))
+    self.write("&lt;br/&gt;")
+    io_loop = tornado.ioloop.IOLoop.instance()
+    yield tornado.gen.Task(io_loop.add_timeout, timedelta(seconds=5))
+    done_model = DoneModel()
+    self.write(unicode(done_model.done))
+    self.write("&lt;br/&gt;")
+    self.finish()
+</code></pre>
+<p>Т.е. мы просто добавили эти строки:</p>
+<pre><code>    io_loop = tornado.ioloop.IOLoop.instance()
+    yield tornado.gen.Task(io_loop.add_timeout, timedelta(seconds=5))
+</code></pre>
+<p>между работой с <code>HiModel</code> и <code>DoneModel</code>.  <br/>
+А теперь попробуем зайти из browser_ru и сразу, не дожидаясь окончания таймера, из browser_en.</p>
+<p>В browser_ru мы увидим это:</p>
+<pre><code>Привет, мир!
+Fuh, done
+</code></pre>
+<p>а в browser_en:</p>
+<pre><code>Hello, world!
+Fuh, done
+</code></pre>
+<p>Думаю вы уже догадались, почему в browser_ru мы видим часть текста на русском, а часть - на английском. На всякий случай давайте разберемся.</p>
+<p>В момент, когда было обращение из browser_ru, мы выставили глобально русский язык.  <br/>
+Потом пошла асинхронная задача.  <br/>
+Дальше пришел другой запрос (browser_en), который выставил глобально английский язык.  <br/>
+После чего асинхронная команда из первого запроса завершилась и обработчик продолжил работу. Но язык уже поменялся другим обработчиком, и строка "Fuh, done" не перевелась.</p>
+<p>Из всего этого можно сделать вывод, что в tornado определить язык можно только в контексте запроса  (handler), и никак иначе.</p>
+<h2>Реализация i18n в tornado с помощью xgettext <a name="tornado-i18n-xgettext"/></h2>
+<p>В <a href="http://www.tornadoweb.org/en/stable/locale.html#module-tornado.locale">документации tornado</a> процесс i18n описан довольно скудно, поэтому здесь хочу описать прям по шагам, что и как нужно делать.</p>
+<p>По-моему, лучше всего объяснять на конкретном примере. Поэтому давайте создадим простейший проект на tornado.</p>
+<p>Структура проекта элементарная:</p>
+<pre><code>└── project
+    ├── app.py
+    ├── home.html
+    └── requirements.txt
+</code></pre>
+<p>app.py:</p>
+<pre><code>import tornado.ioloop
+import tornado.web
+
+class HomeHandler(tornado.web.RequestHandler):
+    def get(self):
+        self.render("home.html", text="Hello, world!")
+
+application = tornado.web.Application([
+    tornado.web.url(r"/", HomeHandler, name='home'),
+])
+
+if __name__ == "__main__":
+    application.listen(8888)
+    tornado.ioloop.IOLoop.instance().start()
+</code></pre>
+<p>home.html:</p>
+<pre><code>&lt;html&gt;
+   &lt;head&gt;&lt;title&gt;Home page&lt;/title&gt;&lt;/head&gt;
+   &lt;body&gt;
+     &lt;div&gt;Home page&lt;/div&gt;
+     &lt;div&gt;{{text}}&lt;/div&gt;
+   &lt;/body&gt;
+ &lt;/html&gt;
+</code></pre>
+<p>requirements.txt:</p>
+<pre><code>tornado==4.0.2
+</code></pre>
+<h4>Цель</h4>
+<p>Добавить в проект поддержку двух языков: английского и русского. Если у пользователя в браузере предпочитаемый язык английский - показывать текст на английском, если русский - то соответственно русский.</p>
+<h4>1. Весь текст в коде должен быть на английском</h4>
+<p>У нас это уже выполнено, на данный момент в проекте есть такие строки:</p>
+<pre><code>"Hello, world!"  # app.py
+"Home page"    # home.html
+</code></pre>
+<h4>2. Маркируем текст</h4>
+<p>Первым делом нужно обозначить строки, требующие перевода (пункт 2. раздела <a href="#gettext">gettext</a>).  <br/>
+Как мы помним, это делается функцией <code>_</code>.   <br/>
+В коде обработчика ее можно получить так:</p>
+<pre><code>_ = self.locale.translate
+</code></pre>
+<p>Код хендлера (файл app.py):</p>
+<pre><code>class HomeHandler(tornado.web.RequestHandler):
+    def get(self):
+        _ = self.locale.translate
+        self.render("home.html", text=_("Hello, world!"))
+</code></pre>
+<p>В шаблоне эта функция уже доступна, она определена в методе <a href="https://github.com/tornadoweb/tornado/blob/branch4.0/tornado/web.py#L788">get_template_namespace()</a>.  <br/>
+Код шаблона (файл home.html):</p>
+<pre><code>&lt;html&gt;
+   &lt;head&gt;&lt;title&gt;{{_("Home page")}}&lt;/title&gt;&lt;/head&gt;
+   &lt;body&gt;
+     &lt;div&gt;{{_("Home page")}}&lt;/div&gt;
+     &lt;div&gt;{{text}}&lt;/div&gt;
+   &lt;/body&gt;
+ &lt;/html&gt;
+</code></pre>
+<p>Шаблонизатор tornado выполняет python код, который заключен внутри двойных фигурных скобок <code>{{ ... }}</code>.</p>
+<h4>3. Создаем файл перевода</h4>
+<p>Сперва создадим папку locale в корне нашего проекта:</p>
+<pre><code>mkdir locale
+</code></pre>
+<p>Далее создаем файлик <code>makemessages.sh</code> в корне проекта и кладем туда такой bash код:</p>
+<pre><code>#!/bin/bash 
+# get arguments and init variables
+if [ "$#" -lt 1 ]; then
+    echo "Usage: $0 &lt;locale&gt; [optional: &lt;domain_name&gt;]"
+    exit 1
+fi
+locale=$1
+domain="messages"
+if [ ! -z "$2" ]; then
+    domain=$2
+fi
+locale_dir="locale/${locale}/LC_MESSAGES"
+pot_file="locale/${domain}.pot"
+po_file="${locale_dir}/${domain}.po"
+# create folders if not exists
+mkdir -p $locale_dir
+# create .pot file
+find . -iname "*.html" -o -iname "*.py" | xargs \
+    xgettext --output=${pot_file} --language=Python --from-code=UTF-8 \
+    --sort-by-file --keyword=_ --keyword=_:1,2 --no-wrap
+# init .po file, if it doesn't exist yet
+if [ ! -f $po_file ]; then
+    msginit --input=${pot_file} --output-file=${po_file} --no-wrap --locale=${locale}
+else
+    # update .po file
+    msgmerge --no-wrap --sort-by-file --output-file=${po_file} ${po_file} ${pot_file}
+fi
+</code></pre>
+<p>Даем права на запуск:</p>
+<pre><code>chmod a+x makemessages.sh
+</code></pre>
+<p>При запуске нужно указать языковой тег. Для этого языка мы будем делать перевод, в данном примере это русский:</p>
+<pre><code>./makemessages.sh ru
+</code></pre>
+<p>При первом запуске может потребоваться ввести ваш email. <br/>
+После выполнения появятся файлы <em>messages.pot</em> и <em>messages.po</em>:</p>
+<pre><code>project
+├── locale
+│   ├── ru
+│   │   └── LC_MESSAGES
+│   │       └── messages.po
+│   └── messages.pot
+├── app.py
+├── home.html
+├── requirements.txt
+└── makemessages.sh
+</code></pre>
+<p>Содержимое messages.po:</p>
+<pre><code># Russian translations for tornado_i18n package.
+# Copyright (C) 2015 THE tornado_i18n'S COPYRIGHT HOLDER
+# This file is distributed under the same license as the tornado_i18n package.
+# stalk &lt;alexevseev@gmail.com&gt;, 2015.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: tornado_i18n\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2015-01-30 12:27+0300\n"
+"PO-Revision-Date: 2015-01-30 12:27+0300\n"
+"Last-Translator: stalk &lt;alexevseev@gmail.com&gt;\n"
+"Language-Team: Russian\n"
+"Language: ru\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=ASCII\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=3; plural=(n%10==1 &amp;&amp; n%100!=11 ? 0 : n%10&gt;=2 &amp;&amp; n%10&lt;=4 &amp;&amp; (n%100&lt;10 || n%100&gt;=20) ? 1 : 2);\n"
+
+#: app.py:8
+msgid "Hello, world!"
+msgstr ""
+
+#: home.html:2 home.html:4
+msgid "Home page"
+msgstr ""
+</code></pre>
+<p>Здесь нужно <strong>обязательно</strong> поменять charset=ASCII на charset=UTF-8, остальные заголовки - опционально:</p>
+<pre><code>"Content-Type: text/plain; charset=UTF-8\n"
+</code></pre>
+<h4>4. Переводим</h4>
+<p>Заполняем пустые строки вида msgstr "" в <em>messages.po</em> (не <em>.pot</em>!):</p>
+<pre><code>#: app.py:8
+msgid "Hello, world!"
+msgstr "Привет, мир!"
+
+#: home.html:2 home.html:4
+msgid "Home page"
+msgstr "Домашняя страница"
+</code></pre>
+<h4>5. Компилируем перевод</h4>
+<p>Создаем файлик <code>compilemessages.sh</code> с кодом:</p>
+<pre><code>#!/bin/bash 
+# get arguments and init variables
+if [ "$#" -lt 1 ]; then
+    echo "Usage: $0 &lt;locale&gt; [optional: &lt;domain_name&gt;]"
+    exit 1
+fi
+locale=$1
+domain="messages"
+if [ ! -z "$2" ]; then
+    domain=$2
+fi
+locale_dir="locale/${locale}/LC_MESSAGES"
+po_file="${locale_dir}/${domain}.po"
+mo_file="${locale_dir}/${domain}.mo"
+# create .mo file from .po
+msgfmt ${po_file} --output-file=${mo_file}
+</code></pre>
+<p>Даем права на запуск:</p>
+<pre><code>chmod a+x compilemessages.sh
+</code></pre>
+<p>При запуске указываем тот же языковой тег, что и для <em>makemessages.sh</em>:</p>
+<pre><code>./compilemessages.sh ru
+</code></pre>
+<p>Получился файл <em>locale/ru/LC_MESSAGES/messages.mo</em>:</p>
+<pre><code>project
+├── locale
+│   ├── ru
+│   │   └── LC_MESSAGES
+│   │       ├── messages.po
+│   │       └── messages.mo
+│   └── messages.pot
+├── app.py
+├── home.html
+├── requirements.txt
+├── compilemessages.sh
+└── makemessages.sh
+</code></pre>
+<h4>6. Связываем перевод с нашим проектом</h4>
+<p>Для этого вызываем функцию <a href="http://www.tornadoweb.org/en/stable/locale.html#tornado.locale.load_gettext_translations">load_gettext_translations()</a>.</p>
+<p>app.py:</p>
+<pre><code>if __name__ == "__main__":
+    tornado.locale.load_gettext_translations('locale', 'messages')
+    application.listen(8888)
+    tornado.ioloop.IOLoop.instance().start()
+</code></pre>
+<p>Попробуем запустить проект.    </p>
+<pre><code>python app.py
+</code></pre>
+<p>Откроем в browser_en адрес <a href="http://127.0.0.1:8888/">http://127.0.0.1:8888/</a>:</p>
+<pre><code>Home page
+Hello, world!
+</code></pre>
+<p>и brower_ru:</p>
+<pre><code>Домашняя страница
+Привет, мир!
+</code></pre>
+<p>Вот и все, перевод готов!</p>
+<h4>7. Обновление перевода</h4>
+<p>Допустим, в файле home.html у нас добавился текст, который нужно перевести:</p>
+<pre><code>&lt;div&gt;{{_("Good buy!")}}&lt;/div&gt;
+</code></pre>
+<p>В этом случае мы просто выполняем наш скрипт:</p>
+<pre><code>./makemessages.sh ru
+</code></pre>
+<p>заполняем перевод в обновленном <em>messages.po</em>:</p>
+<pre><code>#: home.html:6
+msgid "Good buy!"
+msgstr "До свидания!"
+</code></pre>
+<p>компилируем:</p>
+<pre><code>./compilemessages.sh ru
+</code></pre>
+<p>и перезапускаем сервер</p>
+<pre><code>python app.py
+</code></pre>
+<p>Все!</p>
+<h4>8. Множественные значения</h4>
+<p>gettext поддерживает множественные значения (plural forms). Вот как это выглядит:</p>
+<pre><code>ngettext("{count} event is gonna happen", "{count} events are gonna happen", count).format(count=count)
+</code></pre>
+<p>ngettext - стандартное имя функции для множественных форм, которое используется в gettext.  <br/>
+Но в tornado функция <code>self.locale.translate</code>, которую мы назвали как <code>_</code>, так же поддерживает аргументы ngettext. Вообщем, мы можем вместо ngettext использовать привычный нам <code>_</code>:</p>
+<pre><code>_("{count} event is gonna happen", "{count} events are gonna happen", count).format(count=count)
+</code></pre>
+<p>Обратите внимание на аргументы функции xgettext в нашем скрипте выше:</p>
+<pre><code>--keyword=_ --keyword=_:1,2
+</code></pre>
+<p>Так мы указываем для парсера, что функция <code>_</code> может принимать как одну строку, так и две вместе с числом.</p>
+<p>Смысл этого в том, что в зависимости от значения <code>count</code> строка будет принимать либо множественное значение, либо единичное.  <br/>
+В случае английского языка это будет выглядеть так:</p>
+<pre><code>_("{count} event is gonna happen", "{count} events are gonna happen", 1).format(count=1)
+# вывод
+"1 event is gonna happen"
+
+_("{count} event is gonna happen", "{count} events are gonna happen", 2).format(count=2)
+# вывод
+"2 events are gonna happen"
+</code></pre>
+<p>Как мы видим, у английского языка только 1 форма множественного числа. Т.е. всегда, когда <code>count &gt; 1</code>, вывод будет один и тот же.</p>
+<p>Однако в русском языке может быть 3 формы (а в некоторых других языках и того больше). Давайте попробуем перевести вручную эту строку:</p>
+<pre><code>1,21,31 событие должно случиться
+2,3,4,22 события должно случиться
+5,6,7,8,9,20,25 событий должно случиться
+</code></pre>
+<p>Если мы все сделаем правильно, gettext будет выводить верную форму.</p>
+<p>Реализуем это в нашем примере.  <br/>
+Добавим в шаблон home.html такую строку:</p>
+<pre><code>&lt;div&gt;{{_("{count} event is gonna happen", "{count} events are gonna happen", count).format(count=count)}}&lt;/div&gt;
+</code></pre>
+<p>а в обработчик из файла app.py:</p>
+<pre><code>class HomeHandler(tornado.web.RequestHandler):
+    def get(self):
+        _ = self.locale.translate
+        count = int(self.get_argument('count', 1))
+        self.render("home.html", text=_("Hello, world!"), count=count)
+</code></pre>
+<p>Обновим наш файл переводов:</p>
+<pre><code>./makemessages.sh ru
+</code></pre>
+<p>Видим такие строки в <em>locale/ru/LC_MESSAGES/messages.po</em>:</p>
+<pre><code>#: home.html:6
+#, python-brace-format
+msgid "{count} event is gonna happen"
+msgid_plural "{count} events are gonna happen"
+msgstr[0] ""
+msgstr[1] ""
+msgstr[2] ""
+</code></pre>
+<p>gettext сам знает, что в русском языке для множественного значения может быть 3 формы.
+Обратите внимание на заголовок, который был создан командой msginit:</p>
+<pre><code>"Plural-Forms: nplurals=3; plural=(n%10==1 &amp;&amp; n%100!=11 ? 0 : n%10&gt;=2 &amp;&amp; n%10&lt;=4 &amp;&amp; (n%100&lt;10 || n%100&gt;=20) ? 1 : 2);\n"
+</code></pre>
+<p>Условия из этого заголовка и определяют нужный вариант в зависимости от числа.  <br/>
+Итак, добавим перевод:</p>
+<pre><code>#: home.html:6
+#, python-brace-format
+msgid "{count} event is gonna happen"
+msgid_plural "{count} events are gonna happen"
+msgstr[0] "{count} событие должно случиться"
+msgstr[1] "{count} события должно случиться"
+msgstr[2] "{count} событий должно случиться"
+</code></pre>
+<p>Скомпилируем:</p>
+<pre><code>./compilemessages.sh ru
+</code></pre>
+<p>Запустим сервер и попробуем обратиться из browser_ru</p>
+<p><a href="http://127.0.0.1:8888/">http://127.0.0.1:8888/</a>:</p>
+<pre><code>1 событие должно случиться
+</code></pre>
+<p><a href="http://127.0.0.1:8888/?count=2">http://127.0.0.1:8888/?count=2</a></p>
+<pre><code>2 события должно случиться
+</code></pre>
+<p><a href="http://127.0.0.1:8888/?count=5">http://127.0.0.1:8888/?count=5</a></p>
+<pre><code>5 событий должно случиться
+</code></pre>
+<p>Отлично!</p>
+<h4>9. Особая логика для выбора языка</h4>
+<p>До сих пор язык пользователя определялся из настроек его браузера. Но допустим мы хотим, чтобы пользователь мог сам выбрать язык и сохранить его где-нибудь у себя в профиле на нашем сайте.  <br/>
+Логику выбора языка можно легко изменить. Если мы это сделаем, то настройки браузера уже не будут влиять.  <br/>
+Для этого просто нужно определить язык в методе <code>get_user_locale()</code>:</p>
+<pre><code>class HomeHandler(tornado.web.RequestHandler):
+
+    def get_user_locale(self):
+        return tornado.locale.get("ru")
+
+    def get(self):
+        _ = self.locale.translate
+        self.render("home.html", text=_("Hello, world!"))
+</code></pre>
+<p>Теперь независимо от браузера, текст всегда будет отображаться на русском языке.</p>
+<h2>Библиотека babel</h2>
+<p>Идем дальше. <a href="http://babel.pocoo.org/">babel</a> предоставляет доступ к CLDR данным из python'а. Так же она реализует команды xgettext на python'e, т.о. xgettext можно не устанавливать. Но остановимся пока на CLDR.</p>
+<p>Давайте попробуем вывести цену какого-нибудь продукта в долларах. В разных странах приняты разные способы отображения цен.  <br/>
+Например, в России обычно указывают цену так: 99,00 $  <br/>
+а в США так: $99.00  <br/>
+а в какой-то другой стране еще по другому.</p>
+<p>И эта информация, помимо всего прочего, есть в CLDR (рубли там тоже есть :))! Мы можем легко использовать ее благодаря babel.  <br/>
+Установим babel:</p>
+<pre><code>pip install babel
+</code></pre>
+<p>Изменим app.py:</p>
+<pre><code>import tornado.ioloop
+import tornado.web
+from babel.numbers import format_currency
+
+
+class HomeHandler(tornado.web.RequestHandler):
+    def get(self):
+        _ = self.locale.translate
+        count = int(self.get_argument('count', 1))
+        format_usd = lambda p: format_currency(p, currency="USD",
+            locale=self.locale.code)
+        self.render("home.html", text=_("Hello, world!"), count=count,
+            format_usd=format_usd)
+</code></pre>
+<p>а в шаблон home.html добавим цену:</p>
+<pre><code>&lt;div&gt;{{format_usd(99)}}&lt;/div&gt;
+</code></pre>
+<p>И все, ничего больше делать не надо.  <br/>
+browser_ru отобразит:</p>
+<pre><code>99,00 $
+</code></pre>
+<p>browser_en:</p>
+<pre><code>$99.00
+</code></pre>
+<p>Это лишь одна из множества функций, доступная в babel. Там есть дни недели, месяцев, форматы даты и многое другое. И этим можно и нужно пользоваться, не стоит переводить все вручную.</p>
+<h2>Реализация i18n в tornado с помощью babel <a name="tornado-i18n-babel"/></h2>
+<p>Как я уже говорил, в babel реализованы основные функции xgettext на python'e. Т.о. можно не устанавливать xgettext. Так же в babel есть возможность задавать свой синтаксис для парсинга. Это может быть удобно для шаблонов html, где синтаксис отличается от python.</p>
+<p>Возьмем все тот же наш маленький проект. По идее, нам нужно будет лишь изменить скрипты <em>makemessages.sh</em> и <em>compilemessages.sh</em>.</p>
+<p>Для чистоты эксперимента удалим все файлы внутри папки locale. Т.о. структура проекта будет такая:</p>
+<pre><code>project
+├── locale
+├── app.py
+├── home.html
+├── requirements.txt
+├── makemessages.sh
+└── compilemessages.sh
+</code></pre>
+<p>Установим babel, если еще не установили:</p>
+<pre><code>pip install babel
+</code></pre>
+<p>Так же для парсинга шаблонов tornado нам понадобится пакет <a href="https://pypi.python.org/pypi/Tornado-Babel/">tornado-babel</a>:</p>
+<pre><code>pip install tornado-babel
+</code></pre>
+<p>Первым делом нужно создать файл <em>locale/babel.cfg</em> с содержимым:</p>
+<pre><code>[python: **.py]
+[tornado: **.html]
+</code></pre>
+<p>Так мы указываем, какие файлы парсить и какой синтаксис использовать при парсинге.</p>
+<p>Перепишем наш <em>makemessages.sh</em>, чтобы он вызывал команды babel вместо xgettext:</p>
+<pre><code>#!/bin/bash 
+# get arguments and init variables
+if [ "$#" -lt 1 ]; then
+    echo "Usage: $0 &lt;locale&gt; [optional: &lt;domain_name&gt;]"
+    exit 1
+fi
+locale=$1
+domain="messages"
+if [ ! -z "$2" ]; then
+    domain=$2
+fi
+base_dir="locale"
+locale_dir="${base_dir}/${locale}/LC_MESSAGES"
+pot_file="${base_dir}/${domain}.pot"
+po_file="${locale_dir}/${domain}.po"
+babel_config="${base_dir}/babel.cfg"
+# create pot template
+pybabel extract ./ --output=${pot_file} \
+    --charset=UTF-8 --no-wrap --sort-by-file \
+    --keyword=_ --mapping=${babel_config}
+# init .po file, if it doesn't exist yet
+if [ ! -f $po_file ]; then
+    pybabel init --input-file=${pot_file} --output-dir=${base_dir} \
+        --domain=${domain} --locale=${locale} --no-wrap
+else
+    # update .po file
+    pybabel update --domain=${domain} --input-file=${pot_file} \
+    --output-dir=${base_dir} --locale=${locale} --no-wrap
+fi
+</code></pre>
+<p>А так же compilemessages.sh:</p>
+<pre><code>#!/bin/bash 
+# get arguments and init variables
+if [ "$#" -lt 1 ]; then
+    echo "Usage: $0 &lt;locale&gt; [optional: &lt;domain_name&gt;]"
+    exit 1
+fi
+locale=$1
+domain="messages"
+if [ ! -z "$2" ]; then
+    domain=$2
+fi
+locale_dir="locale/${locale}/LC_MESSAGES"
+po_file="${locale_dir}/${domain}.po"
+mo_file="${locale_dir}/${domain}.mo"
+# create .mo file from .po
+pybabel compile --locale=${locale} --domain=${domain} --directory=locale/
+</code></pre>
+<p>Если вы заметили, мы указываем только <code>--keyword=_</code>. Без <code>--keyword=_:1,2</code>. Почему?  <br/>
+Дело в том, что в версии babel==1.3, которая доступна из pypi на момент написания статьи, не поддерживаются разные аргументы для одной и той же функции.  <br/>
+На что это влияет в нашем случае?  <br/>
+Нам придется для множественных форм использовать функцию <code>ngettext</code>, а не <code>_</code>.  <br/>
+Для этого поправим чуть-чуть app.py, определив <code>ngettext</code> и передав ее в шаблон:</p>
+<pre><code>class HomeHandler(tornado.web.RequestHandler):
+
+    def get(self):
+        ngettext = _ = self.locale.translate
+        # ...
+        self.render("home.html", text=_("Hello, world!"), count=count,
+            ngettext=ngettext)
+</code></pre>
+<p>и в шаблоне для перевода множественных форм используем ngettext:</p>
+<pre><code> &lt;div&gt;{{ngettext("{count} event is gonna happen", "{count} events are gonna happen", count).format(count=count)}}&lt;/div&gt;
+</code></pre>
+<p>Дальше все по старому.</p>
+<p>Создаем файлы перевода:</p>
+<pre><code>./makemessages.sh ru
+</code></pre>
+<p>Опять добавляем перевод в <em>locale/ru/LC_MESSAGES/messages.po</em>.</p>
+<p>Компилируем:</p>
+<pre><code>./compilemessages.sh ru
+</code></pre>
+<p>При выполнении этого скрипта можно увидеть что-то вроде</p>
+<pre><code>catalog 'locale/ru/LC_MESSAGES/messages.po' is marked as fuzzy, skipping
+</code></pre>
+<p>Тогда нужно в файле <em>messages.po</em> удалить такие строки, говорящие, что перевод не подтвержденный:</p>
+<pre><code>#, fuzzy
+</code></pre>
+<p>и опять скомпилировать перевод.</p>
+<p>И теперь все работает аналогично. Но без xgettext!</p>
+<h4>Исправляем babel</h4>
+<p>Согласитесь, что неудобно иметь две функции <code>_</code> и <code>ngettext</code>. Давайте это исправим! :)  <br/>
+Я отправил pull-request'ы в <a href="https://github.com/mitsuhiko/babel/pull/140">babel репозиторий</a> и в <a href="https://github.com/openlabs/tornado-babel/pull/6">tornado-babel</a>. Возможно, они уже приняты.  <br/>
+Однако, чтобы не ждать, есть готовые версии с этими исправлениями. Но вначале удалим текущие babel и tornado-babel:</p>
+<pre><code>pip uninstall babel
+pip uninstall tornado-babel
+</code></pre>
+<p>Ставим исправленные версии:</p>
+<pre><code>pip install https://github.com/st4lk/babel/archive/2.1.2-draft.tar.gz
+pip install https://github.com/st4lk/tornado-babel/archive/0.3b.tar.gz
+</code></pre>
+<p>Добавим <code>--keyword=_1,2</code> в <em>makemessages.sh</em>.  <br/>
+Было:</p>
+<pre><code>--keyword=_ --mapping=${babel_config}
+</code></pre>
+<p>Стало:</p>
+<pre><code>--keyword=_ --keyword=_:1,2 --mapping=${babel_config}
+</code></pre>
+<p>Уберем теперь уже не нужную функцию ngettext.</p>
+<p>app.py:</p>
+<pre><code>class HomeHandler(tornado.web.RequestHandler):
+
+    def get(self):
+        _ = self.locale.translate
+        # ...
+        self.render("home.html", text=_("Hello, world!"), count=count)
+</code></pre>
+<p>home.html:</p>
+<pre><code>&lt;div&gt;{{_("{count} event is gonna happen", "{count} events are gonna happen", count).format(count=count)}}&lt;/div&gt;
+</code></pre>
+<p>Ура, теперь мы работаем с babel точно так же, как и с xgettext!</p>
+<p>Если что, код примера на github'e: <a href="https://github.com/st4lk/tornado_i18n_example">https://github.com/st4lk/tornado_i18n_example</a></p>
+</div>
+
+
+
+
+
+
+</div></body></html>

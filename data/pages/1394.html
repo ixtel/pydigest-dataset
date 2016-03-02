@@ -1,0 +1,180 @@
+<html><body><div><div class="content html_format">
+      <img src="https://habrastorage.org/files/fb5/ee8/54c/fb5ee854c8f147f59500f5319fcd7d86.png" align="right"/><p>Уже несколько лет как появилась возможность любому </p><s>смертному</s><p> желающему арендовать не только shared-хостинг, но и «полноценный» сервер с root-доступом и возможностью настроить его так, как хочется самому. Настроить, например, кроме web-сервера еще и кучу других сервисов.</p><p>
+Так же поступил и я несколько лет назад. Сначала арендовал один сервер, потом другой, и переносил настройки ручками, находя нужные файлы в директории /etc.
+</p><p>
+За пару лет на моём сервере осело несколько блогов друзей, и даже почтовый сервер, так как давно не хочу, чтобы моя почта была у Google. Насчет сохранности данных задумывался после каждой статьи на Хабре, но всё было как-то не до этого. И, как говорится, админы делятся на три категории: на тех, кто не делает бэкапы, на тех, кто уже делает и на тех, кто даже проверяет восстанавливаемость из бэкапов. Так получилось и со мной, хоть хостер и очень хороший, но произошла у них авария с жесткими дисками. Да такая, что неделю они пытались восстановить диски и предварительные оценки были очень неутешительными. А бэкапов у меня не было. Какое настроение у меня было в те дни можете сами представить.
+</p><p>
+Но через несколько дней техникам хостера удалось-таки восстановить данные и запустить все виртуальные сервера на той ноде. А я задумался о бэкапах. Думал я так — бэкап должен быть не на том же сервере (естественно!), желательно, чтобы он был у меня на компьютере, но не в одном экземпляре. Я обдумал и установку FTP на домашний компьютер и даже отправку архивов письмами, но все эти варианты меня не устраивали. И я понял, что надо попробовать Dropbox, которым я к тому времени пользовался уже пару лет, а бесплатных гигов у меня было около 18-ти.
+
+</p><h4>Преимущества бэкапа в Dropbox:</h4>
+<ul>
+<li>Независимость от домашней инфраструктуры и канала в Интернет</li>
+<li>Множественные копии (сразу на все синхронизируемые ПК)</li>
+<li>Кроме собственного хранения бэкапы хранятся и в облаке</li>
+</ul>
+<h4>Что делает представленный мной скрипт?</h4>
+<ul>
+<li>Инкрементальный бэкап файлов в указанных папках (по первым и пятнадцатым числам идет полный бэкап)</li>
+<li>Бэкап всей базы MySQL</li>
+<li>Бэкап архивируется с помощью 7zip, с указанием пароля (вам же не надо хранить пароли в открытом виде в Dropbox'е?)</li>
+</ul><a name="habracut"/>
+<h4>Как это делается?</h4><p>
+Вкратце, создаётся «приложение» с точки зрения платформы Dropbox, авторизуется пользователем (то есть нами) и пишется скрипт, который пользуется авторизационными данными и заливает файлы бэкапа на Dropbox.
+
+</p><h4>А точнее?</h4>
+<h5>Шаг 1 — создание приложения</h5><p>
+Заходим на страницу </p><a href="https://www.dropbox.com/developers/apps">App Console</a><p>, нажимаем кнопку «Create app», выбираем тип «Dropbox API app», выбираем пункт «Files and datastores», так как мы собираемся работать с файлами, а в следующем пункте отвечаем «Yes — My app only needs access to files it creates», это означает, что ваше приложение будет ограничено только своей отдельной подпапкой в папке App, к другим файлам у него не будет доступа. Придумываем название своему приложению и нажимаем «Create app».</p><p>
+Перед вами предстанет целая страница настроек созданного приложения, но там не требуется ничего дополнительно настраивать. Но пока не закрывайте её.
+
+</p><h5>Шаг 2 — скачивание и установка SDK</h5><p>
+Чтобы писать приложения, которые будут работать с файлами в вашем Dropbox'е, надо зайти в раздел </p><a href="https://www.dropbox.com/developers/core">Core API</a><p>. Там мы можем скачать нужные нам SDK, почитать документацию и пройти обучающие туры.</p><p>
+Так как я считаю, что лучшим языком для скриптования для меня является Python, то я скачал себе его SDK и установил. Установка очень простая, всё ограничивается скачиванием, разархивированием самого SDK и установкой его с помощью команд "</p><i>python setup.py install</i><p>", или "</p><i>pip install dropbox</i><p>".
+
+</p><h5>Шаг 3 — авторизация</h5><p>
+Библиотека Core API использует </p><a href="http://www.oauth.net/">OAuth v2</a><p>, но Python SDK от Dropbox'а сам позаботится о том, как им пользоваться, так что вам не о чем волноваться и не придется писать всё с нуля.</p><p>
+Настало время накодить небольшой скрипт:
+
+</p><pre><code class="python"># Включить Dropbox SDK
+import dropbox
+
+# Вставить настоящие app_key и app_secret со страницы созданного приложения из шага 1
+app_key = 'INSERT_APP_KEY'
+app_secret = 'INSERT_APP_SECRET'
+
+flow = dropbox.client.DropboxOAuth2FlowNoRedirect(app_key, app_secret)
+
+# На данном этапе юзер авторизуется
+authorize_url = flow.start()
+print '1. Перейдите по ссылке: ' + authorize_url
+print '2. Нажмите "Allow"'
+print '3. Скопируйте авторизационный код.'
+code = raw_input("Вставьте авторизационный код сюда: ").strip()
+
+# Если вы ввели правильный код, то дальше он отсылается на сервер и получается access_token, который нам нужен
+access_token, user_id = flow.finish(code)
+
+# Для проверки авторизации выведем информацию об аккаунте
+client = dropbox.client.DropboxClient(access_token)
+print 'linked account: ', client.account_info()
+
+# А сам access_token вам надо сохранить в файл для дальнейшей работы скрипта
+print 'access_token: ', access_token
+</code></pre>
+<h5>Шаг 4 — создаём временную папку и файл токена</h5><p>
+Сам скрипт backup.py у меня лежит в папке /root, в ней же есть временная папка backup и файл dropbox_token.txt. Вам тоже нужно создать их и в файл записать токен с предыдущего шага. Токен состоит из двух строк, в файле они именно так и лежат, с переносом строки.
+
+</p><h5>Шаг последний — пишем скрипт бэкапа</h5>
+<div class="spoiler"><b class="spoiler_title">Развернуть</b><div class="spoiler_text"><pre><code class="python">#!/usr/bin/python
+
+import os
+import sys
+import time
+import string
+from os.path import getsize
+
+curDate = time.strftime("%d.%m.%Y", time.gmtime())
+curDay = time.strftime("%d", time.gmtime())
+backupDelay = time.time()-86400
+if curDay == "01" or curDay == "15":
+  backupDelay = 0
+print "curDate:", curDate
+
+# Include the Dropbox SDK libraries
+from dropbox import client, rest, session
+
+# Get your app key and secret from the Dropbox developer website
+APP_KEY = 'ключ приложения'
+APP_SECRET = 'секретный код приложения'
+
+# ACCESS_TYPE should be 'dropbox' or 'app_folder' as configured for your app
+ACCESS_TYPE = 'app_folder'
+sess = session.DropboxSession(APP_KEY, APP_SECRET, ACCESS_TYPE)
+
+oauth_token = ''
+oauth_token_secret = ''
+
+f = open("dropbox_token.txt",'r')
+if f:
+  oauth_token = string.strip(f.readline())
+  oauth_token_secret = string.strip(f.readline())
+  f.close()
+
+print "oauth token found:", oauth_token, oauth_token_secret
+
+if oauth_token == '' or oauth_token_secret == '':
+  request_token = sess.obtain_request_token()
+
+  # Authorize the application on dropbox site
+  url = sess.build_authorize_url(request_token)
+  print "url:", url
+  print "Please visit this website and press the 'Allow' button, then hit 'Enter' here."
+  raw_input()
+  # This will fail if the user didn't visit the above URL and hit 'Allow'
+  access_token = sess.obtain_access_token(request_token)
+  f = open("dropbox_token.txt","wb")
+  f.write(access_token.key + '\n')
+  f.write(access_token.secret)
+  f.close()
+else:
+  sess.set_token(oauth_token, oauth_token_secret)
+
+client = client.DropboxClient(sess)
+print "linked account:", client.account_info()
+
+def sync_dir(dir):
+  rootdir = dir
+  print "Syncing directory:", rootdir
+  startTime = backupDelay
+  for root, subFolders, files in os.walk(rootdir):
+    for file in files:
+      fname = os.path.join(root,file)
+      if os.path.getmtime(fname)&gt;startTime:
+        #print root, file
+        os.system("mkdir -p 'backup"+root+"'")
+        os.system("cp '"+fname+"' 'backup"+fname+"'")
+
+print "Making dump of MySQL databases..."
+os.system("mysqldump --all-databases -uroot -pROOT_ПАРОЛЬ_MYSQL -r backup/backup.sql")
+
+sync_dir("/var/www")
+sync_dir("/var/spool/virtual")
+sync_dir("/home/user")
+
+backupName = 'backup_'+curDate+'.7z'
+
+print "Creating archive with name", backupName
+os.system("7z a -pПАРОЛЬ_АРХИВА "+backupName+" backup/* /etc")
+
+f = open(backupName,'rb')
+if f:
+  fsize = getsize(backupName)
+  uploader = client.get_chunked_uploader(f, fsize)
+  print "Uploading file", fsize, "bytes..."
+  while uploader.offset &lt; fsize:
+    try:
+      upload = uploader.upload_chunked()
+      print "."
+    except rest.ErrorResponse, e:
+      # perform error handling and retry logic
+      print "error uploading file!"
+  uploader.finish("/"+backupName)
+  f.close()
+  print "File uploaded successfully."
+
+print "Deleting temp files..."
+os.system("rm -r backup/*")
+os.system("rm " + backupName);
+</code></pre></div></div>
+<h5>Послесловие</h5>
+<ul>
+<li>Этот скрипт я добавил в crontab с запуском ежедневно в 4:00 утра.</li>
+<li>В скрипте есть три строки с вызовом функции sync_dir, точно так же вы сами можете настроить, какие папки вам надо бэкапить.</li>
+<li>Скрипт не удаляет файлы, которые были удалены из папки, если инкрементально разархивировать полный архив и последующие, то удалённые папки/файлы останутся.</li>
+<li>Удаление старых бэкапов в самом Dropbox я делать не стал, чищу папку сам когда вспоминаю об этом.</li>
+<li>Недавно взял себе еще пару VPS в других странах, а в скрипт добавил только префикс к названию бэкапов, таким образом все бэкапы сливаются в одну папку, но их можно отличить очень просто.</li>
+</ul>
+      <p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

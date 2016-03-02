@@ -1,0 +1,70 @@
+<html><body><div><div class="post-content">
+      <h2 id="introduction">Introduction</h2>
+<p>At Yelp we value our ability to quickly ship code. We’re constantly pushing changes out to production, and we even encourage our interns to ship code on their first day. We’ve managed to maintain this pace even as the engineering team has grown to over 300 people and our codebase has reached several million lines of Python code (with a helping of Java on the side).</p>
+
+<p>One key factor in maintaining our iteration speed has been our move to a service</p>
+
+<p>oriented architecture. Initially, most of our development work occurred in a single, monolithic web application, creatively named ‘yelp-main.’ As the company grew, our developers were spending increasing amounts of time trying to ship code in yelp-main. After recognizing this pain point, we started experimenting with a service oriented architecture to scale the development process, and so far it’s been a resounding success. Over the course of the last three years, we’ve gone from writing our first service to having over seventy production services.</p>
+
+<p>What kinds of services are we writing at Yelp? As an example, let’s suppose you want to <a href="http://www.yelp.com/search?find_desc=burrito&amp;find_loc=San+Francisco%2C+CA&amp;ns=1&amp;attrs=PlatformDelivery&amp;ytp_st=pickup">order a burrito</a> for delivery. First of all, you’ll probably make use of our autocompletion service as you type in what you’re looking for. Then, when you click ‘search,’ your query will hit half a dozen backend services as we try to <a href="http://engineeringblog.yelp.com/2015/02/reading-between-the-lines-how-we-make-sense-of-users-searches.html">understand</a> your query and select the best businesses for you. Once you’ve found your ideal taqueria and made your selection from the menu, details of your order will hit a number of services to handle payment, communication with partners, etc.</p>
+
+<p>What about yelp-main? There’s a huge amount of code here, and it’s definitely not going to disappear anytime soon (if ever). However we do see yelp-main increasingly becoming more of a frontend application, responsible for aggregating and rendering data from our growing number of backend services. We are also actively experimenting with creating frontend services so that we can further modularize the yelp-main development process.</p>
+
+<p>The rest of this blog post roughly falls into two categories: general development practices and infrastructure. For the former, we discuss how we help developers write robust services, and then follow up with details on how we’ve tackled the problems of designing good interfaces and testing services. We then switch focus to our infrastructure, and discuss the particular technology choices we’ve made for our service stack. This is followed by discussions on datastores and service discovery. We conclude with details on future directions.</p>
+
+<h2 id="education">Education</h2>
+<p>Service oriented architecture forces developers to confront the <a href="http://en.wikipedia.org/wiki/Fallacies_of_distributed_computing">realities</a> of distributed systems such as partial failure (oops, that service you were talking to just crashed) and distributed ownership (it’s going to take a few weeks before all the other teams update their code to start using v2 of your fancy REST interface). Of course, all of these challenges are still present when developing a monolithic web application, but to a lesser extent.</p>
+
+<p>We strive to mitigate many of these problems with infrastructure (more on that later!), but we’ve found that there’s no substitute for helping developers really understand the realities of the systems that they’re building. One approach that we’ve taken is to hold a weekly ‘services office hours,’ where any developer is free to drop in and ask questions about services. These questions cover the full gamut, from performance (“What’s the best way to cache this data?”) to architecture (“We’ve realized that we should have really implemented these two separate services as a single service - what’s the best way to combine them?”).</p>
+
+<p>We’ve also created a set of <a href="https://github.com/Yelp/service-principles">basic principles</a> for writing and maintaining services. These principles include architecture guidelines, such as how to determine whether a feature is better suited to a library or whether the overhead of a service is justified. They also contain a set of operational guidelines so that service authors are aware of what they can expect once their service is up and running in production. We’ve found that it can often be useful to refer to these principles during code reviews or design discussions, as well as during developer onboarding.</p>
+
+<p>Finally, we recognize that we’re sometimes going to make mistakes that negatively impact either our customers or other developers. In such cases we write <a href="https://codeascraft.com/2012/05/22/blameless-postmortems/">postmortems</a> to help the engineering team learn from these mistakes. We work hard to eliminate any blame from the postmortem process so that engineers do not feel discouraged from participating.</p>
+
+<h2 id="interfaces">Interfaces</h2>
+<p>Most services expose HTTP interfaces and pass around any structured data using JSON. Many service authors also provide a Python client library that wraps the raw HTTP interface so that it’s easier for other teams to use their service.</p>
+
+<p>There are definite tradeoffs in our choice to use HTTP and JSON. A huge benefit of standardizing on HTTP is that there is great tooling to help with debugging, caching and load balancing. One of the more significant downsides is that there’s no standard solution for defining service interfaces independently of their implementation (in contrast to technologies such as Thrift). This makes it hard to precisely specify and check interfaces, which can lead to nasty bugs (“I thought your service returned a ‘username’ field?”).</p>
+
+<p>We’ve addressed this issue by using <a href="http://swagger.io/">Swagger</a>. Swagger builds on the <a href="http://json-schema.org/">JSON Schema standard</a> to provide a language for documenting the interface of HTTP/JSON services. We’ve found that it’s possible to retrofit Swagger specifications onto most our our services without having to change any of their interfaces. Given a Swagger specification for a service, we use <a href="https://github.com/Yelp/swagger-py">swagger-py</a> to automatically create a Python client for that service. We also use <a href="https://github.com/swagger-api/swagger-ui">Swagger UI</a> to provide a centralized directory of all service interfaces. This allows developers from across the engineering team to easily discover what services are available, and helps prevent duplicated effort.</p>
+
+<h2 id="testing">Testing</h2>
+<p>Testing <em>within</em> a service is fairly standard. We replace any external service calls with mocks and make assertions about the call. The complexity arises when we wish to perform tests that span services. This is one of the areas where a service oriented architecture brings additional costs. Our first attempt at this involved maintaining canonical ‘testing’ instances of services. This approach lead to test pollution for stateful services, general flakiness due to remote service calls and an increased maintenance burden for developers.</p>
+
+<p>In response to this issue we’re now using <a href="https://www.docker.com/">Docker containers</a> to spin up private test instances of services (including databases). The key idea here is that service authors are responsible for publishing Docker images of their services. These images can then be pulled in as dependencies by other service authors for acceptance testing their services.</p>
+
+<h2 id="service-stack">Service stack</h2>
+<p>The majority of our services are built on a Python service stack that we’ve assembled from several different open-source components. We use <a href="http://www.pylonsproject.org/">Pyramid</a> as our web framework and <a href="http://www.sqlalchemy.org/">SQLAlchemy</a> for our database access layer, with everything running on top of <a href="https://uwsgi-docs.readthedocs.org/en/latest/">uWSGI</a>. We find that these components are stable, well-documented and have almost all of the features that we need. We’ve also had a lot of success with using <a href="http://www.gevent.org/">gevent</a> to eke additional performance out of Python services where needed. Our <a href="http://engineeringblog.yelp.com/2014/11/scaling-elasticsearch-to-hundreds-of-developers.html">Elasticsearch proxy</a> uses this approach to scale to thousands of requests per second for each worker process.</p>
+
+<p>We use Pyramid <a href="http://docs.pylonsproject.org/docs/pyramid/en/latest/narr/hooks.html#registering-tweens">tweens</a> to hook into request lifecycles so that we can log query and response data for monitoring and historical analysis. Each service instance also runs <a href="https://github.com/Yelp/uwsgi_metrics">uwsgi_metrics</a> to capture and locally aggregate performance metrics. These metrics are then published on a standard HTTP endpoint for ingestion into our Graphite-based metrics system.</p>
+
+<p>Another topic is how services access third-party libraries. Initially we used system-installed packages that were shared across all service instances. However, we quickly discovered that rolling out upgrades to core packages was an almost impossible task due to the large number of services that could potentially be affected. In response to this, all Python services now run in <a href="https://virtualenv.pypa.io/en/latest/">virtualenvs</a> and source their dependencies from a private PyPI server. Our PyPI server hosts both the open-source libraries that we depend upon, and our internally-released libraries (built using a Jenkins continuous deployment pipeline).</p>
+
+<p>Finally, it’s important to note that our underlying infrastructure is agnostic with respect to the language that a service is written in. The Search Team has used this flexibility to write several of their more performance-critical services in Java.</p>
+
+<h2 id="datastores">Datastores</h2>
+<p>A significant proportion of our services need to persist data. In such cases, we try to give service authors the flexibility to choose the datastore that is the best match for their needs. For example, some services use MySQL databases, whereas others make use of Cassandra or ElasticSearch. We also have some services that make use of precomputed, read-only data files. Irrespective of the choice of datastore, we try to keep implementation details private to the owning service. This gives service authors the long-term flexibility to change the underlying data representation or even the datastore.</p>
+
+<p>The canonical version of much of our core data, such as businesses, users and reviews, still resides in the yelp-main database. We’ve found that extracting this type of highly relational data out into services is difficult, and we’re still in the process of finding the right way to do it. So how do services access this data? In addition to exposing the familiar web frontend, yelp-main also provides an internal API for use by backend services in our datacenters. This API is defined using a Swagger specification, and for most purposes can be viewed as just another service interface.</p>
+
+<h2 id="discovery">Discovery</h2>
+<p>A core problem in a service oriented architecture is discovering the locations of other service instances. Our initial approach was to manually configure a centralized pair of <a href="http://www.haproxy.org/">HAProxy</a> load balancers in each of our datacenters, and embed the virtual IP address of these load balancers in configuration files. We quickly found that this approach did not scale. It was labor intensive and error prone both to deploy new services and also to move existing services between machines. We also started seeing performance issues due to the load balancers becoming overloaded.</p>
+
+<p>We addressed these issues by switching to a service discovery system built around <a href="http://nerds.airbnb.com/smartstack-service-discovery-cloud/">SmartStack</a>. Briefly, each client host now runs an HAProxy instance that is bound to localhost. The load balancer is dynamically configured from service registration information stored in <a href="http://zookeeper.apache.org/">ZooKeeper</a>. A client can then contact a service by connecting to its localhost load balancer, which will then proxy the request to a healthy service instance. This facility has proved itself highly reliable, and the majority of our production services are now using it.</p>
+
+<h2 id="future-directions">Future directions</h2>
+<p>We are currently working on a next-generation service platform called <a href="https://vimeo.com/121183491#t=9m51s">Paasta</a>. This uses the <a href="http://mesosphere.github.io/marathon/">Marathon</a> framework (running on top of <a href="http://mesos.apache.org/">Apache Mesos</a>) to allocate containerized service instances across clusters of machines, and integrates with SmartStack for service discovery. This platform will allow us to treat our servers as a much more fungible resource, freeing us from the issues associated with statically assigning services to hosts. We will be publishing more details about this project later this year.</p>
+
+<h2 id="acknowledgements">Acknowledgements</h2>
+<p>The work described in this blog post has been carried out and supported by numerous members of the Engineering Team here at Yelp. Particular credit goes to Prateek Agarwal, Ben Chess, Sam Eaton, Julian Krause, Reed Lipman, Joey Lynch, Daniel Nephin and Semir Patel.</p>
+
+
+
+      
+
+
+      
+
+      <p class="back-to-blog"><a href="/">Back to blog</a></p>
+    </div>
+  </div></body></html>

@@ -1,0 +1,145 @@
+<html><body><div><div class="post-body entry-content" id="post-body-5220217840294304704" itemprop="description articleBody">
+<div dir="ltr" trbidi="on">
+<div dir="ltr" trbidi="on">
+<div dir="ltr" trbidi="on">
+<div dir="ltr">
+<span>Вряд ли стоит описывать важность знания паттернов проектирования в современной разработке  приложений и сервисов. Но вот все ли паттерны мы знаем? На слуху - разумеется синглтон, декоратор, адаптер, фасад, прокси, фабрика и прочие. А вот IoC-контейнер (инверсия контроля) и DI (внедрение зависимости) - многие ли слышали, многие ли применяли? Между тем, не смотря на <a href="http://blog.zalab.net/2010/12/service-locator.html" target="_blank">споры</a> вокруг ценности и применимости IoC, он вполне имеет право на существование и при правильном применении может существенно облегчить жизнь разработчику. </span></div>
+<b id="docs-internal-guid-7fc79660-02d4-b3ea-dc89-c9ee6ec2ab50"><br/></b>
+
+<p dir="ltr">
+<span>В данной статье я хочу рассмотреть простой пример реализации паттерна Service Locator (частного случая IoC) на замечательном языке Python. Этот паттерн представляет из себя дополнительный абстрактный слой, реализованный в виде контейнера, хранящего “таблицу переходов” и функционал для её управления: добавление, удаление и подмена параметров перехода. </span></p>
+<b><br/></b>
+
+<p dir="ltr">
+<span>Применение Service Locator’а помогает избегать развесистых цепочек условных операторов и усложнения алгоритмов: достаточно сохранить в контейнере класс и потом, по мере надобности, подменять его на другие классы, при том что интерфейс обращения к нему остаётся одним и тем же - по заранее заданному ключу (тут я назвал его алиасом).</span></p>
+
+<p dir="ltr">
+<span>Собственно: сам класс, реализующий паттерн Service Locator:</span></p>
+</div>
+<pre><code class="python">
+# coding: utf-8
+
+"""Service Locator: a simple python implementation."""
+
+from importlib import import_module
+
+
+class ServiceLocatorError(Exception): pass
+
+
+class ServiceLocator(object):
+
+    u"""Класс для работы с контейнером названий объектов.
+
+    Представляет собой реализацию паттерна Service Locator.
+    """
+
+    # словарь для хранения сервисных классов
+    _objects = {}
+
+    @classmethod
+    def set_class(cls, alias, class_path):
+        u"""Добавить новый сервисный класс в контейнер.
+
+        :param alias: алиас сервисного класса
+        :type alias: str
+        :param class_path: полное имя класса
+        :type object_name: str
+        """
+        assert isinstance(alias, basestring), type(alias)
+        assert isinstance(class_path, basestring), type(class_path)
+
+        cls._objects[alias] = class_path
+
+    @classmethod
+    def get_class(cls, alias, default=None):
+        u"""Найти имя класса в сервис-локаторе по его алиасу.
+
+        :param alias: Алиас класса
+        :type alias: str
+        :return: полное имя объекта или None
+        """
+        assert isinstance(alias, basestring), type(alias)
+
+        return cls._objects.get(alias, default)
+
+    @classmethod
+    def fabricate(cls, alias, *args, **kwargs):
+        u"""Импортировать и создать экземпляр класса по его алиасу.
+
+        :param alias: Алиас сервисного класса
+        :type alias: str
+        :param args: аргументы для конструктора класса
+        :param kwargs: именованные аргументы для конструктора класса
+        :return: инстанс класса
+        """
+        assert isinstance(alias, basestring), type(alias)
+
+        full_class_name = cls._objects.get(alias)
+        if full_class_name:
+            full_path, class_name = full_class_name.rsplit('.', 1)
+
+            try:
+                module = import_module(full_path)
+                return getattr(module, class_name)(*args, **kwargs)
+            except (ImportError, AttributeError) as err:
+                raise ServiceLocatorError(err)
+
+        raise ServiceLocatorError(u"Unknown alias: %s" % alias)
+
+    @classmethod
+    def remove(cls, alias):
+        u"""Удаление алиаса из Service Locator’а.
+
+        :param alias: алиас класса
+        :type alias: str
+        """
+        assert isinstance(alias, basestring), type(alias)
+
+        if cls._objects.get(alias):
+            del cls._objects[alias]
+
+</code></pre>
+<pre><span id="docs-internal-guid-7fc79660-02e2-fae4-6406-b67a2e161def"><p dir="ltr">
+<span>Из приведённого кода видно, что о каждом классе хранится следующая информация:</span><br/>
+<span>    - алиас - короткое название или ещё какой условный синоним,</span><br/>
+<span>    - </span><span>полное имя - имя сервисного класса и полный путь к нему, по которому он будет вызываться (пакеты, подпакеты и модуль),  например: “foo_package.bar_module.ProviderClazz”.</span></p>
+<p>
+<span><span>Пример использования:</span></span></p>
+</span></pre>
+</div>
+<pre><code>...
+# сохранять(добавлять в контейнер) можно так:
+ServiceLocator.set_class(
+    'test_provider',
+    'legacy.provider.Provider'
+)
+
+# а можно даже так:
+if some_flag:
+    ServiceLocator.set_class(
+        'test_provider',
+        'foo.provider.FooProvider'
+    )
+else:
+    ServiceLocator.set_class(
+        'test_provider',
+        'bar.provider.BarProvider'
+    )
+
+        ...
+
+# получение экземпляра класса
+provider = ServiceLocator.fabricate(
+    'test_provider',
+     a=10, b=20, c=30
+)
+        
+print provider.func()
+
+</code></pre>
+<pre><code>Реализация Service Locator на Java - <a href="http://javatutor.net/articles/j2ee-pattern-service-locator" target="_blank">здесь</a> </code></pre>
+</div>
+<p/>
+</div>
+</div></body></html>

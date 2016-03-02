@@ -1,0 +1,97 @@
+<html><body><div><div class="wpis" id="post-3951">
+	
+		<span class="data"><small><i>2013-03-11 0:32</i></small></span>
+	
+	<p><a href="http://flask.pocoo.org/">Flask</a> is one of the <a href="http://wiki.python.org/moin/WebFrameworks">countless web frameworks</a> available for Python. It’s probably my favorite, because it’s rather minimal, simple and easy to use. All the expected features are there, too, although they might not be as powerful as in some <a href="https://www.djangoproject.com/">more advanced tools</a>.</p>
+<p>As an example, here’s how you define some simple request handler, bound to a parametrized URL pattern:</p>
+<div id="ig-sh-1" class="syntax_hilite">	<div class="code"><ol class="python"><li><p><span>from</span> flask <span>import</span> abort<span>,</span> render_template</p></li>
+<li><p><span>from</span> myapplication <span>import</span> app<span>,</span> db_session<span>,</span> Post</p></li>
+<li><p> </p></li>
+<li><p><span>@</span>app.<span>route</span><span>(</span><span>'/post/&lt;int:post_id&gt;'</span><span>)</span></p></li>
+<li><p><span>def</span> blogpost<span>(</span>post_id<span>)</span>:</p></li>
+<li><p>    post <span>=</span> db_session.<span>query</span><span>(</span>Post<span>)</span>.<span>get</span><span>(</span>post_id<span>)</span></p></li>
+<li><p>    <span>if</span> <span>not</span> post:</p></li>
+<li><p>        abort<span>(</span><span>404</span><span>)</span></p></li>
+<li><p>    <span>return</span> render_template<span>(</span><span>'post.html'</span><span>,</span> post<span>=</span>post<span>)</span></p></li>
+</ol>	</div></div>
+<p>This handler responds to requests that go to <em>/post/42</em> and similar paths. The syntax for those URL patterns is not very advanced: parameters can only be captured as path segments rather than arbitrary groups within a regular expression. (You can still use <a href="http://flask.pocoo.org/docs/api/#flask.Request.args">query string arguments</a>, of course).</p>
+<p>On the flip side, <em>reversing</em> the URL – building it from handler name and parameters – is always possible. There is a <a href="http://flask.pocoo.org/docs/api/#flask.url_for"><code>url_for</code> function</a> which does just that. It can be used both from Python code and, perhaps more usefully, from HTML (Jinja) templates:</p>
+<div id="ig-sh-2" class="syntax_hilite">	<div class="code"><ol class="html4strict"><li/>
+<li/>
+<li><p>  {% for post in posts %}</p></li>
+<li/>
+<li><div>      <span>&lt;<a href="http://december.com/html/4/element/a.html"><span>a</span></a> <span>href</span><span>=</span><span>"{{ url_for('blogpost', post_id=post.id) }}"</span>&gt;</span></div></li>
+<li><p>        {{ post.title }}</p></li>
+<li/>
+<li/>
+<li><p>  {% endfor %}</p></li>
+<li/>
+</ol>	</div></div>
+<p>Parameters can have types, too. We’ve seen, for example, that <code>post_id</code> was defined as <code>int</code> in the URL pattern for <code>blogpost</code> handler. These types are checked during the actual routing of HTTP requests, but also by the <code>url_for</code> function:</p>
+<div id="ig-sh-3" class="syntax_hilite">	<div class="code"><ol class="python"><li><p>pattern <span>=</span> url_for<span>(</span><span>'blogpost'</span><span>,</span> post_id<span>=</span><span>'&lt;id&gt;'</span><span>)</span>  <span># raises ValueError</span></p></li>
+</ol>	</div></div>
+<p>Most of the time, this little bit of “static typing” is a nice feature. However, there are some cases where this behavior of <code>url_for</code> is a bit too strict. Anytime we don’t intend to invoke the resulting URL directly, we might want a little more flexibility.</p>
+<p>Biggest case-in-point are various client-side templates, used by JavaScript code to update small pieces of HTML without reloading the whole page. If you, for example, wanted to rewrite the template above to use <a href="http://underscorejs.org/#template">Underscore templates</a>, you would still want <code>url_for</code> to format the <code>blogpost</code> URL pattern:</p>
+<div id="ig-sh-4" class="syntax_hilite">	<div class="code"><ol class="html4strict"><li/>
+<li/>
+<li><p>  <span>&lt;% _.each<span>(</span>posts, function<span>(</span>post<span>)</span> <span>{</span> %&gt;</span></p></li>
+<li><div>    <span>&lt;<a href="http://december.com/html/4/element/a.html"><span>a</span></a> <span>href</span><span>=</span><span>"{{ url_for('blogpost', post_id='&lt;%= post.id %&gt;</span></span><p>') }}"&gt;</p></div></li>
+<li><p>        <span>&lt;%- post.<span>name</span> %&gt;</span></p></li>
+<li/>
+<li><p>  <span>&lt;% <span>}</span><span>)</span>; %&gt;</span></p></li>
+<li/>
+</ol>	</div></div>
+<p>Assuming you don’t feel dizzy from seeing <em>two</em> templating languages at once, you will obviously notice that <code>''</code> is not a valid <code>int</code> value. But it’s a <em>correct</em> value for <code>post_id</code> parameter, because the resulting URL (<code>/post/</code>) would not be used immediately. Instead, it would be just sent to the browser, where some JS code would pick it up and replace the Underscore placeholder with an actual ID.</p>
+<p>Unfortunately, bypassing the default strictness of <code>url_for</code> is not exactly easy.<br/>
+<span id="more-3951"/><br/>
+Actually, it doesn’t seem <em>possible</em>, at least not without forking Flask and fiddling with its internals. So if you are not in the mood for that, here’s a hack that I devised:<br/>
+</p><noscript><pre><code class="language-python python">import re
+from flask import url_for
+from myflaskapp import app
+
+
+def url_for_ex(endpoint, **values):
+    """Improved version of standard Flask's :func:`url_for`
+    that accepts an additional, optional ``_strict`` argument.
+
+    :param _strict: If ``False``, values for the endpoint are not checked
+                    for compatibility with types defined in the URL rule.
+                    Default: ``True``.
+    """
+    strict = values.pop('_strict', True)
+
+    if not strict:
+        # search for matching URL rule; if that fails, we will just
+        # invoke url_for() normally so that Flask can handle the error
+        url_arguments = set(key for key in values.iterkeys()
+                            if not key.startswith('_'))
+        url_rule = None
+        for rule in app.url_map.iter_rules(endpoint):
+            rule_arguments = set(rule._converters.iterkeys())
+            if rule_arguments == url_arguments:
+                url_rule = rule.rule
+                break
+
+        if url_rule:
+            # replace argument placeholders in the URL rule (``&lt;int:foo&gt;``...)
+            # with values provided for those arguments
+            regex = '|'.join(r'\&lt;(?:\w+\:)?(%s)\&gt;' % arg for arg in values)
+            return re.sub(regex, lambda m: str(values[m.group(1)]), url_rule)
+
+    return url_for(endpoint, **values)
+
+app.jinja_env.globals['url_for'] = url_for_ex</code></pre></noscript><p>
+So, what the hell is this doing?… Well, it’s quite simple, really. I just wrap a normal </p><code>url_for</code><p> call in a function that works </p><em>almost</em><p> exactly the same – but with one additional feature.
+</p><p>Namely, it accepts a brand new <code>_strict</code> argument, which allows the caller to turn type checking on and off. The former case is the default, of course. For the latter, though, there is hardly any point in actually using <code>url_for</code>: we can perform the URL “building” through a simple replacement:</p>
+<div id="ig-sh-5" class="syntax_hilite">	<div class="code"><ol class="python"><li><p>regex <span>=</span> <span>'|'</span>.<span>join</span><span>(</span>r<span>'<span>\&lt;</span>(?:<span>\w</span>+<span>\:</span>)?(%s)<span>\&gt;</span>'</span> % arg <span>for</span> arg <span>in</span> values<span>)</span></p></li>
+<li><p><span>return</span> <span>re</span>.<span>sub</span><span>(</span>regex<span>,</span> <span>lambda</span> m: <span>str</span><span>(</span>values<span>[</span>m.<span>group</span><span>(</span><span>1</span><span>)</span><span>]</span><span>)</span><span>,</span> url_rule<span>)</span></p></li>
+</ol>	</div></div>
+<p>I’m sure most of you well versed in intricacies of regular expressions (<em>*cough*</em>), but just in case…<br/>
+What we’re doing here is building a regex that matches any form of argument placeholder – such as <code>&lt;post&gt;</code> or <code>&lt;int:post&gt;</code> – of any URL argument given to the function. Resulting <code>regex</code> is then applied to the actual <code>url_rule</code> (e.g. <code>/post/&lt;int:post_id&gt;</code>) and every match is replaced with the intended value of corresponding parameter.</p>
+<p>As for getting the <code>url_rule</code>, that’s what the loop above is doing. Thankfully, Flask exposes its URL routing rules as <a href="http://flask.pocoo.org/docs/api/#flask.Flask.url_map">the <code>url_map</code> attribute</a>. We just need to find the one that has the exact same arguments as requested by the caller.</p>
+
+			
+		
+</div>
+		    
+		    </div></body></html>

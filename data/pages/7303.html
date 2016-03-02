@@ -1,0 +1,193 @@
+<html><body><div><div class="post-text" itemprop="text">
+
+<p>We have a Django application that is connecting to multiple MS SQL database instances. There is a router.py for each app that handles routing the processes to each database.</p>
+
+<p>This is my first time setting up multiple database access.</p>
+
+<p>Django built-in apps are routed to the default database via this router.py:</p>
+
+<pre><code>class DjangoRouter(object):
+"""
+A router to control all database operations on models in the
+auth application.
+"""
+
+def db_for_read(self, model, **hints):
+    """
+    Attempts to read auth models go to auth.
+    """
+    app_list = ('auth', 'admin', 'contenttypes', 'sessions',)
+
+    if model._meta.app_label in app_list:
+        return 'default'
+    return None
+
+def db_for_write(self, model, **hints):
+    """
+    Attempts to write auth models go to auth.
+    """
+    app_list = ('auth', 'admin', 'contenttypes', 'sessions',)
+    if model._meta.app_label in app_list:
+        return 'default'
+    return None
+
+def allow_relation(self, obj1, obj2, **hints):
+    """
+    Allow relations if a model in the auth app is involved.
+    """
+    app_list = ('auth', 'admin', 'contenttypes', 'sessions',)
+    if obj1._meta.app_label in app_list and obj2._meta.app_label in app_list:
+        return True
+    return None
+
+def allow_migrate(self, db, app_label, model=None, **hints):
+    """
+    Make sure the auth app only appears in the 'auth'
+    database.
+    """
+    app_list = ('auth', 'admin', 'contenttypes', 'sessions',)
+
+    if app_label in app_list:
+        return db == 'default'
+    return None
+</code></pre>
+
+<p>We are using LDAP authentication and Django's built-in authentication. The idea is that intranet users can authenticate against our AD server. External users can register, and will be authenticated with Django's authentication.</p>
+
+<p>When I have the default database set to:</p>
+
+<pre><code>'default': {
+    'ENGINE': 'sql_server.pyodbc',
+    'NAME': 'Django',
+    'USER': '',
+    'PASSWORD': '',
+    'HOST': 'sqlbeta',
+    'PORT': '',
+},
+</code></pre>
+
+<p>LDAP works, but I cannot add user to Django's authentication. The admin displays a "success" message, but the user is not added to the database.</p>
+
+<p>If I switch the default database back to SQLLite, I am able to authenticate against AD and add Django users.</p>
+
+<p>So, I don't think it is an issue with the routers.py file. I worry that it might be an issue with the 'sql_server.pyodbc' engine.</p>
+
+<p>EDIT:
+Per request, here are the database settings:</p>
+
+<pre><code>DATABASES = {
+    # 'default': {
+    #    'ENGINE': 'django.db.backends.sqlite3',
+    #    'NAME': os.path.join(BASE_DIR, 'db.sqlite3'),
+    # },
+    'default': {
+        'ENGINE': 'sql_server.pyodbc',
+        'NAME': 'Django',
+        'USER': '',
+        'PASSWORD': '',
+        'HOST': 'sqlbeta',
+        'PORT': '',
+    },
+    'master': {
+        'ENGINE': 'sql_server.pyodbc',
+        'NAME': 'master',
+        'USER': '',
+        'PASSWORD': '',
+        'HOST': 'sqlbeta',
+        'PORT': '',
+    },
+    'databaseone': {
+        'ENGINE': 'sql_server.pyodbc',
+        'NAME': 'databaseone',
+        'USER': '',
+        'PASSWORD': '',
+        'HOST': 'sqlbeta',
+        'PORT': '',
+    },
+    'databasetwo': {
+        'ENGINE': 'sql_server.pyodbc',
+        'NAME': 'databasetwo',
+        'USER': '',
+        'PASSWORD': '',
+        'HOST': 'sqlbeta',
+        'PORT': '',
+    },
+}
+</code></pre>
+
+<p>NOTE:
+I think this might have to do with the way Django saves new users. Going to take a look there. I am able to use the createsuperuser command to add more superusers while both authentication backends are in place. Confirmed, I can create regular users via the shell, but not through the admin.</p>
+
+<p>Follow up note:
+Still have not sourced the problem with the admin, but I found that I could add users via a form. I'm thinking the problem must be a bug in the admin.</p>
+
+<p>Edit:</p>
+
+<p>Per @AndrewSmiley's request:</p>
+
+<p><a href="https://github.com/django/django/blob/1.8.6/django/contrib/auth/forms.py" rel="nofollow">Django Admin Add User View</a></p>
+
+<pre><code>class UserCreationForm(forms.ModelForm):
+    """
+    A form that creates a user, with no privileges, from the given username and
+    password.
+    """
+    error_messages = {
+        'password_mismatch': _("The two password fields didn't match."),
+    }
+    password1 = forms.CharField(label=_("Password"),
+        widget=forms.PasswordInput)
+    password2 = forms.CharField(label=_("Password confirmation"),
+        widget=forms.PasswordInput,
+        help_text=_("Enter the same password as above, for verification."))
+
+    class Meta:
+        model = User
+        fields = ("username",)
+
+    def clean_password2(self):
+        password1 = self.cleaned_data.get("password1")
+        password2 = self.cleaned_data.get("password2")
+        if password1 and password2 and password1 != password2:
+            raise forms.ValidationError(
+                self.error_messages['password_mismatch'],
+                code='password_mismatch',
+            )
+        return password2
+
+    def save(self, commit=True):
+        user = super(UserCreationForm, self).save(commit=False)
+        user.set_password(self.cleaned_data["password1"])
+        if commit:
+            user.save()
+        return user
+</code></pre>
+
+<p>UPDATE:</p>
+
+<p>Per @user1797792 suggestions, I created a custom UserCreationForm to set the <code>date_joined</code> value, but we are still unable to add users via the Django Admin.</p>
+
+<p>Relevant forms.py &amp; admin.py entries are below:</p>
+
+<pre><code>class CustomUserCreationForm(UserCreationForm):
+    now = timezone.now()
+
+    class Meta:
+        model = User
+        fields = ('username',)
+
+    def save(self, commit=True):
+        user = super(CustomUserCreationForm, self).save(commit=False)
+        user.date_joined = self.now
+        if commit:
+            user.save()
+        return user
+
+class CustomUserAdmin(UserAdmin):
+    add_form = CustomUserCreationForm
+
+admin.site.unregister(User)
+admin.site.register(User, CustomUserAdmin)
+</code></pre>
+    </div>
+    </div></body></html>

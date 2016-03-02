@@ -1,0 +1,256 @@
+<html><body><div><div class="inside">
+
+    <abbr class="published" title="2014-12-30T17:00:00+01:00">
+      <em>Tue 30 December 2014</em>
+    </abbr>
+
+        <h2>Things which aren't magic - Flask and @app.route - Part 2</h2>
+        <p/><p>In my last post I finished off with a skeleton which mimicked the behaviour of "@app.route('/')" in the first example on the Flask website.</p>
+<p>If you missed that edition of "Things which aren't magic", then check it out <a href="things-which-arent-magic-flask-part-1.html">here</a>.</p>
+<p>In this post we're going to turn up the difficulty level a tiny bit and add the ability to have variable parameters in our URLs, by the end of this blog post we'll be able to support the expected behaviour for the following piece of code.</p>
+<div class="highlight"><pre><span class="n">app</span> <span class="o">=</span> <span class="n">Flask</span><span class="p">(</span><span class="n">__name__</span><span class="p">)</span>
+
+<span class="nd">@app.route</span><span class="p">(</span><span class="s">"/hello/&lt;username&gt;"</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">hello_user</span><span class="p">(</span><span class="n">username</span><span class="p">):</span>
+    <span class="k">return</span> <span class="s">"Hello {}!"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">username</span><span class="p">)</span>
+</pre></div>
+
+
+<p>So that the following path:</p>
+
+
+
+<p>Will match the route above, giving us the output of </p>
+
+
+
+<h3>Expressing our routes, regularly.</h3>
+<p>Now that we're allowing our URLs to be dynamic, we can no longer directly compare the path that we're serving to the route previously registered using "@app.route()". </p>
+<p>What are we going to do instead? We're going to need to use regular expressions, so we can match paths against a pattern, instead comparing them to a fixed string.</p>
+<p>I won't be going into detail about specifics of regular expressions in this blog post, but if you need a refresher check out <a href="http://www.regular-expressions.info/quickstart.html">this website</a>.</p>
+<p>So, our first step is going to be to transform our route into a regular expression pattern that we can match the path incoming against. We'll also be using this regular expression to extract the variables that we're interested in.</p>
+<p>So what would a regular expression that matches the route "/hello/&lt;username&gt;" look like? </p>
+<p>Well a simple regular expression such as <strong>"^/hello/(.+)$"</strong>, would be a good start, so lets see how that would work with some code:</p>
+<div class="highlight"><pre><span class="kn">import</span> <span class="nn">re</span>
+
+<span class="n">route_regex</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span><span class="s">r"^/hello/(.+)$"</span><span class="p">)</span>
+<span class="n">match</span> <span class="o">=</span> <span class="n">route_regex</span><span class="o">.</span><span class="n">match</span><span class="p">(</span><span class="s">"/hello/ains"</span><span class="p">)</span>
+
+<span class="k">print</span> <span class="n">match</span><span class="o">.</span><span class="n">groups</span><span class="p">()</span>
+</pre></div>
+
+
+<p>Will output:</p>
+
+
+
+<p>Sweet, however, ideally we want to preserve the link between the first group that we've matched, and the identifier "username" from our route <em>"/hello/&lt;username&gt;"</em>.</p>
+<h4>Named Gapturing Groups</h4>
+<p>Fortunately, regular expresions also support named capturing groups, this allows us to assign a name to a matching group, which we can recover later when reading through our matches.</p>
+<p>We can use the following syntax to give our capturing group from the first example the identifier of <em>username</em>.</p>
+<div class="highlight"><pre> <span class="sr">/hello/</span><span class="p">(</span><span class="cp">&lt;?</span><span class="nx">P</span><span class="o">&lt;</span><span class="nx">username</span><span class="o">&gt;.+</span><span class="p">)</span><span class="s2">"</span>
+</pre></div>
+
+
+<p>Then we can use the <em>groupdict()</em> method on our regular expression match to get all of the capturing groups as a dictionary, with the name of the group mapped to the matched value.</p>
+<p>So now we get the following code:</p>
+<div class="highlight"><pre><span class="n">route_regex</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span><span class="s">r'^/hello/(?P&lt;username&gt;.+)$'</span><span class="p">)</span>
+<span class="n">match</span> <span class="o">=</span> <span class="n">route_regex</span><span class="o">.</span><span class="n">match</span><span class="p">(</span><span class="s">"/hello/ains"</span><span class="p">)</span>
+
+<span class="k">print</span> <span class="n">match</span><span class="o">.</span><span class="n">groupdict</span><span class="p">()</span>
+</pre></div>
+
+
+<p>Giving us the following dictionary as output:</p>
+
+
+
+<p>So now, armed with the format of the regular expressions we'll need, and the knowledge how we can use them to match incoming URLs, all that's left is to make a method that will convert our declared routes into their equivalent regular expression pattern.</p>
+<p>To do this we're going to use another regular expression (it's regular expressions all the way down), to convert the variables in our routes into regular expression patterns, so for example we'll need to convert "&lt;username&gt;" to "(?P&lt;username&gt;.+)".</p>
+<p>Sounds simple enough! We're able to do it with just a few lines of code.</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">build_route_pattern</span><span class="p">(</span><span class="n">route</span><span class="p">):</span>
+    <span class="n">route_regex</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">sub</span><span class="p">(</span><span class="s">r'(&lt;\w+&gt;)'</span><span class="p">,</span> <span class="s">r'(?P\1.+)'</span><span class="p">,</span> <span class="n">route</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">re</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span><span class="s">"^{}$"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">route_regex</span><span class="p">))</span>
+
+<span class="k">print</span> <span class="n">build_route_pattern</span><span class="p">(</span><span class="s">'/hello/&lt;username&gt;'</span><span class="p">)</span>
+</pre></div>
+
+
+<p>Here we're doing a regular expression substitution of all occurences of the pattern <em>&lt;\w+&gt;</em> (a string enclosed in angled brackets), with it's regular expression named group equivalent. </p>
+<p>In the first argument of re.sub we place our pattern <em>&lt;\w+&gt;</em> inside brackets in order to assign it to the first matching group. In our second argument we can use the contents of the first matching group by writing <strong>\1</strong> (<strong>\2</strong> would be the contents of the second matching group, etc, etc...)</p>
+<p>So finally, inputting the pattern </p>
+
+
+
+<p>Will give us the regular expression:</p>
+<div class="highlight"><pre>^/hello/(?P&lt;username&gt;.+)$
+</pre></div>
+
+
+<h3>Out with the old, in with the new.</h3>
+<p>Let's take a quick look at the simple NotFlask class that we built last time.</p>
+<div class="highlight"><pre><span class="k">class</span> <span class="nc">NotFlask</span><span class="p">():</span>
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">routes</span> <span class="o">=</span> <span class="p">{}</span>
+
+    <span class="k">def</span> <span class="nf">route</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">route_str</span><span class="p">):</span>
+        <span class="k">def</span> <span class="nf">decorator</span><span class="p">(</span><span class="n">f</span><span class="p">):</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">routes</span><span class="p">[</span><span class="n">route_str</span><span class="p">]</span> <span class="o">=</span> <span class="n">f</span>
+            <span class="k">return</span> <span class="n">f</span>
+
+        <span class="k">return</span> <span class="n">decorator</span>
+
+    <span class="k">def</span> <span class="nf">serve</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">path</span><span class="p">):</span>
+        <span class="n">view_function</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">routes</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">path</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">view_function</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">view_function</span><span class="p">()</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s">'Route "{}"" has not been registered'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">path</span><span class="p">))</span>
+
+
+<span class="n">app</span> <span class="o">=</span> <span class="n">NotFlask</span><span class="p">()</span>
+
+<span class="nd">@app.route</span><span class="p">(</span><span class="s">"/"</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">hello</span><span class="p">():</span>
+    <span class="k">return</span> <span class="s">"Hello World!"</span>
+</pre></div>
+
+
+<p>Now that we have a new and improved method of matching incoming routes, we're going to have to get rid of the naive dictionary implentation we had before.</p>
+<p>Let's start by retrofitting our function for adding routes, so that instead of storing our routes in a dictionary we'll have a list of <em>(pattern, view_function)</em> pairs.</p>
+<p>This means that when a programmer decorates a function with @app.route() we'll attempt to compile their route into a regular expression and then store it along with the decorated function in our new routes list.</p>
+<p>Let's have a look at the code that does that:</p>
+<div class="highlight"><pre><span class="k">class</span> <span class="nc">NotFlask</span><span class="p">():</span>
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">routes</span> <span class="o">=</span> <span class="p">[]</span>
+
+    <span class="c"># Here's our build_route_pattern we made earlier</span>
+    <span class="nd">@staticmethod</span>
+    <span class="k">def</span> <span class="nf">build_route_pattern</span><span class="p">(</span><span class="n">route</span><span class="p">):</span>
+        <span class="n">route_regex</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">sub</span><span class="p">(</span><span class="s">r'(&lt;\w+&gt;)'</span><span class="p">,</span> <span class="s">r'(?P\1.+)'</span><span class="p">,</span> <span class="n">route</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">re</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span><span class="s">"^{}$"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">route_regex</span><span class="p">))</span>
+
+    <span class="k">def</span> <span class="nf">route</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">route_str</span><span class="p">):</span>
+        <span class="k">def</span> <span class="nf">decorator</span><span class="p">(</span><span class="n">f</span><span class="p">):</span>
+            <span class="c"># Instead of inserting into a dictionary,</span>
+            <span class="c"># We'll append the tuple to our route list</span>
+            <span class="n">route_pattern</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">build_route_pattern</span><span class="p">(</span><span class="n">route_str</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">routes</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">route_pattern</span><span class="p">,</span> <span class="n">f</span><span class="p">))</span>
+
+            <span class="k">return</span> <span class="n">f</span>
+
+        <span class="k">return</span> <span class="n">decorator</span>
+</pre></div>
+
+
+<p>We're also going to need a <em>get_route_match</em> method, which given a path, will try and find a matching view function, or return <em>None</em> if one can't be found. </p>
+<p>However, one more thing which we're going to need return if a match is found, in addition to the view function, will be the dictionary of capturing groups which we matched earlier, we'll need this in order to pass the correct arguments over to the view function.</p>
+<p>So here's what our <em>get_route_match</em> function is going to look like:</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">get_route_match</span><span class="p">(</span><span class="n">path</span><span class="p">):</span>
+    <span class="k">for</span> <span class="n">route_pattern</span><span class="p">,</span> <span class="n">view_function</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">routes</span><span class="p">:</span>
+        <span class="n">m</span> <span class="o">=</span> <span class="n">route_pattern</span><span class="o">.</span><span class="n">match</span><span class="p">(</span><span class="n">path</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">m</span><span class="p">:</span>
+           <span class="k">return</span> <span class="n">m</span><span class="o">.</span><span class="n">groupdict</span><span class="p">(),</span> <span class="n">view_function</span>
+
+    <span class="k">return</span> <span class="bp">None</span>
+</pre></div>
+
+
+<p>Now we're almost there, the last piece of this puzzle will be figuring out how to call the view function with the correct arguments from that dictionary of regular expression matching groups.</p>
+<h3>A thousand ways to call a function.</h3>
+<p>Let's take a step back and look at the different ways we can call a function in python.</p>
+<p>Like this one for example:</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">hello_user</span><span class="p">(</span><span class="n">username</span><span class="p">):</span>
+    <span class="k">return</span> <span class="s">"Hello {}!"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">username</span><span class="p">)</span>
+</pre></div>
+
+
+<p>The simplest way (which you'll hopefully be familiar with) is using regular arguments, here the order of the arguments matches the order of those in our function definition.</p>
+<div class="highlight"><pre>&gt;&gt;&gt; hello_user("ains")
+Hello ains!
+</pre></div>
+
+
+<p>Another way to call a function is with keyword arguments. Keyword arguments can be specified in any order, and work great for functions with many optional arguments.</p>
+<div class="highlight"><pre>&gt;&gt;&gt; hello_user(username="ains")
+Hello ains!
+</pre></div>
+
+
+<p>One last way to call a function in Python is with a dictionary of keyword arguments, where the keys in the dictionary correspond to the name of the argument. We tell Python to unpack a dictionary and use it as the keyword arguments of a function by using two stars, "**". This snippet below is exactly the same as the snippet above, now we're using a dictionary of arguments which we can create dynamically at runtime.</p>
+<div class="highlight"><pre>&gt;&gt;&gt; kwargs = {"username": "ains"}
+&gt;&gt;&gt; hello_user(**kwargs)
+Hello ains!
+</pre></div>
+
+
+<p>So, remember the groupdict() method from before? The same one which returned <em>{"username": "ains"}</em> after regular expression was matched? Well now that we know about kwargs, we easily can pass the dictionary of matches as arguments to our view function, completing NotFlask!</p>
+<p>So lets put all of this together into one final class.</p>
+<div class="highlight"><pre><span class="k">class</span> <span class="nc">NotFlask</span><span class="p">():</span>
+    <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">routes</span> <span class="o">=</span> <span class="p">[]</span>
+
+    <span class="nd">@staticmethod</span>
+    <span class="k">def</span> <span class="nf">build_route_pattern</span><span class="p">(</span><span class="n">route</span><span class="p">):</span>
+        <span class="n">route_regex</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">sub</span><span class="p">(</span><span class="s">r'(&lt;\w+&gt;)'</span><span class="p">,</span> <span class="s">r'(?P\1.+)'</span><span class="p">,</span> <span class="n">route</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">re</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span><span class="s">"^{}$"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">route_regex</span><span class="p">))</span>
+
+    <span class="k">def</span> <span class="nf">route</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">route_str</span><span class="p">):</span>
+        <span class="k">def</span> <span class="nf">decorator</span><span class="p">(</span><span class="n">f</span><span class="p">):</span>
+            <span class="n">route_pattern</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">build_route_pattern</span><span class="p">(</span><span class="n">route_str</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">routes</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">route_pattern</span><span class="p">,</span> <span class="n">f</span><span class="p">))</span>
+
+            <span class="k">return</span> <span class="n">f</span>
+
+        <span class="k">return</span> <span class="n">decorator</span>
+
+    <span class="k">def</span> <span class="nf">get_route_match</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">path</span><span class="p">):</span>
+        <span class="k">for</span> <span class="n">route_pattern</span><span class="p">,</span> <span class="n">view_function</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">routes</span><span class="p">:</span>
+            <span class="n">m</span> <span class="o">=</span> <span class="n">route_pattern</span><span class="o">.</span><span class="n">match</span><span class="p">(</span><span class="n">path</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">m</span><span class="p">:</span>
+                <span class="k">return</span> <span class="n">m</span><span class="o">.</span><span class="n">groupdict</span><span class="p">(),</span> <span class="n">view_function</span>
+
+        <span class="k">return</span> <span class="bp">None</span>
+
+    <span class="k">def</span> <span class="nf">serve</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">path</span><span class="p">):</span>
+        <span class="n">route_match</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">get_route_match</span><span class="p">(</span><span class="n">path</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">route_match</span><span class="p">:</span>
+            <span class="n">kwargs</span><span class="p">,</span> <span class="n">view_function</span> <span class="o">=</span> <span class="n">route_match</span>
+            <span class="k">return</span> <span class="n">view_function</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s">'Route "{}"" has not been registered'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">path</span><span class="p">))</span>
+</pre></div>
+
+
+<p>Now, just like magic, the following snippet: </p>
+<div class="highlight"><pre><span class="n">app</span> <span class="o">=</span> <span class="n">NotFlask</span><span class="p">()</span>
+
+<span class="nd">@app.route</span><span class="p">(</span><span class="s">"/hello/&lt;username&gt;"</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">hello_user</span><span class="p">(</span><span class="n">username</span><span class="p">):</span>
+    <span class="k">return</span> <span class="s">"Hello {}!"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">username</span><span class="p">)</span>
+
+<span class="k">print</span> <span class="n">app</span><span class="o">.</span><span class="n">serve</span><span class="p">(</span><span class="s">"/hello/ains"</span><span class="p">)</span>
+</pre></div>
+
+
+<p>Gives us the output of :</p>
+
+
+
+<h3>Wrapping Up</h3>
+<p>So that's it for the our look into Flask's app.route() for "Things which aren't magic". It turns out all we had to do was use a dash of regular expressions and Python's method of calling functions with keyword arguments in order to add a bit of dynamicism to our URLs.</p>
+<p>The source for the NotFlask example, along with it's tiny test suite is <a href="https://github.com/ains/twam-flask">available over on Github</a> so over go any check it out.</p>
+<p>Up next is this series I'll be digging into AngularJS, seeing how it does dependency injection, and how declarations like the snippet below are made possible!</p>
+<div class="highlight"><pre><span class="nx">angular</span><span class="p">.</span><span class="nx">module</span><span class="p">(</span><span class="s1">'test'</span><span class="p">,</span> <span class="p">[</span><span class="s1">'$http'</span><span class="p">,</span> <span class="kd">function</span><span class="p">(</span><span class="nx">$http</span><span class="p">)</span> <span class="p">{</span>
+    <span class="nx">$http</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s2">"http://google.com/"</span><span class="p">).</span><span class="nx">success</span><span class="p">(</span><span class="kd">function</span><span class="p">(</span><span class="nx">data</span><span class="p">)</span> <span class="p">{</span>
+        <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">data</span><span class="p">);</span>
+    <span class="p">});</span>
+<span class="p">}]);</span>
+</pre></div>
+
+
+        
+
+        
+    </div>
+</div></body></html>

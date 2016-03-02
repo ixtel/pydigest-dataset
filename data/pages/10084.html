@@ -1,0 +1,202 @@
+<html><body><div><div class="document">
+<p>Testing in a Django project ensures the latest version of a project is as bug-free as possible. But when deploying, you’re dealing with multiple versions of the project through the migrations.</p>
+<p>The test runner is extremely helpful in its creation and cleanup of a test database for our test suite. In this temporary test database, all of the project's migrations are run before our tests. This means our tests are running the latest version of the schema and are unable to verify the behavior of those very migrations because the tests cannot set up data before the migrations run
+or assert conditions about them.</p>
+<p>We can teach our tests to run against those migrations with just a bit of work. This is especially
+helpful for migrations that are going to include significant alterations to existing data.</p>
+<p>The Django test runner begins each run by creating a new database and running all migrations in
+it. This ensures that every test is running against the current schema the project expects, but
+we'll need to work around this setup in order to test those migrations. To accomplish this, we'll
+need to have the test runner step back in the migration chain just for the tests against them.</p>
+<p>Ultimately, we're going to try to write tests against migrations that look like this:</p>
+<div class="highlight"><pre><span class="k">class</span> <span class="nc">TagsTestCase</span><span class="p">(</span><span class="n">TestMigrations</span><span class="p">):</span>
+
+    <span class="n">migrate_from</span> <span class="o">=</span> <span class="s">'0009_previous_migration'</span>
+    <span class="n">migrate_to</span> <span class="o">=</span> <span class="s">'0010_migration_being_tested'</span>
+
+    <span class="k">def</span> <span class="nf">setUpBeforeMigration</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">apps</span><span class="p">):</span>
+        <span class="n">BlogPost</span> <span class="o">=</span> <span class="n">apps</span><span class="o">.</span><span class="n">get_model</span><span class="p">(</span><span class="s">'blog'</span><span class="p">,</span> <span class="s">'Post'</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">post_id</span> <span class="o">=</span> <span class="n">BlogPost</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">create</span><span class="p">(</span>
+            <span class="n">title</span> <span class="o">=</span> <span class="s">"A test post with tags"</span><span class="p">,</span>
+            <span class="n">body</span> <span class="o">=</span> <span class="s">""</span><span class="p">,</span>
+            <span class="n">tags</span> <span class="o">=</span> <span class="s">"tag1 tag2"</span><span class="p">,</span>
+        <span class="p">)</span><span class="o">.</span><span class="n">id</span>
+
+    <span class="k">def</span> <span class="nf">test_tags_migrated</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">BlogPost</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">apps</span><span class="o">.</span><span class="n">get_model</span><span class="p">(</span><span class="s">'blog'</span><span class="p">,</span> <span class="s">'Post'</span><span class="p">)</span>
+        <span class="n">post</span> <span class="o">=</span> <span class="n">BlogPost</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="nb">id</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">post_id</span><span class="p">)</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">post</span><span class="o">.</span><span class="n">tags</span><span class="o">.</span><span class="n">count</span><span class="p">(),</span> <span class="mi">2</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">post</span><span class="o">.</span><span class="n">tags</span><span class="o">.</span><span class="n">all</span><span class="p">()[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="s">"tag1"</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">post</span><span class="o">.</span><span class="n">tags</span><span class="o">.</span><span class="n">all</span><span class="p">()[</span><span class="mi">1</span><span class="p">]</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="s">"tag2"</span><span class="p">)</span>
+</pre></div>
+
+<p>Before explaining how to make this work, we'll break down how this test is actually written.</p>
+<p>We're inheriting from a TestCase helper that will be written to make testing migrations possible
+named <tt class="docutils literal">TestMigrations</tt> and defining for this class two attributes that configure the migrations
+before and after that we want to test. <tt class="docutils literal">migrate_from</tt> is the last migration we expect to be
+run on machines we want to deploy to and <tt class="docutils literal">migrate_to</tt> is the latest new migration we're testing
+before deploying.</p>
+<div class="highlight"><pre><span class="k">class</span> <span class="nc">TagsTestCase</span><span class="p">(</span><span class="n">TestMigrations</span><span class="p">):</span>
+
+    <span class="n">migrate_from</span> <span class="o">=</span> <span class="s">'0009_previous_migration'</span>
+    <span class="n">migrate_to</span> <span class="o">=</span> <span class="s">'0010_migration_being_tested'</span>
+</pre></div>
+
+<p>Because our test is about a migration, data modifying migrations in particular, we want to do
+some setup <em>before</em> the migration in question (<tt class="docutils literal">0010_migration_being_tested</tt>) is run. An extra
+setup method is defined to do that kind of data setup <em>after</em> <tt class="docutils literal">0009_previous_migration</tt> has run
+but before <tt class="docutils literal">0010_migration_being_tested</tt>.</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">setUpBeforeMigration</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">apps</span><span class="p">):</span>
+    <span class="n">BlogPost</span> <span class="o">=</span> <span class="n">apps</span><span class="o">.</span><span class="n">get_model</span><span class="p">(</span><span class="s">'blog'</span><span class="p">,</span> <span class="s">'Post'</span><span class="p">)</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">post_id</span> <span class="o">=</span> <span class="n">BlogPost</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">create</span><span class="p">(</span>
+        <span class="n">title</span> <span class="o">=</span> <span class="s">"A test post with tags"</span><span class="p">,</span>
+        <span class="n">body</span> <span class="o">=</span> <span class="s">""</span><span class="p">,</span>
+        <span class="n">tags</span> <span class="o">=</span> <span class="s">"tag1 tag2"</span><span class="p">,</span>
+    <span class="p">)</span><span class="o">.</span><span class="n">id</span>
+</pre></div>
+
+<p>Once our test runs this setup, we expect the final <tt class="docutils literal">0010_migration_being_tested</tt> migration to
+be run. At that time, one or more <tt class="docutils literal"><span class="pre">test_*()</span></tt> methods we define can do the sort of assertions
+tests would normally do. In this case, we're making sure data was converted to the new schema
+correctly.</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">test_tags_migrated</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+    <span class="n">BlogPost</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">apps</span><span class="o">.</span><span class="n">get_model</span><span class="p">(</span><span class="s">'blog'</span><span class="p">,</span> <span class="s">'Post'</span><span class="p">)</span>
+    <span class="n">post</span> <span class="o">=</span> <span class="n">BlogPost</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="nb">id</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">post_id</span><span class="p">)</span>
+
+    <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">post</span><span class="o">.</span><span class="n">tags</span><span class="o">.</span><span class="n">count</span><span class="p">(),</span> <span class="mi">2</span><span class="p">)</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">post</span><span class="o">.</span><span class="n">tags</span><span class="o">.</span><span class="n">all</span><span class="p">()[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="s">"tag1"</span><span class="p">)</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">post</span><span class="o">.</span><span class="n">tags</span><span class="o">.</span><span class="n">all</span><span class="p">()[</span><span class="mi">1</span><span class="p">]</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="s">"tag2"</span><span class="p">)</span>
+</pre></div>
+
+<p>Here we've fetched a copy of this <tt class="docutils literal">Post</tt> model's after-migration version and confirmed the
+value we set up in <tt class="docutils literal">setUpBeforeMigration()</tt> was converted to the new structure.</p>
+<p>Now, let's look at that <tt class="docutils literal">TestMigrations</tt> base class that makes this possible. First, the pieces
+from Django we'll need to import to build our migration-aware test cases.</p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">django.apps</span> <span class="kn">import</span> <span class="n">apps</span>
+<span class="kn">from</span> <span class="nn">django.test</span> <span class="kn">import</span> <span class="n">TransactionTestCase</span>
+<span class="kn">from</span> <span class="nn">django.db.migrations.executor</span> <span class="kn">import</span> <span class="n">MigrationExecutor</span>
+<span class="kn">from</span> <span class="nn">django.db</span> <span class="kn">import</span> <span class="n">connection</span>
+</pre></div>
+
+<p>We'll be extending the <tt class="docutils literal">TransactionTestCase</tt> class. In order to control migration running, we'll
+use <tt class="docutils literal">MigrationExecutor</tt>, which needs the database <tt class="docutils literal">connection</tt> to operate on. Migrations are
+tied pretty intrinsically to Django applications, so we'll be using <tt class="docutils literal">django.apps.apps</tt> and, in
+particular, <tt class="docutils literal">get_containing_app_config()</tt> to identify the current app our tests are running in.</p>
+<div class="highlight"><pre><span class="k">class</span> <span class="nc">TestMigrations</span><span class="p">(</span><span class="n">TransactionTestCase</span><span class="p">):</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span> <span class="nf">app</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">apps</span><span class="o">.</span><span class="n">get_containing_app_config</span><span class="p">(</span><span class="nb">type</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="n">__module__</span><span class="p">)</span><span class="o">.</span><span class="n">name</span>
+
+    <span class="n">migrate_from</span> <span class="o">=</span> <span class="bp">None</span>
+    <span class="n">migrate_to</span> <span class="o">=</span> <span class="bp">None</span>
+</pre></div>
+
+<p>We're starting with a few necessary properties.</p>
+<ul class="simple">
+<li><tt class="docutils literal">app</tt> is a dynamic property that'll look up and return the name of the current app.</li>
+<li><tt class="docutils literal">migrate_to</tt> will be defined on our own test case subclass as the name of the migration
+we're testing.</li>
+<li><tt class="docutils literal">migrate_from</tt> is the migration we want to set up test data in, usually the latest migration
+that's currently been deployed in the project.</li>
+</ul>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">setUp</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+    <span class="k">assert</span> <span class="bp">self</span><span class="o">.</span><span class="n">migrate_from</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">migrate_to</span><span class="p">,</span> \
+        <span class="s">"TestCase '{}' must define migrate_from and migrate_to properties"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="nb">type</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="n">__name__</span><span class="p">)</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">migrate_from</span> <span class="o">=</span> <span class="p">[(</span><span class="bp">self</span><span class="o">.</span><span class="n">app</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">migrate_from</span><span class="p">)]</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">migrate_to</span> <span class="o">=</span> <span class="p">[(</span><span class="bp">self</span><span class="o">.</span><span class="n">app</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">migrate_to</span><span class="p">)]</span>
+    <span class="n">executor</span> <span class="o">=</span> <span class="n">MigrationExecutor</span><span class="p">(</span><span class="n">connection</span><span class="p">)</span>
+    <span class="n">old_apps</span> <span class="o">=</span> <span class="n">executor</span><span class="o">.</span><span class="n">loader</span><span class="o">.</span><span class="n">project_state</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">migrate_from</span><span class="p">)</span><span class="o">.</span><span class="n">apps</span>
+</pre></div>
+
+<p>After insisting the test case class had defined <tt class="docutils literal">migrate_to</tt> and <tt class="docutils literal">migrate_from</tt> migrations,
+we use the internal <tt class="docutils literal">MigrationExecutor</tt> utility to get a state of the applications as of the
+older of the two migrations.</p>
+<p>We'll use <tt class="docutils literal">old_apps</tt> in our <tt class="docutils literal">setUpBeforeMigration()</tt> to work with old versions of the models
+from this app. First, we'll run our migrations <em>backwards</em> to return to this original migration
+and then call the <tt class="docutils literal">setUpBeforeMigration()</tt> method.</p>
+<div class="highlight"><pre><span class="c"># Reverse to the original migration</span>
+<span class="n">executor</span><span class="o">.</span><span class="n">migrate</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">migrate_from</span><span class="p">)</span>
+
+<span class="bp">self</span><span class="o">.</span><span class="n">setUpBeforeMigration</span><span class="p">(</span><span class="n">old_apps</span><span class="p">)</span>
+</pre></div>
+
+<p>Now that we've set up the old state, we simply run the migrations forward again. If the migrations
+are correct, they should update any test data we created. Of course, we're validating
+that in our actual tests.</p>
+<div class="highlight"><pre><span class="c"># Run the migration to test</span>
+<span class="n">executor</span><span class="o">.</span><span class="n">migrate</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">migrate_to</span><span class="p">)</span>
+</pre></div>
+
+<p>And finally, we store a current version of the app configuration that our tests can access and
+define a no-op <tt class="docutils literal">setUpBeforeMigration()</tt></p>
+<div class="highlight"><pre>    <span class="bp">self</span><span class="o">.</span><span class="n">apps</span> <span class="o">=</span> <span class="n">executor</span><span class="o">.</span><span class="n">loader</span><span class="o">.</span><span class="n">project_state</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">migrate_to</span><span class="p">)</span><span class="o">.</span><span class="n">apps</span>
+
+<span class="k">def</span> <span class="nf">setUpBeforeMigration</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">apps</span><span class="p">):</span>
+    <span class="k">pass</span>
+</pre></div>
+
+<p>Here's a complete version:</p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">django.apps</span> <span class="kn">import</span> <span class="n">apps</span>
+<span class="kn">from</span> <span class="nn">django.test</span> <span class="kn">import</span> <span class="n">TransactionTestCase</span>
+<span class="kn">from</span> <span class="nn">django.db.migrations.executor</span> <span class="kn">import</span> <span class="n">MigrationExecutor</span>
+<span class="kn">from</span> <span class="nn">django.db</span> <span class="kn">import</span> <span class="n">connection</span>
+
+
+<span class="k">class</span> <span class="nc">TestMigrations</span><span class="p">(</span><span class="n">TransactionTestCase</span><span class="p">):</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span> <span class="nf">app</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">apps</span><span class="o">.</span><span class="n">get_containing_app_config</span><span class="p">(</span><span class="nb">type</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="n">__module__</span><span class="p">)</span><span class="o">.</span><span class="n">name</span>
+
+    <span class="n">migrate_from</span> <span class="o">=</span> <span class="bp">None</span>
+    <span class="n">migrate_to</span> <span class="o">=</span> <span class="bp">None</span>
+
+    <span class="k">def</span> <span class="nf">setUp</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">assert</span> <span class="bp">self</span><span class="o">.</span><span class="n">migrate_from</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">migrate_to</span><span class="p">,</span> \
+            <span class="s">"TestCase '{}' must define migrate_from and migrate_to properties"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="nb">type</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="n">__name__</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">migrate_from</span> <span class="o">=</span> <span class="p">[(</span><span class="bp">self</span><span class="o">.</span><span class="n">app</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">migrate_from</span><span class="p">)]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">migrate_to</span> <span class="o">=</span> <span class="p">[(</span><span class="bp">self</span><span class="o">.</span><span class="n">app</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">migrate_to</span><span class="p">)]</span>
+        <span class="n">executor</span> <span class="o">=</span> <span class="n">MigrationExecutor</span><span class="p">(</span><span class="n">connection</span><span class="p">)</span>
+        <span class="n">old_apps</span> <span class="o">=</span> <span class="n">executor</span><span class="o">.</span><span class="n">loader</span><span class="o">.</span><span class="n">project_state</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">migrate_from</span><span class="p">)</span><span class="o">.</span><span class="n">apps</span>
+
+        <span class="c"># Reverse to the original migration</span>
+        <span class="n">executor</span><span class="o">.</span><span class="n">migrate</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">migrate_from</span><span class="p">)</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">setUpBeforeMigration</span><span class="p">(</span><span class="n">old_apps</span><span class="p">)</span>
+
+        <span class="c"># Run the migration to test</span>
+        <span class="n">executor</span><span class="o">.</span><span class="n">migrate</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">migrate_to</span><span class="p">)</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">apps</span> <span class="o">=</span> <span class="n">executor</span><span class="o">.</span><span class="n">loader</span><span class="o">.</span><span class="n">project_state</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">migrate_to</span><span class="p">)</span><span class="o">.</span><span class="n">apps</span>
+
+    <span class="k">def</span> <span class="nf">setUpBeforeMigration</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">apps</span><span class="p">):</span>
+        <span class="k">pass</span>
+
+
+<span class="k">class</span> <span class="nc">TagsTestCase</span><span class="p">(</span><span class="n">TestMigrations</span><span class="p">):</span>
+
+    <span class="n">migrate_from</span> <span class="o">=</span> <span class="s">'0009_previous_migration'</span>
+    <span class="n">migrate_to</span> <span class="o">=</span> <span class="s">'0010_migration_being_tested'</span>
+
+    <span class="k">def</span> <span class="nf">setUpBeforeMigration</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">apps</span><span class="p">):</span>
+        <span class="n">BlogPost</span> <span class="o">=</span> <span class="n">apps</span><span class="o">.</span><span class="n">get_model</span><span class="p">(</span><span class="s">'blog'</span><span class="p">,</span> <span class="s">'Post'</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">post_id</span> <span class="o">=</span> <span class="n">BlogPost</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">create</span><span class="p">(</span>
+            <span class="n">title</span> <span class="o">=</span> <span class="s">"A test post with tags"</span><span class="p">,</span>
+            <span class="n">body</span> <span class="o">=</span> <span class="s">""</span><span class="p">,</span>
+            <span class="n">tags</span> <span class="o">=</span> <span class="s">"tag1 tag2"</span><span class="p">,</span>
+        <span class="p">)</span><span class="o">.</span><span class="n">id</span>
+
+    <span class="k">def</span> <span class="nf">test_tags_migrated</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">BlogPost</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">apps</span><span class="o">.</span><span class="n">get_model</span><span class="p">(</span><span class="s">'blog'</span><span class="p">,</span> <span class="s">'Post'</span><span class="p">)</span>
+        <span class="n">post</span> <span class="o">=</span> <span class="n">BlogPost</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="nb">id</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">post_id</span><span class="p">)</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">post</span><span class="o">.</span><span class="n">tags</span><span class="o">.</span><span class="n">count</span><span class="p">(),</span> <span class="mi">2</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">post</span><span class="o">.</span><span class="n">tags</span><span class="o">.</span><span class="n">all</span><span class="p">()[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="s">"tag1"</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">post</span><span class="o">.</span><span class="n">tags</span><span class="o">.</span><span class="n">all</span><span class="p">()[</span><span class="mi">1</span><span class="p">]</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="s">"tag2"</span><span class="p">)</span>
+</pre></div>
+
+</div>
+
+  </div></body></html>

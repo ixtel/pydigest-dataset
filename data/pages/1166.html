@@ -1,0 +1,133 @@
+<html><body><div><div>
+            <h1 class="post-title">The not-so-sorry state of SSL in Python</h1>
+            
+            <h3>Introduction</h3>
+
+<p>TLS and SSL are two critical technologies which underly much of the secure
+communications that occur on the internet. Over the past few years, spurred by
+increasingly effective attacks and a desire for new functionality, SSL and TLS
+have seen many new features, as well as practical improvements.</p>
+
+<p>Python is currently in a transitional period between Python 2 and Python 3. For
+the past few years, all new feature development has been happening on Python 3,
+including new features in Python's <code>ssl</code> module. This means that Python 3 users
+have had acccess to these improvements to TLS, but Python 2 users (still the
+majority of Python users) have been falling behind.</p>
+
+
+
+<p>Unfortunately, missing features in an SSL/TLS stack aren't like missing
+features in other modules. They can prevent interoperability with the wider
+internet, compromise the security of connections, and there's usually no
+workaround. To get a sense of how bad this situation is, you can watch <a href="https://hynek.me/talks/tls/">Hynek
+Schlawack's talk on "The Sorry State of SSL" from
+PyCon</a>.</p>
+
+<h3>Current State and Requirements</h3>
+
+<p>This situation is unacceptable, given that Python 2 is going to continue to see
+production usage for many years to come. As a result, we advocated strongly for
+<a href="http://legacy.python.org/dev/peps/pep-0466/">PEP 466</a>, which provides
+permission to backport many of these improvements to Python 2.</p>
+
+<p>A few of the important features missing from Python 2 are:</p>
+
+<ol>
+<li><code>NPN</code>/<code>ALPN</code> support. NPN (Next Protocol Negotiation) was a TLS extension
+originally <a href="https://technotes.googlecode.com/git/nextprotoneg.html">introduced by
+Google</a>, which
+allows a connection to negotiate which application-level protocol will be
+used, it is currently in the process of being supplanted by ALPN
+(Application Level Protocol Negotiation), which is an IETF draft. These are
+necessary for protocols such as <a href="https://en.wikipedia.org/wiki/SPDY">SPDY</a>
+and <a href="https://en.wikipedia.org/wiki/HTTP_2.0">HTTP/2</a>. (ALPN is not yet in
+Python, because it's not yet in an OpenSSL releases, once it is the feature
+will be added).</li>
+<li>SNI support. SNI (Server Name Indication) is another TLS extension, which
+allows a server to support multiple hostnames on a single IP address. This
+is necessary because of the shrinking supply of IPv4 addresses and
+increasing desire to run distributed CDNs which serve multiple hostnames.</li>
+<li>Hostname verification support. Part of the process for correctly
+implementing a TLS client is verifying that the certificate it presents has
+a hostname which matches the one you intended to request. Without this
+support, TLS connections are vulnerable to Man-In-The-Middle attacks.</li>
+<li>Locating platform trust roots. With this Python is able to use your
+Operating System's provided set of Certificate Authorities for verifying the
+certificates of TLS servers.</li>
+<li>Improved cipher suites. Previously Python used OpenSSL's default cipher suite
+list, which is unfortunately insecure. It includes several weak ciphers, and
+does not correctly prioritize the strongest ciphers.</li>
+<li>ECDHE and DHE support. ECDHE (Elliptic Curve Diffie-Hellman Ephemeral) and
+DHE (Diffie-Hellman Ephemeral) provide a property called "Perfect Forward
+Secrecy", which means that even if the server's private key is compromised
+the plaintext of sessions <em>before</em> the compromise are still secret.</li>
+<li>Any configurability. It's impossible to disable TLS compression (to prevent
+the <a href="https://en.wikipedia.org/wiki/CRIME">CRIME</a>) attack, or configure which
+versions of the SSL/TLS protocol should be used.</li>
+</ol>
+
+<h3>Work, Solutions and Issues</h3>
+
+<p>To address this, we backported each of these features from the Python 3 branch
+to the Python 2 branch. This was a large task, because it is a huge amount of
+code (the resulting diff is over 12,000 lines), written for two different
+programming languages, with some very fundamental differences.</p>
+
+<p>Our first step was to take a diff of the files that comprise the SSL module
+between Python 2 and Python 3. Then, we applied this diff, using a graphical
+merge tool and throwing away changes that were incorrect, or introduced
+backwards incompatibilities.</p>
+
+<p>Then we made sure all of the code compiled, fixing syntax errors, and API
+differences between Python 2 and Python 3. And finally we ran the tests and
+made fixes as necessary until all of them were passing.</p>
+
+<p>A few of the issues we ran across were:</p>
+
+<ol>
+<li>Missing functions in the C API, such as <code>PyUnicode_FSConverter</code>.</li>
+<li>Usage of stdlib modules, such as <code>enum</code>, which didn't exist in Python 2.</li>
+<li>Differences between the handling of <code>str</code>, <code>bytes</code>, and <code>unicode</code>.
+Particularly, existing Python 3 code was very strict about text vs. bytes in
+a way that often wasn't possible to emulate in Python 2.</li>
+<li>The <code>ssl</code> module is deeply coupled to the <code>socket</code> module, and many of the
+internals of the <code>socket</code> module were changed in Python 3 to fully
+participate in <a href="http://legacy.python.org/dev/peps/pep-3116/">PEP 3116</a>.</li>
+<li>Most of the code for the <code>ssl</code> module is written in C, rather than in
+Python. C code is considerably more difficult to work with than Python code,
+while all of the Python-code differences were easy to work around, the C API
+differences required considerably more work.</li>
+</ol>
+
+<h3>Rackspace</h3>
+
+<p>This work is important to Rackspace for several reasons:</p>
+
+<ol>
+<li>Rackspace uses a lot of Python. Between OpenStack, other open source Python
+projects, and internal tooling, Rackspace is powered by Python. Keeping our
+own code secure is a very important priority.</li>
+<li>Many of Rackspace's customers use Python, including to orchestrate
+Rackspace's APIs, Keeping those connections secure is important.</li>
+<li>Features like NPN, ALPN, SNI, and Perfect Forward Secrecy are vital for the
+health and continued growth of the internet. Developers' access to and
+adoption of these technologies in Python, whether for use with Rackspace or
+not, is critical.</li>
+</ol>
+
+<h3>Closing Thoughts</h3>
+
+<p>The patch with our work is currently in code review, and we're hoping it will
+be merged soon, for release in Python 2.7.9. One of our goals in working on
+this patch was to reduce the maintenance burden going forward, by minimizing
+the delta with Python 3. When new features like ALPN are added to Python 3,
+they should be much easier to backport to Python 2 than this was.</p>
+
+            
+            
+<p id="disqus_thread"/>
+
+
+
+        </div>
+    </div></body></html>

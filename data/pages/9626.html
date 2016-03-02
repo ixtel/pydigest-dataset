@@ -1,0 +1,273 @@
+<html><body><div><div class="content">
+      
+        <h1 class="content-title">Examples of using Walrus, a lightweight Redis Toolkit</h1>
+      
+      
+      
+  
+  
+  
+    <p><a href="http://media.charlesleifer.com/blog/photos/walrus-logo-0.png" title="photos/walrus-logo-0.png"><img alt="photos/walrus-logo-0.png" class="img-responsive" src="http://m.charlesleifer.com/t/800x-/blog/photos/walrus-logo-0.png?key=UNDBglET9Q1eL4xjIZj4Bg"/></a></p>
+<p><a href="http://walrus.readthedocs.org/">walrus</a> is my go-to toolkit for working with Redis in Python, and hopefully this post will convince you that it can be <em>your</em> go-to as well. I've tried to include lots of high-level Python APIs built on Redis primitives and the result is quite a lot of functionality. In this post I'll take you on a tour of the library and show examples of how it might be useful in your next project.</p>
+<p>To follow along, you can install <code>walrus</code> locally by running:</p>
+
+<p>Also make sure that <a href="http://redis.io">redis</a> is running locally.</p>
+<h3>Introduction to Walrus</h3>
+<p>At the lowest level, Walrus is just a wrapper on top of Andy McCurdy's <a href="https://github.com/andymccurdy/redis-py">redis-py</a>. Walrus adds new functionality, but does not detract from what's already there, so if you're familiar with <code>redis-py</code>, you will be familiar with Walrus.</p>
+<p>To get started, let's import walrus and check it out:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">walrus</span> <span class="kn">import</span> <span class="n">Walrus</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">db</span> <span class="o">=</span> <span class="n">Walrus</span><span class="p">()</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">db</span>
+<span class="go">Database&lt;ConnectionPool&lt;Connection&lt;host=localhost,port=6379,db=0&gt;&gt;&gt;</span>
+</pre></div>
+<p>As you can see, the <code>Walrus()</code> instance is just a fancy wrapper.</p>
+<h3>Containers</h3>
+<p>At the next level, Walrus provides Pythonic container types for the various Redis data-types. Walrus provides Pythonic wrappers for:</p>
+<ul>
+<li>Hash</li>
+<li>List</li>
+<li>Set</li>
+<li>ZSet</li>
+<li>HyperLogLog</li>
+<li>Array (custom type with O(1) indexing as opposed to O(n) with List).</li>
+</ul>
+<p>These containers use Python magic methods to make them behave like the Python analogues. For instance, the Hash acts a lot like a <code>dict</code>:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">h</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">Hash</span><span class="p">(</span><span class="s1">'huey-info'</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">h</span><span class="p">[</span><span class="s1">'color'</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'white'</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">h</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">temperament</span><span class="o">=</span><span class="s1">'feisty'</span><span class="p">,</span> <span class="n">eyes</span><span class="o">=</span><span class="s1">'blue'</span><span class="p">)</span>
+<span class="go">&lt;Hash "my-hash": {'eyes': 'blue', 'foo': 'bar', 'temperament': 'feisty'}&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="nb">len</span><span class="p">(</span><span class="n">h</span><span class="p">)</span>
+<span class="go">3</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="s1">'eyes'</span> <span class="ow">in</span> <span class="n">h</span>
+<span class="go">True</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="nb">sorted</span><span class="p">(</span><span class="n">h</span><span class="p">)</span>
+<span class="go">[('eyes', 'blue'), ('foo', 'bar'), ('temperament', 'feisty')]</span>
+</pre></div>
+<p>For details on the various container types and their APIs, check out <a href="http://walrus.readthedocs.org/en/latest/containers.html">the containers documentation</a>.</p>
+<h3>High-level APIs</h3>
+<p>Walrus provides high-level APIs for the following functionality:</p>
+
+<h4>Caching</h4>
+<p>Let's begin with caching and work our way through to Models, which are the most complex and also the most interesting I think.</p>
+<p>The caching APIs are pretty simple. There are the standard <code>get</code>, <code>set</code>, and <code>delete</code> we're all familiar with from our memcached days, but in addition there is a handy decorator that can be used to effectively "memoize" the results of a function call. There is also a <code>cached_property</code> decorator that works just like the function decorator but exposes the cached method call as a property. Also possibly of interest is the <code>cache_async()</code> decorator, which will execute the wrapped function in a separate thread.</p>
+<p>Here's a very simple example demonstrating the use of the cache:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span> <span class="nn">datetime</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">cache</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">cache</span><span class="p">()</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="nd">@cache.cached</span><span class="p">()</span>
+<span class="gp">... </span><span class="k">def</span> <span class="nf">what_time_is_it</span><span class="p">(</span><span class="n">seed</span><span class="o">=</span><span class="mi">0</span><span class="p">):</span>
+<span class="gp">... </span>    <span class="k">return</span> <span class="n">datetime</span><span class="o">.</span><span class="n">datetime</span><span class="o">.</span><span class="n">now</span><span class="p">()</span>
+<span class="gp">...</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="n">what_time_is_it</span><span class="p">()</span>
+<span class="go">datetime.datetime(2016, 1, 13, 23, 27, 44, 160312)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">what_time_is_it</span><span class="p">()</span>  <span class="c1"># We get the cached value.</span>
+<span class="go">datetime.datetime(2016, 1, 13, 23, 27, 44, 160312)</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="n">what_time_is_it</span><span class="p">(</span><span class="mi">123</span><span class="p">)</span>  <span class="c1"># We get a new value since the function args changed.</span>
+<span class="go">datetime.datetime(2016, 1, 13, 23, 28, 02, 211871)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">what_time_is_it</span><span class="p">(</span><span class="mi">123</span><span class="p">)</span>  <span class="c1"># We get the previous value since the seed is the same.</span>
+<span class="go">datetime.datetime(2016, 1, 13, 23, 28, 02, 211871)</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="n">what_time_is_it</span><span class="p">()</span>  <span class="c1"># Back to the original value.</span>
+<span class="go">datetime.datetime(2016, 1, 13, 23, 27, 44, 160312)</span>
+</pre></div>
+<p>For more information, check out the <a href="http://walrus.readthedocs.org/en/latest/cache.html">caching</a> docs.</p>
+<h4>Autocomplete</h4>
+<p>The <code>walrus</code> autocomplete is much more powerful than the autocomplete examples you typically see that involve the use of <code>ZRANGEBYLEX</code> or something similar. <code>walrus</code> uses a complex scoring algorithm to ensure that multi-word titles are sorted correctly when being returned to the user, ensuring that the closest matches come first. The <code>walrus</code> autocomplete engine can also store rich metadata along with the titles. Let's say you're building a movie search box using the autocomplete. You could store the movie's year, a URL to a thumbnail of the box-cover, and the URL to the movie detail page in the autocomplete index, that way when you are showing a user their results you can avoid a second round-trip to the database for that metadata.</p>
+<p>Let's look at a simple example that does not use metadata. We'll just store simple titles and the search engine will return simple string results.</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">ac</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">autocomplete</span><span class="p">()</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">ac</span><span class="o">.</span><span class="n">store</span><span class="p">(</span><span class="s1">'charlie and huey are friends'</span><span class="p">)</span>
+<span class="go">True</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">ac</span><span class="o">.</span><span class="n">store</span><span class="p">(</span><span class="s1">'huey is not friends with mickey'</span><span class="p">)</span>
+<span class="go">True</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">ac</span><span class="o">.</span><span class="n">store</span><span class="p">(</span><span class="s1">'zaizee loves huey'</span><span class="p">)</span>
+<span class="go">True</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">ac</span><span class="o">.</span><span class="n">store</span><span class="p">(</span><span class="s1">'zaizee and huey are cats'</span><span class="p">)</span>
+<span class="go">True</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="p">[</span><span class="n">result</span> <span class="k">for</span> <span class="n">result</span> <span class="ow">in</span> <span class="n">ac</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="s1">'hue'</span><span class="p">)]</span>
+<span class="go">[u'huey is not friends with mickey',</span>
+<span class="go"> u'charlie and huey are friends',</span>
+<span class="go"> u'zaizee and huey are cats',</span>
+<span class="go"> u'zaizee loves huey']</span>
+</pre></div>
+<p>Note how the first result starts with the phrase we were looking for, "hue*". In the subsequent results, "huey" is the third word, the results are then sorted alphabetically by word. This type of sorting, along with metadata storage, are the primary reasons to use the walrus autocomplete engine over a simpler <code>ZRANGEBYLEX</code> solution.</p>
+<p>For more information, check out the <a href="http://walrus.readthedocs.org/en/latest/autocomplete.html">autocomplete</a> docs.</p>
+<h4>Rate-limiting</h4>
+<p>Rate-limiting is a kind of thorny problem and I'll say up front that <code>walrus</code> implements a fairly simplisitic rate-limiting implementation. The gist is that the rate limiter will allow up to <code>N</code> number of events per <code>t</code> seconds for a given key, which may be an IP address, etc. The time period is rolling, so we're looking at the difference between the Nth-last event and the first in order to determine if the limit has been exceeded.</p>
+<p>Let's create another function that tells the time and put a global rate limit on it of 2 calls every 10 seconds:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">rl</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">rate_limit</span><span class="p">(</span><span class="s1">'rl-1'</span><span class="p">,</span> <span class="n">limit</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span> <span class="n">per</span><span class="o">=</span><span class="mi">10</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="nd">@rl.rate_limited</span><span class="p">()</span>
+<span class="gp">... </span><span class="k">def</span> <span class="nf">the_time</span><span class="p">():</span>
+<span class="gp">... </span>    <span class="k">return</span> <span class="n">datetime</span><span class="o">.</span><span class="n">datetime</span><span class="o">.</span><span class="n">now</span><span class="p">()</span>
+<span class="gp">...</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="n">the_time</span><span class="p">()</span>
+<span class="go">datetime.datetime(2016, 1, 13, 23, 45, 58, 530863)</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="n">the_time</span><span class="p">()</span>
+<span class="go">datetime.datetime(2016, 1, 13, 23, 45, 59, 148192)</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="n">the_time</span><span class="p">()</span>
+<span class="go">---------------------------------------------------------------------------</span>
+<span class="go">RateLimitException                        Traceback (most recent call last)</span>
+<span class="go">&lt;ipython-input-30-4a5a055f25ab&gt; in &lt;module&gt;()</span>
+<span class="go">----&gt; 1 the_time()</span>
+
+<span class="go">/home/charles/pypath/walrus/rate_limit.pyc in inner(*args, **kwargs)</span>
+<span class="go">     93                     raise RateLimitException(</span>
+<span class="go">     94                         'Call to %s exceeded %s events in %s seconds.' % (</span>
+<span class="go">---&gt; 95                             fn.__name__, self._limit, self._per))</span>
+<span class="go">     96                 return fn(*args, **kwargs)</span>
+<span class="go">     97             return inner</span>
+
+<span class="go">RateLimitException: Call to the_time exceeded 2 events in 10 seconds.</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="n">the_time</span><span class="p">()</span>  <span class="c1"># Waited a bit...</span>
+<span class="go">datetime.datetime(2016, 1, 13, 23, 46, 9, 369301)</span>
+</pre></div>
+<p>If your function takes parameters, then by default <code>walrus</code> will hash them together to create a unique key for the rate limiter. This key functions the same as a cache key might when using the <code>cached()</code> decorator. Rate limits are often a necessary evil in web development, so having one handy, albeit a simple implementation, is definitely convenient.</p>
+<p>For more information, check out the <a href="http://walrus.readthedocs.org/en/latest/rate-limit.html">rate limiting</a> documentation.</p>
+<h4>Counters</h4>
+<p>Really there's not much to say here... You give it a key and call <code>incr()</code> or <code>decr()</code>. If you'd like to read up on them, <a href="http://walrus.readthedocs.org/en/latest/api.html#walrus.Database.counter">check out the docs</a>. Here's a quick example:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">c1</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">counter</span><span class="p">(</span><span class="s1">'my-counter'</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">c1</span><span class="o">.</span><span class="n">incr</span><span class="p">()</span>
+<span class="go">1</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">c1</span><span class="o">.</span><span class="n">incr</span><span class="p">()</span>
+<span class="go">2</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">c2</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">counter</span><span class="p">(</span><span class="s1">'my-counter'</span><span class="p">)</span>  <span class="c1"># Same counter key!</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">c2</span><span class="o">.</span><span class="n">value</span><span class="p">()</span>
+<span class="go">2</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">c2</span><span class="o">.</span><span class="n">incr</span><span class="p">()</span>
+<span class="go">3</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">c1</span><span class="o">.</span><span class="n">value</span><span class="p">()</span>
+<span class="go">3</span>
+</pre></div>
+<h4>Locks</h4>
+<p>In a networked or distributed environment, sometimes it's necessary to serialize access to particular resources to avoid race conditions. Python provides nice locking APIs, but they only work for the given interpreter process. If you've got multiple web servers, a task queue, etc, and they all need to be able to coordinate access to a shared resource, then using Redis as a lock server can be a good solution. The hitch is that we need to be sure our Redis implementation isn't vulnerable to race conditions. To this end, <code>walrus</code> implements the lock acquisition and release as Lua scripts which are guaranteed to be atomic.</p>
+<p>The <code>walrus</code> <code>Lock</code> object has an API that mimicks <code>threading.Lock</code> with the exception that locks are given a name so other processes can reference them. Beyond that, they can be used as context managers, decorators, or just use the <code>acquire</code> / <code>release</code> methods.</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">l</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">lock</span><span class="p">(</span><span class="s1">'secret-file'</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="k">with</span> <span class="n">l</span><span class="p">:</span>
+<span class="gp">... </span>    <span class="n">read_from_file</span><span class="p">()</span>
+<span class="gp">... </span>    <span class="n">write_changes_to_file</span><span class="p">()</span>
+<span class="gp">...</span>
+
+<span class="gp">&gt;&gt;&gt; </span><span class="n">l</span><span class="o">.</span><span class="n">acquire</span><span class="p">()</span>
+<span class="go">True</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">l</span><span class="o">.</span><span class="n">acquire</span><span class="p">(</span><span class="n">block</span><span class="o">=</span><span class="bp">False</span><span class="p">)</span>  <span class="c1"># If we didn't specify False, we'd be stuck.</span>
+<span class="go">False</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">l</span><span class="o">.</span><span class="n">release</span><span class="p">()</span>
+<span class="go">True</span>
+</pre></div>
+<p>To read more, check out the <a href="http://walrus.readthedocs.org/en/latest/api.html#walrus.Lock">locks</a> documentation.</p>
+<h4>Models</h4>
+<p>As is typical with Python ORMs these days, <code>walrus</code> does not deviate far from the standard declarative metaclass hackery combined with lists of <code>Field</code> instances describing the various model attributes.</p>
+<p>On the backend, models are stored in hashes where the attributes correspond to the keys of the hash. Models can also have fields that are themselves containers, and these are stored separately, so a "Blog Post" model might have a "Set" of tags which is not stored in the hash, but in a separate <code>Set</code> object. In addition, Models support secondary indexes, which provide the ability to execute arbitrarily complex queries.</p>
+<p>Let's look at a simple example that flexes all the muscles. The model code will be as follows:</p>
+<div class="highlight"><pre><span class="kn">import</span> <span class="nn">datetime</span>
+<span class="kn">from</span> <span class="nn">walrus</span> <span class="kn">import</span> <span class="o">*</span>
+
+<span class="n">db</span> <span class="o">=</span> <span class="n">Walrus</span><span class="p">()</span>
+
+<span class="k">class</span> <span class="nc">User</span><span class="p">(</span><span class="n">Model</span><span class="p">):</span>
+    <span class="n">database</span> <span class="o">=</span> <span class="n">db</span>
+    <span class="n">namespace</span> <span class="o">=</span> <span class="s1">'my-app'</span>  <span class="c1"># Optional.</span>
+
+    <span class="c1"># Here we specify that the user's username will be the primary key we use</span>
+    <span class="c1"># to look them up. If a primary key is not supplied, then walrus will create</span>
+    <span class="c1"># an auto-incrementing integer primary key named "_id".</span>
+    <span class="n">username</span> <span class="o">=</span> <span class="n">TextField</span><span class="p">(</span><span class="n">primary_key</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+
+    <span class="c1"># We specify that `dob` is indexed. This means we can perform equality and</span>
+    <span class="c1"># range-type queries on the (reported) ages of the users.</span>
+    <span class="n">dob</span> <span class="o">=</span> <span class="n">DateField</span><span class="p">(</span><span class="n">index</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+
+
+<span class="k">class</span> <span class="nc">Note</span><span class="p">(</span><span class="n">Model</span><span class="p">):</span>
+    <span class="n">database</span> <span class="o">=</span> <span class="n">db</span>
+    <span class="n">namespace</span> <span class="o">=</span> <span class="s1">'my-app'</span>  <span class="c1"># Optional.</span>
+
+    <span class="c1"># There is no foreign key monkey-business in walrus. But since the username is</span>
+    <span class="c1"># the primary key of the User model, in order to link a note to a user, we can</span>
+    <span class="c1"># just store their username. To ensure that notes are searchable by username,</span>
+    <span class="c1"># we add a secondary index to it using `index=True`.</span>
+    <span class="n">username</span> <span class="o">=</span> <span class="n">TextField</span><span class="p">(</span><span class="n">index</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+
+    <span class="c1"># In order to support full-text search over the notes, we'll use `fts=True` to</span>
+    <span class="c1"># create a special type of secondary index that allows full-text search.</span>
+    <span class="n">content</span> <span class="o">=</span> <span class="n">TextField</span><span class="p">(</span><span class="n">fts</span><span class="o">=</span><span class="bp">True</span><span class="p">,</span> <span class="n">stemmer</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+
+    <span class="c1"># The timestamp will also be stored in an indexed field to allow querying for</span>
+    <span class="c1"># notes within a given range.</span>
+    <span class="n">timestamp</span> <span class="o">=</span> <span class="n">DateTimeField</span><span class="p">(</span><span class="n">index</span><span class="o">=</span><span class="bp">True</span><span class="p">,</span> <span class="n">default</span><span class="o">=</span><span class="n">datetime</span><span class="o">.</span><span class="n">datetime</span><span class="o">.</span><span class="n">now</span><span class="p">)</span>
+
+    <span class="c1"># We will store whether or not a note is published using a boolean field.</span>
+    <span class="c1"># Since we intend to query on it, we'll add a secondary index.</span>
+    <span class="n">published</span> <span class="o">=</span> <span class="n">BooleanField</span><span class="p">(</span><span class="n">index</span><span class="o">=</span><span class="bp">True</span><span class="p">,</span> <span class="n">default</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+
+    <span class="c1"># Lastly we have an instance of a container field. Tags will be stored in a</span>
+    <span class="c1"># Redis set.</span>
+    <span class="n">tags</span> <span class="o">=</span> <span class="n">SetField</span><span class="p">()</span>
+</pre></div>
+<p>Before we run queries against our data, let's populate a couple users and notes:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">charlie</span> <span class="o">=</span> <span class="n">User</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">username</span><span class="o">=</span><span class="s1">'charlie'</span><span class="p">,</span> <span class="n">dob</span><span class="o">=</span><span class="n">datetime</span><span class="o">.</span><span class="n">date</span><span class="p">(</span><span class="mi">1983</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">huey</span> <span class="o">=</span> <span class="n">User</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">username</span><span class="o">=</span><span class="s1">'huey'</span><span class="p">,</span> <span class="n">dob</span><span class="o">=</span><span class="n">datetime</span><span class="o">.</span><span class="n">date</span><span class="p">(</span><span class="mi">2010</span><span class="p">,</span> <span class="mi">7</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">Note</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">username</span><span class="o">=</span><span class="s1">'charlie'</span><span class="p">,</span> <span class="n">content</span><span class="o">=</span><span class="s1">'my awesome first note'</span><span class="p">)</span>
+<span class="go">1</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">Note</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">username</span><span class="o">=</span><span class="s1">'charlie'</span><span class="p">,</span> <span class="n">content</span><span class="o">=</span><span class="s1">'my fantastic second note'</span><span class="p">)</span>
+<span class="go">2</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">Note</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">username</span><span class="o">=</span><span class="s1">'charlie'</span><span class="p">,</span> <span class="n">content</span><span class="o">=</span><span class="s1">'my terrible third note'</span><span class="p">)</span>
+<span class="go">3</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">Note</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">username</span><span class="o">=</span><span class="s1">'huey'</span><span class="p">,</span> <span class="n">content</span><span class="o">=</span><span class="s1">'meow this is awesome'</span><span class="p">)</span>
+<span class="go">4</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">Note</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">username</span><span class="o">=</span><span class="s1">'huey'</span><span class="p">,</span> <span class="n">content</span><span class="o">=</span><span class="s1">'purr walrus is fantastic'</span><span class="p">)</span>
+<span class="go">5</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">Note</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">username</span><span class="o">=</span><span class="s1">'huey'</span><span class="p">,</span> <span class="n">content</span><span class="o">=</span><span class="s1">'purr hiss'</span><span class="p">,</span> <span class="n">published</span><span class="o">=</span><span class="bp">False</span><span class="p">)</span>
+<span class="go">6</span>
+</pre></div>
+<p>For our first example, let's just find the published notes by huey:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">Note</span><span class="o">.</span><span class="n">query</span><span class="p">((</span><span class="n">Note</span><span class="o">.</span><span class="n">published</span> <span class="o">==</span> <span class="bp">True</span><span class="p">)</span> <span class="o">&amp;</span> <span class="p">(</span><span class="n">Note</span><span class="o">.</span><span class="n">username</span> <span class="o">==</span> <span class="s1">'huey'</span><span class="p">))</span>
+<span class="go">&lt;generator object query at 0x7f95c0f026e0&gt;</span>
+</pre></div>
+<p>As you can see, the output is a generator. To get the actual results we'll need to iterate over the generator:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">results</span> <span class="o">=</span> <span class="n">_</span>  <span class="c1"># Get the previous line's return value, our generator</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="p">[</span><span class="n">note</span><span class="o">.</span><span class="n">content</span> <span class="k">for</span> <span class="n">note</span> <span class="ow">in</span> <span class="n">results</span><span class="p">]</span>
+<span class="go">[u'meow this is awesome', u'purr walrus is fantastic']</span>
+</pre></div>
+<p>Cool! Did you notice that we combined two operations using the <code>&amp;</code> operator? With <code>walrus</code> you can combine as many different query expressions as you want, and using the secondary indexes, <code>walrus</code> will resolve each expression into a <code>Set</code>. These small sets are combined with one another such that <code>&amp;</code> results in an intersection and <code>|</code> (pipe) results in a union. In this way arbitrarily complex queries are not only possible, but quite easy to implement.</p>
+<p>For the next query, let's use the full-text search index to find published notes containing the word "awesome". For an added bonus, we'll order them sorting from newest-to-oldest:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">results</span> <span class="o">=</span> <span class="n">Note</span><span class="o">.</span><span class="n">query</span><span class="p">((</span><span class="n">Note</span><span class="o">.</span><span class="n">published</span> <span class="o">==</span> <span class="bp">True</span><span class="p">)</span> <span class="o">&amp;</span> <span class="p">(</span><span class="n">Note</span><span class="o">.</span><span class="n">content</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="s1">'awesome'</span><span class="p">)),</span> <span class="n">order_by</span><span class="o">=</span><span class="n">Note</span><span class="o">.</span><span class="n">timestamp</span><span class="o">.</span><span class="n">desc</span><span class="p">())</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="p">[</span><span class="n">x</span><span class="o">.</span><span class="n">content</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="n">results</span><span class="p">]</span>
+<span class="go">[u'meow this is awesome', u'my awesome first note']</span>
+</pre></div>
+<p>Pretty neat! If we wanted to query for users whose DOB is less than 2000, we can write:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">og_users</span> <span class="o">=</span> <span class="n">User</span><span class="o">.</span><span class="n">query</span><span class="p">(</span><span class="n">User</span><span class="o">.</span><span class="n">dob</span> <span class="o">&lt;</span> <span class="n">datetime</span><span class="o">.</span><span class="n">date</span><span class="p">(</span><span class="mi">2000</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="p">[</span><span class="n">user</span><span class="o">.</span><span class="n">username</span> <span class="k">for</span> <span class="n">user</span> <span class="ow">in</span> <span class="n">og_users</span><span class="p">]</span>
+<span class="go">[u'charlie']</span>
+</pre></div>
+<p>If you'd like to learn more about <code>walrus</code> models, <a href="http://walrus.readthedocs.org/en/latest/models.html">check out the documentation</a> or have a look at the example <a href="https://github.com/coleifer/walrus/blob/master/examples/twitter/app.py">twitter app</a> or <a href="https://github.com/coleifer/walrus/blob/master/examples/diary.py">diary app</a>.</p>
+<h3>That's it!</h3>
+<p>Thanks for taking the time to read this post. If you weren't already familiar with <a href="https://github.com/coleifer/walrus">walrus</a>, then hopefully it may be useful to you. Redis is an amazing database and it lends itself well to little wrappers like this, and I look forward to continuing to enhance <code>walrus</code> as Redis adds new features or as I get new ideas for cool things to build on top of Redis.</p>
+<p>Are there any missing pieces you'd like to see added to <code>walrus</code>? Please don't hesitate to <a href="#comments">leave a comment</a> or <a href="/contact/">contact me</a> with your ideas.</p>
+<p>I did not go into detail, but <code>walrus</code> also supports a handful of alternative "redis-like" databases (currently <a href="http://ledisdb.com/">ledisdb</a>, <a href="http://vedis.symisc.net">vedis</a>, and <a href="https://github.com/seppo0010/rlite">rlite</a>). If there are any other Redis-like databases out there that I missed, please let me know and I'll see about adding support.</p>
+<p>Thanks again for reading, happy hacking!</p>
+  
+  
+
+  
+  
+  
+
+  
+  
+  
+
+
+<hr/>
+
+  <p>Commenting has been closed, but please feel free to <a href="/contact/">contact me</a></p>
+
+
+    </div>
+
+    </div></body></html>

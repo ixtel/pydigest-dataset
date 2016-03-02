@@ -1,0 +1,393 @@
+<html><body><div><div class="post-text" itemprop="text">
+
+<p>I would like to use Qt and PyOpenGL to do some real time plotting and learn a bit about OpenGL, but am having trouble even getting my initail test data to show up.</p>
+
+<p>The idea is to store the x-coordinates and y-coordinates in different buffers since the x-coordinates will rarely change while the y-coordintates will change nearly every render. Unfortunately, having them in different buffers is giving me problems. </p>
+
+<p>Right now I have no errors and nothing is showing up so I'm not sure where to go.</p>
+
+<p>Here is what I have so far for the plotting class:</p>
+
+<pre><code>class GLWidget(QtOpenGL.QGLWidget):
+    def __init__(self, parent=None):
+        self.parent = parent
+        QtOpenGL.QGLWidget.__init__(self, parent)
+        self.current_position = 0
+
+    def initializeGL(self):
+        self.initGeometry()
+
+        self.vertex_code = """
+            #version 120
+            attribute vec4 color;
+            attribute float x_position;
+            attribute float y_position;
+            varying vec4 v_color;
+            void main()
+            {
+                gl_Position = vec4(x_position, y_position, 0.0, 1.0);
+                v_color = color;
+            } """
+
+        self.fragment_code = """
+            #version 120
+            varying vec4 v_color;
+            void main()
+            {
+                //gl_FragColor = v_color;
+                gl_FragColor = vec4(1,1,1,1);
+            } """
+
+        ## Build and activate program
+        # Request program and shader slots from GPU
+        self.program = GL.glCreateProgram()
+        self.vertex = GL.glCreateShader(GL.GL_VERTEX_SHADER)
+        self.fragment = GL.glCreateShader(GL.GL_FRAGMENT_SHADER)
+
+        # Set shaders source
+        GL.glShaderSource(self.vertex, self.vertex_code)
+        GL.glShaderSource(self.fragment, self.fragment_code)
+
+        # Compile shaders
+        GL.glCompileShader(self.vertex)
+        GL.glCompileShader(self.fragment)
+
+        # Attach shader objects to the program
+        GL.glAttachShader(self.program, self.vertex)
+        GL.glAttachShader(self.program, self.fragment)
+
+        # Build program
+        GL.glLinkProgram(self.program)
+
+        # Get rid of shaders (not needed anymore)
+        GL.glDetachShader(self.program, self.vertex)
+        GL.glDetachShader(self.program, self.fragment)
+
+        # Make program the default program
+        GL.glUseProgram(self.program)
+
+        # Create array object
+        self.vao = GL.glGenVertexArrays(1)
+        GL.glBindVertexArray(self.vao)
+
+        # Request buffer slot from GPU
+        self.x_data_buffer = GL.glGenBuffers(1)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.x_data_buffer)
+        GL.glBufferData(GL.GL_ARRAY_BUFFER, ArrayDatatype.arrayByteCount(self.x), self.x, GL.GL_DYNAMIC_DRAW)
+
+        self.y_data_buffer = GL.glGenBuffers(1)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.y_data_buffer)
+        GL.glBufferData(GL.GL_ARRAY_BUFFER, ArrayDatatype.arrayByteCount(self.y), self.y, GL.GL_DYNAMIC_DRAW)
+
+
+
+
+        ## Bind attributes
+        #self.stride = self.x.strides[0]
+        #self.offset = ctypes.c_void_p(0)
+        self.loc = GL.glGetAttribLocation(self.program, "x_position".encode('utf-8'))
+        GL.glEnableVertexAttribArray(self.loc)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.x_data_buffer)
+        GL.glVertexAttribPointer(self.loc, 1, GL.GL_FLOAT, GL.GL_FALSE, 0, 0)
+
+        #self.stride = self.y.strides[0]
+        #self.offset = ctypes.c_void_p(0)
+        self.loc = GL.glGetAttribLocation(self.program, "y_position".encode('utf-8'))
+        GL.glEnableVertexAttribArray(self.loc)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.y_data_buffer)
+        GL.glVertexAttribPointer(self.loc, 1, GL.GL_FLOAT, GL.GL_FALSE, 0, 0)
+
+
+    def resizeGL(self, width, height):
+        if height == 0: height = 1
+
+        GL.glViewport(0, 0, width, height)
+        GL.glMatrixMode(GL.GL_PROJECTION)
+        GL.glLoadIdentity()
+        aspect = width / float(height)
+
+        GLU.gluPerspective(45.0, aspect, 1.0, 100.0)
+        GL.glMatrixMode(GL.GL_MODELVIEW)
+
+    def paintGL(self):
+        GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
+
+        GL.glDrawArrays(GL.GL_LINE_STRIP, 0, self.bins)
+
+
+    def initGeometry(self):
+        self.bins = 1000
+
+        self.x = np.linspace(-0.5,0.5,self.bins)
+        self.y = np.array([np.sin(val*2*np.pi) for val in self.x])
+        self.color = np.array([(1,1,1,1) for x in np.arange(self.bins)])
+
+
+    def addPoint(self, point):
+        #print('ADD POINT')
+        self.y[self.current_position] = point
+        if self.current_position &lt; self.bins-1:
+            self.current_position += 1
+        else:
+            self.current_position = 0
+
+        return True
+
+    def render(self):
+        #print('RENDER')
+        self.updateGL()
+        return True
+</code></pre>
+
+<p>I also put a full working version of the program here:</p>
+
+<pre><code>import sys
+from PyQt5.QtWidgets import QDesktopWidget, QMainWindow, QWidget, QAction, qApp, QApplication, QHBoxLayout, QVBoxLayout, QPushButton
+from PyQt5.QtCore import QTimer
+from PyQt5.QtGui import QIcon
+from PyQt5 import QtOpenGL
+
+from OpenGL import GL
+from OpenGL import GLU
+from OpenGL.arrays.arraydatatype import ArrayDatatype
+
+import ctypes
+import numpy as np
+from threading import Timer, Thread, Event
+
+class OxySensor(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.initUI()
+        self.initActions()
+        self.initMenuBar()
+        self.initRenderTimer()
+        self.start()
+
+    def initUI(self):
+        self.resize(800,600)
+        self.center()
+        self.setWindowTitle('OxySensor')
+
+        okButton = QPushButton("OK")
+        cancelButton = QPushButton("Cancel")
+
+
+        hbox = QHBoxLayout()
+        hbox.addStretch(1)
+        hbox.addWidget(okButton)
+        hbox.addWidget(cancelButton)
+
+        vbox = QVBoxLayout()
+        #vbox.addStretch(1)
+        self.gl_widget = GLWidget()
+        vbox.addWidget(self.gl_widget)
+        vbox.addLayout(hbox)
+
+        mainWidget = QWidget(self)
+        mainWidget.setLayout(vbox)
+
+        self.setCentralWidget(mainWidget)
+
+
+        self.show()
+
+    def initActions(self):
+        self.exitAction = QAction(QIcon('images/close20.png'), '&amp;Exit', self)
+        self.exitAction.setShortcut('Ctrl+W')
+        self.exitAction.setStatusTip('Exit application')
+        self.exitAction.triggered.connect(self.onExit)
+
+    def initMenuBar(self):
+        menubar = self.menuBar()
+        fileMenu = menubar.addMenu('&amp;File')
+        fileMenu.addAction(self.exitAction)
+        return True
+
+    def initRenderTimer(self):
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.gl_widget.render)
+        self.timer.start(100)
+        return True
+
+    def start(self):
+        self.stop_flag = Event()
+        self.thread = SerialPort(self.onTimerExpired, self.stop_flag)
+        self.thread.start()
+        self.statusBar().showMessage('Ready')
+
+    def center(self):
+        qr = self.frameGeometry()
+        cp = QDesktopWidget().availableGeometry().center()
+        qr.moveCenter(cp)
+        self.move(qr.topLeft())
+        return True
+
+    def onTimerExpired(self):
+        data = np.random.uniform(-1,1)
+        self.gl_widget.addPoint(data)
+        return True
+
+    def onExit(self):
+        self.close()
+        return None
+
+    def closeEvent(self,event):
+        self.stop_flag.set()
+        event.accept()
+        return None
+
+class GLWidget(QtOpenGL.QGLWidget):
+    def __init__(self, parent=None):
+        self.parent = parent
+        QtOpenGL.QGLWidget.__init__(self, parent)
+        self.yRotDeg = 0.0
+        self.current_position = 0
+
+    def initializeGL(self):
+        self.initGeometry()
+
+        self.vertex_code = """
+            #version 120
+            attribute vec4 color;
+            attribute float x_position;
+            attribute float y_position;
+            varying vec4 v_color;
+            void main()
+            {
+                gl_Position = vec4(x_position, y_position, 0.0, 1.0);
+                v_color = color;
+            } """
+
+        self.fragment_code = """
+            #version 120
+            varying vec4 v_color;
+            void main()
+            {
+                //gl_FragColor = v_color;
+                gl_FragColor = vec4(1,1,1,1);
+            } """
+
+        ## Build and activate program
+        # Request program and shader slots from GPU
+        self.program = GL.glCreateProgram()
+        self.vertex = GL.glCreateShader(GL.GL_VERTEX_SHADER)
+        self.fragment = GL.glCreateShader(GL.GL_FRAGMENT_SHADER)
+
+        # Set shaders source
+        GL.glShaderSource(self.vertex, self.vertex_code)
+        GL.glShaderSource(self.fragment, self.fragment_code)
+
+        # Compile shaders
+        GL.glCompileShader(self.vertex)
+        GL.glCompileShader(self.fragment)
+
+        # Attach shader objects to the program
+        GL.glAttachShader(self.program, self.vertex)
+        GL.glAttachShader(self.program, self.fragment)
+
+        # Build program
+        GL.glLinkProgram(self.program)
+
+        # Get rid of shaders (not needed anymore)
+        GL.glDetachShader(self.program, self.vertex)
+        GL.glDetachShader(self.program, self.fragment)
+
+        # Make program the default program
+        GL.glUseProgram(self.program)
+
+        # Create array object
+        self.vao = GL.glGenVertexArrays(1)
+        GL.glBindVertexArray(self.vao)
+
+        # Request buffer slot from GPU
+        self.x_data_buffer = GL.glGenBuffers(1)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.x_data_buffer)
+        GL.glBufferData(GL.GL_ARRAY_BUFFER, ArrayDatatype.arrayByteCount(self.x), self.x, GL.GL_DYNAMIC_DRAW)
+
+        self.y_data_buffer = GL.glGenBuffers(1)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.y_data_buffer)
+        GL.glBufferData(GL.GL_ARRAY_BUFFER, ArrayDatatype.arrayByteCount(self.y), self.y, GL.GL_DYNAMIC_DRAW)
+
+
+
+
+        ## Bind attributes
+        #self.stride = self.x.strides[0]
+        #self.offset = ctypes.c_void_p(0)
+        self.loc = GL.glGetAttribLocation(self.program, "x_position".encode('utf-8'))
+        GL.glEnableVertexAttribArray(self.loc)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.x_data_buffer)
+        GL.glVertexAttribPointer(self.loc, 1, GL.GL_FLOAT, GL.GL_FALSE, 0, 0)
+
+        #self.stride = self.y.strides[0]
+        #self.offset = ctypes.c_void_p(0)
+        self.loc = GL.glGetAttribLocation(self.program, "y_position".encode('utf-8'))
+        GL.glEnableVertexAttribArray(self.loc)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.y_data_buffer)
+        GL.glVertexAttribPointer(self.loc, 1, GL.GL_FLOAT, GL.GL_FALSE, 0, 0)
+
+
+    def resizeGL(self, width, height):
+        if height == 0: height = 1
+
+        GL.glViewport(0, 0, width, height)
+        GL.glMatrixMode(GL.GL_PROJECTION)
+        GL.glLoadIdentity()
+        aspect = width / float(height)
+
+        GLU.gluPerspective(45.0, aspect, 1.0, 100.0)
+        GL.glMatrixMode(GL.GL_MODELVIEW)
+
+    def paintGL(self):
+        GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
+
+        GL.glDrawArrays(GL.GL_LINE_STRIP, 0, self.bins)
+
+
+    def initGeometry(self):
+        self.bins = 1000
+
+        self.x = np.linspace(-0.5,0.5,self.bins)
+        self.y = np.array([np.sin(val*2*np.pi) for val in self.x])
+        self.color = np.array([(1,1,1,1) for x in np.arange(self.bins)])
+
+
+    def addPoint(self, point):
+        #print('ADD POINT')
+        self.y[self.current_position] = point
+        if self.current_position &lt; self.bins-1:
+            self.current_position += 1
+        else:
+            self.current_position = 0
+
+        return True
+
+    def render(self):
+        #print('RENDER')
+        self.updateGL()
+        return True
+
+class SerialPort(Thread):
+    def __init__(self, callback, event):
+        Thread.__init__(self)
+        self.callback = callback
+        self.stopped = event
+        return None
+
+    def SetInterval(self, time_in_seconds):
+        self.delay_period = time_in_seconds
+        return True
+
+    def run(self):
+        while not self.stopped.wait(0.1):
+            self.callback()
+        return True
+
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    oxy_sensor = OxySensor()
+    sys.exit(app.exec_())
+</code></pre>
+    </div>
+    </div></body></html>

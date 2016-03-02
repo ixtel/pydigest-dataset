@@ -1,0 +1,143 @@
+<html><body><div><div class="post-content" itemprop="articleBody">
+    <p><img class=" size-medium wp-image-527 alignright" src="/assets/fry-slang.jpg" alt="fry-slang"/>At HumanGeo, we love Elasticsearch and we love social media. Elasticsearch lends itself well to a variety of interesting ways to process the vast amount of content in social media. But like most things on the internet, keeping up with slang and trends in social media text can be an increasingly difficult barrier to entry to analysing the data (so can getting beyond your teenage years). So how do we get past this barrier? If the web is so powerful, can't we use it to help us understand what's really being said?</p>
+<p>Enter Urban Dictionary. Usually, if you're looking for answers, UD might be the last place on the internet you want to look unless you have a large jug of mindbleach waiting on standby. Aside from proving that the internet is a cold, dark place, Urban Dictionary has a large amount of crowd-sourced data that can help us get some insight into today's communication medium, whether it's 140 characters or beyond.</p>
+<p>In this post, my goal is to 1) collect a bunch of data from Urban Dictionary, 2) index it in such a way that I can use it to "decipher" <i>lousy internet slang </i>and 3) query it with "normal" terms and get extended results.</p>
+<h3><strong>The Data</strong></h3>
+<p>To get started, we needed to get the words themselves. To do this, I built a simple web scraper to scroll UD and extract the words. Here's a snippet to extract the words out of the DOM using Python via Requests and Beautiful Soup.</p>
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><span class="kn">import</span> <span class="nn">requests</span>
+<span class="kn">from</span> <span class="nn">bs4</span> <span class="kn">import</span> <span class="n">BeautifulSoup</span>
+<span class="n">WORD_LINK</span> <span class="o">=</span> <span class="s">'http://www.urbandictionary.com/popular.php?character={0}'</span>
+<span class="k">def</span> <span class="nf">make_alphabet_soup</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">letter</span><span class="p">,</span> <span class="n">link</span><span class="o">=</span><span class="n">WORD_LINK</span><span class="p">):</span>
+    <span class="s">'''Make soup from the list of letters on the page.'''</span>
+    <span class="n">r</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">link</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">letter</span><span class="p">))</span>
+    <span class="n">soup</span> <span class="o">=</span> <span class="n">BeautifulSoup</span><span class="p">(</span><span class="n">r</span><span class="o">.</span><span class="n">text</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">soup</span>
+<span class="k">def</span> <span class="nf">parse_words</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">letter</span><span class="p">,</span> <span class="n">soup</span><span class="o">=</span><span class="bp">None</span><span class="p">):</span>
+    <span class="s">'''Scrape the webpage and return the words present.'''</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">soup</span><span class="p">:</span>
+        <span class="n">soup</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">make_alphabet_soup</span><span class="p">(</span><span class="n">letter</span><span class="p">)</span>
+    <span class="n">word_divs</span> <span class="o">=</span> <span class="n">soup</span><span class="o">.</span><span class="n">find</span><span class="p">(</span><span class="nb">id</span><span class="o">=</span><span class="s">'columnist'</span><span class="p">)</span><span class="o">.</span><span class="n">find_all</span><span class="p">(</span><span class="s">'a'</span><span class="p">)</span>
+    <span class="n">words</span> <span class="o">=</span> <span class="p">[</span><span class="n">div</span><span class="o">.</span><span class="n">text</span> <span class="k">for</span> <span class="n">div</span> <span class="ow">in</span> <span class="n">word_divs</span><span class="p">]</span>
+    <span class="k">return</span> <span class="n">popular_words</span></code></pre></figure>
+<p>This is the basic building block, but I extended from there. For every word I grabbed, I threw it against the <a title="Urban Dictionary API" href="http://urbandictionary.wufoo.com/forms/api-interest-form/" target="_blank">Urban Dictionary API</a> and got a definition.</p>
+<figure class="highlight"><pre><code class="language-python" data-lang="python"><span class="c"># Redacted</span>
+<span class="n">API_LINK</span> <span class="o">=</span> <span class="s">'http://ud_api.com'</span>
+<span class="k">def</span> <span class="nf">define</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">word</span><span class="p">,</span> <span class="n">url</span><span class="o">=</span><span class="n">API_LINK</span><span class="p">):</span>
+<span class="s">'''Send a request with the given word to the UD JSON API.'''</span>
+    <span class="n">r</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">url</span><span class="p">,</span> <span class="n">params</span><span class="o">=</span><span class="p">{</span><span class="s">'term'</span><span class="p">:</span> <span class="n">word</span><span class="p">},</span> <span class="n">timeout</span><span class="o">=</span><span class="mf">5.0</span><span class="p">)</span>
+    <span class="n">j</span> <span class="o">=</span> <span class="n">r</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
+    <span class="c"># Add our search term to the document for context</span>
+    <span class="n">j</span><span class="o">.</span><span class="n">update</span><span class="p">({</span><span class="s">'word'</span><span class="p">:</span> <span class="n">word</span><span class="p">})</span>
+    <span class="k">return</span> <span class="n">j</span></code></pre></figure>
+<p>Using this method, I ended up with about 100k "popular" words, as defined by UD. An example response from the API looks something like:</p>
+<figure class="highlight"><pre><code class="language-javascript" data-lang="javascript"><span class="p">{</span>
+ <span class="s2">"tags"</span><span class="err">:</span> <span class="p">[</span>
+    <span class="s2">"black"</span><span class="p">,</span>
+    <span class="s2">"ozzy"</span><span class="p">,</span>
+    <span class="s2">"sabbath"</span><span class="p">,</span>
+    <span class="s2">"black sabbath"</span><span class="p">,</span>
+    <span class="s2">"geezer"</span><span class="p">,</span>
+    <span class="s2">"metal"</span><span class="p">,</span>
+    <span class="s2">"osbourne"</span><span class="p">,</span>
+    <span class="s2">"tony"</span><span class="p">,</span>
+    <span class="s2">"bill"</span><span class="p">,</span>
+    <span class="s2">"butler"</span>
+ <span class="p">],</span>
+ <span class="s2">"result_type"</span><span class="err">:</span><span class="s2">"exact"</span><span class="p">,</span>
+ <span class="s2">"list"</span><span class="err">:</span> <span class="p">[</span>
+    <span class="p">{</span>
+       <span class="s2">"defid"</span><span class="p">:</span> <span class="mi">772739</span><span class="p">,</span>
+       <span class="s2">"word"</span><span class="p">:</span> <span class="s2">"Iommi"</span><span class="p">,</span>
+       <span class="s2">"author"</span><span class="p">:</span> <span class="s2">"Matthew McDonnell"</span><span class="p">,</span>
+       <span class="s2">"permalink"</span><span class="p">:</span> <span class="s2">"http://iommi.urbanup.com/772739"</span><span class="p">,</span>
+       <span class="s2">"definition"</span><span class="p">:</span> <span class="s2">"Iommi = a Godlike person. A master of their chosen craft. Someone or something extremely cool"</span><span class="p">,</span>
+       <span class="s2">"example"</span><span class="p">:</span> <span class="s2">"Example 1. Hey rick, that motorcyle stunt you did was really Iommi! \r\n\r\nExample 2. That guy is SO Iommi! \r\n\r\nExample 3. Be Iommi, man!"</span><span class="p">,</span>
+       <span class="s2">"thumbs_up"</span><span class="p">:</span> <span class="mi">57</span><span class="p">,</span>
+       <span class="s2">"thumbs_down"</span><span class="p">:</span> <span class="mi">3</span><span class="p">,</span>
+       <span class="s2">"current_vote"</span><span class="p">:</span> <span class="s2">""</span>
+    <span class="p">}</span>
+ <span class="p">],</span>
+ <span class="s2">"sounds"</span><span class="err">:</span><span class="p">[]</span>
+<span class="p">}</span></code></pre></figure>
+<p>Now that I had the data, it was time to make something out of it.</p>
+<h3><strong>The Process</strong></h3>
+<p>With our data in hand, it's time to utilize Elasticsearch. More specifically, it's time to take advantage of the <a title="Synonym Token Filter" href="http://www.elasticsearch.org/guide/en/elasticsearch/reference/current/analysis-synonym-tokenfilter.html" target="_blank">Synonym Token Filter</a> when indexing data into Elasticsearch.</p>
+<p><strong>A quick interjection about indexing: </strong>this is an good time to talk about "the guts" of how data is indexed into Elasticsearch. If you don't specify your mappings when indexing data, you can get unexpected results if you're not familiar with the mapping/analysis process. By default, the data is tokenized upon indexing, which is great for full-text search but not when we want exact matches to multiple words. For example, if I'm searching for exactly "brown fox" in my index (for example, an exact match against my query string), I will get results for the sentence "John Brown was attacked by a fox." You can read more about that behavior <a title="ES Core Types" href="http://www.elasticsearch.org/guide/en/elasticsearch/reference/current/mapping-core-types.html" target="_blank">here</a>. A good strategy is to create a subfield of "word" such as ".raw" where the ".raw" is set to not_analyzed in your mapping.</p>
+<p>Using the data, we collected, we can generate the <a title="Solr Synonyms" href="http://www.elasticsearch.org/guide/en/elasticsearch/reference/current/analysis-synonym-tokenfilter.html#_solr_synonyms" target="_blank">Solr synonym file</a> required by the token filter. To do this, I used the "tags" area of the definition. This <em>definitely </em>is not a set of synonyms (sometimes you just get a bunch of racism and filth), but it does provide (potentially) related words to the original word. For example, here are the tags for word "internet":</p>
+<ul>
+<li>"facebook"</li>
+<li>"web"</li>
+<li>"computer"</li>
+<li>"myspace"</li>
+<li>"lol"</li>
+<li>"google"</li>
+<li>"online"</li>
+<li>"porn"</li>
+<li>"youtube"</li>
+<li>"internets"</li>
+</ul>
+<p>I mean,<em> they're not wrong. </em>Here's an example of adding the mapping I used on the "test" index in the "name" field:</p>
+<pre>justin@macbook ~/p/urban&gt; curl -XPOST "http://localhost:9200/test" -d</pre>
+<figure class="highlight"><pre><code class="language-javascript" data-lang="javascript"><span class="p">{</span>
+   <span class="s2">"settings"</span><span class="err">:</span> <span class="p">{</span>
+      <span class="s2">"index"</span><span class="err">:</span> <span class="p">{</span>
+         <span class="s2">"analysis"</span><span class="err">:</span> <span class="p">{</span>
+            <span class="s2">"analyzer"</span><span class="err">:</span> <span class="p">{</span>
+               <span class="s2">"synonym"</span><span class="err">:</span> <span class="p">{</span>
+                  <span class="s2">"tokenizer"</span><span class="err">:</span> <span class="s2">"whitespace"</span><span class="p">,</span>
+                  <span class="s2">"filter"</span><span class="err">:</span> <span class="p">[</span>
+                     <span class="s2">"synonym"</span>
+                  <span class="p">]</span>
+               <span class="p">}</span>
+            <span class="p">},</span>
+            <span class="s2">"filter"</span><span class="err">:</span> <span class="p">{</span>
+               <span class="s2">"synonym"</span><span class="err">:</span> <span class="p">{</span>
+                  <span class="s2">"type"</span><span class="err">:</span> <span class="s2">"synonym"</span><span class="p">,</span>
+                  <span class="s2">"synonyms_path"</span><span class="err">:</span> <span class="s2">"/tmp/solr-synonyms.txt"</span>
+               <span class="p">}</span>
+            <span class="p">}</span>
+         <span class="p">}</span>
+      <span class="p">}</span>
+   <span class="p">},</span>
+   <span class="s2">"mappings"</span><span class="err">:</span> <span class="p">{</span>
+      <span class="s2">"test"</span><span class="err">:</span> <span class="p">{</span>
+         <span class="s2">"properties"</span><span class="err">:</span> <span class="p">{</span>
+            <span class="s2">"name"</span><span class="err">:</span> <span class="p">{</span>
+               <span class="s2">"type"</span><span class="err">:</span><span class="s2">"string"</span><span class="p">,</span>
+               <span class="s2">"index"</span><span class="err">:</span><span class="s2">"analyzed"</span><span class="p">,</span>
+               <span class="s2">"analyzer"</span><span class="err">:</span><span class="s2">"synonym"</span>
+            <span class="p">}</span>
+         <span class="p">}</span>
+      <span class="p">}</span>
+   <span class="p">}</span>
+<span class="p">}</span></code></pre></figure>
+<h3><strong>The Search</strong></h3>
+<p>Now that we have our index set up, it's time to put a search in action.  Until I went down this rabbit hole, I had no idea calling something <a title="Tony Iommi - Wikipedia" href="http://en.wikipedia.org/wiki/Tony_Iommi" target="_blank"><em>Iommi</em></a> was a thing (it probably isn't). As someone who likes Black Sabbath, I want to find other words in my index that are<em> totally Iommi. </em>Using the mapping I specified above, I indexed a few sample documents with "name" field set to tags that UD relates to <em>Iommi, </em>as well as some bogus filler. Example tags (and no, <a title="UD - Iommi" href="http://www.urbandictionary.com/define.php?term=Iommi" target="_blank">I did not make this example up</a>):</p>
+<ul class="array collapsible">
+<li>
+<p class="hoverable"><span class="type-string">"sabbath"</span></p>
+</li>
+<li>
+<p class="hoverable"><span class="type-string">"black sabbath"</span></p>
+</li>
+<li>
+<p class="hoverable"><span class="type-string">"geezer"</span></p>
+</li>
+<li>
+<p class="hoverable"><span class="type-string">"metal"</span></p>
+</li>
+</ul>
+<p><img class=" size-medium wp-image-553 alignright" src="/assets/screen-shot-2014-12-10-at-10-11-14-pm.png" alt="Screen Shot 2014-12-10 at 10.11.14 PM"/>Our query (in <a title="Elasticsearch Sense" href="https://github.com/bleskes/sense" target="_blank">Sense</a>, against the 'test' index), and the results:</p>
+<pre>POST _search
+{
+    "query": {
+       "term": {
+          "name": "iommi"
+      }
+   }
+}</pre>
+<p>Awesome! This installment is more about showcasing how the filter works, so it's not entirely practical. Look out for a future installment where we use <em>real social media data </em>to do "extended search" and display results with the Elasticsearch highlighting to show a practical example of this in action.</p>
+
+  </div>
+
+</div></body></html>

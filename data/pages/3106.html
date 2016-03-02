@@ -1,0 +1,30 @@
+<html><body><div><div itemprop="articleBody"><p>We want to achieve this routing scheme <a class="footnote-reference" href="#id4" id="id1">[2]</a>:</p><ul class="simple"><li>/anything =&gt; static file, <em>if it exists!</em></li><li>/ =&gt; the wsgi app</li></ul><p>For some reason this isn't as <a class="reference external" href="http://wiki.nginx.org/HttpCoreModule#try_files">straightforward</a> as in Nginx. Example <a class="footnote-reference" href="#id3" id="id2">[1]</a>.</p><p>With Apache you have to employ mod_rewrite, which is not straightforward if you're not writing rewrite rules and conditions all day long :)</p><p>The first this is to alias the wsgi app to a different location than the root:</p><div class="highlight"><pre><span/><span class="nb">WSGIScriptAlias</span> <span class="sx">/wsgi</span> <span class="sx">/path/to/the/app.wsgi</span>
+</pre></div><p>We need to make the location of the static files the <tt class="docutils literal">DocumentRoot</tt>:</p><div class="highlight"><pre><span/><span class="nb">DocumentRoot</span> <span class="sx">/path/to/static/files</span>
+<span class="nt">&lt;Directory</span> <span class="s">/path/to/static/files</span><span class="nt">&gt;</span>
+    <span class="nb">Order</span> deny,allow
+    <span class="nb">Allow</span> from <span class="k">all</span>
+<span class="nt">&lt;/Directory&gt;</span>
+</pre></div><p>And now the mod_rewrite dance:</p><p>Set some conditions: if the request path is <strong>not</strong> a filename:</p><div class="highlight"><pre><span/><span class="nb">RewriteCond</span> <span class="sx">/path/to/static/files</span>%{REQUEST_FILENAME} !-f
+</pre></div><p>And <strong>not</strong> a directory:</p><div class="highlight"><pre><span/><span class="nb">RewriteCond</span> <span class="sx">/path/to/static/files</span>%{REQUEST_FILENAME} !-d
+</pre></div><p>Optional, exempt any other special locations (I have an <tt class="docutils literal">Alias</tt> /media):</p><div class="highlight"><pre><span/><span class="nb">RewriteCond</span> %{REQUEST_URI} !^/media
+</pre></div><p>And finally the rewrite rule:</p><div class="highlight"><pre><span/><span class="nb">RewriteRule</span> ^(.*)$ <span class="sx">/wsgi</span>$1 [PT,L]
+</pre></div><ul class="simple"><li><tt class="docutils literal">PT</tt> - Take the request to go through the URL mapping machinery (so <tt class="docutils literal">Alias</tt>, <tt class="docutils literal">WSGIScriptAlias</tt> etc are applied again for the resulting URL)</li><li><tt class="docutils literal">L</tt> - Stops processing any other <tt class="docutils literal">RewriteRule</tt> for this request. This is implied by <tt class="docutils literal">PT</tt> but it put it there in case I forget this :).</li></ul><p>The full configuration:</p><div class="highlight"><pre><span/><span class="nb">WSGIScriptAlias</span> <span class="sx">/wsgi</span> <span class="sx">/path/to/the/app.wsgi</span>
+
+<span class="nb">DocumentRoot</span> <span class="sx">/path/to/static/files</span>
+<span class="nt">&lt;Directory</span> <span class="s">/path/to/static/files</span><span class="nt">&gt;</span>
+    <span class="nb">Order</span> deny,allow
+    <span class="nb">Allow</span> from <span class="k">all</span>
+<span class="nt">&lt;/Directory&gt;</span>
+
+<span class="nb">Alias</span> <span class="sx">/media</span> <span class="sx">/path/to/media/files</span>
+<span class="nt">&lt;Directory</span> <span class="s">/path/to/media/files</span><span class="nt">&gt;</span>
+    <span class="nb">Order</span> deny,allow
+    <span class="nb">Allow</span> from <span class="k">all</span>
+<span class="nt">&lt;/Directory&gt;</span>
+
+<span class="nb">RewriteEngine</span> <span class="k">on</span>
+<span class="nb">RewriteCond</span> <span class="sx">/path/to/static/files</span>%{REQUEST_FILENAME} !-f
+<span class="nb">RewriteCond</span> <span class="sx">/path/to/static/files</span>%{REQUEST_FILENAME} !-d
+<span class="nb">RewriteCond</span> %{REQUEST_URI} !^/media
+<span class="nb">RewriteRule</span> ^(.*)$ <span class="sx">/wsgi</span>$1 [PT,L]
+</pre></div></div></div></body></html>

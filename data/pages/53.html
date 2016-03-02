@@ -1,0 +1,639 @@
+<html><body><div><div class="entry-content clearfix"><p>In this tutorial, we’ll be taking a simple local Django project, backed by a MySQL database, and converting it to run on Heroku. Amazon S3 will be used to host our static files, while Fabric will automate the deployment process.</p>
+
+<p>The Project is a simple message system. It could be a todo app or a blog or even a Twitter clone. To simulate a real-live scenario, the Project will first be created with a MySQL backend, then converted to Postgres for deployment on Heroku. I’ve personally had five or six projects where I’ve had to do this exact thing: convert a local Project, backed with MySQL, to a live app on Heroku.</p>
+
+<a name="Setup"/>
+<h2>Setup</h2>
+
+<a name="Pre-requisites:"/>
+<h3>Pre-requisites:</h3>
+
+<ol>
+<li>Read the official Django Quick Start guide over at <a href="https://devcenter.heroku.com/articles/django">Heroku</a>. Just read it. This will help you get a feel for what we’ll be accomplishing in this tutorial. We’ll be using the official tutorial as a guide for our own, more advanced deployment process.</li>
+<li>Create an AWS account and set up an active S3 bucket.</li>
+<li>Install MySQL.</li>
+</ol>
+
+
+<a name="Let.s.begin:"/>
+<h3>Let’s begin:</h3>
+
+<p>Start by downloading the test Project <a href="http://realpython.com/files/django_heroku_deploy.zip">here</a>, unzip, then activate a virtualenv:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span><span class="nb">cd </span>django_heroku_deploy
+</span><span class="line"><span class="nv">$ </span>virtualenv --no-site-packages myenv
+</span><span class="line"><span class="nv">$ </span><span class="nb">source </span>myenv/bin/activate
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Create a new repository on Github:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>curl -u <span class="s1">'USER'</span> https://api.github.com/user/repos -d <span class="s1">'{"name":"REPO"}'</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<blockquote><p>Make sure to replace the all caps KEYWORDS with your own settings. For example – <code>curl -u 'mjhea0' https://api.github.com/user/repos -d '{"name":"django-deploy-heroku-s3"}'</code></p></blockquote>
+
+<p>Add a readme file, initialize the local Git repo, then PUSH the local copy to Github:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>touch README.md
+</span><span class="line"><span class="nv">$ </span>git init
+</span><span class="line"><span class="nv">$ </span>git add .
+</span><span class="line"><span class="nv">$ </span>git commit -am <span class="s2">"initial"</span>
+</span><span class="line"><span class="nv">$ </span>git remote add origin https://github.com/username/Hello-World.git
+</span><span class="line"><span class="nv">$ </span>git push origin master
+</span></code></pre></td></tr></table></div></figure>
+
+
+<blockquote><p>Be sure to change the URL to your repo’s URL that you created in the previous step.</p></blockquote>
+
+<p>Set up a new MySQL database called <em>django_deploy</em>:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>mysql.server start
+</span><span class="line"><span class="nv">$ </span>mysql -u root -p
+</span><span class="line">Enter password:
+</span><span class="line">Welcome to the MySQL monitor.  Commands end with <span class="p">;</span> or <span class="se">\g</span>. Your MySQL connection id is 1
+</span><span class="line">Type <span class="s1">'help;'</span> or <span class="s1">'\h'</span> <span class="k">for </span>help. Type <span class="s1">'\c'</span> to clear the buffer.
+</span><span class="line">mysql&gt;
+</span><span class="line">mysql&gt; CREATE DATABASE django_deploy<span class="p">;</span>
+</span><span class="line">Query OK, 1 row affected <span class="o">(</span>0.01 sec<span class="o">)</span>
+</span><span class="line">mysql&gt;
+</span><span class="line">mysql&gt; quit
+</span><span class="line">Bye
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Update <em>settings.py</em>:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="n">DATABASES</span> <span class="o">=</span> <span class="p">{</span>
+</span><span class="line"><span class="s">'default'</span><span class="p">:</span> <span class="p">{</span>
+</span><span class="line">    <span class="s">'ENGINE'</span><span class="p">:</span> <span class="s">'django.db.backends.mysql'</span><span class="p">,</span>
+</span><span class="line">    <span class="s">'NAME'</span><span class="p">:</span> <span class="s">'django_deploy'</span><span class="p">,</span>
+</span><span class="line">    <span class="s">'USER'</span><span class="p">:</span> <span class="s">'root'</span><span class="p">,</span>
+</span><span class="line">    <span class="s">'PASSWORD'</span><span class="p">:</span> <span class="s">'your_password'</span><span class="p">,</span>
+</span><span class="line"><span class="p">}</span>
+</span><span class="line"><span class="p">}</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Install the dependencies:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>pip install -r requirements.txt
+</span><span class="line"><span class="nv">$ </span>python manage.py syncdb
+</span><span class="line"><span class="nv">$ </span>python manage.py runserver
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Run the server at <a href="http://localhost:8000/admin/">http://localhost:8000/admin/</a>, and make sure you can log in to the admin. Add a few items to the <code>Whatever</code> object. Kill the server.</p>
+
+<a name="Convert.from.MySQL.to.Postgres"/>
+<h2>Convert from MySQL to Postgres</h2>
+
+<blockquote><p>Note: In this hypothetical situation, let’s pretend that you have been working on this Project for a while using MySQL and now you want to convert it to Postgres.</p></blockquote>
+
+<p>Install dependencies:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>pip install psycopg2
+</span><span class="line"><span class="nv">$ </span>pip install py-mysql2pgsql
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Set up a Postgres database:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>psql -h localhost
+</span><span class="line">psql <span class="o">(</span>9.2.4<span class="o">)</span>
+</span><span class="line">Type <span class="s2">"help"</span> <span class="k">for </span>help.
+</span><span class="line"><span class="nv">michaelherman</span><span class="o">=</span><span class="c"># CREATE DATABASE django_deploy;</span>
+</span><span class="line">CREATE DATABASE
+</span><span class="line"><span class="nv">michaelherman</span><span class="o">=</span><span class="c"># \q</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Migrate data:</p>
+
+<figure class="code"><figcaption><span/></figcaption></figure>
+
+
+<p>This command creates a file called <em>mysql2pgsql.yml</em>, containing the following info:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+<span class="line-number">14</span>
+<span class="line-number">15</span>
+</pre></td><td class="code"><pre><code class="yaml"><span class="line"><span class="l-Scalar-Plain">mysql</span><span class="p-Indicator">:</span>
+</span><span class="line">  <span class="l-Scalar-Plain">hostname</span><span class="p-Indicator">:</span> <span class="l-Scalar-Plain">localhost</span>
+</span><span class="line">  <span class="l-Scalar-Plain">port</span><span class="p-Indicator">:</span> <span class="l-Scalar-Plain">3306</span>
+</span><span class="line">  <span class="l-Scalar-Plain">socket</span><span class="p-Indicator">:</span> <span class="l-Scalar-Plain">/tmp/mysql.sock</span>
+</span><span class="line">  <span class="l-Scalar-Plain">username</span><span class="p-Indicator">:</span> <span class="l-Scalar-Plain">foo</span>
+</span><span class="line">  <span class="l-Scalar-Plain">password</span><span class="p-Indicator">:</span> <span class="l-Scalar-Plain">bar</span>
+</span><span class="line">  <span class="l-Scalar-Plain">database</span><span class="p-Indicator">:</span> <span class="l-Scalar-Plain">your_database_name</span>
+</span><span class="line">  <span class="l-Scalar-Plain">compress</span><span class="p-Indicator">:</span> <span class="l-Scalar-Plain">false</span>
+</span><span class="line"><span class="l-Scalar-Plain">destination</span><span class="p-Indicator">:</span>
+</span><span class="line">  <span class="l-Scalar-Plain">postgres</span><span class="p-Indicator">:</span>
+</span><span class="line">    <span class="l-Scalar-Plain">hostname</span><span class="p-Indicator">:</span> <span class="l-Scalar-Plain">localhost</span>
+</span><span class="line">    <span class="l-Scalar-Plain">port</span><span class="p-Indicator">:</span> <span class="l-Scalar-Plain">5432</span>
+</span><span class="line">    <span class="l-Scalar-Plain">username</span><span class="p-Indicator">:</span> <span class="l-Scalar-Plain">foo</span>
+</span><span class="line">    <span class="l-Scalar-Plain">password</span><span class="p-Indicator">:</span> <span class="l-Scalar-Plain">bar</span>
+</span><span class="line">    <span class="l-Scalar-Plain">database</span><span class="p-Indicator">:</span> <span class="l-Scalar-Plain">your_database_name</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<blockquote><p>Update this for your configuration. This example just covers the basic conversion. You can also include or exclude certain tables. See the full example <a href="https://github.com/philipsoutham/py-mysql2pgsql">here</a>.</p></blockquote>
+
+<p> Transfer the data:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>py-mysql2pgsql -v -f mysql2pgsql.yml
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Once the data is transferred, be sure to update your <em>settings.py</em> file:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="n">DATABASES</span> <span class="o">=</span> <span class="p">{</span>
+</span><span class="line">    <span class="s">"default"</span><span class="p">:</span> <span class="p">{</span>
+</span><span class="line">        <span class="s">"ENGINE"</span><span class="p">:</span> <span class="s">"django.db.backends.postgresql_psycopg2"</span><span class="p">,</span>
+</span><span class="line">        <span class="s">"NAME"</span><span class="p">:</span> <span class="s">"your_database_name"</span><span class="p">,</span>
+</span><span class="line">        <span class="s">"USER"</span><span class="p">:</span> <span class="s">"foo"</span><span class="p">,</span>
+</span><span class="line">        <span class="s">"PASSWORD"</span><span class="p">:</span> <span class="s">"bar"</span><span class="p">,</span>
+</span><span class="line">        <span class="s">"HOST"</span><span class="p">:</span> <span class="s">"localhost"</span><span class="p">,</span>
+</span><span class="line">        <span class="s">"PORT"</span><span class="p">:</span> <span class="s">"5432"</span><span class="p">,</span>
+</span><span class="line">    <span class="p">}</span>
+</span><span class="line"><span class="p">}</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Finally, resync the database, run the test server, and add another item to the database to ensure the conversion succeeded.</p>
+
+<a name="Add.a.local_settings.py.file"/>
+<h2>Add a local_settings.py file</h2>
+
+<p>By adding a <em>local_settings.py</em> file, you can extend the <em>settings.py</em> file with settings relevant to your local environment, while the main <em>settings.py</em> file is used solely for your staging and production environments.</p>
+
+<p>Make sure you add <em>local_settings.py</em> to your <em>.gitignore</em> file in order to keep the file out of your repositories. Those who want to use or contribute to your project can then clone the repo and create their own <em>local_settings.py</em> file specific to their own local environment.</p>
+
+<blockquote><p>Although this method of using two settings files has been convention for a number of years, many Python developers now use another pattern called <a href="https://speakerdeck.com/jacobian/the-best-and-worst-of-django?slide=81">The One True Way</a>. We may look at this pattern in a future tutorial.</p></blockquote>
+
+<a name="We.need.to.make.three.changes.to.our.current..em.settings.py..em..file:"/>
+<h3>We need to make three changes to our current <em>settings.py</em> file:</h3>
+
+<p>Change <code>DEBUG</code> mode to false:</p>
+
+<p> <code>python
+ DEBUG = False
+</code>
+Add the following code to the bottom of the file:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+<span class="line-number">14</span>
+<span class="line-number">15</span>
+<span class="line-number">16</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="c"># # Allow all host hosts/domain names for this site</span>
+</span><span class="line"><span class="n">ALLOWED_HOSTS</span> <span class="o">=</span> <span class="p">[</span><span class="s">'*'</span><span class="p">]</span>
+</span><span class="line">
+</span><span class="line"><span class="c"># Parse database configuration from $DATABASE_URL</span>
+</span><span class="line"><span class="kn">import</span> <span class="nn">dj_database_url</span>
+</span><span class="line">
+</span><span class="line"><span class="n">DATABASES</span> <span class="o">=</span> <span class="p">{</span> <span class="s">'default'</span> <span class="p">:</span> <span class="n">dj_database_url</span><span class="o">.</span><span class="n">config</span><span class="p">()}</span>
+</span><span class="line">
+</span><span class="line"><span class="c"># Honor the 'X-Forwarded-Proto' header for request.is_secure()</span>
+</span><span class="line"><span class="n">SECURE_PROXY_SSL_HEADER</span> <span class="o">=</span> <span class="p">(</span><span class="s">'HTTP_X_FORWARDED_PROTO'</span><span class="p">,</span> <span class="s">'https'</span><span class="p">)</span>
+</span><span class="line">
+</span><span class="line"><span class="c"># try to load local_settings.py if it exists</span>
+</span><span class="line"><span class="k">try</span><span class="p">:</span>
+</span><span class="line">  <span class="kn">from</span> <span class="nn">local_settings</span> <span class="kn">import</span> <span class="o">*</span>
+</span><span class="line"><span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+</span><span class="line">  <span class="k">pass</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Update the database settings:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="c"># we only need the engine name, as heroku takes care of the rest</span>
+</span><span class="line"><span class="n">DATABASES</span> <span class="o">=</span> <span class="p">{</span>
+</span><span class="line">    <span class="s">"default"</span><span class="p">:</span> <span class="p">{</span>
+</span><span class="line">        <span class="s">"ENGINE"</span><span class="p">:</span> <span class="s">"django.db.backends.postgresql_psycopg2"</span><span class="p">,</span>
+</span><span class="line">    <span class="p">}</span>
+</span><span class="line"><span class="p">}</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Create your <em>local_settings.py</em> file:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>touch local_settings.py
+</span><span class="line"><span class="nv">$ </span>pip install dj_database_url
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Then add the following code:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+<span class="line-number">14</span>
+<span class="line-number">15</span>
+<span class="line-number">16</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="kn">from</span> <span class="nn">settings</span> <span class="kn">import</span> <span class="n">PROJECT_ROOT</span><span class="p">,</span> <span class="n">SITE_ROOT</span>
+</span><span class="line"><span class="kn">import</span> <span class="nn">os</span>
+</span><span class="line">
+</span><span class="line"><span class="n">DEBUG</span> <span class="o">=</span> <span class="bp">True</span>
+</span><span class="line"><span class="n">TEMPLATE_DEBUG</span> <span class="o">=</span> <span class="bp">True</span>
+</span><span class="line">
+</span><span class="line"><span class="n">DATABASES</span> <span class="o">=</span> <span class="p">{</span>
+</span><span class="line">    <span class="s">"default"</span><span class="p">:</span> <span class="p">{</span>
+</span><span class="line">        <span class="s">"ENGINE"</span><span class="p">:</span> <span class="s">"django.db.backends.postgresql_psycopg2"</span><span class="p">,</span>
+</span><span class="line">        <span class="s">"NAME"</span><span class="p">:</span> <span class="s">"django_deploy"</span><span class="p">,</span>
+</span><span class="line">        <span class="s">"USER"</span><span class="p">:</span> <span class="s">"foo"</span><span class="p">,</span>
+</span><span class="line">        <span class="s">"PASSWORD"</span><span class="p">:</span> <span class="s">"bar"</span><span class="p">,</span>
+</span><span class="line">        <span class="s">"HOST"</span><span class="p">:</span> <span class="s">"localhost"</span><span class="p">,</span>
+</span><span class="line">        <span class="s">"PORT"</span><span class="p">:</span> <span class="s">"5432"</span><span class="p">,</span>
+</span><span class="line">    <span class="p">}</span>
+</span><span class="line"><span class="p">}</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Fire up the test server to make sure everything still works. Add a few more records to the database.</p>
+
+<a name="Heroku.setup"/>
+<h2>Heroku setup</h2>
+
+<p>Add a Procfile to the main directory:</p>
+
+<figure class="code"><figcaption><span/></figcaption></figure>
+
+
+<p>and add the following code to the file:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="n">web</span><span class="p">:</span> <span class="n">python</span> <span class="n">manage</span><span class="o">.</span><span class="n">py</span> <span class="n">runserver</span> <span class="mf">0.0</span><span class="o">.</span><span class="mf">0.0</span><span class="p">:</span><span class="err">$</span><span class="n">PORT</span> <span class="o">--</span><span class="n">noreload</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Install the Heroku toolbelt:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>pip install django-toolbelt
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Freeze the dependencies:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>pip freeze &gt; requirements.txt
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Update the <em>wsgi.py</em> file:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="kn">from</span> <span class="nn">django.core.wsgi</span> <span class="kn">import</span> <span class="n">get_wsgi_application</span>
+</span><span class="line"><span class="kn">from</span> <span class="nn">dj_static</span> <span class="kn">import</span> <span class="n">Cling</span>
+</span><span class="line">
+</span><span class="line"><span class="n">application</span> <span class="o">=</span> <span class="n">Cling</span><span class="p">(</span><span class="n">get_wsgi_application</span><span class="p">())</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Test your Heroku settings locally:</p>
+
+<figure class="code"><figcaption><span/></figcaption></figure>
+
+
+<p>Navigate to <a href="http://localhost:5000/">http://localhost:5000/</a>.</p>
+
+<p>Looking good? Let’s get Amazon S3 running.</p>
+
+<a name="Amazon.S3"/>
+<h2>Amazon S3</h2>
+
+<p>Although it is hypothetically possible to host static files in your Heroku repo, it’s best to use a third party host, especially if you have a customer-facing application. S3 is easy to use, and it requires only a few changes to your <em>settings.py</em> file.</p>
+
+<p>Install dependencies:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>pip install django-storages
+</span><span class="line"><span class="nv">$ </span>pip install boto
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Add <code>storages</code> and <code>boto</code> to your <code>INSTALLED_APPS</code> in “settings.py”</p>
+
+<p>Add the following code to the bottom of “settings.py”:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="c">#Storage on S3 settings are stored as os.environs to keep settings.py clean</span>
+</span><span class="line"><span class="k">if</span> <span class="ow">not</span> <span class="n">DEBUG</span><span class="p">:</span>
+</span><span class="line">   <span class="n">AWS_STORAGE_BUCKET_NAME</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s">'AWS_STORAGE_BUCKET_NAME'</span><span class="p">]</span>
+</span><span class="line">   <span class="n">AWS_ACCESS_KEY_ID</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s">'AWS_ACCESS_KEY_ID'</span><span class="p">]</span>
+</span><span class="line">   <span class="n">AWS_SECRET_ACCESS_KEY</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s">'AWS_SECRET_ACCESS_KEY'</span><span class="p">]</span>
+</span><span class="line">   <span class="n">STATICFILES_STORAGE</span> <span class="o">=</span> <span class="s">'storages.backends.s3boto.S3BotoStorage'</span>
+</span><span class="line">   <span class="n">S3_URL</span> <span class="o">=</span> <span class="s">'http://</span><span class="si">%s</span><span class="s">.s3.amazonaws.com/'</span> <span class="o">%</span> <span class="n">AWS_STORAGE_BUCKET_NAME</span>
+</span><span class="line">   <span class="n">STATIC_URL</span> <span class="o">=</span> <span class="n">S3_URL</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>The AWS environment-dependent settings are stored as environmental variables. So we don’t have to set these from the terminal each time we run the development server, we can set these in our virtualenv <code>activate</code> script. Grab the AWS Bucket name, Access Key ID, and Secret Access Key from S3. Open <code>myenv/bin/activate</code> and append the following code (make sure to add in your specific info you just pulled from S3):</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="c"># s3 deployment info</span>
+</span><span class="line"><span class="n">export</span> <span class="n">AWS_STORAGE_BUCKET_NAME</span><span class="o">=</span><span class="p">[</span><span class="n">YOUR</span> <span class="n">AWS</span> <span class="n">S3</span> <span class="n">BUCKET</span> <span class="n">NAME</span><span class="p">]</span>
+</span><span class="line"><span class="n">export</span> <span class="n">AWS_ACCESS_KEY</span><span class="o">=</span><span class="n">XXXXXXXXXXXXXXXXXXXX</span>
+</span><span class="line"><span class="n">export</span> <span class="n">AWS_SECRET_ACCESS_KEY</span><span class="o">=</span><span class="n">XXXXXXXXXXXXXXXXXXXX</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Deactivate and reactivate your virtualenv, then launch the local server to make sure the changes took affect:</p>
+
+<figure class="code"><figcaption><span/></figcaption></figure>
+
+
+<p>Kill the server, then update the <em>requirements.txt</em> file:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>pip freeze &gt; requirements.txt
+</span></code></pre></td></tr></table></div></figure>
+
+
+<a name="Push.to.Github.and.Heroku"/>
+<h2>Push to Github and Heroku</h2>
+
+<p>Let’s backup our files to Github before PUSHing to Heroku:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>git add .
+</span><span class="line"><span class="nv">$ </span>git commit -m <span class="s2">"update project for heroku and S3"</span>
+</span><span class="line"><span class="nv">$ </span>git push -u origin master
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Create a Heroku Project/Repo:</p>
+
+<figure class="code"><figcaption><span/></figcaption></figure>
+
+
+<blockquote><p>Name it whatever you’d like.</p></blockquote>
+
+<p>PUSH to Heroku:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>git push heroku master
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Send the AWS environmental variables to Heroku</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>heroku config:set <span class="nv">AWS_STORAGE_BUCKET_NAME</span><span class="o">=[</span>YOUR AWS S3 BUCKET NAME<span class="o">]</span>
+</span><span class="line"><span class="nv">$ </span>heroku config:set <span class="nv">AWS_ACCESS_KEY</span><span class="o">=</span>XXXXXXXXXXXXXXXXXXXX
+</span><span class="line"><span class="nv">$ </span>heroku config:set <span class="nv">AWS_SECRET_ACCESS_KEY</span><span class="o">=</span>XXXXXXXXXXXXXXXXXXXX
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Collect the static files and send to Amazon:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>heroku run python manage.py collectstatic
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Add development database:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>heroku addons:add heroku-postgresql:dev
+</span><span class="line">Adding heroku-postgresql on deploy_django... <span class="k">done</span>, v13 <span class="o">(</span>free<span class="o">)</span>
+</span><span class="line">Attached as HEROKU_POSTGRESQL_COPPER_URL
+</span><span class="line">Database has been created and is available
+</span><span class="line">! This database is empty. If upgrading, you can transfer
+</span><span class="line">! data from another database with pgbackups:restore.
+</span><span class="line">Use <span class="sb">`</span>heroku addons:docs heroku-postgresql<span class="sb">`</span> to view documentation.
+</span><span class="line"><span class="nv">$ </span>heroku pg:promote HEROKU_POSTGRESQL_COPPER_URL
+</span><span class="line">Promoting HEROKU_POSTGRESQL_COPPER_URL to DATABASE_URL... <span class="k">done</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Now sync the DB:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>heroku run python manage.py syncdb
+</span></code></pre></td></tr></table></div></figure>
+
+
+<a name="Data.transfer"/>
+<h2>Data transfer</h2>
+
+<p>We need to transfer the data from the local database to the production database.</p>
+
+<p>Install the Heroku PGBackups add-on:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>heroku addons:add pgbackups
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Dump your local database:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>pg_dump -h localhost  -Fc library  &gt; db.dump
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>In order for Heroku to access db dump, you need to upload it to the Internet somewhere. You could use a personal website, dropbox, or S3. I simply uploaded it to the S3 bucket.</p>
+
+<p>Import the dump to Heroku:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>heroku pgbackups:restore DATABASE http://www.example.com/db.dump
+</span></code></pre></td></tr></table></div></figure>
+
+
+<a name="Test"/>
+<h2>Test</h2>
+
+<p>Let’s test to make sure everything works.</p>
+
+<p>First, update your allowed hosts to your specific domain in <em>settings.py</em>:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">ALLOWED_HOSTS</span> <span class="o">=</span> <span class="o">[</span><span class="s1">'[your-project-name].herokuapp.com'</span><span class="o">]</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Check out your app:</p>
+
+<figure class="code"><figcaption><span/></figcaption></figure>
+
+
+<a name="Fabric"/>
+<h2>Fabric</h2>
+
+<p>Fabric is used for automating deployment of your application.</p>
+
+<p>Install:</p>
+
+<figure class="code"><figcaption><span/></figcaption></figure>
+
+
+<p>Create the fabfile:</p>
+
+<figure class="code"><figcaption><span/></figcaption></figure>
+
+
+<p>Then add the following code:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+</pre></td><td class="code"><pre><code class="python"><span class="line"><span class="kn">from</span> <span class="nn">fabric.api</span> <span class="kn">import</span> <span class="n">local</span>
+</span><span class="line">
+</span><span class="line"><span class="k">def</span> <span class="nf">deploy</span><span class="p">():</span>
+</span><span class="line">   <span class="n">local</span><span class="p">(</span><span class="s">'pip freeze &gt; requirements.txt'</span><span class="p">)</span>
+</span><span class="line">   <span class="n">local</span><span class="p">(</span><span class="s">'git add .'</span><span class="p">)</span>
+</span><span class="line">   <span class="k">print</span><span class="p">(</span><span class="s">"enter your git commit comment: "</span><span class="p">)</span>
+</span><span class="line">   <span class="n">comment</span> <span class="o">=</span> <span class="nb">raw_input</span><span class="p">()</span>
+</span><span class="line">   <span class="n">local</span><span class="p">(</span><span class="s">'git commit -m "</span><span class="si">%s</span><span class="s">"'</span> <span class="o">%</span> <span class="n">comment</span><span class="p">)</span>
+</span><span class="line">   <span class="n">local</span><span class="p">(</span><span class="s">'git push -u origin master'</span><span class="p">)</span>
+</span><span class="line">   <span class="n">local</span><span class="p">(</span><span class="s">'heroku maintenance:on'</span><span class="p">)</span>
+</span><span class="line">   <span class="n">local</span><span class="p">(</span><span class="s">'git push heroku master'</span><span class="p">)</span>
+</span><span class="line">   <span class="n">local</span><span class="p">(</span><span class="s">'heroku maintenance:off'</span><span class="p">)</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Test:</p>
+
+<figure class="code"><figcaption><span/></figcaption></figure>
+
+
+
+
+<hr/>
+
+
+<p>Please leave questions or comments? Thanks!</p>
+</div>
+
+
+      </div></body></html>

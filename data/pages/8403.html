@@ -1,0 +1,71 @@
+<html><body><div><div class="content html_format"><p>
+      Понадобилось мне однажды у себя в проекте реализовать работу с файловым хранилищем с использованием HTTP REST API. Проект разрабатывается на python, к тому же уже был реализован http-клиент с использованием библиотеки httplib2, поэтому было решено расширить функциональность http-клиента и работать с файловым хранилищем через туже библиотеку. Проблема возникла при загрузке файлов на сервер. Первый PUT запрос выполняется, далее все последующие запросы отказываются выполняться — 500 </p><i>Internal Server Error</i><p>.
+</p><p>
+Смотрю Wireshark'ом выясняется что после первого запроса сервер посылает в заголовках ответа </p><b>connection: keep-alive</b><p> и следом через 5 секунд закрывает соединение. Всё просто — это таймаут keep-alive установлен на сервере.
+
+</p><img src="https://habrastorage.org/files/5e9/6fa/dfa/5e96fadfa3ce4f8891e6e19601233b26.png"/>
+<p>
+А вот как это выглядит на клиенте:
+</p><a name="habracut"/><p>
+Включаю дебажные логи для httplib2:
+
+</p><pre><code>httplib2.debuglevel = 4
+</code></pre><p>
+Выполняю PUT запрос на клиенте:
+
+</p><pre><code>res = rq.request(url, 'PUT', mediafile, h)
+connect: (system.restfs.test, 9990) ************
+send: 'PUT /domain/p.city/sounds/test_folder/12.wav HTTP/1.1\r\nHost: system.restfs.test:9990\r\nContent-Length: 13864\r\ncontent-type: audio/x-wav\r\naccept-encoding: gzip, deflate\r\nuser-agent: Python-httplib2/0.8 (gzip)\r\n\r\n'
+send: &lt;open file '/home/mixo/\xd0\x97\xd0\xb0\xd0\xb3\xd1\x80\xd1\x83\xd0\xb7\xd0\xba\xd0\xb8/12.wav', mode 'r' at 0x7fca638c4db0&gt;
+sendIng a read()able
+reply: 'HTTP/1.1 201 Created\r\n'
+header: connection: keep-alive
+header: server: Cowboy
+header: date: Fri, 11 Dec 2015 05:14:09 GMT
+header: content-length: 0
+header: content-type: audio/x-wav
+</code></pre><p>
+Повторный PUT запрос:
+
+</p><pre><code>res = rq.request(url, 'PUT', mediafile, h)
+send: 'PUT /domain/p.city/sounds/test_folder/12.wav HTTP/1.1\r\nHost: system.restfs.test:9990\r\nContent-Length: 13864\r\ncontent-type: audio/x-wav\r\naccept-encoding: gzip, deflate\r\nuser-agent: Python-httplib2/0.8 (gzip)\r\n\r\n'
+send: &lt;open file '/home/mixo/\xd0\x97\xd0\xb0\xd0\xb3\xd1\x80\xd1\x83\xd0\xb7\xd0\xba\xd0\xb8/12.wav', mode 'r' at 0x7f167a933030&gt;
+sendIng a read()able
+reply: ''
+connect: (system.restfs.test, 9990) ************
+send: 'PUT /domain/p.city/sounds/test_folder/12.wav HTTP/1.1\r\nHost: system.restfs.test:9990\r\nContent-Length: 13864\r\ncontent-type: audio/x-wav\r\naccept-encoding: gzip, deflate\r\nuser-agent: Python-httplib2/0.8 (gzip)\r\n\r\n'
+send: &lt;open file '/home/mixo/\xd0\x97\xd0\xb0\xd0\xb3\xd1\x80\xd1\x83\xd0\xb7\xd0\xba\xd0\xb8/12.wav', mode 'r' at 0x7f167a933030&gt;
+sendIng a read()able
+reply: 'HTTP/1.1 500 Internal Server Error\r\n'
+header: connection: keep-alive
+header: server: Cowboy
+header: date: Fri, 11 Dec 2015 05:26:27 GMT
+header: content-length: 0
+header: content-type: audio/x-wav
+</code></pre><p>
+Здесь мы видим, что httplib2 честно, как и предписано сервером, не переустанавливает соединение и в тот же сокет отправляет новый запрос, не получив ответ, заново устанавливается соединение и посылает повторный запрос. Но этот повторный запрос уже не обрабатывается сервером, а возвращается ошибка 500.
+
+</p><img src="https://habrastorage.org/files/d62/cc6/b9f/d62cc6b9f6684fdea40bd3368dfcb902.png"/>
+<p>
+При этом, если сравнить логи Wireshark для двух запросов, видно, что после переустановки соединения файл не отправляется и запрос обрывается и отправляется не полностью.
+</p><p>
+Тут же в качестве временного решения было выбрано выставлять в ответе на сервере заголовок </p><b>connection: close</b><p>. Этот вариант оказался рабочим: приятно почувствовать, что ты на верном пути, и решение близко.
+</p><p>
+Но не так близко, как я тогда думал. После изучения исходного кода httplib (которую расширяет httplib2) было выбрано более простое решение и создан pull-request для httplib:
+ 
+</p><img src="https://habrastorage.org/files/ddd/5a2/762/ddd5a27626144022b1c223f658265349.png"/>
+<p>
+В ходе детального рассмотрения </p><a href="http://bugs.python.org/issue25838?@ok_message=msg%20256255%20created%0Aissue%2025838%20message_count%2C%20messages%20edited%20ok&amp;@template=item">pull-request'а</a><p> совместно с ребятами из поддержки выяснилось что проблема находится на стыке библиотеки httplib и библиотеки httplib2:
+
+</p><ul>
+<li>httplib отправляет запрос и вычитывает файл в BODY;</li>
+<li>httplib2 переустанавливает соединение с сервером и отправляет запрос повторно, но файл уже прочитан, и курсор находится в конце файла.</li>
+</ul><p>
+В случае повторной отправки запроса нужно начать читать файл сначала. Осталось выбрать виновного и </p><s>казнить</s><p> избрать меру пресечения. В библиотеке httplib при отправке файла предполагается, что если объект имеет метод read(), то его можно считать и передать. Можно ли также предположить, что этот же объект имеет методы tell() и seek() и сделать возврат курсора в начало файла. И если да, то эта логика все же должна быть вынесена в httplib2. В итоге был создан </p><a href="https://github.com/jcgregorio/httplib2/pull/321">pull-request</a><p> для httplib2. На данный момент найденная проблема не имеет окончательного решения, но есть большое желание довести её до победного финала.
+</p><p>
+Надеюсь, этот пост будет полезен. Спасибо за внимание.
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

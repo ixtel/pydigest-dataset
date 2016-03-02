@@ -1,0 +1,162 @@
+<html><body><div><div class="post-content" itemprop="articleBody">
+    <p>The <a href="http://www.django-rest-framework.org/">Django REST Framework</a> allows Django developers to build simple yet robust standards-based REST APIs for their applications.  We've used it successfully on a number of Django web design projects.  However, even seemingly simple, straightforward usage of the Django REST Framework and its <a href="http://www.django-rest-framework.org/api-guide/relations/#nested-relationships">nested serializers</a> can <em>kill performance</em> of your API endpoints. And that matters: if your web server is wasting its time inefficiently responding to a REST API call, it will drag the rest of the server's responsiveness down with it.</p>
+
+<p>At it's root, the problem is called the <strong>"N+1 selects problem"</strong>; the database is queried once for data in a table (say, <code>Customers</code>), and then, one or more times <em>per customer</em> inside a loop to get, say, <code>customer.country.Name</code>.  Using the Django ORM, this mistake is easy to make.  Using DRF, it is hard <em>not</em> to make.</p>
+
+<p>Luckily, there is a solution that can be used to fix this common Django REST Framework performance problem, without any major restructuring of the code.  It requires use of the underutilized <a href="https://docs.djangoproject.com/en/dev/ref/models/querysets/#django.db.models.query.QuerySet.select_related"><code>select_related</code></a>
+and <a href="https://docs.djangoproject.com/en/dev/ref/models/querysets/#django.db.models.query.QuerySet.prefetch_related"><code>prefetch_related</code></a> methods on the Django ORM (and the newer <a href="https://docs.djangoproject.com/en/dev/ref/models/querysets/#prefetch-objects"><code>Prefetch</code></a> object as well) to perform what is called "eager loading".</p>
+
+<p>This approach can have a <strong>big</strong> effect.  On the most recent project we applied this too, important API calls 
+were taking <em>5-10 seconds</em> to return results.  After applying appropriate eager loading, the same
+calls were well below 1s.  <strong>Speedups of 20x or more are typical</strong>.</p>
+
+<h2>Why does Django REST Framework cause this issue so readily?</h2>
+
+<p>When you build a DRF view, you often want the return to include data from more than one related table.  Writing this is straightforward and <a href="http://www.django-rest-framework.org/api-guide/serializers/#dealing-with-nested-objects">covered</a> in the DRF docs <a href="http://www.django-rest-framework.org/api-guide/relations/">in depth</a>. Unfortunately, <strong>as soon as you use a nested relationship in your serializer, you risk crushing your performance</strong>, and like so many performance problems, it often <strong>only shows itself in production</strong> with larger, real world data sets.</p>
+
+<p>This happens because the Django ORM is <em>lazy</em>; it only fetches the minimum amount of data needed to respond to the current query.  It does not know you're about to ask a hundred (or ten thousand) times for the same or very similar data.  </p>
+
+<p>And these days, when talking about database-backed websites, generally, the most important metric when determining site responsiveness is <strong>number of trips to the database</strong>.  </p>
+
+<p>In DRF, we run into trouble whenever a serializer has a nested relationship, such as either of these:</p>
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="k">class</span> <span class="nc">CustomerSerializer</span><span class="p">(</span><span class="n">serializers</span><span class="o">.</span><span class="n">ModelSerializer</span><span class="p">):</span>
+    <span class="c"># This can kill performance!</span>
+    <span class="n">order_descriptions</span> <span class="o">=</span> <span class="n">serializers</span><span class="o">.</span><span class="n">StringRelatedField</span><span class="p">(</span><span class="n">many</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span> 
+    <span class="c"># So can this, same exact problem...</span>
+    <span class="n">orders</span> <span class="o">=</span> <span class="n">OrderSerializer</span><span class="p">(</span><span class="n">many</span><span class="o">=</span><span class="bp">True</span><span class="p">,</span> <span class="n">read_only</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span> <span class="c"># This can kill performance!</span>
+</code></pre></div>
+<p>The code inside DRF that populates either <code>CustomerSerializer</code> does this:</p>
+
+<ol>
+<li>Fetch all <code>customers</code>. (Requires a round-trip to the database.)</li>
+<li>For the first returned customer, fetch their <code>orders</code>.  (Requires another round-trip to the database.)</li>
+<li>For the second returned customer, fetch its <code>orders</code>.  (Requires another round-trip to the database.)</li>
+<li>For the third returned customer, fetch its <code>orders</code>.  (Requires another round-trip to the database.)</li>
+<li>For the fourth returned customer, fetch its <code>orders</code>.  (Requires another round-trip to the database.)</li>
+<li>For the fifth returned customer, fetch its <code>orders</code>.  (Requires another round-trip to the database.)</li>
+<li>For the sixth returned customer, fetch its <code>orders</code>.  (Requires another round-trip to the database.)</li>
+<li>... you get the idea.  <strong>Lets hope you don't have too many customers!</strong></li>
+</ol>
+
+<p>And it quickly can get worse.  If your <code>OrderSerializer</code> itself has a nested relationship, you have a loop-inside-a-loop, and you're quickly in trouble, even for smallish amount of data.  As a rule of thumb, these days, on a modest traffic website, you can probably afford 50 trips to the database before you start getting into real trouble.  </p>
+
+<h2>The basic approach to solving Django's "laziness"</h2>
+
+<p>Our approach to fixing this problem is called "eager loading".  Essentially, you warn the Django ORM ahead of time that you're going to ask it the same inane question over and over, "so get ready".  In the above example, simply do this before DRF starts fetching:</p>
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">queryset</span> <span class="o">=</span> <span class="n">queryset</span><span class="o">.</span><span class="n">prefetch_related</span><span class="p">(</span><span class="s">'orders'</span><span class="p">)</span>
+</code></pre></div>
+<p>Then, when DRF makes the same call as above to serialize customers, this happens instead:</p>
+
+<ol>
+<li>Fetch all <code>customers</code>. (Makes TWO round-trips to the database.  The first is for customers.  The second fetches all orders related to any of the fetched customers.)</li>
+<li>For the first returned customer, fetch their <code>orders</code>.  (Does NOT require a trip to the database, we already fetch the needed data in step 1.)</li>
+<li>For the second returned customer, fetch its <code>orders</code>.  (Does NOT require a trip to the database.)</li>
+<li>For the third returned customer, fetch its <code>orders</code>.  (Does NOT require a trip to the database.)</li>
+<li>For the fourth returned customer, fetch its <code>orders</code>.  (Does NOT require a trip to the database.)</li>
+<li>For the fifth returned customer, fetch its <code>orders</code>.  (Does NOT require a trip to the database.)</li>
+<li>For the sixth returned customer, fetch its <code>orders</code>. (Does NOT require a trip to the database.)</li>
+<li>... you get the idea.  <strong>You can have LOTS of customers</strong> and not have to keep waiting on trips to the database.</li>
+</ol>
+
+<p>In short, the Django ORM "eagerly" asked for the data in step 1, then could supply the data requested in steps 2+ from it's local data cache.  Fetching data from the local data cache is essentially instantaneous when compared with the database round-trip, so we just got an enormous performance speedup in conditions when there are many customers.</p>
+
+<h2>Standardizing a pattern to fix the Django REST Framework performance problem</h2>
+
+<p>We have settled on a common pattern to optimize this Django REST Framework performance problem.  Whenever a serializer will query nested fields, we add a new <code>@staticmethod</code> called <code>setup_eager_loading</code> to the serializer, like so:</p>
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="k">class</span> <span class="nc">CustomerSerializer</span><span class="p">(</span><span class="n">serializers</span><span class="o">.</span><span class="n">ModelSerializer</span><span class="p">):</span>
+    <span class="n">orders</span> <span class="o">=</span> <span class="n">OrderSerializer</span><span class="p">(</span><span class="n">many</span><span class="o">=</span><span class="bp">True</span><span class="p">,</span> <span class="n">read_only</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">setup_eager_loading</span><span class="p">(</span><span class="n">cls</span><span class="p">,</span> <span class="n">queryset</span><span class="p">):</span>
+        <span class="sd">""" Perform necessary eager loading of data. """</span>
+        <span class="n">queryset</span> <span class="o">=</span> <span class="n">queryset</span><span class="o">.</span><span class="n">prefetch_related</span><span class="p">(</span><span class="s">'orders'</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">queryset</span>
+</code></pre></div>
+<p>And then, wherever that serializer is going to be used, simply call <code>setup_eager_loading</code> on the 
+queryset before the serializer is invoked, like so:</p>
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">customer_qs</span> <span class="o">=</span> <span class="n">Customers</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">all</span><span class="p">()</span>
+<span class="n">customer_qs</span> <span class="o">=</span> <span class="n">CustomerSerializer</span><span class="o">.</span><span class="n">setup_eager_loading</span><span class="p">(</span><span class="n">customer_qs</span><span class="p">)</span>  <span class="c"># Set up eager loading to avoid N+1 selects</span>
+<span class="n">post_data</span> <span class="o">=</span> <span class="n">CustomerSerializer</span><span class="p">(</span><span class="n">customer_qs</span><span class="p">,</span> <span class="n">many</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span><span class="o">.</span><span class="n">data</span>
+</code></pre></div>
+<p>...or, if you have an <code>APIView</code> or a <code>ViewSet</code>, you can call <code>setup_eager_loading</code> in the <code>get_queryset</code> method:</p>
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="k">def</span> <span class="nf">get_queryset</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+    <span class="n">queryset</span> <span class="o">=</span> <span class="n">Customers</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">all</span><span class="p">()</span>
+    <span class="c"># Set up eager loading to avoid N+1 selects</span>
+    <span class="n">queryset</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">get_serializer_class</span><span class="p">()</span><span class="o">.</span><span class="n">setup_eager_loading</span><span class="p">(</span><span class="n">queryset</span><span class="p">)</span>  
+    <span class="k">return</span> <span class="n">queryset</span>
+</code></pre></div>
+<h2>How do I write <code>setup_eager_loading</code>?</h2>
+
+<p>The hard part of solving this Django performance problem is becoming adept with how <code>select_related</code> and its friends work.  Here, we'll detail how each is used in the context of the Django ORM and the Django REST Framework.</p>
+
+<ul>
+<li><code>select_related</code>: The simplest eager loading tool in the Django ORM, for all <strong>one-to-one</strong> or <strong>many-to-one relationships</strong>, where you need data from the "one" parent object, such as a customer's company name.  This translates into a SQL join so the parent rows are fetched in the same query as the child rows.  <a href="https://docs.djangoproject.com/en/dev/ref/models/querysets/#django.db.models.query.QuerySet.select_related">(See Official Documentation)</a></li>
+<li><code>prefetch_related</code>: For more complex relationships where there are multiple rows per result (ie many=True), like <strong>many-to-many</strong> or <strong>one-to-many</strong> relationships, such as a customer's orders as above. This translates to a second SQL query on the related table, usually with a long <code>WHERE ... IN</code> clause to select only relevant rows. <a href="https://docs.djangoproject.com/en/dev/ref/models/querysets/#django.db.models.query.QuerySet.prefetch_related">(See Official Documentation)</a></li>
+<li><code>Prefetch</code>: Used for complex <code>prefetch_related</code> queries, such as filtered subsets. It can also be used to nest <code>setup_eager_loading</code> calls. <a href="https://docs.djangoproject.com/en/dev/ref/models/querysets/#prefetch-objects">(See Official Documentation)</a></li>
+</ul>
+
+<h3>An example model with the appropriate eager loading</h3>
+
+<p>For our example, let's optimize the Django REST Framework-related performance problems of an imaginary event-planning website (which surprisingly parallels our ongoing project getfetcher.com).  We have a simple database structure:</p>
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="kn">from</span> <span class="nn">django.contrib.auth.models</span> <span class="kn">import</span> <span class="n">User</span>
+
+<span class="k">class</span> <span class="nc">Event</span><span class="p">:</span>
+    <span class="sd">""" A single occasion that has many `attendees` from a number of organizations."""</span>
+    <span class="n">creator</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">ForeignKey</span><span class="p">(</span><span class="n">User</span><span class="p">)</span>
+    <span class="n">name</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">TextField</span><span class="p">()</span>
+    <span class="n">event_date</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">DateTimeField</span><span class="p">()</span>
+
+<span class="k">class</span> <span class="nc">Attendee</span><span class="p">:</span>
+    <span class="sd">""" A party-goer who (usually) represents an `organization`, who may attend many `events`."""</span>
+    <span class="n">events</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">ManyToManyField</span><span class="p">(</span><span class="n">Event</span><span class="p">,</span> <span class="n">related_name</span><span class="o">=</span><span class="s">'attendees'</span><span class="p">)</span>
+    <span class="n">organization</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">ForeignKey</span><span class="p">(</span><span class="n">Organization</span><span class="p">,</span> <span class="n">null</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+
+<span class="k">class</span> <span class="nc">Organization</span><span class="p">:</span>
+    <span class="n">name</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">TextField</span><span class="p">()</span>
+</code></pre></div>
+<p>For this example, to fetch all events, our eager loading code would look like this:</p>
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="k">class</span> <span class="nc">EventSerializer</span><span class="p">(</span><span class="n">serializers</span><span class="o">.</span><span class="n">ModelSerializer</span><span class="p">):</span>
+    <span class="n">creator</span> <span class="o">=</span> <span class="n">serializers</span><span class="o">.</span><span class="n">StringRelatedField</span><span class="p">()</span>
+    <span class="n">attendees</span> <span class="o">=</span> <span class="n">AttendeeSerializer</span><span class="p">(</span><span class="n">many</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+    <span class="n">unaffiliated_attendees</span> <span class="o">=</span> <span class="n">AttendeeSerializer</span><span class="p">(</span><span class="n">many</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+
+    <span class="nd">@staticmethod</span>
+    <span class="k">def</span> <span class="nf">setup_eager_loading</span><span class="p">(</span><span class="n">queryset</span><span class="p">):</span>
+        <span class="sd">""" Perform necessary eager loading of data. """</span>
+        <span class="c"># select_related for "to-one" relationships</span>
+        <span class="n">queryset</span> <span class="o">=</span> <span class="n">queryset</span><span class="o">.</span><span class="n">select_related</span><span class="p">(</span><span class="s">'creator'</span><span class="p">)</span>
+
+        <span class="c"># prefetch_related for "to-many" relationships</span>
+        <span class="n">queryset</span> <span class="o">=</span> <span class="n">queryset</span><span class="o">.</span><span class="n">prefetch_related</span><span class="p">(</span>
+            <span class="s">'attendees'</span><span class="p">,</span>
+            <span class="s">'attendees__organization'</span><span class="p">)</span>
+
+        <span class="c"># Prefetch for subsets of relationships</span>
+        <span class="n">queryset</span> <span class="o">=</span> <span class="n">queryset</span><span class="o">.</span><span class="n">prefetch_related</span><span class="p">(</span>
+            <span class="n">Prefetch</span><span class="p">(</span><span class="s">'unaffiliated_attendees'</span><span class="p">,</span> 
+                <span class="n">queryset</span><span class="o">=</span><span class="n">Attendee</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="n">organization__isnull</span><span class="o">=</span><span class="bp">True</span><span class="p">))</span>
+            <span class="p">)</span>
+        <span class="k">return</span> <span class="n">queryset</span>
+</code></pre></div>
+<p>When we make sure to invoke <code>setup_eager_loading</code> before using the EventSerializer, we will only have two large queries instead of N+1 smaller queries, and our performance will usually be MUCH better!</p>
+
+<h2>Conclusion</h2>
+
+<p>Eager loading is a common performance optimization that has application well beyond the Django REST Framework.</p>
+
+<p>Any time you are querying nested relationships via an ORM, you should think about
+setting up the proper eager loading.  In my experience, it is the most commonplace 
+performance-related problem in modern small- and midsize web development.</p>
+
+<p>In a followup blog post, I'll write some debugging strategies for figuring out elusive queries spawned by more complex Serializers and some more advanced usages of <code>Prefetch</code>.  </p>
+
+<h2>References</h2>
+
+
+
+<p>Thank you for reading!</p>
+
+  </div>
+
+  
+  
+  </div></body></html>

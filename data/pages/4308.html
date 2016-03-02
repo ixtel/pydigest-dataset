@@ -1,0 +1,343 @@
+<html><body><div><div class="ArticleText">
+
+<p>
+Josh Triplett started out with "the punchline" for his PyCon 2015 talk
+on porting 
+Python to run without an operating system: he and his Intel colleagues got
+the interpreter to run in the <a href="https://www.gnu.org/software/grub/">GRUB boot loader</a> for either
+BIOS or EFI 
+systems.  But that didn't spoil the rest of the talk by any means.  He had
+plenty of interesting things to say and a number of eye-opening demos to
+show as well.
+</p>
+
+<p>
+The original reason for wanting Python in the boot loader was to be able to
+test the hardware, BIOS, Extensible Firmware Interface (EFI), and Advanced
+Configuration and Power Interface (ACPI) without having to write a "bunch of
+one-off programs" for testing.  Traditionally, Intel had written test
+programs targeting DOS (for BIOS systems) or EFI.  Both DOS and EFI provide
+environments without protections, so that programs can poke around in
+memory and the hardware to do what they need.
+</p>
+
+<a href="/Articles/641305/">
+<img src="http://static.lwn.net/images/2015/pycon-triplett-sm.jpg" border="0" hspace="5" align="right" alt="[Josh Triplett]" title="Josh Triplett"/>
+</a>
+
+<p>
+What he wanted to be able to do was to write scripts for these tests,
+"which is more fun".  He wanted to avoid writing more C code, but also to
+move away from the previous incarnation that used the GRUB shell along with
+some shell functions that could evaluate C-like expressions.  In fact, he said,
+"the more sentences I can end with 'without writing any C code', the
+happier my life is".
+</p>
+
+<p>
+Over time, the Python port to GRUB has turned into a useful exploratory
+environment for working with hardware.  It hearkens back to the fun of
+hacking on
+the <a href="http://en.wikipedia.org/wiki/Commodore_64">Commodore 64</a> (or
+DOS) using <a href="http://en.wikipedia.org/wiki/PEEK_and_POKE"><tt>PEEK</tt> and
+<tt>POKE</tt></a> to mess with the hardware.  That can't really be done
+with modern hardware, he said.
+</p>
+
+<h4>Python in GRUB</h4>
+
+<p>
+The <a href="http://biosbits.org/">BIOS Implementation Test Suite</a>
+(BITS), as the project is called, will run on GRUB for several kinds of
+firmware: 32-bit BIOS or EFI
+and 64-bit EFI.  <strike>It uses the original GRUB (i.e. <a href="https://www.gnu.org/software/grub/grub-legacy.html">GRUB Legacy</a>)
+not GRUB 2.</strike> [<b>Correction</b>: BITS uses GRUB 2.]
+It is  
+based on the standard Python interpreter (i.e. CPython), but he apologized
+that it uses Python 2.7.  The target audience for the tool is
+quite familiar with that version of the language.  If that
+changes, he would love to move to Python 3 some day.
+</p>
+
+<p>
+There is an interactive <a href="http://en.wikipedia.org/wiki/Read%E2%80%93eval%E2%80%93print_loop">read-eval-print
+loop</a> (REPL) that gives full access to the language.  That includes
+tab completion, history, and line editing as well.  A
+"substantial fraction" of the standard library has been ported to run on
+BITS.  On top of 
+that, the project has added modules for platform support: CPU, SMP
+(symmetric multi-processing), ACPI,
+EFI, and others.  Intel has created a test suite and some exploratory tools
+written in Python using all of that.
+</p>
+
+<p>
+Triplett then switched away from his slides to a Python prompt from an
+interpreter running on
+GRUB in a virtual machine. 
+He typed two statements into the interpreter to demonstrate that it
+supported both list comprehensions and arbitrarily large integers
+(i.e. bignums). 
+</p>
+
+<p>
+To get an interactive prompt from Python, there is a single function that
+GRUB will need to
+call:
+</p><pre>
+    PyRun_InteractiveLoop(stdin, "&lt;stdin&gt;");
+</pre><p>
+That handles everything for the REPL, including parsing and executing the
+input, line 
+editing, and so on.
+The two parameters simply say where to get the input and what to print as
+the source "file" in the traceback when there is an exception.  But to be
+able to call that function
+from GRUB requires some work.
+
+
+</p><p>
+The project couldn't use the standard Python <tt>configure</tt> and
+<tt>make</tt> because those would use the toolchain and attributes from the
+Linux host. 
+There is no GNU target string (i.e. the cpu-vendor-os triple used for
+cross-compilation) and no target header files available for GRUB.  So,
+instead, BITS added all of 
+the Python source files into the GRUB build system.
+Essentially that was just a list of C files that GRUB needed in order to add
+Python.  Normally, <a href="https://www.gnu.org/software/autoconf/">autoconf</a> would create a
+<tt>pyconfig.h</tt> file as part of the Python build process
+that would say which features are present on the platform.  Instead, the
+project manually created a
+<tt>pyconfig.h</tt> that had lots of "no I don't have this feature"
+configuration parameters along with a handful of 
+"yes" entries.
+</p>
+
+<p>
+Many of the features listed in <tt>pyconfig.h</tt> are things that are provided
+(or not) by the operating system, but in this case there is no operating
+system.  Python does minimally require some support functions, though, plus
+there were some extra features that were configured in. The project
+needed to provide any functions that were called but not present.
+</p>
+
+<h4>What CPython needs</h4>
+
+<p>
+So, what do you really actually need to run CPython?  Triplett provided a
+number of examples.  There are some non-trivial file operations that are
+needed, like <tt>stat()</tt> to determine if a path is a directory that
+might contain an <tt>__init__.py</tt> or if it is a file.  A simple
+<tt>isatty()</tt> (which, for BITS, returns true if the file descriptor is less
+than three) 
+was added, as was a <tt>seek()</tt> implementation.  To support those, a
+simple file descriptor table had to be added because GRUB's file functions
+use structure pointers rather than descriptors.
+</p>
+
+<p>
+Python also needs to be able to use <tt>ungetc()</tt>, as the parser will
+sometimes put one character back on the input stream.  Rather than add a
+one-character buffer, a "quick hack" was added to seek backward by one
+character.  An open-coded <tt>qsort()</tt> was added as well; GRUB didn't
+have any support for sorting. 
+</p>
+
+<p>
+Floating-point math was another area that GRUB had no support for.  The
+project found a permissively licensed floating-point library called <a href="http://www.netlib.org/fdlibm/readme">FDLIBM</a>.  It does not have
+any support for acceleration using floating-point hardware, which is
+actually an advantage in 
+the GRUB environment.  It means that floating point can be used even if the
+firmware has not properly initialized the floating-point hardware.
+</p>
+
+<p>
+Python uses <tt>printf()</tt> and <tt>sprintf()</tt> extensively, so those
+were needed.  For the most part, GRUB's versions worked fine, though
+support for the "%%" format specifier (to put a "%" in the output) was not
+present.  It turns out that Python uses that frequently to format its
+strings for output.  Strange bugs were seen until that lack was identified
+and fixed.
+</p>
+
+<p>
+There are a number of performance issues that the project has had to work
+through.  To start with, the startup time was surprisingly long.  That was
+painful on real hardware, but it was really bad on CPU circuit simulators
+("we wouldn't want this to take three days to boot").  Part of the problem
+was the Python parser, which reads data one character at a time and uses
+<tt>ungetc()</tt>.   GRUB does not have much disk caching, so all of that
+I/O hits the disk.
+</p>
+
+<p>
+By adding support for <tt>.pyc</tt> (Python byte code) files, the project
+was able to reduce much of the parsing overhead.  A host version of the
+interpreter is built at the same time as the GRUB version and that is
+used to byte-compile the Python files needed at startup.
+</p>
+
+<p>
+That made substantial improvements, but startup is still a little slow
+because of <tt>stat()</tt> performance.  On a Linux system, you  expect
+<tt>stat()</tt> to take microseconds, but the BITS version takes
+milliseconds, he said.  Adding support for <a href="https://docs.python.org/2/library/zipimport.html">zipimport</a>
+allowed the project to bundle up all of the <tt>.pyc</tt> files into a
+single ZIP file to avoid most of the <tt>stat()</tt> calls.
+</p>
+
+<p>
+The project wanted history and tab completion for the REPL, but the normal
+way to get that support is to use the <a href="http://cnswww.cns.cwru.edu/php/chet/readline/rltop.html">Readline
+library</a>. That library depends on having a POSIX environment along with tty
+support.  The developers did not want to write a "pile of C code" to
+provide that, so instead they wrote the Readline support in Python.  The
+<tt>PyOS_ReadlineFunctionPointer</tt> in CPython is set to a C function
+that calls the new Python function using the C API.
+</p>
+
+<p>
+There was also a desire to construct dynamic menus for GRUB so that various
+test suites and other options were available.  GRUB already has disk and
+filesystem providers for devices like disks and CD drives (e.g. "(hd0)",
+"(cd)") so BITS added a "(python)" device and filesystem that works like
+the Linux <a href="http://fuse.sourceforge.net/">Filesystem in
+Userspace</a> (FUSE).  So Python code can access arbitrary in-memory files,
+such as the menu configuration file that lives at
+<tt>(python)/menu.cfg</tt>.  "Even more C code we don't have to write",
+Triplett said.
+</p>
+
+<h4>Accessing the hardware</h4>
+
+<p>
+Since the goal was to provide a nice environment for testing the hardware,
+Python needs to be able to access it.  A module called "bits"
+was added that provided access to various hardware functionality such as
+CPUID, model-specific registers (MSRs), I/O ports, and memory-mapped I/O.
+He demonstrated those capabilities with a bit of Python:
+</p><pre>
+    &gt;&gt;&gt; import bits
+    &gt;&gt;&gt; from ctypes import *
+    &gt;&gt;&gt; c = bits.cpuid(0, 0)
+    &gt;&gt;&gt; c
+    cpuid_result(eax=0x..., ebx=..., ecx=..., edx=...)
+</pre><p>
+He would use the ctypes import in order to "manipulate raw pieces of
+memory" in the next piece of the demo. For those who want to dig a little
+deeper, all of the demos 
+are quite visible in the </p><a href="https://www.youtube.com/watch?v=bYQ_lq5dcvM">YouTube video</a><p> of the
+talk.  The </p><tt>cpuid()</tt><p> call returns the CPUID of CPU0, which he then
+prints.  "How fun is that?", he asked. "We are getting processor registers
+from Python." From there, he used Python to
+interpret the result:
+</p><pre>
+    &gt;&gt;&gt; buf = (c_uint32*3)(c.ebx, c.edx, c.ecx)
+    &gt;&gt;&gt; (c_char*12).from_buffer(buf).value
+    'GenuineIntel'
+</pre><p>
+Three of the registers contain an identifier describing the processor
+type.  He used the types from the ctypes module to reinterpret those three
+registers (in that order) as a character string, which showed the processor
+type.
+
+
+</p><p>
+Intel wanted to be able to test highly parallel systems, but GRUB only knows
+about the boot CPU.  So BITS wakes up every CPU in the system and puts them
+into a sleeping loop using <tt>MWAIT</tt> (the x86 monitor wait
+instruction) waiting for work to do.  There are functions to wake up
+specific CPUs and to run functions on them. 
+</p>
+
+<p>
+The project also wanted to be able to access ACPI information and methods
+from Python.  It took the <a href="https://www.acpica.org/">ACPI Component
+Architecture</a> (ACPICA) reference implementation and added it into BITS.
+That was all C code, so Python bindings were added. That allows arbitrary ACPI
+methods to be called from Python with arguments converted to ACPI types and
+with the result being converted into Python types.  He demonstrated dumping
+all of the hardware IDs for devices in the virtual machine using a simple Python
+program:
+</p><pre>
+    &gt;&gt;&gt; import acpi
+    &gt;&gt;&gt; print acpi.dump('_HID')
+</pre>    
+
+
+<p>
+Triplett said that he wouldn't be going into more details of using BITS for
+hardware exploration.  He has given other talks along the way with more
+detailed information about that.
+</p>
+
+<p>
+Intel also wanted to be able to access EFI for systems using that firmware,
+rather than BIOS.  The "Extensible" in the name refers to the idea that
+everything in EFI is a "protocol", each of which includes native C functions to
+call.
+To do so, the foreign function interface provided by <a href="https://sourceware.org/libffi/">libffi</a>
+was ported to run in GRUB and 
+support for
+the EFI 
+calling convention was added.  Using that and the Python ctypes module that
+provides an interface to C types and functions from Python
+allowed the interpreter access to EFI.  He demonstrated
+accessing EFI methods from within Python:
+
+</p><pre>
+    &gt;&gt;&gt; import efi
+    &gt;&gt;&gt; out = efi.system_table.ConOut.contents
+    &gt;&gt;&gt; out.ClearScreen(out)
+    [ which clears the screen ]
+    &gt;&gt;&gt; out.OutputString(out, 'Hello world!\r\n')
+    Hello world!
+</pre>
+
+
+<p>
+Access to EFI also allows Python to use the EFI file protocol to make
+directories and write files in the EFI filesystem, which is useful since
+GRUB only knows how to read files.  Beyond that, there is a
+graphics output protocol (GOP) that can be used to read and write the contents of
+the screen.  As he noted, presentation slides are simply graphics and, in
+fact, were being displayed by BITS and EFI on his laptop.  The 
+presentation and demos were all done in the BITS environment, so, in
+reality, the whole 
+presentation was a demo, he said to a round of applause.  Doing so required
+"no new C code, not a single 
+line". 
+</p>
+
+<p>
+He saved his best demo for last.  He started by getting a pointer to the
+frame buffer from the EFI GOP as a Python array.  As he typed in the
+next few lines of code, it was clear that some in the room recognized what
+he was up to, 
+which was calculating and displaying a 400x400 grayscale image of the <a href="http://en.wikipedia.org/wiki/Mandelbrot_set">Mandelbrot set</a>.
+"Fractals in eight lines of Python using the EFI graphics protocol", he
+said to another round of applause.  It took around 15 seconds to draw the
+image, which was kind of slow; that was not due to Python, he said, but instead
+to the software-only 
+floating point in the interpreter.
+</p>
+
+<p>
+In the questions following the talk, Triplett noted that there was no hook
+for interrupt handling in BITS, but that it is something that could be
+added fairly easily.  Environments like <a href="http://openmirage.org/">Mirage OS</a> (and other "just enough
+operating systems") could also add
+Python using the BITS code without too much difficulty, he said.  The "next
+fun item on our to-do list" 
+is to add Python bindings for the EFI TCP network protocol and to hook that up
+to the Python <a href="https://docs.python.org/2/library/socket.html">socket</a> module to
+see if the <a href="https://docs.python.org/2/library/simplehttpserver.html">SimpleHTTPServer</a>
+will run in that environment.  That would effectively add a "web REPL" to
+the BITS environment.</p><hr align="left"/><p>
+           (</p><a href="https://lwn.net/login?target=/Articles/641244/">Log in</a><p> to post comments)
+           </p><p>
+           
+</p></div> 
+</div></body></html>

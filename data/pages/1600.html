@@ -1,0 +1,148 @@
+<html><body><div><div class="section" id="asyncio-implementation-overview">
+<h1>Asyncio Implementation Overview</h1>
+<p>I’ve been learning the new-in-Python-3.4 <a class="reference external" href="http://docs.python.org/dev/library/asyncio.html#module-asyncio" title="(in Python v3.5)"><tt class="xref py py-mod docutils literal"><span class="pre">asyncio</span></tt></a> module recently, since
+I want to employ it in a project.  I started reading the docs, and after
+reading a bit about the <tt class="docutils literal"><span class="pre">EventLoop</span></tt> I clicked through to the chapter on
+coroutines, <tt class="docutils literal"><span class="pre">Future</span></tt> and <tt class="docutils literal"><span class="pre">Task</span></tt>.  And got rather confused.</p>
+<p>After poking around for a while, reading other articles on asyncio, talking to
+one of the developers, and looking through the source code, I’m pretty sure
+I’ve figured out how it works, and what roles coroutines, <tt class="docutils literal"><span class="pre">Future</span></tt> and
+<tt class="docutils literal"><span class="pre">Task</span></tt> play.  Someone who knows asyncio who reviewed this article briefly
+commented that it was way too long and complex, that the concepts really
+should be simple.  I think if I were aiming to explain how to <em>use</em>
+<a class="reference external" href="http://docs.python.org/dev/library/asyncio.html#module-asyncio" title="(in Python v3.5)"><tt class="xref py py-mod docutils literal"><span class="pre">asyncio</span></tt></a> I wouldn’t have an article this long (indeed, some of the
+ones I read were quite short).  But what I wanted, as an experienced
+Python programmer new to both <a class="reference external" href="http://docs.python.org/dev/library/asyncio.html#module-asyncio" title="(in Python v3.5)"><tt class="xref py py-mod docutils literal"><span class="pre">asyncio</span></tt></a> in particular and async
+programming in general, was an explanation of how it <em>worked</em>, and what
+role these various classes actually played in making it work.</p>
+<p>I did not find any articles that explained things at this level (that doesn’t
+meant they don’t exist, I just didn’t find one), so I wrote one in order to
+solidify my understanding.  And, indeed, I don’t feel my understanding was
+complete until I <em>finished</em> writing the article.</p>
+<p>So, on to my (hopefully correct) explanation of how <a class="reference external" href="http://docs.python.org/dev/library/asyncio.html#module-asyncio" title="(in Python v3.5)"><tt class="xref py py-mod docutils literal"><span class="pre">asyncio</span></tt></a> works.</p>
+<p>The most fundamental building block of asyncio is the concept of the
+<a class="reference external" href="http://docs.python.org/dev/library/asyncio-task.html#asyncio.Future" title="(in Python v3.5)"><tt class="xref py py-class docutils literal"><span class="pre">Future</span></tt></a>.  This is similar to
+<a class="reference external" href="http://docs.python.org/dev/library/concurrent.futures.html#concurrent.futures.Future" title="(in Python v3.5)"><tt class="xref py py-class docutils literal"><span class="pre">concurrent.futures.Future</span></tt></a>, but adapted so that it works with the
+second most fundamental component of asyncio, the <a class="reference external" href="http://docs.python.org/dev/library/asyncio-eventloop.html#asyncio-event-loop" title="(in Python v3.5)"><em class="xref std std-ref">EventLoop</em></a>.</p>
+<p>Conceptually a <tt class="docutils literal"><span class="pre">Future</span></tt> object is really very simple.  It is a holder for
+(eventually) a result or exception, and also for a list of callbacks to be
+called when it is “done” (that is, when there is a result, an exception, or the
+<tt class="docutils literal"><span class="pre">Future</span></tt> has been canceled).</p>
+<p>Conceptually, the <tt class="docutils literal"><span class="pre">EventLoop</span></tt> is also very simple: each time through the
+loop, it calls any callback in the list of ‘ready’ callbacks (the <tt class="docutils literal"><span class="pre">call_soon</span></tt>
+list), and then uses a <a class="reference external" href="http://docs.python.org/dev/library/selectors.html#module-selectors" title="(in Python v3.5)"><tt class="xref py py-mod docutils literal"><span class="pre">selector</span></tt></a> to wait either for the next
+pending IO operation to complete or the time for the next scheduled task to
+arrive, at which point it adds the callback that will handle the event to the
+<tt class="docutils literal"><span class="pre">call_soon</span></tt> list and starts a new loop iteration.</p>
+<p>An asyncio program can be written in “callback” style using just these two
+components: <tt class="docutils literal"><span class="pre">Future</span></tt> objects are used for signalling by attaching callbacks
+to be scheduled for execution by the <tt class="docutils literal"><span class="pre">EventLoop</span></tt> when the <tt class="docutils literal"><span class="pre">Future</span></tt>‘s
+<tt class="docutils literal"><span class="pre">set_result</span></tt> method is called (or some other call is made that marks the
+<tt class="docutils literal"><span class="pre">Future</span></tt> as “done”).  Other callbacks are scheduled with the <tt class="docutils literal"><span class="pre">EventLoop</span></tt> to
+handle IO events and to run scheduled tasks, and when these callbacks run they
+call the appropriate methods on the appropriate <tt class="docutils literal"><span class="pre">Future</span></tt>s to mark them as
+“done” and therefore trigger the <tt class="docutils literal"><span class="pre">Future</span></tt>‘s callbacks to run.</p>
+<p>The power of asyncio programming, however, comes from two additional
+components: <a class="reference external" href="http://docs.python.org/dev/library/asyncio-task.html#coroutine" title="(in Python v3.5)"><em>Coroutines</em></a> and <a class="reference external" href="http://docs.python.org/dev/library/asyncio-task.html#asyncio.Task" title="(in Python v3.5)"><tt class="xref py py-class docutils literal"><span class="pre">Task</span></tt></a>s.  These two
+components tie <tt class="docutils literal"><span class="pre">Futures</span></tt> and the <tt class="docutils literal"><span class="pre">EventLoop</span></tt> into a system that allows one
+to write procedural-looking code that, under the hood, is async code.</p>
+<p>Note: the following discussion simplifies certain advanced details of how
+coroutines work (and that I currently don’t understand :) in order to make the
+fundamental mechanisms clearer.</p>
+<p>The nature of a coroutine is that it is a Python generator function that uses
+only <a class="reference external" href="http://docs.python.org/dev/reference/expressions.html#yieldexpr" title="(in Python v3.5)"><em class="xref std std-ref">yield from</em></a>.  When writing code using asyncio,
+instead of calling a function using python function call syntax and obtaining a
+result:</p>
+<blockquote>
+<p>res = normal_function()</p></blockquote>
+<p>you use <tt class="docutils literal"><span class="pre">yield</span> <span class="pre">from</span></tt>:</p>
+<blockquote>
+<p>res = yield from async_function()</p></blockquote>
+<p>In the above snippet, <tt class="docutils literal"><span class="pre">async_function</span></tt> is a function that returns either
+a <tt class="docutils literal"><span class="pre">Future</span></tt> or a <tt class="docutils literal"><span class="pre">coroutine</span></tt>.</p>
+<p>A <tt class="docutils literal"><span class="pre">Task</span></tt> is, itself, a <tt class="docutils literal"><span class="pre">Future</span></tt>, and it wraps a <tt class="docutils literal"><span class="pre">coroutine</span></tt> (or another
+<tt class="docutils literal"><span class="pre">Future</span></tt>, but there’s no reason to do that).  When a <tt class="docutils literal"><span class="pre">Task</span></tt> is created, it
+adds a callback to the <tt class="docutils literal"><span class="pre">EventLoop</span></tt>‘s <tt class="docutils literal"><span class="pre">call_soon</span></tt> queue that starts the
+iteration of the <tt class="docutils literal"><span class="pre">coroutine</span></tt> it is wrapping.  That is, it arranges to call
+<tt class="xref std std-keyword docutils literal"><span class="pre">next</span></tt> on the <tt class="docutils literal"><span class="pre">coroutine</span></tt>.  The result of that call to <tt class="docutils literal"><span class="pre">next</span></tt> has
+one of three valid results:  a <tt class="docutils literal"><span class="pre">Future</span></tt>,  a <a class="reference external" href="http://docs.python.org/dev/library/exceptions.html#StopIteration" title="(in Python v3.5)"><tt class="xref py py-exc docutils literal"><span class="pre">StopIteration</span></tt></a> exception
+with a value, or some other exception.</p>
+<p>If it is an exception, the <tt class="docutils literal"><span class="pre">Task</span></tt> schedules a <tt class="docutils literal"><span class="pre">call_soon</span></tt> callback with the
+<tt class="docutils literal"><span class="pre">EventLoop</span></tt> that, on the next pass through the loop, will <tt class="xref std std-keyword docutils literal"><span class="pre">throw</span></tt>
+the exception into the <tt class="docutils literal"><span class="pre">coroutine</span></tt>.  This means that the exception will be
+raised at the point where the (innermost) <tt class="docutils literal"><span class="pre">yield</span> <span class="pre">from</span></tt> call was made.</p>
+<p>If the result is a <tt class="docutils literal"><span class="pre">Future</span></tt>, the <tt class="docutils literal"><span class="pre">Task</span></tt> schedules a callback on the
+<tt class="docutils literal"><span class="pre">Future</span></tt> to call the <tt class="docutils literal"><span class="pre">Task</span></tt> when the <tt class="docutils literal"><span class="pre">Future</span></tt> has completed.  When some
+other thread of control eventually causes the <tt class="docutils literal"><span class="pre">Future</span></tt> to move to the “done”
+state, the <tt class="docutils literal"><span class="pre">Future</span></tt> will schedule that callback to run.  That callback in
+turn will schedule another <tt class="docutils literal"><span class="pre">call_soon</span></tt> callback that will call <tt class="docutils literal"><span class="pre">next</span></tt> on
+the <tt class="docutils literal"><span class="pre">coroutine</span></tt>.</p>
+<p>If the result is a <tt class="docutils literal"><span class="pre">StopIteration</span></tt> exception, the <tt class="docutils literal"><span class="pre">Task</span></tt> sets the value
+associated with the exception (which will be what the wrapped <tt class="docutils literal"><span class="pre">coroutine</span></tt>
+specified in its <a class="reference external" href="http://docs.python.org/dev/reference/simple_stmts.html#return" title="(in Python v3.5)"><tt class="xref std std-keyword docutils literal"><span class="pre">return</span></tt></a> statement) as its result via <tt class="docutils literal"><span class="pre">set_result</span></tt>
+(remember, the <tt class="docutils literal"><span class="pre">Task</span></tt> is a <tt class="docutils literal"><span class="pre">Future</span></tt>).</p>
+<p>All <tt class="docutils literal"><span class="pre">coroutines</span></tt> make calls to other <tt class="docutils literal"><span class="pre">coroutines</span></tt> and <tt class="docutils literal"><span class="pre">Future</span></tt>s using
+<tt class="docutils literal"><span class="pre">yield</span> <span class="pre">from</span></tt>.  What <tt class="docutils literal"><span class="pre">yield</span> <span class="pre">from</span></tt> does is to iterate over the object passed
+to it and <tt class="docutils literal"><span class="pre">yield</span></tt> each result in turn.  If we call <tt class="docutils literal"><span class="pre">yield</span> <span class="pre">from</span></tt> on a
+generator, and that generator in turn calls <tt class="docutils literal"><span class="pre">yield</span> <span class="pre">from</span></tt>, the values from the
+inner iterator will be yielded as values from the outer <tt class="docutils literal"><span class="pre">yield</span> <span class="pre">from</span></tt>.  Since
+coroutines only call <tt class="docutils literal"><span class="pre">yield</span> <span class="pre">from</span></tt> on other coroutines or on <tt class="docutils literal"><span class="pre">Futures</span></tt>, this
+means that when a <tt class="docutils literal"><span class="pre">Task</span></tt> callback calls <tt class="xref std std-keyword docutils literal"><span class="pre">next</span></tt> on the <tt class="docutils literal"><span class="pre">coroutine</span></tt>
+it wraps what it gets back is a <tt class="docutils literal"><span class="pre">Future</span></tt>, and it then schedules a callback on
+the <tt class="docutils literal"><span class="pre">Future</span></tt> and control returns to the <tt class="docutils literal"><span class="pre">EventLoop</span></tt>.  Control thus returns
+to the <tt class="docutils literal"><span class="pre">EventLoop</span></tt> after <em>each</em> iteration of the <em>innermost</em> iterator in the
+<tt class="docutils literal"><span class="pre">coroutine</span></tt> call chain, no matter how deeply nested in a chain of <tt class="docutils literal"><span class="pre">yeild</span>
+<span class="pre">from</span></tt>s that <tt class="docutils literal"><span class="pre">Future</span></tt> was.</p>
+<p>When a <tt class="docutils literal"><span class="pre">Future</span></tt> completes, it schedules the callback provided by the <tt class="docutils literal"><span class="pre">Task</span></tt>
+that wraps the <tt class="docutils literal"><span class="pre">coroutine</span></tt> that was at the top of the chain of <tt class="docutils literal"><span class="pre">yield</span>
+<span class="pre">from</span></tt>s that resulted in <tt class="docutils literal"><span class="pre">yield</span> <span class="pre">from</span></tt> being called on that <tt class="docutils literal"><span class="pre">Future</span></tt>, and
+then it executes a <a class="reference external" href="http://docs.python.org/dev/reference/simple_stmts.html#return" title="(in Python v3.5)"><tt class="xref std std-keyword docutils literal"><span class="pre">return</span></tt></a> statement, passing <tt class="docutils literal"><span class="pre">return</span></tt> the value
+that was set on the <tt class="docutils literal"><span class="pre">Future</span></tt> via <tt class="docutils literal"><span class="pre">set_result</span></tt>.  The <tt class="docutils literal"><span class="pre">Future</span></tt>-scheduled
+callback (provided by the <tt class="docutils literal"><span class="pre">Task</span></tt> that wraps the top level <tt class="docutils literal"><span class="pre">coroutine</span></tt>)
+schedules another callback that will make another call to <tt class="docutils literal"><span class="pre">next</span></tt> on the
+<tt class="docutils literal"><span class="pre">coroutine</span></tt>.  That causes all of the <tt class="docutils literal"><span class="pre">yield</span> <span class="pre">from</span></tt>s in the chain to
+request the next value, which for the innermost <tt class="docutils literal"><span class="pre">yield</span> <span class="pre">from</span></tt> will cause the
+<tt class="docutils literal"><span class="pre">coroutine</span></tt> that executed it to obtain the value <a class="reference external" href="http://docs.python.org/dev/reference/simple_stmts.html#return" title="(in Python v3.5)"><tt class="xref std std-keyword docutils literal"><span class="pre">return</span></tt></a>ed by the
+<tt class="docutils literal"><span class="pre">Future</span></tt>, and that <tt class="docutils literal"><span class="pre">coroutine</span></tt> will continue execution with value in hand.
+When that lowest level <tt class="docutils literal"><span class="pre">coroutine</span></tt> itself reaches its end and returns a
+value, the <tt class="docutils literal"><span class="pre">yield</span> <span class="pre">from</span></tt> that called it returns that value and the next higher
+<tt class="docutils literal"><span class="pre">coroutine</span></tt>, that executed that <tt class="docutils literal"><span class="pre">yield</span> <span class="pre">from</span></tt>, will continue execution with
+value in hand.  And so on until the top level <tt class="docutils literal"><span class="pre">coroutine</span></tt> completes and
+returns the value that becomes the value of the <tt class="docutils literal"><span class="pre">Future</span></tt> that is the
+<tt class="docutils literal"><span class="pre">Task</span></tt>.</p>
+<p>To summarise at a slightly higher level, the overall flow in an asyncio program
+is that we execute procedural style code, and every time we get to a <tt class="docutils literal"><span class="pre">yield</span>
+<span class="pre">from</span></tt> statement the execution of that procedural code is suspended.  This may
+go on for several levels of <tt class="docutils literal"><span class="pre">yield</span> <span class="pre">from</span></tt> call, but eventually a <tt class="docutils literal"><span class="pre">Future</span></tt>
+will be yielded and make its way back up to the <tt class="docutils literal"><span class="pre">Task</span></tt>, and we will start a
+new pass through the <tt class="docutils literal"><span class="pre">EventLoop</span></tt>.  The <tt class="docutils literal"><span class="pre">EventLoop</span></tt> will then run any
+<tt class="docutils literal"><span class="pre">call_soon</span></tt> callbacks.  When all <tt class="docutils literal"><span class="pre">call_soon</span></tt> callbacks have run, the
+<tt class="docutils literal"><span class="pre">EventLoop</span></tt> uses a <a class="reference external" href="http://docs.python.org/dev/library/selectors.html#module-selectors" title="(in Python v3.5)"><tt class="xref py py-mod docutils literal"><span class="pre">selector</span></tt></a> to wait for the next IO event
+or the next callback that was scheduled to run at a specific time.  Those IO or
+timed events will provide values that will be set on certain <tt class="docutils literal"><span class="pre">Future</span></tt>
+objects, which will trigger the scheduling of <tt class="docutils literal"><span class="pre">call_soon</span></tt> callbacks which
+will in turn cause the <tt class="docutils literal"><span class="pre">corouties</span></tt> that were waiting for those <tt class="docutils literal"><span class="pre">Futures</span></tt> to
+be scheduled via <tt class="docutils literal"><span class="pre">call_soon</span></tt> to have <tt class="docutils literal"><span class="pre">next</span></tt> called on them and thus get
+another chance to run.  This continues until all <tt class="docutils literal"><span class="pre">Futures</span></tt> are complete,
+including the <tt class="docutils literal"><span class="pre">Task</span></tt> or <tt class="docutils literal"><span class="pre">Task</span></tt>s that the main <tt class="docutils literal"><span class="pre">EventLoop</span></tt> is waiting
+for (or the <tt class="docutils literal"><span class="pre">EventLoop</span></tt> is explicitly shut down).</p>
+<p>From the point of view of the <tt class="docutils literal"><span class="pre">coroutine</span></tt>, this looks like procedural code:
+the <tt class="docutils literal"><span class="pre">coroutine</span></tt> (using <tt class="docutils literal"><span class="pre">yield</span> <span class="pre">from</span></tt>) calls a subroutine, gets back a value,
+and continues on with its computations.  When you write the <tt class="docutils literal"><span class="pre">coroutine</span></tt> you
+don’t (for the most part) have to worry about the fact that there is an
+uncertain amount of time that will elapse between the <tt class="docutils literal"><span class="pre">yield</span> <span class="pre">from</span></tt> call and
+the acquisition of the result.</p>
+<p>You do, of course, have to be cognizant of the potential for deadlocks and the
+mutation of shared data by other <tt class="docutils literal"><span class="pre">coroutines</span></tt>, just as you would in any
+programming involving multitasking.  However, in async code, you do <em>not</em> have
+to worry about <em>simultaneous</em> modification of shared data:  the other code can
+<em>only</em> execute when you call <tt class="docutils literal"><span class="pre">yield</span> <span class="pre">from</span></tt>.</p>
+<p>And there you have it.  Using this “one cool trick” (<tt class="docutils literal"><span class="pre">yield</span> <span class="pre">from</span></tt>) we can
+write async code as if it was procedural code.</p>
+
+
+
+</div>
+
+
+          </div></body></html>

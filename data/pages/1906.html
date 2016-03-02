@@ -1,0 +1,185 @@
+<html><body><div><div class="content">
+      
+        <h1 class="content-title">Dear Diary, an Encrypted Command-Line Diary with Python</h1>
+      
+      
+      
+  
+  
+  
+    <p><a href="http://media.charlesleifer.com/blog/photos/p1415049480.87.png" title="photos/p1415049480.87.png"><img alt="photos/p1415049480.87.png" class="img-responsive" src="http://m.charlesleifer.com/t/800x-/blog/photos/p1415049480.87.png?key=d65ITxyLE11rw9V1ds4yoA"/></a></p>
+<p>In my last post, I wrote about how to work with <a href="/blog/encrypted-sqlite-databases-with-python-and-sqlcipher/">encrypted SQLite databases with Python</a>. As an example application of these libraries, I showed some code fragments for a fictional <em>diary</em> program. Because I was thinking the <a href="https://github.com/coleifer/peewee/tree/master/examples">examples</a> directory of the peewee repo was looking a little thin, I decided to flesh out the diary program and <a href="https://github.com/coleifer/peewee/blob/master/examples/diary.py">include it</a> as an example.</p>
+<p>In this post, I'll go over the diary code in the hopes that you may find it interesting or useful. The code shows how to use the peewee <a href="http://docs.peewee-orm.com/en/latest/peewee/playhouse.html#sqlcipher-ext">SQLCipher extension</a>. I've also implemented a simple command-line menu loop. All told, the code is less than 100 lines!</p>
+<h3>Getting started</h3>
+<p>To follow along at home, you'll need to install a few libraries. The encryption is handled by <a href="https://www.zetetic.net/sqlcipher/">SQLCipher</a>, an open-source library that securely encrypts SQLite databases using AES-256 with cipher-block chaining. There are also <a href="https://github.com/leapcode/pysqlcipher">python bindings</a> which expose a db-api 2.0 compatible API. For detailed instructions on installation, refer to <a href="/blog/encrypted-sqlite-databases-with-python-and-sqlcipher/">my previous post</a>, but if you want things to <em>just work</em>, you can run the following:</p>
+<div class="highlight"><pre><span class="gp">$</span> pip install pysqlcipher
+</pre></div>
+<p>You will also need to install <a href="http://docs.peewee-orm.com/en/latest/">peewee</a>:</p>
+
+<h3>The database layer</h3>
+<p>We'll be using peewee to securely store and manage the database of diary entries. To get started, we will define our database connection and a model class representing the table of entries.</p>
+<div class="highlight"><pre><span class="ch">#!/usr/bin/env python</span>
+
+<span class="kn">from</span> <span class="nn">peewee</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="kn">from</span> <span class="nn">playhouse.sqlcipher_ext</span> <span class="kn">import</span> <span class="n">SqlCipherDatabase</span>
+
+<span class="c1"># Defer initialization of the database until the script is executed from the</span>
+<span class="c1"># command-line.</span>
+<span class="n">db</span> <span class="o">=</span> <span class="n">SqlCipherDatabase</span><span class="p">(</span><span class="bp">None</span><span class="p">)</span>
+
+<span class="k">class</span> <span class="nc">Entry</span><span class="p">(</span><span class="n">Model</span><span class="p">):</span>
+    <span class="n">content</span> <span class="o">=</span> <span class="n">TextField</span><span class="p">()</span>
+    <span class="n">timestamp</span> <span class="o">=</span> <span class="n">DateTimeField</span><span class="p">(</span><span class="n">default</span><span class="o">=</span><span class="n">datetime</span><span class="o">.</span><span class="n">datetime</span><span class="o">.</span><span class="n">now</span><span class="p">)</span>
+
+    <span class="k">class</span> <span class="nc">Meta</span><span class="p">:</span>
+        <span class="n">database</span> <span class="o">=</span> <span class="n">db</span>
+
+<span class="k">def</span> <span class="nf">initialize</span><span class="p">(</span><span class="n">passphrase</span><span class="p">):</span>
+    <span class="n">db</span><span class="o">.</span><span class="n">init</span><span class="p">(</span><span class="s1">'diary.db'</span><span class="p">,</span> <span class="n">passphrase</span><span class="o">=</span><span class="n">passphrase</span><span class="p">,</span> <span class="n">kdf_iter</span><span class="o">=</span><span class="mi">64000</span><span class="p">)</span>
+    <span class="n">Entry</span><span class="o">.</span><span class="n">create_table</span><span class="p">(</span><span class="n">fail_silently</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+</pre></div>
+<p>The python standard library includes a module for reading passwords from <code>stdin</code> without echoing the characters. We will use that module to securely accept the passphrase for unlocking the diary.</p>
+<p>In the application's entry-point, we'll collect the passphrase, initialize the database, and enter the main menu loop (defined later in the post).</p>
+<div class="highlight"><pre><span class="ch">#!/usr/bin/env python</span>
+
+<span class="kn">from</span> <span class="nn">getpass</span> <span class="kn">import</span> <span class="n">getpass</span>
+<span class="kn">import</span> <span class="nn">sys</span>
+
+<span class="kn">from</span> <span class="nn">peewee</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="kn">from</span> <span class="nn">playhouse.sqlcipher_ext</span> <span class="kn">import</span> <span class="n">SqlCipherDatabase</span>
+
+<span class="c1"># ... Database and model code from previous code snippet ...</span>
+
+<span class="k">if</span> <span class="n">__name__</span> <span class="o">==</span> <span class="s1">'__main__'</span><span class="p">:</span>
+    <span class="c1"># Collect the passphrase using a secure method.</span>
+    <span class="n">passphrase</span> <span class="o">=</span> <span class="n">getpass</span><span class="p">(</span><span class="s1">'Enter password: '</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">passphrase</span><span class="p">:</span>
+        <span class="n">sys</span><span class="o">.</span><span class="n">stderr</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s1">'Passphrase required to access diary.</span><span class="se">\n</span><span class="s1">'</span><span class="p">)</span>
+        <span class="n">sys</span><span class="o">.</span><span class="n">stderr</span><span class="o">.</span><span class="n">flush</span><span class="p">()</span>
+        <span class="n">sys</span><span class="o">.</span><span class="n">exit</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+
+    <span class="c1"># Initialize the database.</span>
+    <span class="n">initialize</span><span class="p">(</span><span class="n">passphrase</span><span class="p">)</span>
+    <span class="n">menu_loop</span><span class="p">()</span>
+</pre></div>
+<h3>Interactive menu loop</h3>
+<p>The diary will feature an interactive menu loop. Having interactive menus in your scripts is typically frowned-upon, because it hurts composability and is not <em>unix-like</em>. For the diary, though, it seemed like a good idea to me, as it allows you to enter your password once and then have many interactions with the app.</p>
+<p>For simplicity, the menu will allow us to perform three operations:</p>
+<ul>
+<li>Add a new entry</li>
+<li>List entries, ordered newest to oldest.</li>
+<li>Search for entries using simple partial-string matching.</li>
+</ul>
+<p>Here is the structure for the menu loop and the functions the menu will delegate to:</p>
+<div class="highlight"><pre><span class="ch">#!/usr/bin/env python</span>
+
+<span class="kn">from</span> <span class="nn">collections</span> <span class="kn">import</span> <span class="n">OrderedDict</span>
+<span class="kn">import</span> <span class="nn">datetime</span>
+<span class="kn">from</span> <span class="nn">getpass</span> <span class="kn">import</span> <span class="n">getpass</span>
+<span class="kn">import</span> <span class="nn">sys</span>
+
+<span class="kn">from</span> <span class="nn">peewee</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="kn">from</span> <span class="nn">playhouse.sqlcipher_ext</span> <span class="kn">import</span> <span class="n">SqlCipherDatabase</span>
+
+<span class="c1"># ... Database definition and model code ...</span>
+
+<span class="k">def</span> <span class="nf">menu_loop</span><span class="p">():</span>
+    <span class="n">choice</span> <span class="o">=</span> <span class="bp">None</span>
+    <span class="k">while</span> <span class="n">choice</span> <span class="o">!=</span> <span class="s1">'q'</span><span class="p">:</span>
+        <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">menu</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+            <span class="k">print</span><span class="p">(</span><span class="s1">'</span><span class="si">%s</span><span class="s1">) </span><span class="si">%s</span><span class="s1">'</span> <span class="o">%</span> <span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="n">value</span><span class="o">.</span><span class="n">__doc__</span><span class="p">))</span>
+        <span class="n">choice</span> <span class="o">=</span> <span class="nb">raw_input</span><span class="p">(</span><span class="s1">'Action: '</span><span class="p">)</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+        <span class="k">if</span> <span class="n">choice</span> <span class="ow">in</span> <span class="n">menu</span><span class="p">:</span>
+            <span class="n">menu</span><span class="p">[</span><span class="n">choice</span><span class="p">]()</span>
+
+<span class="k">def</span> <span class="nf">add_entry</span><span class="p">():</span>
+    <span class="sd">"""Add entry"""</span>
+
+<span class="k">def</span> <span class="nf">view_entries</span><span class="p">(</span><span class="n">search_query</span><span class="o">=</span><span class="bp">None</span><span class="p">):</span>
+    <span class="sd">"""View previous entries"""</span>
+
+<span class="k">def</span> <span class="nf">search_entries</span><span class="p">():</span>
+    <span class="sd">"""Search entries"""</span>
+
+<span class="n">menu</span> <span class="o">=</span> <span class="n">OrderedDict</span><span class="p">([</span>
+    <span class="p">(</span><span class="s1">'a'</span><span class="p">,</span> <span class="n">add_entry</span><span class="p">),</span>
+    <span class="p">(</span><span class="s1">'v'</span><span class="p">,</span> <span class="n">view_entries</span><span class="p">),</span>
+    <span class="p">(</span><span class="s1">'s'</span><span class="p">,</span> <span class="n">search_entries</span><span class="p">),</span>
+<span class="p">])</span>
+
+<span class="k">if</span> <span class="n">__name__</span> <span class="o">==</span> <span class="s1">'__main__'</span><span class="p">:</span>
+    <span class="c1"># ... Application entry-point code ...</span>
+</pre></div>
+<p>The menu loop is called after the database is initialized, then runs in a loop, displaying the menu and delegating to one of the three menu functions. The program ends when the user types <code>q</code>.</p>
+<p>Let's start by defining the <code>add_entry</code> function. This function will accept multiple lines of input from the user, reading until an <code>EOF</code> is received (<em>Ctrl+d</em> on my computer). After the user has entered their text, the program will prompt the user whether they wish to save the entry and automatically return to the menu loop.</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">add_entry</span><span class="p">():</span>
+    <span class="sd">"""Add entry"""</span>
+    <span class="k">print</span><span class="p">(</span><span class="s1">'Enter your entry. Press ctrl+d when finished.'</span><span class="p">)</span>
+    <span class="n">data</span> <span class="o">=</span> <span class="n">sys</span><span class="o">.</span><span class="n">stdin</span><span class="o">.</span><span class="n">read</span><span class="p">()</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+    <span class="k">if</span> <span class="n">data</span> <span class="ow">and</span> <span class="nb">raw_input</span><span class="p">(</span><span class="s1">'Save entry? [Yn] '</span><span class="p">)</span> <span class="o">!=</span> <span class="s1">'n'</span><span class="p">:</span>
+        <span class="n">Entry</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">content</span><span class="o">=</span><span class="n">data</span><span class="p">)</span>
+        <span class="k">print</span><span class="p">(</span><span class="s1">'Saved successfully.'</span><span class="p">)</span>
+</pre></div>
+<p>Impressively, that's all the code it takes! The call to <code>sys.stdin.read()</code> will automatically read up to an EOF. Since the <code>menu_loop</code> delegated to the function, when the function exits we will be back in the loop, so no additional code is required.</p>
+<p>Now let's define the <code>view_entries</code> function which will display previously-written entries. We have a couple options here -- we could get fancy and implement a <em>less</em>-style paging system, or we could go simple and just print every single entry in a massive wall-of-text. I chose to take the middle road -- display one entry at a time, and let the user continue to the next one or break out of the loop.</p>
+<p>To accomplish this, <code>view_entries</code> will query entries ordered newest-to-oldest, then in a loop, each entry will be displayed and the user will then be prompted to continue to the next, or to quit. As with the <code>add_entry</code> function, as soon as the function exits, we will be back in the menu loop.</p>
+<p>In order to re-use this logic for the search action, I've written <code>view_entries</code> to accept an optional search query.</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">view_entries</span><span class="p">(</span><span class="n">search_query</span><span class="o">=</span><span class="bp">None</span><span class="p">):</span>
+    <span class="sd">"""View previous entries"""</span>
+    <span class="n">query</span> <span class="o">=</span> <span class="n">Entry</span><span class="o">.</span><span class="n">select</span><span class="p">()</span><span class="o">.</span><span class="n">order_by</span><span class="p">(</span><span class="n">Entry</span><span class="o">.</span><span class="n">timestamp</span><span class="o">.</span><span class="n">desc</span><span class="p">())</span>
+    <span class="k">if</span> <span class="n">search_query</span><span class="p">:</span>
+        <span class="n">query</span> <span class="o">=</span> <span class="n">query</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">Entry</span><span class="o">.</span><span class="n">content</span><span class="o">.</span><span class="n">contains</span><span class="p">(</span><span class="n">search_query</span><span class="p">))</span>
+
+    <span class="k">for</span> <span class="n">entry</span> <span class="ow">in</span> <span class="n">query</span><span class="p">:</span>
+        <span class="n">timestamp</span> <span class="o">=</span> <span class="n">entry</span><span class="o">.</span><span class="n">timestamp</span><span class="o">.</span><span class="n">strftime</span><span class="p">(</span><span class="s1">'%A %B </span><span class="si">%d</span><span class="s1">, %Y %I:%M%p'</span><span class="p">)</span>
+        <span class="k">print</span><span class="p">(</span><span class="n">timestamp</span><span class="p">)</span>
+        <span class="k">print</span><span class="p">(</span><span class="s1">'='</span> <span class="o">*</span> <span class="nb">len</span><span class="p">(</span><span class="n">timestamp</span><span class="p">))</span>
+        <span class="k">print</span><span class="p">(</span><span class="n">entry</span><span class="o">.</span><span class="n">content</span><span class="p">)</span>
+        <span class="k">print</span><span class="p">(</span><span class="s1">'n) next entry'</span><span class="p">)</span>
+        <span class="k">print</span><span class="p">(</span><span class="s1">'q) return to main menu'</span><span class="p">)</span>
+        <span class="k">if</span> <span class="nb">raw_input</span><span class="p">(</span><span class="s1">'Choice? (Nq) '</span><span class="p">)</span> <span class="o">==</span> <span class="s1">'q'</span><span class="p">:</span>
+            <span class="k">break</span>
+</pre></div>
+<p>As eluded to in the previous paragraph, <code>search_entries</code> will simply delegate to the <code>view_entries</code> function after collecting the search query from the user. Here is the code:</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">search_entries</span><span class="p">():</span>
+    <span class="sd">"""Search entries"""</span>
+    <span class="n">view_entries</span><span class="p">(</span><span class="nb">raw_input</span><span class="p">(</span><span class="s1">'Search query: '</span><span class="p">))</span>
+</pre></div>
+<p>And with that, our secret diary program is complete!</p>
+<h3>Ideas for improving the diary</h3>
+<p>As an exercise, here are some features that might be cool to add:</p>
+<ul>
+<li>Option to delete an entry.</li>
+<li>Smarter pagination for lists of entries.</li>
+<li>Use terminal colors to make the app more visually appealing. <a href="http://pythonhosted.org//blessings/">Blessings</a> looks pretty cool for this.</li>
+<li>Option to edit entries.</li>
+<li>Calendar-type view, or way to query entries by date.</li>
+<li>Web front-end?</li>
+</ul>
+<h3>Thanks for reading</h3>
+<p>If you'd like to browse the complete code, <a href="https://github.com/coleifer/peewee/blob/master/examples/diary.py">you can find it here</a>.</p>
+<p>I hope you enjoyed reading this post! Feel free to <a href="#comments">leave any comments or questions</a> using the form below.</p>
+
+<p>Here are some blog posts on related topics you might be interested in:</p>
+
+  
+  
+
+  
+  
+  
+
+  
+  
+  
+
+
+<hr/>
+
+  <p>Commenting has been closed, but please feel free to <a href="/contact/">contact me</a></p>
+
+
+    </div>
+
+    </div></body></html>

@@ -1,0 +1,403 @@
+<html><body><div><p>For all who are interested in the working of the cheat: You need to know
+Python and Javascript. Python code downloads the stockfish engine and
+starts a interactive process and communicates with the stockfish binary
+over UCI. Then the engine is exposed via a simple web server that the
+Javascript cheat makes use of.</p>
+<p>Previous cheats didn't intercept the network traffic between the lichess
+server and the browser. But new versions make use of <a href="https://github.com/abhinavsingh/proxy.py">the proxy.py
+module</a>. Using a proxy has
+many advantages such as being able to modify any javascript logic.</p>
+<p>Have a nice one.</p>
+<div class="highlight"><pre><span class="cm">/**</span>
+<span class="cm"> * </span>
+<span class="cm"> * https://github.com/NikolaiT/lichess_cheat</span>
+<span class="cm"> * </span>
+<span class="cm"> * Just copy paste this file into your browsers javascript console.</span>
+<span class="cm"> * Make sure the cheat_server.py is running on your localhost before!</span>
+<span class="cm"> * </span>
+<span class="cm"> * Author = Nikolai Tschacher</span>
+<span class="cm"> * Date = Summer 2015</span>
+<span class="cm"> * Contact = incolumitas.com</span>
+<span class="cm"> */</span>
+
+<span class="p">(</span><span class="kd">function</span><span class="p">()</span> <span class="p">{</span>
+
+ <span class="kd">var</span> <span class="nx">allMoves</span> <span class="o">=</span> <span class="s1">''</span><span class="p">;</span>
+ <span class="kd">var</span> <span class="nx">incrementTime</span> <span class="o">=</span> <span class="nb">parseInt</span><span class="p">(</span><span class="sr">/\+([0-9]+)/g</span><span class="p">.</span><span class="nx">exec</span><span class="p">(</span><span class="nx">$</span><span class="p">(</span><span class="s1">'span.setup'</span><span class="p">).</span><span class="nx">text</span><span class="p">())[</span><span class="mi">1</span><span class="p">]);</span>
+ <span class="kd">var</span> <span class="nx">ply</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1</span><span class="p">;</span>
+ <span class="kd">var</span> <span class="nx">uci</span> <span class="o">=</span> <span class="kc">null</span><span class="p">;</span>
+ <span class="kd">var</span> <span class="nx">playerColor</span> <span class="o">=</span> <span class="nx">$</span><span class="p">(</span><span class="s1">'.cg-board'</span><span class="p">).</span><span class="nx">hasClass</span><span class="p">(</span><span class="s1">'orientation-black'</span><span class="p">)</span> <span class="o">?</span> <span class="s1">'black'</span> <span class="o">:</span> <span class="s1">'white'</span><span class="p">;</span>
+ <span class="kd">var</span> <span class="nx">debug</span> <span class="o">=</span> <span class="kc">true</span><span class="p">;</span>
+
+  <span class="kd">function</span> <span class="nx">addEngineProposalClass</span><span class="p">()</span> <span class="p">{</span>
+      <span class="nx">$</span><span class="p">(</span><span class="s2">""</span><span class="p">)</span>
+          <span class="p">.</span><span class="nx">prop</span><span class="p">(</span><span class="s2">"type"</span><span class="p">,</span> <span class="s2">"text/css"</span><span class="p">)</span>
+          <span class="p">.</span><span class="nx">html</span><span class="p">(</span><span class="s2">"  </span>
+<span class="s2">         .engineProposal {  </span>
+<span class="s2">             border-color: #FF4D4D;  </span>
+<span class="s2">             border-width: 3px;  </span>
+<span class="s2">             border-style: solid;  </span>
+<span class="s2">         };  </span>
+<span class="s2">         .enginePonderProposal {  </span>
+<span class="s2">             border-color: #5CADFF;  </span>
+<span class="s2">             border-width: 2px;  </span>
+<span class="s2">             border-style: solid;  </span>
+<span class="s2">         }"</span><span class="p">)</span>
+          <span class="p">.</span><span class="nx">appendTo</span><span class="p">(</span><span class="s2">"head"</span><span class="p">);</span>
+  <span class="p">}</span>
+
+  <span class="kd">function</span> <span class="nx">highlightEngineProposal</span><span class="p">(</span><span class="nx">engineMove</span><span class="p">)</span> <span class="p">{</span>
+      <span class="kd">var</span> <span class="nx">bfrom</span> <span class="o">=</span> <span class="nx">engineMove</span><span class="p">.</span><span class="nx">best</span><span class="p">.</span><span class="nx">slice</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">2</span><span class="p">),</span>
+          <span class="nx">bto</span> <span class="o">=</span> <span class="nx">engineMove</span><span class="p">.</span><span class="nx">best</span><span class="p">.</span><span class="nx">slice</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">4</span><span class="p">),</span>
+          <span class="nx">pfrom</span> <span class="o">=</span> <span class="nx">engineMove</span><span class="p">.</span><span class="nx">ponder</span><span class="p">.</span><span class="nx">slice</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">2</span><span class="p">),</span>
+          <span class="nx">pto</span> <span class="o">=</span> <span class="nx">engineMove</span><span class="p">.</span><span class="nx">ponder</span><span class="p">.</span><span class="nx">slice</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">4</span><span class="p">);</span>
+
+      <span class="nx">$</span><span class="p">(</span><span class="s1">'.cg-square'</span><span class="p">).</span><span class="nx">removeClass</span><span class="p">(</span><span class="s1">'engineProposal'</span><span class="p">);</span>
+      <span class="nx">$</span><span class="p">(</span><span class="s1">'.cg-square'</span><span class="p">).</span><span class="nx">removeClass</span><span class="p">(</span><span class="s1">'enginePonderProposal'</span><span class="p">);</span>
+
+      <span class="nx">$</span><span class="p">(</span><span class="s1">'.cg-square.'</span> <span class="o">+</span> <span class="nx">bfrom</span><span class="p">).</span><span class="nx">addClass</span><span class="p">(</span><span class="s1">'engineProposal'</span><span class="p">);</span>
+      <span class="nx">$</span><span class="p">(</span><span class="s1">'.cg-square.'</span> <span class="o">+</span> <span class="nx">bto</span><span class="p">).</span><span class="nx">addClass</span><span class="p">(</span><span class="s1">'engineProposal'</span><span class="p">);</span>
+
+      <span class="nx">$</span><span class="p">(</span><span class="s1">'.cg-square.'</span> <span class="o">+</span> <span class="nx">pfrom</span><span class="p">).</span><span class="nx">addClass</span><span class="p">(</span><span class="s1">'enginePonderProposal'</span><span class="p">);</span>
+      <span class="nx">$</span><span class="p">(</span><span class="s1">'.cg-square.'</span> <span class="o">+</span> <span class="nx">pto</span><span class="p">).</span><span class="nx">addClass</span><span class="p">(</span><span class="s1">'enginePonderProposal'</span><span class="p">);</span>
+  <span class="p">}</span>
+
+  <span class="kd">function</span> <span class="nx">getLastMove</span><span class="p">()</span> <span class="p">{</span>
+
+      <span class="kd">function</span> <span class="nx">getMove</span><span class="p">(</span><span class="nx">s</span><span class="p">)</span> <span class="p">{</span> <span class="k">return</span> <span class="nx">s</span><span class="p">.</span><span class="nx">match</span><span class="p">(</span><span class="sr">/[a-h][0-8]/g</span><span class="p">);</span> <span class="p">};</span>
+
+      <span class="k">try</span> <span class="p">{</span>
+        <span class="kd">var</span> <span class="nx">to</span> <span class="o">=</span> <span class="nx">getMove</span><span class="p">(</span><span class="nx">$</span><span class="p">(</span><span class="s1">'.cg-square.last-move.occupied'</span><span class="p">).</span><span class="nx">attr</span><span class="p">(</span><span class="s1">'class'</span><span class="p">));</span>
+        <span class="kd">var</span> <span class="nx">from</span> <span class="o">=</span> <span class="nx">getMove</span><span class="p">(</span><span class="nx">$</span><span class="p">(</span><span class="s1">'.cg-square.last-move'</span><span class="p">).</span><span class="nx">not</span><span class="p">(</span><span class="s1">'.occupied'</span><span class="p">).</span><span class="nx">attr</span><span class="p">(</span><span class="s1">'class'</span><span class="p">));</span>
+      <span class="p">}</span> <span class="k">catch</span> <span class="p">(</span><span class="nx">e</span><span class="p">)</span> <span class="p">{</span>
+        <span class="k">return</span> <span class="s1">''</span><span class="p">;</span>
+      <span class="p">}</span>
+
+      <span class="k">return</span> <span class="nx">from</span><span class="o">+</span><span class="nx">to</span><span class="p">;</span>
+  <span class="p">}</span>
+
+  <span class="kd">function</span> <span class="nx">getRemainingTime</span><span class="p">()</span> <span class="p">{</span>
+    <span class="kd">var</span> <span class="nx">time</span> <span class="o">=</span> <span class="nx">$</span><span class="p">(</span><span class="s1">'.clock_'</span> <span class="o">+</span> <span class="nx">playerColor</span> <span class="o">+</span> <span class="s1">' .time'</span><span class="p">).</span><span class="nx">text</span><span class="p">();</span>
+    <span class="kd">var</span> <span class="nx">minutes</span> <span class="o">=</span> <span class="nb">parseInt</span><span class="p">(</span><span class="sr">/^([0-9]*?):/g</span><span class="p">.</span><span class="nx">exec</span><span class="p">(</span><span class="nx">time</span><span class="p">)[</span><span class="mi">1</span><span class="p">]);</span>
+    <span class="k">return</span> <span class="nx">minutes</span> <span class="o">*</span> <span class="mi">60</span> <span class="o">+</span> <span class="nb">parseInt</span><span class="p">(</span><span class="nx">time</span><span class="p">.</span><span class="nx">slice</span><span class="p">(</span><span class="o">-</span><span class="mi">2</span><span class="p">));</span>
+  <span class="p">}</span>
+
+  <span class="kd">function</span> <span class="nx">getEngineMoveByAllMoves</span><span class="p">()</span> <span class="p">{</span>
+      <span class="kd">var</span> <span class="nx">bestMoves</span> <span class="o">=</span> <span class="s1">''</span><span class="p">;</span>
+
+      <span class="nx">$</span><span class="p">.</span><span class="nx">ajax</span><span class="p">({</span>
+        <span class="c1">// /allMoves/e2e4 e7e5/incrementTime/1/remainingTime/60/</span>
+      <span class="nx">url</span><span class="o">:</span> <span class="s2">"http://localhost:8888/allMoves/"</span> <span class="o">+</span> <span class="nx">allMoves</span> <span class="o">+</span> <span class="s2">"/incrementTime/"</span> <span class="o">+</span> <span class="nx">incrementTime</span> <span class="o">+</span> <span class="s2">"/remainingTime/"</span> <span class="o">+</span> <span class="nx">getRemainingTime</span><span class="p">()</span> <span class="o">+</span> <span class="s2">"/"</span><span class="p">,</span>
+      <span class="nx">success</span><span class="o">:</span> <span class="kd">function</span><span class="p">(</span><span class="nx">html</span><span class="p">)</span> <span class="p">{</span>
+        <span class="nx">bestMoves</span> <span class="o">=</span> <span class="nx">html</span><span class="p">;</span>
+      <span class="p">},</span>
+      <span class="nx">async</span><span class="o">:</span><span class="kc">false</span>
+      <span class="p">});</span>
+
+      <span class="k">return</span> <span class="p">{</span>
+        <span class="s1">'best'</span><span class="o">:</span> <span class="nx">bestMoves</span><span class="p">.</span><span class="nx">slice</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">4</span><span class="p">),</span>
+        <span class="s1">'ponder'</span><span class="o">:</span> <span class="nx">bestMoves</span><span class="p">.</span><span class="nx">slice</span><span class="p">(</span><span class="mi">5</span><span class="p">,</span><span class="mi">9</span><span class="p">)</span>
+      <span class="p">};</span>
+  <span class="p">}</span>
+
+  <span class="kd">function</span> <span class="nx">isMyTurn</span><span class="p">()</span> <span class="p">{</span>
+      <span class="k">return</span> <span class="p">(</span><span class="nx">playerColor</span> <span class="o">===</span> <span class="s1">'white'</span> <span class="o">&amp;&amp;</span> <span class="p">(</span><span class="nx">ply</span> <span class="o">%</span> <span class="mi">2</span> <span class="o">===</span> <span class="mi">0</span><span class="p">))</span> <span class="o">||</span>
+          <span class="p">(</span><span class="nx">playerColor</span> <span class="o">===</span> <span class="s1">'black'</span> <span class="o">&amp;&amp;</span> <span class="p">(</span><span class="nx">ply</span> <span class="o">%</span> <span class="mi">2</span> <span class="o">===</span> <span class="mi">1</span><span class="p">));</span>
+  <span class="p">}</span>
+
+
+  <span class="kd">function</span> <span class="nx">showEngineMove</span><span class="p">()</span> <span class="p">{</span>
+      <span class="k">if</span> <span class="p">(</span><span class="nx">isMyTurn</span><span class="p">())</span> <span class="p">{</span>
+          <span class="nx">engineMoves</span> <span class="o">=</span> <span class="nx">getEngineMoveByAllMoves</span><span class="p">();</span>
+          <span class="nx">highlightEngineProposal</span><span class="p">(</span><span class="nx">engineMoves</span><span class="p">);</span>
+      <span class="p">}</span>
+  <span class="p">}</span>
+
+  <span class="nx">addEngineProposalClass</span><span class="p">();</span>
+
+  <span class="k">if</span> <span class="p">(</span><span class="nx">playerColor</span> <span class="o">===</span> <span class="s1">'black'</span><span class="p">)</span> <span class="p">{</span>
+    <span class="nx">uci</span> <span class="o">=</span> <span class="s1">''</span><span class="p">;</span>
+    <span class="nx">ply</span><span class="o">++</span><span class="p">;</span>
+  <span class="p">}</span>
+
+  <span class="nx">setInterval</span><span class="p">(</span><span class="kd">function</span><span class="p">()</span> <span class="p">{</span>
+      <span class="kd">var</span> <span class="nx">lastMove</span> <span class="o">=</span> <span class="nx">getLastMove</span><span class="p">();</span>
+
+      <span class="k">if</span> <span class="p">(</span><span class="nx">uci</span> <span class="o">!==</span> <span class="nx">lastMove</span><span class="p">)</span> <span class="p">{</span>
+        <span class="c1">// new next move!</span>
+        <span class="nx">uci</span> <span class="o">=</span> <span class="nx">lastMove</span><span class="p">;</span>
+        <span class="nx">ply</span><span class="o">++</span><span class="p">;</span>
+        <span class="nx">allMoves</span> <span class="o">+=</span> <span class="p">(</span><span class="s1">' '</span> <span class="o">+</span> <span class="nx">uci</span><span class="p">);</span>
+
+        <span class="k">if</span> <span class="p">(</span><span class="nx">debug</span><span class="p">)</span> <span class="p">{</span>
+          <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">playerColor</span><span class="p">);</span>
+          <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">"My turn: "</span> <span class="o">+</span> <span class="nx">isMyTurn</span><span class="p">());</span>
+          <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">allMoves</span><span class="p">);</span>
+          <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">ply</span><span class="p">);</span>
+          <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">uci</span><span class="p">);</span>
+        <span class="p">}</span>
+        <span class="nx">showEngineMove</span><span class="p">();</span>
+
+      <span class="p">}</span>
+
+  <span class="p">},</span> <span class="mi">75</span><span class="p">);</span>
+
+<span class="p">})();</span>
+</pre></div>
+
+
+<div class="highlight"><pre><span class="c">#!/usr/bin/env python3</span>
+
+<span class="c"># https://github.com/NikolaiT/lichess_cheat</span>
+<span class="c"># Implements a RESTful Api to the stockfish engine.</span>
+<span class="c"># You may call this RESTful API with a request as the follows:</span>
+<span class="c"># http://localhost:8888/allMoves/e2e4 e7e5/incrementTime/1/remainingTime/60/</span>
+<span class="c"># All times are in seconds.</span>
+
+<span class="n">__author__</span> <span class="o">=</span> <span class="s">'Nikolai Tschacher'</span>
+<span class="n">__contact__</span> <span class="o">=</span> <span class="s">'incolumitas.com'</span>
+<span class="n">__date__</span> <span class="o">=</span> <span class="s">'Summer 2015'</span>
+
+<span class="kn">import</span> <span class="nn">subprocess</span>
+<span class="kn">import</span> <span class="nn">os</span>
+<span class="kn">import</span> <span class="nn">time</span>
+<span class="kn">import</span> <span class="nn">sys</span>
+<span class="kn">import</span> <span class="nn">re</span>
+<span class="kn">import</span> <span class="nn">random</span>
+<span class="kn">import</span> <span class="nn">urllib.request</span>
+<span class="kn">from</span> <span class="nn">urllib.parse</span> <span class="kn">import</span> <span class="n">unquote</span>
+<span class="kn">from</span> <span class="nn">http.server</span> <span class="kn">import</span> <span class="n">BaseHTTPRequestHandler</span><span class="p">,</span> <span class="n">HTTPServer</span>
+<span class="kn">import</span> <span class="nn">socketserver</span>
+<span class="kn">import</span> <span class="nn">zipfile</span>
+<span class="kn">import</span> <span class="nn">pprint</span>
+
+<span class="n">config</span> <span class="o">=</span> <span class="p">{</span>
+  <span class="s">'stockfish_download_link'</span><span class="p">:</span> <span class="s">'https://stockfish.s3.amazonaws.com/stockfish-6-{}.zip'</span><span class="p">,</span>
+    <span class="s">'stockfish_binary'</span> <span class="p">:</span> <span class="s">''</span><span class="p">,</span> <span class="c"># the path to your local stockfish binary</span>
+  <span class="s">'pwd'</span><span class="p">:</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">dirname</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">realpath</span><span class="p">(</span><span class="n">__file__</span><span class="p">)),</span>
+  <span class="s">'debug'</span><span class="p">:</span> <span class="bp">True</span><span class="p">,</span>
+  <span class="s">'thinking_time'</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span>
+  <span class="s">'max_thinking_time'</span><span class="p">:</span> <span class="mi">2</span><span class="p">,</span> <span class="c"># in seconds</span>
+<span class="p">}</span>
+
+<span class="k">def</span> <span class="nf">unzip</span><span class="p">(</span><span class="n">source_filename</span><span class="p">,</span> <span class="n">dest_dir</span><span class="p">):</span>
+  <span class="sd">"""</span>
+<span class="sd">  Taken from:</span>
+<span class="sd">  http://stackoverflow.com/questions/12886768/how-to-unzip-file-in-python-on-all-oses</span>
+<span class="sd">  """</span>
+  <span class="k">with</span> <span class="n">zipfile</span><span class="o">.</span><span class="n">ZipFile</span><span class="p">(</span><span class="n">source_filename</span><span class="p">)</span> <span class="k">as</span> <span class="n">zf</span><span class="p">:</span>
+    <span class="k">for</span> <span class="n">member</span> <span class="ow">in</span> <span class="n">zf</span><span class="o">.</span><span class="n">infolist</span><span class="p">():</span>
+      <span class="c"># Path traversal defense copied from</span>
+      <span class="c"># http://hg.python.org/cpython/file/tip/Lib/http/server.py#l789</span>
+      <span class="n">words</span> <span class="o">=</span> <span class="n">member</span><span class="o">.</span><span class="n">filename</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s">'/'</span><span class="p">)</span>
+      <span class="n">path</span> <span class="o">=</span> <span class="n">dest_dir</span>
+      <span class="k">for</span> <span class="n">word</span> <span class="ow">in</span> <span class="n">words</span><span class="p">[:</span><span class="o">-</span><span class="mi">1</span><span class="p">]:</span>
+        <span class="n">drive</span><span class="p">,</span> <span class="n">word</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">splitdrive</span><span class="p">(</span><span class="n">word</span><span class="p">)</span>
+        <span class="n">head</span><span class="p">,</span> <span class="n">word</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="n">word</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">word</span> <span class="ow">in</span> <span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">curdir</span><span class="p">,</span> <span class="n">os</span><span class="o">.</span><span class="n">pardir</span><span class="p">,</span> <span class="s">''</span><span class="p">):</span> <span class="k">continue</span>
+        <span class="n">path</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">path</span><span class="p">,</span> <span class="n">word</span><span class="p">)</span>
+      <span class="n">zf</span><span class="o">.</span><span class="n">extract</span><span class="p">(</span><span class="n">member</span><span class="p">,</span> <span class="n">path</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">install_stockfish</span><span class="p">():</span>
+  <span class="sd">"""</span>
+<span class="sd">  Grabs the latest stockfish binary and installs it besides the script.</span>
+<span class="sd">  """</span>
+  <span class="n">dl</span> <span class="o">=</span> <span class="n">config</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'stockfish_download_link'</span><span class="p">)</span>
+  <span class="n">binary_path</span> <span class="o">=</span> <span class="s">''</span>
+
+  <span class="k">if</span> <span class="n">os</span><span class="o">.</span><span class="n">name</span> <span class="o">==</span> <span class="s">'nt'</span><span class="p">:</span>
+    <span class="n">dl</span> <span class="o">=</span> <span class="n">dl</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="s">'windows'</span><span class="p">)</span>
+    <span class="n">binary_path</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">config</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'pwd'</span><span class="p">),</span> <span class="s">'Windows</span><span class="se">\\</span><span class="s">stockfish-6-64.exe'</span><span class="p">)</span>
+  <span class="k">elif</span> <span class="n">os</span><span class="o">.</span><span class="n">name</span> <span class="o">==</span> <span class="s">'posix'</span> <span class="ow">and</span> <span class="n">sys</span><span class="o">.</span><span class="n">platform</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s">'linux'</span><span class="p">):</span>
+    <span class="n">dl</span> <span class="o">=</span> <span class="n">dl</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="s">'linux'</span><span class="p">)</span>
+    <span class="n">binary_path</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">config</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'pwd'</span><span class="p">),</span> <span class="s">'stockfish-6-linux/Linux/stockfish-6-linux/Linux/stockfish_6_x64'</span><span class="p">)</span>
+  <span class="k">elif</span> <span class="n">sys</span><span class="o">.</span><span class="n">platform</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s">'darwin'</span><span class="p">):</span>
+    <span class="n">dl</span> <span class="o">=</span> <span class="n">dl</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="s">'mac'</span><span class="p">)</span>
+    <span class="n">binary_path</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">config</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'pwd'</span><span class="p">),</span> <span class="s">'stockfish-6-mac/Mac/stockfish-6-64'</span><span class="p">)</span>
+  <span class="k">else</span><span class="p">:</span>
+    <span class="nb">exit</span><span class="p">(</span><span class="s">'System {} is not supported.'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">name</span><span class="p">))</span>
+
+  <span class="k">if</span> <span class="ow">not</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">binary_path</span><span class="p">):</span>
+    <span class="n">save_in</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">config</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'pwd'</span><span class="p">),</span> <span class="s">'stockfish.zip'</span><span class="p">)</span>
+    <span class="n">request</span> <span class="o">=</span> <span class="n">urllib</span><span class="o">.</span><span class="n">request</span><span class="o">.</span><span class="n">URLopener</span><span class="p">()</span>
+    <span class="n">request</span><span class="o">.</span><span class="n">retrieve</span><span class="p">(</span><span class="n">dl</span><span class="p">,</span> <span class="n">save_in</span><span class="p">)</span>
+    <span class="n">unzip</span><span class="p">(</span><span class="n">save_in</span><span class="p">,</span> <span class="n">config</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'pwd'</span><span class="p">))</span>
+    <span class="n">os</span><span class="o">.</span><span class="n">unlink</span><span class="p">(</span><span class="n">save_in</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">sys</span><span class="o">.</span><span class="n">platform</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s">'linux'</span><span class="p">)</span> <span class="ow">or</span> <span class="n">sys</span><span class="o">.</span><span class="n">platform</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s">'darwin'</span><span class="p">):</span>
+      <span class="n">os</span><span class="o">.</span><span class="n">system</span><span class="p">(</span><span class="s">'chmod +x {}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">binary_path</span><span class="p">))</span>
+
+  <span class="n">config</span><span class="p">[</span><span class="s">'stockfish_binary'</span><span class="p">]</span> <span class="o">=</span> <span class="n">binary_path</span>
+
+  <span class="k">if</span> <span class="n">config</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'debug'</span><span class="p">,</span> <span class="bp">False</span><span class="p">):</span>
+    <span class="n">pprint</span><span class="o">.</span><span class="n">pprint</span><span class="p">(</span><span class="n">config</span><span class="p">)</span>
+
+
+<span class="k">class</span> <span class="nc">StockfishEngine</span><span class="p">():</span>
+  <span class="sd">"""Implements all engine related stuff"""</span>
+
+  <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">stockfish_plays_white</span><span class="o">=</span><span class="bp">True</span><span class="p">):</span>
+    <span class="sd">"""</span>
+<span class="sd">    Sets the engine up.</span>
+
+<span class="sd">    stockfish_plays_white determines whether stockfish is white or black. If </span>
+<span class="sd">    stockfish is white, it needs to make the first move.</span>
+
+<span class="sd">    thinking_time controls how much time stockfish is given to calculate its moves.</span>
+<span class="sd">    max_thinking_time determines the maximum thinking time the engine has.</span>
+<span class="sd">    """</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">max_thinking_time</span> <span class="o">=</span> <span class="n">config</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'max_thinking_time'</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">thinking_time</span> <span class="o">=</span> <span class="n">config</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'thinking_time'</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">stockfish_plays_white</span> <span class="o">=</span> <span class="n">stockfish_plays_white</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">proc</span> <span class="o">=</span> <span class="bp">None</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">moves</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">fen</span> <span class="o">=</span> <span class="s">''</span>
+
+    <span class="bp">self</span><span class="o">.</span><span class="n">init_stockfish</span><span class="p">()</span>
+
+  <span class="k">def</span> <span class="nf">get</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">poll</span><span class="o">=</span><span class="bp">True</span><span class="p">,</span> <span class="n">sleep_time</span><span class="o">=</span><span class="mi">0</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">poll</span><span class="p">:</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">proc</span><span class="o">.</span><span class="n">stdin</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s">'isready</span><span class="se">\n</span><span class="s">'</span><span class="p">)</span>
+    <span class="n">buf</span> <span class="o">=</span> <span class="s">''</span>
+    <span class="k">while</span> <span class="bp">True</span><span class="p">:</span>
+      <span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="n">sleep_time</span><span class="p">)</span>
+      <span class="n">line</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">proc</span><span class="o">.</span><span class="n">stdout</span><span class="o">.</span><span class="n">readline</span><span class="p">()</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+      <span class="n">buf</span> <span class="o">+=</span> <span class="n">line</span>
+      <span class="k">if</span> <span class="s">'readyok'</span> <span class="ow">in</span> <span class="n">line</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">buf</span>
+      <span class="k">if</span> <span class="s">'bestmove'</span> <span class="ow">in</span> <span class="n">line</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">buf</span>
+
+  <span class="k">def</span> <span class="nf">init_stockfish</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">config</span><span class="p">[</span><span class="s">'stockfish_binary'</span><span class="p">]):</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">proc</span> <span class="o">=</span> <span class="n">subprocess</span><span class="o">.</span><span class="n">Popen</span><span class="p">([</span><span class="n">config</span><span class="p">[</span><span class="s">'stockfish_binary'</span><span class="p">]],</span> <span class="n">universal_newlines</span><span class="o">=</span><span class="bp">True</span><span class="p">,</span>
+                  <span class="n">stdout</span><span class="o">=</span><span class="n">subprocess</span><span class="o">.</span><span class="n">PIPE</span><span class="p">,</span> <span class="n">stdin</span><span class="o">=</span><span class="n">subprocess</span><span class="o">.</span><span class="n">PIPE</span><span class="p">)</span>
+
+      <span class="n">greeting</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">proc</span><span class="p">)</span>
+      <span class="k">if</span> <span class="ow">not</span> <span class="s">'Stockfish'</span> <span class="ow">in</span> <span class="n">greeting</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s">'Couldnt execute stockfish'</span><span class="p">)</span>
+
+      <span class="bp">self</span><span class="o">.</span><span class="n">proc</span><span class="o">.</span><span class="n">stdin</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s">'uci</span><span class="se">\n</span><span class="s">'</span><span class="p">)</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">get</span><span class="p">()</span>
+      <span class="c"># stolen from https://github.com/brandonhsiao/lichess-bot/blob/master/server.py</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">proc</span><span class="o">.</span><span class="n">stdin</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s">'ucinewgame</span><span class="se">\n</span><span class="s">'</span><span class="p">)</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">get</span><span class="p">()</span>
+      <span class="c"># some of theese options are not supported. Doesn't harm us...</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">proc</span><span class="o">.</span><span class="n">stdin</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s">'setoption name Hash value 128</span><span class="se">\n</span><span class="s">'</span><span class="p">)</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">proc</span><span class="o">.</span><span class="n">stdin</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s">'setoption name Threads value 4</span><span class="se">\n</span><span class="s">'</span><span class="p">)</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">proc</span><span class="o">.</span><span class="n">stdin</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s">'setoption name Best Book Move value true</span><span class="se">\n</span><span class="s">'</span><span class="p">)</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">proc</span><span class="o">.</span><span class="n">stdin</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s">'setoption name Aggressiveness value 200</span><span class="se">\n</span><span class="s">'</span><span class="p">)</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">proc</span><span class="o">.</span><span class="n">stdin</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s">'setoption name Cowardice value 0</span><span class="se">\n</span><span class="s">'</span><span class="p">)</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">proc</span><span class="o">.</span><span class="n">stdin</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s">'setoption name Contempt Factor value 50</span><span class="se">\n</span><span class="s">'</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+      <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s">'No stockfish binary path given'</span><span class="p">)</span>
+
+  <span class="k">def</span> <span class="nf">whos_move_is_it</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+    <span class="k">return</span> <span class="s">'white'</span> <span class="k">if</span> <span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">moves</span><span class="p">)</span> <span class="o">%</span> <span class="mi">2</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span> <span class="k">else</span> <span class="s">'black'</span>
+
+  <span class="k">def</span> <span class="nf">start_move_calculation</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">remaining_time</span><span class="o">=</span><span class="bp">None</span><span class="p">,</span> <span class="n">increment_time</span><span class="o">=</span><span class="bp">None</span><span class="p">):</span>
+    <span class="sd">"""</span>
+<span class="sd">    When remaining_time and increment_time are given, the best move</span>
+<span class="sd">    is calculated considering the remaining time. If not, the thinking_time</span>
+<span class="sd">    given in the config is considered.</span>
+<span class="sd">    """</span>
+    <span class="k">if</span> <span class="n">remaining_time</span> <span class="ow">and</span> <span class="n">increment_time</span><span class="p">:</span>
+      <span class="n">remaining_time</span><span class="p">,</span> <span class="n">increment_time</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">remaining_time</span><span class="p">)</span> <span class="o">*</span> <span class="mi">1000</span><span class="p">,</span> <span class="nb">int</span><span class="p">(</span><span class="n">increment_time</span><span class="p">)</span> <span class="o">*</span> <span class="mi">1000</span>
+      <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">whos_move_is_it</span><span class="p">()</span> <span class="o">==</span> <span class="s">'white'</span><span class="p">:</span>
+        <span class="n">cmd</span> <span class="o">=</span> <span class="s">'go wtime {} winc {}</span><span class="se">\n</span><span class="s">'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">remaining_time</span><span class="p">,</span> <span class="n">increment_time</span><span class="p">)</span>
+      <span class="k">else</span><span class="p">:</span>
+        <span class="n">cmd</span> <span class="o">=</span> <span class="s">'go btime {} binc {}</span><span class="se">\n</span><span class="s">'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">remaining_time</span><span class="p">,</span> <span class="n">increment_time</span><span class="p">)</span>
+
+      <span class="bp">self</span><span class="o">.</span><span class="n">proc</span><span class="o">.</span><span class="n">stdin</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">cmd</span><span class="p">)</span>
+      <span class="n">out</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">poll</span><span class="o">=</span><span class="bp">False</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">proc</span><span class="o">.</span><span class="n">stdin</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s">'go infinite</span><span class="se">\n</span><span class="s">'</span><span class="p">)</span>
+      <span class="n">sleep_time</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">thinking_time</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_thinking_time</span> <span class="o">&lt;</span> <span class="bp">self</span><span class="o">.</span><span class="n">thinking_time</span> <span class="k">else</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_thinking_time</span>
+      <span class="k">try</span><span class="p">:</span>
+        <span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="nb">float</span><span class="p">(</span><span class="n">sleep_time</span><span class="p">))</span>
+      <span class="k">except</span> <span class="ne">ValueError</span> <span class="k">as</span> <span class="n">ve</span><span class="p">:</span>
+        <span class="k">print</span><span class="p">(</span><span class="n">ve</span><span class="p">)</span>
+        <span class="n">sys</span><span class="o">.</span><span class="n">exit</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">proc</span><span class="o">.</span><span class="n">stdin</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s">'stop</span><span class="se">\n</span><span class="s">'</span><span class="p">)</span>
+      <span class="n">out</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">poll</span><span class="o">=</span><span class="bp">False</span><span class="p">)</span>
+
+    <span class="k">try</span><span class="p">:</span>
+      <span class="n">bestmove</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="s">r'bestmove\s(?P[a-h][1-8][a-h][1-8])'</span><span class="p">,</span> <span class="n">out</span><span class="p">)</span><span class="o">.</span><span class="n">group</span><span class="p">(</span><span class="s">'move'</span><span class="p">)</span>
+      <span class="n">ponder</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="s">r'ponder\s(?P[a-h][1-8][a-h][1-8])'</span><span class="p">,</span> <span class="n">out</span><span class="p">)</span><span class="o">.</span><span class="n">group</span><span class="p">(</span><span class="s">'ponder'</span><span class="p">)</span>
+    <span class="k">except</span> <span class="ne">AttributeError</span><span class="p">:</span>
+      <span class="k">return</span> <span class="bp">False</span>
+
+    <span class="k">return</span> <span class="n">bestmove</span><span class="p">,</span> <span class="n">ponder</span>
+
+  <span class="k">def</span> <span class="nf">newgame_stockfish</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">stockfish_plays_white</span><span class="o">=</span><span class="bp">True</span><span class="p">,</span> <span class="n">fen</span><span class="o">=</span><span class="s">''</span><span class="p">,</span>
+              <span class="n">all_moves</span><span class="o">=</span><span class="bp">None</span><span class="p">,</span> <span class="n">remaining_time</span><span class="o">=</span><span class="bp">None</span><span class="p">,</span> <span class="n">increment_time</span><span class="o">=</span><span class="bp">None</span><span class="p">):</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">stockfish_plays_white</span> <span class="o">=</span> <span class="n">stockfish_plays_white</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">moves</span> <span class="o">=</span> <span class="p">[]</span>
+
+    <span class="k">if</span> <span class="n">fen</span><span class="p">:</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">fen</span> <span class="o">=</span> <span class="n">fen</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">proc</span><span class="o">.</span><span class="n">stdin</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s">'position fen {}</span><span class="se">\n</span><span class="s">'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">fen</span><span class="p">))</span>
+      <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">start_move_calculation</span><span class="p">(</span><span class="n">remaining_time</span><span class="p">,</span> <span class="n">increment_time</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">all_moves</span> <span class="ow">is</span> <span class="ow">not</span> <span class="bp">None</span><span class="p">:</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">moves</span> <span class="o">=</span> <span class="n">all_moves</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s">' '</span><span class="p">)</span>
+      <span class="k">if</span> <span class="n">all_moves</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">proc</span><span class="o">.</span><span class="n">stdin</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s">'position startpos moves {}</span><span class="se">\n</span><span class="s">'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">all_moves</span><span class="p">))</span>
+      <span class="k">else</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">proc</span><span class="o">.</span><span class="n">stdin</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s">'position startpos</span><span class="se">\n</span><span class="s">'</span><span class="p">)</span>
+
+      <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">start_move_calculation</span><span class="p">(</span><span class="n">remaining_time</span><span class="p">,</span> <span class="n">increment_time</span><span class="p">)</span>
+
+  <span class="k">def</span> <span class="nf">quit_stockfish</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">proc</span><span class="o">.</span><span class="n">stdin</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s">'quit</span><span class="se">\n</span><span class="s">'</span><span class="p">)</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">proc</span><span class="o">.</span><span class="n">terminate</span><span class="p">()</span>
+
+
+<span class="k">class</span> <span class="nc">StockfishServer</span><span class="p">(</span><span class="n">BaseHTTPRequestHandler</span><span class="p">):</span>
+
+    <span class="k">def</span> <span class="nf">get_param</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">names</span><span class="p">):</span>
+      <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">names</span><span class="p">,</span> <span class="nb">tuple</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s">'variable "names" must be a tuple'</span><span class="p">)</span>
+
+      <span class="n">ns</span> <span class="o">=</span> <span class="p">{}</span>
+      <span class="k">for</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">names</span><span class="p">:</span>
+        <span class="k">try</span><span class="p">:</span>
+          <span class="n">ns</span><span class="p">[</span><span class="n">name</span><span class="p">]</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="s">r'{name}/(?P&lt;{name}&gt;[^/]*?)/'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="n">name</span><span class="p">),</span> <span class="bp">self</span><span class="o">.</span><span class="n">path</span><span class="p">)</span><span class="o">.</span><span class="n">group</span><span class="p">(</span><span class="n">name</span><span class="p">)</span>
+        <span class="k">except</span><span class="p">:</span>
+          <span class="n">ns</span><span class="p">[</span><span class="n">name</span><span class="p">]</span> <span class="o">=</span> <span class="bp">None</span>
+
+      <span class="k">return</span> <span class="n">ns</span>
+
+    <span class="k">def</span> <span class="nf">do_GET</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">send_response</span><span class="p">(</span><span class="mi">200</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">send_header</span><span class="p">(</span><span class="s">'Access-Control-Allow-Origin'</span><span class="p">,</span> <span class="s">'*'</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">send_header</span><span class="p">(</span><span class="s">'Content-type'</span><span class="p">,</span> <span class="s">'text/html'</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">end_headers</span><span class="p">()</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s">'/lastPosFen/'</span><span class="p">):</span>
+          <span class="n">fen</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">get_param</span><span class="p">((</span><span class="s">'lastPosFen'</span><span class="p">,</span> <span class="p">))</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'lastPosFen'</span><span class="p">,</span> <span class="s">''</span><span class="p">)</span>
+          <span class="n">best</span><span class="p">,</span> <span class="n">ponder</span> <span class="o">=</span> <span class="n">engine</span><span class="o">.</span><span class="n">newgame_stockfish</span><span class="p">(</span><span class="n">fen</span><span class="o">=</span><span class="n">unquote</span><span class="p">(</span><span class="n">fen</span><span class="p">))</span>
+          <span class="bp">self</span><span class="o">.</span><span class="n">wfile</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="nb">bytes</span><span class="p">(</span><span class="n">best</span> <span class="o">+</span> <span class="s">' '</span> <span class="o">+</span> <span class="n">ponder</span><span class="p">,</span> <span class="s">"utf-8"</span><span class="p">))</span>
+        <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s">'/allMoves/'</span><span class="p">):</span>
+          <span class="n">params</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">get_param</span><span class="p">((</span><span class="s">'allMoves'</span><span class="p">,</span> <span class="s">'remainingTime'</span><span class="p">,</span> <span class="s">'incrementTime'</span><span class="p">))</span>
+          <span class="k">if</span> <span class="n">config</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'debug'</span><span class="p">,</span> <span class="bp">False</span><span class="p">):</span>
+            <span class="n">pprint</span><span class="o">.</span><span class="n">pprint</span><span class="p">(</span><span class="n">params</span><span class="p">)</span>
+          <span class="n">best</span><span class="p">,</span> <span class="n">ponder</span> <span class="o">=</span> <span class="n">engine</span><span class="o">.</span><span class="n">newgame_stockfish</span><span class="p">(</span>
+                          <span class="n">all_moves</span><span class="o">=</span><span class="n">unquote</span><span class="p">(</span><span class="n">params</span><span class="p">[</span><span class="s">'allMoves'</span><span class="p">]),</span>
+                          <span class="n">remaining_time</span><span class="o">=</span><span class="n">params</span><span class="p">[</span><span class="s">'remainingTime'</span><span class="p">],</span>
+                          <span class="n">increment_time</span><span class="o">=</span><span class="n">params</span><span class="p">[</span><span class="s">'incrementTime'</span><span class="p">])</span>
+          <span class="bp">self</span><span class="o">.</span><span class="n">wfile</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="nb">bytes</span><span class="p">(</span><span class="n">best</span> <span class="o">+</span> <span class="s">' '</span> <span class="o">+</span> <span class="n">ponder</span><span class="p">,</span> <span class="s">"utf-8"</span><span class="p">))</span>
+
+<span class="k">def</span> <span class="nf">run</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span> <span class="n">server_class</span><span class="o">=</span><span class="n">HTTPServer</span><span class="p">,</span> <span class="n">handler_class</span><span class="o">=</span><span class="n">StockfishServer</span><span class="p">):</span>
+    <span class="n">server_address</span> <span class="o">=</span> <span class="p">(</span><span class="s">''</span><span class="p">,</span> <span class="mi">8888</span><span class="p">)</span>
+    <span class="n">httpd</span> <span class="o">=</span> <span class="n">server_class</span><span class="p">(</span><span class="n">server_address</span><span class="p">,</span> <span class="n">handler_class</span><span class="p">)</span>
+    <span class="k">print</span><span class="p">(</span><span class="s">'[+] Running CheatServer.py on {}:{}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">server_address</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">server_address</span><span class="p">[</span><span class="mi">1</span><span class="p">]))</span>
+    <span class="n">httpd</span><span class="o">.</span><span class="n">engine</span> <span class="o">=</span> <span class="n">engine</span>
+    <span class="n">httpd</span><span class="o">.</span><span class="n">serve_forever</span><span class="p">()</span>
+
+
+<span class="k">if</span> <span class="n">__name__</span> <span class="o">==</span> <span class="s">'__main__'</span><span class="p">:</span>
+  <span class="n">install_stockfish</span><span class="p">()</span>
+  <span class="n">engine</span> <span class="o">=</span> <span class="n">StockfishEngine</span><span class="p">()</span>
+  <span class="n">run</span><span class="p">(</span><span class="n">engine</span><span class="p">)</span>
+</pre></div>
+  </div></body></html>

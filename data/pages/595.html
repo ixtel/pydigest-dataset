@@ -1,0 +1,339 @@
+<html><body><div><div class="entry-content">
+    <p>I'm lucky to work with some of the most talented engineers I've ever met. As a member of the Canonical QA department, we frequently talk about automated code testing, things like: What's the best strategy to test declarative UI languages? How do we test difficult-to-reach-place X? How do we measure how many tests we should have at each level? etc. etc.</p>
+<p>There is, however, one discussion (some might say 'argument') that I find myself frequently engaged in, and I don't seem to be able to make much traction. So, instead of repeating my viewpoint <em>ad nauseam</em>, I'll explain myself here, and I can point people to it in the future.</p>
+<p>Note: While all the code snippets in this post are either python or pseudo-python, the content of this post applied to any language.</p>
+<div class="section" id="the-question">
+<h2>The Question</h2>
+<p>The question we're often trying to answer is:</p>
+<p><strong>How many tests do I have to write before I can confidently release my software to the public when all the test suites pass?</strong></p>
+<p>And a common answer is:</p>
+<blockquote>
+When you have 100% test coverage.</blockquote>
+<p>Now, when you ask what "test coverage" means, you'll often be told:</p>
+<blockquote>
+Line and branch coverage, as measured during your unit test run.</blockquote>
+<p>I think this is wrong, and I'm going to explain why I think it's wrong in a fairly roundabout manner.</p>
+</div>
+<div class="section" id="example-code">
+<h2>Example Code</h2>
+<p>Typical software is not written in isolation. For anything but the simplest of software, you need to talk to external components ("external" meaning "outside your source tree"). Here's one such example from <a class="reference external" href="http://launchpad.net/autopilot/">autopilot</a>, the acceptance test tool I maintain:</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">_get_click_app_id</span><span class="p">(</span><span class="n">package_id</span><span class="p">,</span> <span class="n">app_name</span><span class="o">=</span><span class="bp">None</span><span class="p">):</span>
+    <span class="k">for</span> <span class="n">pkg</span> <span class="ow">in</span> <span class="n">_get_click_manifest</span><span class="p">():</span>
+        <span class="k">if</span> <span class="n">pkg</span><span class="p">[</span><span class="s">'name'</span><span class="p">]</span> <span class="o">==</span> <span class="n">package_id</span><span class="p">:</span>
+            <span class="k">if</span> <span class="n">app_name</span> <span class="ow">is</span> <span class="bp">None</span><span class="p">:</span>
+                <span class="c"># py3 dict.keys isn't indexable.</span>
+                <span class="n">app_name</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">pkg</span><span class="p">[</span><span class="s">'hooks'</span><span class="p">]</span><span class="o">.</span><span class="n">keys</span><span class="p">())[</span><span class="mi">0</span><span class="p">]</span>
+            <span class="k">elif</span> <span class="n">app_name</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">pkg</span><span class="p">[</span><span class="s">'hooks'</span><span class="p">]:</span>
+                <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span>
+                    <span class="s">"Application '{}' is not present within the click "</span>
+                    <span class="s">"package '{}'."</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">app_name</span><span class="p">,</span> <span class="n">package_id</span><span class="p">))</span>
+
+            <span class="k">return</span> <span class="s">"{0}_{1}_{2}"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">package_id</span><span class="p">,</span> <span class="n">app_name</span><span class="p">,</span> <span class="n">pkg</span><span class="p">[</span><span class="s">'version'</span><span class="p">])</span>
+    <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span>
+        <span class="s">"Unable to find package '{}' in the click manifest."</span>
+        <span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">package_id</span><span class="p">)</span>
+    <span class="p">)</span>
+
+
+<span class="k">def</span> <span class="nf">_get_click_manifest</span><span class="p">():</span>
+    <span class="sd">"""Return the click package manifest as a python list."""</span>
+    <span class="c"># get the whole click package manifest every time - it seems fast enough</span>
+    <span class="c"># but this is a potential optimisation point for the future:</span>
+    <span class="n">click_manifest_str</span> <span class="o">=</span> <span class="n">subprocess</span><span class="o">.</span><span class="n">check_output</span><span class="p">(</span>
+        <span class="p">[</span><span class="s">"click"</span><span class="p">,</span> <span class="s">"list"</span><span class="p">,</span> <span class="s">"--manifest"</span><span class="p">],</span>
+        <span class="n">universal_newlines</span><span class="o">=</span><span class="bp">True</span>
+    <span class="p">)</span>
+    <span class="k">return</span> <span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">click_manifest_str</span><span class="p">)</span>
+</pre></div>
+<p>This isn't the best, or the worst code I've ever seen; it's reasonably readable, and it comes with a suite of tests that provide 100% test coverage. We generate branch and line coverage with the wonderful <a class="reference external" href="http://nedbatchelder.com/code/coverage/">coverage.py</a> tool. The coverage output looks like this:</p>
+<img alt="" src="static/images/coverage_report.png"/>
+<p>So, based on the common answer of "If all your tests pass you should be confident to release", should I be able to release this code when all my unit tests pass? Hell no!</p>
+</div>
+<div class="section" id="the-misunderstanding">
+<h2>The misunderstanding</h2>
+<p>The problem is that in the original answer,</p>
+<blockquote>
+When you have 100% test coverage</blockquote>
+<p>we have a misunderstanding about the meaning of "test coverage".</p>
+<p class="youtube" align="left"><iframe src="https://www.youtube.com/embed/G2y8Sx4B2Sk" frameborder="0">VIDEO</iframe></p></div>
+<div class="section" id="an-alternative-definition">
+<h2>An Alternative Definition</h2>
+<p>I propose that "test coverage" is actually a rather useless term. To me, it means "100% coverage for all tests at all levels". The important thing to note here is that this does <strong>not</strong> apply only to unit test coverage. So, what other types of tests are there?</p>
+<p>This is where the discussion usually runs into trouble. The terminology around software testing is hopelessly fragmented, with the same terms often meaning different things to different people. What follows is a non-exhaustive list of tests at different levels.</p>
+<p>This list is in order from the lowest test levels to the highest. A general rule of thumb is that you need more individual tests at a lower level, and fewer at a higher level. Similarly, lower level tests will be smaller and simpler, while higher level tests will be larger, and tend to be more complex.</p>
+<div class="section" id="unit-tests">
+<h3>Unit Tests</h3>
+<div class="section" id="purpose">
+<h4>Purpose</h4>
+<p>The purpose of a unit test is to verify the correctness of low level algorithms. Unit tests tend to concentrate on parts of the code that manipulate data.</p>
+</div>
+<div class="section" id="definition">
+<h4>Definition</h4>
+<p>A test at the lowest level. It must test a single unit of code. Another way of thinking about this is that a test must be able to fail in a single way only. It really must test only one thing. Sometimes a 'unit' of code will be a single method or function, most often it'll be an even smaller unit of code.</p>
+<p>Depending on the structure of the code under test, unit tests may need to resort to mocking or patching out other parts of the code under test. Reliance of mocks and patches are a sign of poor code structure though, so excessive use of those techniques at this level should make test authors nervous.</p>
+</div>
+<div class="section" id="example">
+<h4>Example:</h4>
+<p>Given the following code:</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">_get_property_file_path</span><span class="p">():</span>
+    <span class="k">return</span> <span class="s">'/system/build.prop'</span>
+
+
+<span class="k">def</span> <span class="nf">_get_property_file</span><span class="p">():</span>
+    <span class="sd">"""Return a file-like object that contains the contents of the build</span>
+<span class="sd">    properties file, if it exists, or None.</span>
+
+<span class="sd">    """</span>
+    <span class="n">path</span> <span class="o">=</span> <span class="n">_get_property_file_path</span><span class="p">()</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">return</span> <span class="nb">open</span><span class="p">(</span><span class="n">path</span><span class="p">)</span>
+    <span class="k">except</span> <span class="ne">IOError</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">None</span>
+</pre></div>
+<p>We need to write unit tests for the <tt class="docutils literal">_get_property_file</tt> function. This function is nice and simple. It:</p>
+<ol class="arabic simple">
+<li>Calls another function for a path to open.</li>
+<li>Opens the path for reading, and returns a file-like object to the caller.</li>
+<li>If the open failed, catch the exception and return <tt class="docutils literal">None</tt>.</li>
+</ol>
+<p>Since this function does more than one thing, we need more than one unit test.</p>
+<p>The first test verifies that the path as returned by the <tt class="docutils literal">_get_property_file_path</tt> function is correctly opened and returned. We do this by patching the <tt class="docutils literal">_get_property_file_path</tt> function to return the path to a file that we create in the file, and populate with a unique string. (Note: I've edited the test a bit, to remove some things that would otherwise detract from my example.)</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">test_get_property_file_opens_path</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+    <span class="n">token</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">getUniqueString</span><span class="p">()</span>
+    <span class="k">with</span> <span class="n">tempfile</span><span class="o">.</span><span class="n">NamedTemporaryFile</span><span class="p">(</span><span class="n">mode</span><span class="o">=</span><span class="s">'w+'</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">token</span><span class="p">)</span>
+        <span class="n">f</span><span class="o">.</span><span class="n">flush</span><span class="p">()</span>
+        <span class="k">with</span> <span class="n">patch</span><span class="p">(</span><span class="s">'_get_property_file_path'</span><span class="p">)</span> <span class="k">as</span> <span class="n">p</span><span class="p">:</span>
+            <span class="n">p</span><span class="o">.</span><span class="n">return_value</span> <span class="o">=</span> <span class="n">f</span><span class="o">.</span><span class="n">name</span>
+            <span class="n">observed</span> <span class="o">=</span> <span class="n">platform</span><span class="o">.</span><span class="n">_get_property_file</span><span class="p">()</span><span class="o">.</span><span class="n">read</span><span class="p">()</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">assertEqual</span><span class="p">(</span><span class="n">token</span><span class="p">,</span> <span class="n">observed</span><span class="p">)</span>
+</pre></div>
+<p>There're a few things to take notice of here:</p>
+<ul class="simple">
+<li>We patch the <tt class="docutils literal">_get_property_file_path</tt> function so we can override what it's returning. We could also have restructured the code to accept this as a parameter, which would, arguably, be cleaner.</li>
+<li>We're cheating a little bit: this test verifies that the function returns a file-like object (at least, one that supports <tt class="docutils literal">read()</tt>), <em>and</em> that the file-like object contains the string we wrote to the file. Unit test purists may suggest splitting this into two separate tests, but I'm <em>slightly</em> more pragmatic than that.</li>
+</ul>
+<p>Then we need several tests to check the error conditions. This first one makes sure that the function returns <tt class="docutils literal">None</tt> when we don't have permissions to open the file:</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">test_get_property_file_opens_path</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+    <span class="k">with</span> <span class="n">tempfile</span><span class="o">.</span><span class="n">NamedTemporaryFile</span><span class="p">(</span><span class="n">mode</span><span class="o">=</span><span class="s">'w+'</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="n">os</span><span class="o">.</span><span class="n">chmod</span><span class="p">(</span><span class="n">f</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
+        <span class="k">with</span> <span class="n">patch</span><span class="p">(</span><span class="s">'_get_property_file_path'</span><span class="p">)</span> <span class="k">as</span> <span class="n">p</span><span class="p">:</span>
+            <span class="n">p</span><span class="o">.</span><span class="n">return_value</span> <span class="o">=</span> <span class="n">f</span><span class="o">.</span><span class="n">name</span>
+            <span class="n">observed</span> <span class="o">=</span> <span class="n">platform</span><span class="o">.</span><span class="n">_get_property_file</span><span class="p">()</span><span class="o">.</span><span class="n">read</span><span class="p">()</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">assertIsNone</span><span class="p">(</span><span class="n">observed</span><span class="p">)</span>
+</pre></div>
+<p>We also need similar unit tests that check that the function returns <tt class="docutils literal">None</tt> when the file does not exist, and possibly in a few other cases.</p>
+</div>
+<div class="section" id="summary">
+<h4>Summary</h4>
+<p>As the example shows, unit tests are concerned with verifying the correctness of a single unit of code. In this case, the calculation we're performing is simple: "if we can open file X, then return the open file, otherwise return None". However, the unit test does not test how this unit of code interacts with any other unit of code. In my opinion, this is a <strong>major source of software defects</strong>. For that, we need a higher level of tests...</p>
+</div>
+</div>
+<div class="section" id="integration-tests-internal">
+<h3>Integration Tests - Internal</h3>
+<div class="section" id="id1">
+<h4>Purpose</h4>
+<p>While unit tests test a single unit of code, integration tests test how two or more units work together.</p>
+</div>
+<div class="section" id="id2">
+<h4>Definition</h4>
+<p>Integration tests are tests that cover two or more functions (or methods, or any other callable), and concentrate on how they integrate with each other. "Internal" integration tests test functions within the same codebase.</p>
+<p>When writing integration tests, we start to consider the architecture of the software. If your code is well written, this is something that we have not had to do until now - unit tests shouldn't have to know or care about much outside the function they're testing.</p>
+<p>Integration tests are primarily concerned with two things:</p>
+<ol class="arabic simple">
+<li>The format of data being passed between functions. This includes:<ul>
+<li>Format/contents of parameters passed from one function to another.</li>
+<li>Format/contents of data returned from one function to another.</li>
+<li>Set of possible error codes returned from one function to another (this is really just a subset of the point above).</li>
+</ul>
+</li>
+<li>For languages that support this, the exceptions that can be raised by a function.</li>
+</ol>
+</div>
+<div class="section" id="id3">
+<h4>Example</h4>
+<p>Consider the following code:</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">_get_click_app_id</span><span class="p">(</span><span class="n">package_id</span><span class="p">,</span> <span class="n">app_name</span><span class="o">=</span><span class="bp">None</span><span class="p">):</span>
+    <span class="k">for</span> <span class="n">pkg</span> <span class="ow">in</span> <span class="n">_get_click_manifest</span><span class="p">():</span>
+        <span class="k">if</span> <span class="n">pkg</span><span class="p">[</span><span class="s">'name'</span><span class="p">]</span> <span class="o">==</span> <span class="n">package_id</span><span class="p">:</span>
+            <span class="k">if</span> <span class="n">app_name</span> <span class="ow">is</span> <span class="bp">None</span><span class="p">:</span>
+                <span class="c"># py3 dict.keys isn't indexable.</span>
+                <span class="n">app_name</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">pkg</span><span class="p">[</span><span class="s">'hooks'</span><span class="p">]</span><span class="o">.</span><span class="n">keys</span><span class="p">())[</span><span class="mi">0</span><span class="p">]</span>
+            <span class="k">elif</span> <span class="n">app_name</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">pkg</span><span class="p">[</span><span class="s">'hooks'</span><span class="p">]:</span>
+                <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span>
+                    <span class="s">"Application '{}' is not present within the click "</span>
+                    <span class="s">"package '{}'."</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">app_name</span><span class="p">,</span> <span class="n">package_id</span><span class="p">))</span>
+
+            <span class="k">return</span> <span class="s">"{0}_{1}_{2}"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">package_id</span><span class="p">,</span> <span class="n">app_name</span><span class="p">,</span> <span class="n">pkg</span><span class="p">[</span><span class="s">'version'</span><span class="p">])</span>
+    <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span>
+        <span class="s">"Unable to find package '{}' in the click manifest."</span>
+        <span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">package_id</span><span class="p">)</span>
+    <span class="p">)</span>
+
+
+<span class="k">def</span> <span class="nf">_get_click_manifest</span><span class="p">():</span>
+    <span class="sd">"""Return the click package manifest as a python list."""</span>
+    <span class="n">click_manifest_str</span> <span class="o">=</span> <span class="n">_load_click_manifest_content</span><span class="p">()</span>
+    <span class="k">return</span> <span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">click_manifest_str</span><span class="p">)</span>
+
+
+<span class="k">def</span> <span class="nf">_load_click_manifest_content</span><span class="p">():</span>
+        <span class="sd">"""Load the click manifest file from disk, and return it as a string."""</span>
+        <span class="n">click_path</span> <span class="o">=</span> <span class="n">_get_click_manifest_path</span><span class="p">()</span>
+        <span class="k">return</span> <span class="nb">open</span><span class="p">(</span><span class="n">click_path</span><span class="p">,</span> <span class="s">'r'</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">()</span>
+</pre></div>
+<p>This code isn't wonderful - but it serves to illustrate the purpose of integration tests. Let us assume that the <tt class="docutils literal">_get_click_app_id</tt> function has been fully unit tested. As in the unit test example, the unit tests would mock out the <tt class="docutils literal">_get_click_manifest</tt> function, and return a python dictionary containing what we expect to be returned by the <tt class="docutils literal">json.loads</tt> call.</p>
+<p>We have here three separate functions, one of which opens an external resource (we'll talk about that separately, later).</p>
+<p>There are <strong>many</strong> possible bugs that could occur here, even with 100% unit test coverage. To name a few:</p>
+<ol class="arabic simple">
+<li>What happens when <tt class="docutils literal">_load_click_manifest_content</tt> cannot open it's file? It raises an IOError (which would have been verified in a unit test) - is that error condition handled by it's calling functions? (nope!)</li>
+<li>What happens when the string returned by <tt class="docutils literal">_load_click_manifest_content</tt> is not valid json, or cannot be parsed by the json module for some other reason? It will raise a <tt class="docutils literal">ValueError</tt> - do callers handle that error case? (nope!)</li>
+<li>What happens when the python object returned by <tt class="docutils literal">_get_click_manifest</tt> does not contain the items expected, or contains the right items, but in the wrong format?</li>
+</ol>
+<p>Architecturally, we have code that look like this:</p>
+<pre class="literal-block">
+Caller &lt;--&gt; _get_click_app_id &lt;--&gt; _get_click_manifest &lt;--&gt; _load_click_manifest_content &lt;--&gt; external resource
+</pre>
+<p>If we were writing unit tests, we'd care about the units themselves. Here, we care about the communication between them. In order to test this, we need to control both ends of the call chain. In this case, we control the external dependency by mocking <tt class="docutils literal">_load_click_manifest_content</tt> to return data we set in the test, and the test <em>is</em> the caller, so we control that end as well.</p>
+<p>For example, we might write a test that looks something like this:</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">test_cannot_open_manifest_file_results_in_RuntimeError</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">with</span> <span class="n">patch</span><span class="p">(</span><span class="s">'_load_click_manifest_content'</span><span class="p">,</span> <span class="n">side_effect</span><span class="o">=</span><span class="ne">IOError</span><span class="p">):</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">assertRaises</span><span class="p">(</span>
+                        <span class="ne">RuntimeError</span><span class="p">,</span>
+                        <span class="k">lambda</span><span class="p">:</span> <span class="n">_get_click_app_id</span><span class="p">(</span><span class="s">'foo'</span><span class="p">)</span>
+                <span class="p">)</span>
+</pre></div>
+<p>This is the integration test you'd write to test scenario 1, above. This test will fail, exposing the fact that somewhere between <tt class="docutils literal">_get_click_app_id</tt> and <tt class="docutils literal">_load_click_manifest_content</tt>, that particular error condition is not covered (of course, somewhere else in the code we'd have to handle that raised <tt class="docutils literal">RuntimeError</tt>, and that would have to be tested again, but in a higher-level integration test).</p>
+</div>
+<div class="section" id="measuring-coverage">
+<h4>Measuring Coverage</h4>
+<p>Measuring "test coverage" for unit tests is easy: you run your coverage tool, and make sure that all lines of code and branches of execution are covered by at least one test (assuming your code is well structured).</p>
+<p>Measuring test coverage for integration tests is harder. First, it's important to note that your integration tests need to be measured separately from your unit tests. The reason is simple: if you have 100% unit test coverage, you won't spot any missing integration test coverage, since all your lines will already be covered.</p>
+<p>Even with a separate coverage report, you cannot look at the file coverage percentage. Instead, you need to make sure that all of the following are covered:</p>
+<ol class="arabic simple">
+<li>Any point where function <tt class="docutils literal">A</tt> calls function <tt class="docutils literal">B</tt>: you need to verify that <tt class="docutils literal">A</tt> passes the correct parameters to <tt class="docutils literal">B</tt>.</li>
+<li>Any point where function <tt class="docutils literal">B</tt> returns data to function <tt class="docutils literal">A</tt>: you need to verify that <tt class="docutils literal">B</tt> returns data in the format that <tt class="docutils literal">A</tt> expects. If <tt class="docutils literal">A</tt> simply returns the data to <em>it's</em> caller, then you need an integration test that covers that caller as well.</li>
+<li>Any point where a function returns an error code or raises an exception: you must make sure that the error code is handled correctly by the calling function. Exceptions can be harder to deal with, since they will propagate up the stack, meaning that you may need to write integration tests that cover many functions (more on that later).</li>
+</ol>
+<p>I have not yet found a way of producing a nice report that makes it easy to see where integration tests are missing. My general process is to use a unit test coverage report, look at call sites, <tt class="docutils literal">return</tt> statements, and places where exceptions are raised.</p>
+</div>
+<div class="section" id="high-level-tests">
+<h4>High Level Tests</h4>
+<p>Before any integration tests can be written, you need to decide where to cut the call chain. A piece of complex software will typically have hundreds of calls between the highest and lowest level functions. Obviously we do not want to write an integration test that covers that much code.</p>
+<p>Hopefully, your software has been written in concentric shells of functionality, which makes the decision about where to cut the chain easy: write integration tests between the exposed shell interface, and the shell beneath it, or the external interface, whichever comes first. If you're writing a <a class="reference external" href="https://www.destroyallsoftware.com/talks/boundaries">functional core with an imperative shell</a>, your life will be much easier. Writing code in this style also helps because the exposed interface of each shell can be a sensible, compact API. This gives us a good place to consolidate raised exceptions, and to return a few, well known errors.</p>
+</div>
+</div>
+<div class="section" id="integration-tests-external">
+<h3>Integration Tests - External</h3>
+<div class="section" id="id4">
+<h4>Purpose</h4>
+<p>Verify that your external data sources behave the way you expect them to.</p>
+</div>
+<div class="section" id="id5">
+<h4>Definition</h4>
+<p>Similar to internal integration tests, external integration tests focus on data flowing between units of code. In this case, however, one of the units comes from an external data source. These external data sources include:</p>
+<ul class="simple">
+<li>Libraries that you link to (python packages / modules, for example).</li>
+<li>Some physically remote system with an API (for example, an HTTP server with a restful API, or an XMLRPC server).</li>
+<li>A file on disk that is supposed to contain data in a certain format.</li>
+<li>A separate process that is supposed to print data in a certain format to one of it's file descriptors.</li>
+<li>...and many many more examples.</li>
+</ul>
+</div>
+<div class="section" id="id6">
+<h4>Example</h4>
+<p>Well structured code tends to exist in concentric shells of functionality, where each layer contains more specific, low-level code. Let's continue with the example from the previous section. We have three units of code that look like this:</p>
+<pre class="literal-block">
+_get_click_app_id &lt;--&gt; _get_click_manifest &lt;--&gt; _load_click_manifest_content &lt;--&gt; external resource
+</pre>
+<p>The "external resource" in this case is a file on disk. We care about the communication between <tt class="docutils literal">_load_click_manifest_content</tt> and this external data source. Note how the communication with the external data source is in the lowest-level code. To test this communication, we need to cover several possible error conditions:</p>
+<ul class="simple">
+<li>The data source does not exist.</li>
+<li>The data source exists, but we don't have permissions to read it.</li>
+<li>The data source exists, but is empty.</li>
+<li>The data source exists, but contains data that's different from what we were expecting.</li>
+</ul>
+<p>Obviously, the exact data source in question will determine the tests that need to be written: external libraries might raise exceptions, for example, while files on disk cannot. A common source of errors when dealing with third party libraries is changing APIs. External integration tests make sure that you'll know about these changes as soon as possible. Files on disk are about the simplest of all data sources we can deal with.</p>
+<p>An external integration test for <tt class="docutils literal">_load_click_manifest_content</tt> might look like this:</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">test_can_open_click_manifest_file</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">content</span> <span class="o">=</span> <span class="n">_load_click_manifest_content</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">assertNotEqual</span><span class="p">(</span><span class="s">""</span><span class="p">,</span> <span class="n">content</span><span class="p">)</span>
+</pre></div>
+<p>Notice that we don't mock out the external data source - we want to get the real thing, or we're not testing anything at all.</p>
+</div>
+<div class="section" id="running-external-integration-tests">
+<h4>Running External Integration Tests</h4>
+<p>Why separate internal from external integration tests? The reason is simple: it can often be difficult to obtain the data source on a development machine. For example, the file on disk in the previous example might only be created on certain platforms, or with certain software installed.</p>
+<p>Generally speaking, you want to keep tests that require external resources separated from tests that do not. With this separation in place, we can run all the tests that don't require any external resources on developer machines, and tests that do require external resources can be run in a QA lab, where these external resources can be provided in a controlled manner.</p>
+</div>
+<div class="section" id="coverage">
+<h4>Coverage</h4>
+<p>How do you tell when you've covered all your external integration points? It's tough. The only real way is to have well structured code, where communication to these external components is reduced to a few small units of code. If anyone has any ideas regarding how to track these integration points, I'd love to hear them!</p>
+</div>
+</div>
+<div class="section" id="acceptance-tests">
+<h3>Acceptance Tests</h3>
+<div class="section" id="id7">
+<h4>Purpose</h4>
+<p>Ensure that the user workflow behaves as designed.</p>
+</div>
+<div class="section" id="id8">
+<h4>Definition</h4>
+<p>Even with the best unit and integration test coverage, it's still possible (nay, likely!) that your software will contain bugs. This is especially true for graphical applications, where the layer of code closest to the user (the UI) is essentially untested, since you don't control the UI toolkit code. It's reasonably common to see bugs creep in due to mistakes made when coding the UI. For example, toolbar buttons that do nothing when clicked, model views that don't render the underlying data as intended, pagination that's broken, etc. etc. These bugs are almost always impossible to test for in one of the lower levels, often due to the fact that the UI toolkit does not allow you to call into it without it actually starting the application UI.</p>
+<p>Good acceptance tests try and emulate the user, and treat the software as a black box. The test does not know or care about the underlying algorithms or architecture of the code. The test generates keyboard and mouse events, and uses a toolkit (such as the excellent <a class="reference external" href="http://launchpad.net/autopilot/">autopilot</a>) to figure out what the application under test does.</p>
+</div>
+<div class="section" id="id9">
+<h4>Example</h4>
+<p>Acceptance tests are difficult to demonstrate, since they tend to be written at a very high level, and rely on a lot of external components in order to work. This is an example from the <a class="reference external" href="http://launchpad.net/ubuntu-clock-app">Ubuntu clock app</a> acceptance test suite (which uses <a class="reference external" href="http://launchpad.net/autopilot/">autopilot</a> as it's test framework):</p>
+<div class="highlight"><pre><span class="k">def</span> <span class="nf">test_delete_alarm_must_delete_from_alarm_list</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+       <span class="sd">"""Test to delete an alarm and check if it has been properly removed"""</span>
+
+       <span class="c"># (set-up) Create a recurring alarm</span>
+       <span class="bp">self</span><span class="o">.</span><span class="n">page</span><span class="o">.</span><span class="n">add_recurring_alarm</span><span class="p">(</span>
+           <span class="s">'Test alarm to delete'</span><span class="p">,</span> <span class="p">[</span><span class="s">'Monday'</span><span class="p">,</span> <span class="s">'Tuesday'</span><span class="p">])</span>
+
+       <span class="n">old_alarm_count</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">page</span><span class="o">.</span><span class="n">get_num_of_alarms</span><span class="p">()</span>
+       <span class="bp">self</span><span class="o">.</span><span class="n">page</span><span class="o">.</span><span class="n">delete_alarm</span><span class="p">(</span><span class="n">index</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+
+       <span class="c"># Check that the alarm is deleted</span>
+       <span class="bp">self</span><span class="o">.</span><span class="n">assertThat</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">page</span><span class="o">.</span><span class="n">get_num_of_alarms</span><span class="p">,</span>
+                       <span class="n">Eventually</span><span class="p">(</span><span class="n">Equals</span><span class="p">(</span><span class="n">old_alarm_count</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)))</span>
+</pre></div>
+</div>
+</div>
+</div>
+<div class="section" id="other-types-of-testing">
+<h2>Other Types of Testing</h2>
+<p>That concludes the list of the three <em>essential</em> test levels. However, even with good test coverage at every level, there's a good chance you will release defective software. There are several types of testing we have not covered. For example, we've not mentioned security testing, memory leak detection, performance tests, etc. Those are topics for another day! This is not supposed to be an exhaustive list, but rather a <em>minimum</em> list of the tests you need before you can use your test suite as an indicator of software quality.</p>
+</div>
+<div class="section" id="id10">
+<h2>Summary</h2>
+<p>Before you can use your test suite as an indicator of your software quality, you need to have tests that cover the following areas:</p>
+<table border="1" class="docutils">
+<colgroup>
+<col/>
+<col/>
+</colgroup>
+<thead valign="bottom">
+<tr><th class="head"><strong>Purpose</strong></th>
+<th class="head"><strong>Description</strong></th>
+</tr>
+</thead>
+<tbody valign="top">
+<tr><td><strong>Algorithmic Correctness:</strong></td>
+<td>You need 100% (or as close to it as is realistically achievable) unit test coverage. These really do need to be proper <em>unit</em> tests though. Don't fall into the general trap of writing "unit" tests that test several units of code at the same time, or you'll end up masking potential errors in your coverage report.</td>
+</tr>
+<tr><td><strong>Data Flow and Error Cases:</strong></td>
+<td>You need integration tests, both internal and external, to ensure that the individual units of your code work well with each other, and understand how to handle errors raised by lower level components.</td>
+</tr>
+<tr><td><strong>User Facing Functionality:</strong></td>
+<td>Finally, you need acceptance tests that test the presentation layer between the underlying core algorithms and the user.</td>
+</tr>
+</tbody>
+</table>
+<p>I have not yet seen a piece of software that meets these requirements (several come close). Writing software is <em>hard work</em>, and it's even harder when you add the burden of exhaustively writing tests. However, it's only a short term cost. Any software that hopes to survive a decade or more of real-world requirements changes cannot skimp on the tests and expect to survive.</p>
+<p>My impression of the software industry is that when it comes to quality, we're still figuring out what we ought to be doing. I suspect that, while my suggested requirements may seem outlandish and extreme today, in 10 years time they'll seem like the lowest possible level of testing required... but I might be wrong. What do you think? Let me know in the comments!</p>
+</div>
+
+  </div>
+  </div></body></html>

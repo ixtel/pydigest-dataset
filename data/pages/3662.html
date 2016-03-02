@@ -1,0 +1,345 @@
+<html><body><div><div class="post-content" itemprop="articleBody">
+    <p>The very nature of Python makes the task of protecting the source code
+complicated. As an interpreted language, the source code must be
+available in some form in order to execute it.</p>
+
+<p>During this article, I’ll write down the steps I’ve followed while trying to
+find a fit solution to the problem of protecting a Python based codebase.</p>
+
+<p>The explored techniques are implemented in the
+<a href="https://github.com/citrusbyte/python-obfuscation">companion repository</a> with a few more attempts
+that will be discussed in a second article. The objective in that
+project was to protect a simple <a href="http://flask.pocoo.org/">Flask</a> application with
+<a href="http://www.numpy.org/">NumPy</a> as a dependency.</p>
+
+<p><strong>Note:</strong> I’ve left obfuscation outside of the equation on purpose,
+it’s a well know mechanism. Python code obfuscation is an extensive
+topic in and of itself that we might cover in another post.</p>
+
+<h2 id="distributing-bytecode">Distributing bytecode</h2>
+
+<p>Taking baby steps, the first thing to attempt is to distribute byte-compiled
+modules, the usual <code>.pyc</code> files created by Python interpreter for performance
+reasons, it’s not faster code, but its load time is shorter.</p>
+
+<p>The idea is to compile any module and distribute them instead of the
+traditional <code>.py</code>.  Python comes with the <a href="https://docs.python.org/2/library/compileall.html">compileall</a> module that will process
+all the <code>.py</code> files in a directory tree, the invocation is quite simple:</p>
+
+
+
+<p>The <code>pyc</code> is a simple binary file containing:</p>
+
+<ul>
+  <li>A magic number (four bytes)</li>
+  <li>A timestamp (four bytes)</li>
+  <li>A code object (marshalled code)</li>
+</ul>
+
+<p>It’s fair to think that this is a secure mechanism, it’s a binary file after
+all, inexperienced eyes will just see garbage when opened with a text editor.
+But, sadly, it’s not impossible to transform it back to the original code.</p>
+
+<p>Take for instance this really simple example stored in a <code>hello.py</code> module:</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="lineno">1</span> <span class="k">def</span> <span class="nf">hello_world</span><span class="p">(</span><span class="n">name</span><span class="p">):</span>
+<span class="lineno">2</span>     <span class="k">print</span><span class="p">(</span><span class="s">'Hello {0}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">name</span><span class="p">))</span></code></pre></div>
+
+<p>The byte-compiled module look like this:</p>
+
+<div class="highlight"><pre><code class="language-text" data-lang="text">0000000: 03f3 0d0a 97b0 fd54 6300 0000 0000 0000  .......Tc.......
+0000010: 0001 0000 0040 0000 0073 0d00 0000 6400  .....@...s....d.
+0000020: 0084 0000 5a00 0064 0100 5328 0200 0000  ....Z..d..S(....
+0000030: 6301 0000 0001 0000 0002 0000 0043 0000  c............C..
+0000040: 0073 1200 0000 6401 006a 0000 7c00 0083  .s....d..j..|...
+0000050: 0100 4748 6400 0053 2802 0000 004e 7309  ..GHd..S(....Ns.
+0000060: 0000 0066 6f6f 202d 207b 307d 2801 0000  ...foo - {0}(...
+0000070: 0074 0600 0000 666f 726d 6174 2801 0000  .t....format(...
+0000080: 0074 0100 0000 6128 0000 0000 2800 0000  .t....a(....(...
+0000090: 0073 0800 0000 6865 6c6c 6f2e 7079 7403  .s....hello.pyt.
+00000a0: 0000 0066 6f6f 0100 0000 7302 0000 0000  ...foo....s.....
+00000b0: 014e 2801 0000 0052 0200 0000 2800 0000  .N(....R....(...
+00000c0: 0028 0000 0000 2800 0000 0073 0800 0000  .(....(....s....
+00000d0: 6865 6c6c 6f2e 7079 7408 0000 003c 6d6f  hello.pyt....&lt;mo
+00000e0: 6475 6c65 3e01 0000 0073 0000 0000       dule&gt;....s....</code></pre></div>
+
+<p>Not much to the naked eye, but it’s easy to inspect using the included
+batteries:</p>
+
+<div class="highlight"><pre><code class="language-pycon" data-lang="pycon"><span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span> <span class="nn">dis</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span> <span class="nn">marshal</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span> <span class="nn">struct</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span> <span class="nn">imp</span>
+<span class="go">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s">'hello.pyc'</span><span class="p">,</span> <span class="s">'r'</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>  <span class="c"># Read the binary file</span>
+<span class="gp">... </span>    <span class="n">magic</span> <span class="o">=</span> <span class="n">f</span><span class="o">.</span><span class="n">read</span><span class="p">(</span><span class="mi">4</span><span class="p">)</span>
+<span class="gp">... </span>    <span class="n">timestamp</span> <span class="o">=</span> <span class="n">f</span><span class="o">.</span><span class="n">read</span><span class="p">(</span><span class="mi">4</span><span class="p">)</span>
+<span class="gp">... </span>    <span class="n">code</span> <span class="o">=</span> <span class="n">f</span><span class="o">.</span><span class="n">read</span><span class="p">()</span>
+<span class="gp">...</span>
+<span class="go">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c"># Unpack the structure content and un-marshal the code</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">magic</span> <span class="o">=</span> <span class="n">struct</span><span class="o">.</span><span class="n">unpack</span><span class="p">(</span><span class="s">'&lt;H'</span><span class="p">,</span> <span class="n">magic</span><span class="p">[:</span><span class="mi">2</span><span class="p">])</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">timestamp</span> <span class="o">=</span> <span class="n">struct</span><span class="o">.</span><span class="n">unpack</span><span class="p">(</span><span class="s">'&lt;I'</span><span class="p">,</span> <span class="n">timestamp</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">code</span> <span class="o">=</span> <span class="n">marshal</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">code</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">magic</span><span class="p">,</span> <span class="n">timestamp</span><span class="p">,</span> <span class="n">code</span>
+<span class="go">((62211,), (1425911959,), &lt;code object &lt;module&gt; at 0x7fd54f90d5b0, file "hello.py", line 1&gt;)</span>
+<span class="go">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c"># Verify if magic number corresponds with the current python version</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">struct</span><span class="o">.</span><span class="n">unpack</span><span class="p">(</span><span class="s">'&lt;H'</span><span class="p">,</span> <span class="n">imp</span><span class="o">.</span><span class="n">get_magic</span><span class="p">()[:</span><span class="mi">2</span><span class="p">])</span> <span class="o">==</span> <span class="n">magic</span>
+<span class="go">True</span>
+<span class="go">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c"># Disassemble the code object</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">dis</span><span class="o">.</span><span class="n">disassemble</span><span class="p">(</span><span class="n">code</span><span class="p">)</span>
+<span class="go">  1           0 LOAD_CONST               0 (&lt;code object hello_world at 0x7f31b7240eb0, file "hello.py", line 1&gt;)</span>
+<span class="go">              3 MAKE_FUNCTION            0</span>
+<span class="go">              6 STORE_NAME               0 (hello_world)</span>
+<span class="go">              9 LOAD_CONST               1 (None)</span>
+<span class="go">             12 RETURN_VALUE</span>
+<span class="go">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c"># Also disassemble that const being loaded (our function)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">dis</span><span class="o">.</span><span class="n">disassemble</span><span class="p">(</span><span class="n">code</span><span class="o">.</span><span class="n">co_consts</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
+<span class="go">  2           0 LOAD_CONST               1 ('Hello  {0}')</span>
+<span class="go">              3 LOAD_ATTR                0 (format)</span>
+<span class="go">              6 LOAD_FAST                0 (name)</span>
+<span class="go">              9 CALL_FUNCTION            1</span>
+<span class="go">             12 PRINT_ITEM</span>
+<span class="go">             13 PRINT_NEWLINE</span>
+<span class="go">             14 LOAD_CONST               0 (None)</span>
+<span class="go">             17 RETURN_VALUE</span></code></pre></div>
+
+<p>It’s not hard to get a notion of what the code is about, and tools can be
+written that will translate the op-codes back to human-friendly strings. In
+fact, that’s already done by the <a href="https://pypi.python.org/pypi/uncompyle2">uncompyle2</a> package.</p>
+
+<p><strong>Result: distribution of <code>.pyc</code> files is not an valid mechanism of
+protection.</strong></p>
+
+<h3 id="optimized-bytecode">Optimized bytecode</h3>
+
+<p>Python has the concept of optimized bytecode, still taking baby steps, we could
+distribute optimized code which might help to protect the original codebase.</p>
+
+<p>But Python optimizations aren’t real code optimizations, but mere
+simplifications. There are two levels of “optimizations”:</p>
+
+<ul>
+  <li>
+    <p>Level one (<code>-O</code> flag)
+This level will discard <code>assert</code> statements from the code.</p>
+  </li>
+  <li>
+    <p>Level two (<code>-OO</code> flag)
+This level will apply the optimizations from level 1, plus it will discard
+<code>docstrings</code> from the code.</p>
+  </li>
+</ul>
+
+<p>So we are back to square one, this time with just a smaller version of <code>.pyc</code>
+files.</p>
+
+<p><strong>Result: distribution of <code>.pyo</code> files is not an valid mechanism of
+protection.</strong></p>
+
+<h2 id="extending-the-import-process">Extending the import process</h2>
+
+<p>Python supports customization of the import process by the means of <a href="https://www.python.org/dev/peps/pep-0302/">import
+hooks</a>. The interpreter makes use of this feature to implement
+the <a href="https://www.python.org/dev/peps/pep-0273/">import of modules from zip archives</a>.</p>
+
+<p>This concept can be used to import modules from different containers types or
+pre-process modules before loading them. Take for instance the following
+<code>finder</code> and <code>loader</code> implementation:</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="lineno"> 1</span> <span class="kn">import</span> <span class="nn">os</span>
+<span class="lineno"> 2</span> <span class="kn">import</span> <span class="nn">imp</span>
+<span class="lineno"> 3</span> <span class="kn">import</span> <span class="nn">sys</span>
+<span class="lineno"> 4</span> 
+<span class="lineno"> 5</span> 
+<span class="lineno"> 6</span> <span class="k">class</span> <span class="nc">BaseLoader</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
+<span class="lineno"> 7</span>     <span class="k">def</span> <span class="nf">modinfo</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">path</span><span class="p">):</span>
+<span class="lineno"> 8</span>         <span class="k">try</span><span class="p">:</span>
+<span class="lineno"> 9</span>             <span class="n">modinfo</span> <span class="o">=</span> <span class="n">imp</span><span class="o">.</span><span class="n">find_module</span><span class="p">(</span><span class="n">name</span><span class="o">.</span><span class="n">rsplit</span><span class="p">(</span><span class="s">'.'</span><span class="p">,</span> <span class="mi">1</span><span class="p">)[</span><span class="o">-</span><span class="mi">1</span><span class="p">],</span> <span class="n">path</span><span class="p">)</span>
+<span class="lineno">10</span>         <span class="k">except</span> <span class="ne">ImportError</span><span class="p">:</span>
+<span class="lineno">11</span>             <span class="k">if</span> <span class="s">'.'</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">name</span><span class="p">:</span>
+<span class="lineno">12</span>                 <span class="k">raise</span>
+<span class="lineno">13</span>             <span class="n">clean_path</span><span class="p">,</span> <span class="n">clean_name</span> <span class="o">=</span> <span class="n">name</span><span class="o">.</span><span class="n">rsplit</span><span class="p">(</span><span class="s">'.'</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+<span class="lineno">14</span>             <span class="n">clean_path</span> <span class="o">=</span> <span class="p">[</span><span class="n">clean_path</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s">'.'</span><span class="p">,</span> <span class="s">'/'</span><span class="p">)]</span>
+<span class="lineno">15</span>             <span class="n">modinfo</span> <span class="o">=</span> <span class="n">imp</span><span class="o">.</span><span class="n">find_module</span><span class="p">(</span><span class="n">clean_name</span><span class="p">,</span> <span class="n">clean_path</span><span class="p">)</span>
+<span class="lineno">16</span> 
+<span class="lineno">17</span>         <span class="nb">file</span><span class="p">,</span> <span class="n">pathname</span><span class="p">,</span> <span class="p">(</span><span class="n">suffix</span><span class="p">,</span> <span class="n">mode</span><span class="p">,</span> <span class="n">type_</span><span class="p">)</span> <span class="o">=</span> <span class="n">modinfo</span>
+<span class="lineno">18</span>         <span class="k">if</span> <span class="n">type_</span> <span class="o">==</span> <span class="n">imp</span><span class="o">.</span><span class="n">PY_SOURCE</span><span class="p">:</span>
+<span class="lineno">19</span>             <span class="n">filename</span> <span class="o">=</span> <span class="n">pathname</span>
+<span class="lineno">20</span>         <span class="k">elif</span> <span class="n">type_</span> <span class="o">==</span> <span class="n">imp</span><span class="o">.</span><span class="n">PY_COMPILED</span><span class="p">:</span>
+<span class="lineno">21</span>             <span class="n">filename</span> <span class="o">=</span> <span class="n">pathname</span><span class="p">[:</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span>
+<span class="lineno">22</span>         <span class="k">elif</span> <span class="n">type_</span> <span class="o">==</span> <span class="n">imp</span><span class="o">.</span><span class="n">PKG_DIRECTORY</span><span class="p">:</span>
+<span class="lineno">23</span>             <span class="n">filename</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">pathname</span><span class="p">,</span> <span class="s">'__init__.py'</span><span class="p">)</span>
+<span class="lineno">24</span>         <span class="k">else</span><span class="p">:</span>
+<span class="lineno">25</span>             <span class="k">return</span> <span class="p">(</span><span class="bp">None</span><span class="p">,</span> <span class="bp">None</span><span class="p">)</span>
+<span class="lineno">26</span>         <span class="k">return</span> <span class="p">(</span><span class="n">filename</span><span class="p">,</span> <span class="n">modinfo</span><span class="p">)</span>
+<span class="lineno">27</span> 
+<span class="lineno">28</span> 
+<span class="lineno">29</span> <span class="k">class</span> <span class="nc">Loader</span><span class="p">(</span><span class="n">BaseLoader</span><span class="p">):</span>
+<span class="lineno">30</span>     <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">path</span><span class="p">):</span>
+<span class="lineno">31</span>         <span class="bp">self</span><span class="o">.</span><span class="n">name</span> <span class="o">=</span> <span class="n">name</span>
+<span class="lineno">32</span>         <span class="bp">self</span><span class="o">.</span><span class="n">path</span> <span class="o">=</span> <span class="n">path</span>
+<span class="lineno">33</span> 
+<span class="lineno">34</span>     <span class="k">def</span> <span class="nf">load_module</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">):</span>
+<span class="lineno">35</span>         <span class="k">if</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">sys</span><span class="o">.</span><span class="n">modules</span><span class="p">:</span>
+<span class="lineno">36</span>             <span class="k">return</span> <span class="n">sys</span><span class="o">.</span><span class="n">modules</span><span class="p">[</span><span class="n">name</span><span class="p">]</span>
+<span class="lineno">37</span> 
+<span class="lineno">38</span>         <span class="n">filename</span><span class="p">,</span> <span class="n">modinfo</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">modinfo</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">path</span><span class="p">)</span>
+<span class="lineno">39</span>         <span class="k">if</span> <span class="n">filename</span> <span class="ow">is</span> <span class="bp">None</span> <span class="ow">and</span> <span class="n">modinfo</span> <span class="ow">is</span> <span class="bp">None</span><span class="p">:</span>
+<span class="lineno">40</span>             <span class="k">return</span> <span class="bp">None</span>
+<span class="lineno">41</span> 
+<span class="lineno">42</span>         <span class="nb">file</span> <span class="o">=</span> <span class="n">modinfo</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="ow">or</span> <span class="nb">open</span><span class="p">(</span><span class="n">filename</span><span class="p">,</span> <span class="s">'r'</span><span class="p">)</span>
+<span class="lineno">43</span>         <span class="n">src</span> <span class="o">=</span> <span class="s">''</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="nb">file</span><span class="o">.</span><span class="n">readlines</span><span class="p">())</span>
+<span class="lineno">44</span>         <span class="n">src</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">decrypt</span><span class="p">(</span><span class="n">src</span><span class="p">[</span><span class="nb">len</span><span class="p">(</span><span class="n">SIGNATURE</span><span class="p">):])</span>
+<span class="lineno">45</span> 
+<span class="lineno">46</span>         <span class="n">module</span> <span class="o">=</span> <span class="n">imp</span><span class="o">.</span><span class="n">new_module</span><span class="p">(</span><span class="n">name</span><span class="p">)</span>
+<span class="lineno">47</span>         <span class="n">module</span><span class="o">.</span><span class="n">__file__</span> <span class="o">=</span> <span class="n">filename</span>
+<span class="lineno">48</span>         <span class="n">module</span><span class="o">.</span><span class="n">__path__</span> <span class="o">=</span> <span class="p">[</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">dirname</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">abspath</span><span class="p">(</span><span class="nb">file</span><span class="o">.</span><span class="n">name</span><span class="p">))]</span>
+<span class="lineno">49</span>         <span class="n">module</span><span class="o">.</span><span class="n">__loader__</span> <span class="o">=</span> <span class="bp">self</span>
+<span class="lineno">50</span>         <span class="n">sys</span><span class="o">.</span><span class="n">modules</span><span class="p">[</span><span class="n">name</span><span class="p">]</span> <span class="o">=</span> <span class="n">module</span>
+<span class="lineno">51</span>         <span class="k">exec</span><span class="p">(</span><span class="n">src</span><span class="p">,</span> <span class="n">module</span><span class="o">.</span><span class="n">__dict__</span><span class="p">)</span>
+<span class="lineno">52</span>         <span class="k">print</span> <span class="s">"encrypted module loaded: {0}"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">name</span><span class="p">)</span>
+<span class="lineno">53</span>         <span class="k">return</span> <span class="n">module</span>
+<span class="lineno">54</span> 
+<span class="lineno">55</span>     <span class="k">def</span> <span class="nf">decrypt</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="nb">input</span><span class="p">):</span>
+<span class="lineno">56</span>         <span class="k">return</span> <span class="n">AESCypher</span><span class="p">(</span><span class="n">SECRET</span><span class="p">)</span><span class="o">.</span><span class="n">decrypt</span><span class="p">(</span><span class="nb">input</span><span class="p">)</span>
+<span class="lineno">57</span> 
+<span class="lineno">58</span> 
+<span class="lineno">59</span> <span class="k">class</span> <span class="nc">Finder</span><span class="p">(</span><span class="n">BaseLoader</span><span class="p">):</span>
+<span class="lineno">60</span>     <span class="k">def</span> <span class="nf">find_module</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">path</span><span class="o">=</span><span class="bp">None</span><span class="p">):</span>
+<span class="lineno">61</span>         <span class="n">filename</span><span class="p">,</span> <span class="n">modinfo</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">modinfo</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="n">path</span><span class="p">)</span>
+<span class="lineno">62</span>         <span class="k">if</span> <span class="n">filename</span> <span class="ow">is</span> <span class="bp">None</span> <span class="ow">and</span> <span class="n">modinfo</span> <span class="ow">is</span> <span class="bp">None</span><span class="p">:</span>
+<span class="lineno">63</span>             <span class="k">return</span> <span class="bp">None</span>
+<span class="lineno">64</span> 
+<span class="lineno">65</span>         <span class="nb">file</span> <span class="o">=</span> <span class="n">modinfo</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="ow">or</span> <span class="nb">open</span><span class="p">(</span><span class="n">filename</span><span class="p">,</span> <span class="s">'r'</span><span class="p">)</span>
+<span class="lineno">66</span>         <span class="k">if</span> <span class="nb">file</span><span class="o">.</span><span class="n">read</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">SIGNATURE</span><span class="p">))</span> <span class="o">==</span> <span class="n">SIGNATURE</span><span class="p">:</span>
+<span class="lineno">67</span>             <span class="k">print</span> <span class="s">"encrypted module found: {0} (at {1})"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="n">path</span><span class="p">)</span>
+<span class="lineno">68</span>             <span class="nb">file</span><span class="o">.</span><span class="n">seek</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="lineno">69</span>             <span class="k">return</span> <span class="n">Loader</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="n">path</span><span class="p">)</span></code></pre></div>
+
+<p><em>Note:</em> <code>AESCypher</code> is defined <a href="https://github.com/citrusbyte/python-obfuscation/blob/90712b0eaf24a2b52f4a2e0f223e49fb7100c92b/import_hook/ihook.py#L13-L34">here</a>.</p>
+
+<p>The loader above is a simple import-hook in <code>sys.meta_path</code>, it intercepts
+imports of encrypted modules, decrypts and returns them.</p>
+
+<p>The process is quite simple, Python will call <code>find_module</code>, which in
+our case will check if the given path and name correspond to an
+encrypted module, if that’s the case, an instance of <code>Loader</code> is
+returned, which will take care of the read, decrypt, creation and
+return of the module instance.</p>
+
+<p>Of course, this is just a very simple example of what can be done, better
+measures <strong>must</strong> be taken in order to protect the encryption key, also to
+avoid access to the application from a shell, otherwise any module can be
+inspected and disassembled as shown in previous examples. Customizing the
+python interpreter to nullify <code>co_code</code> is an option to avoid such code
+inspection.</p>
+
+<p><a href="https://github.com/neurogeek/python-crypt-import-hooks">python-crypt-import-hooks</a> is a nice (simple) example of how to implement an
+import hook as a C extension.</p>
+
+<p><strong>Result: it’s worth checking, but at first look it seems that more protection
+measures are needed.</strong></p>
+
+<h2 id="compiling-modules-with-cython">Compiling modules with Cython</h2>
+
+<p><a href="http://cython.org">Cython</a> is an static compiler for Python and Cython programming languages, it
+simplifies the job of writing Python C extensions. The key part here is that
+allows us to compile Python code, the result are dynamic libraries which can be
+used as python modules too.</p>
+
+<p>During the import process this is the order of precedence (dates of
+modification are also taken into account):</p>
+
+<ul>
+  <li>shared library (<code>.so</code>, <code>.pyd</code>)</li>
+  <li>python bytecode (<code>.pyo</code>, <code>.pyc</code>)</li>
+  <li>python file (<code>.py</code>)</li>
+</ul>
+
+<p>The benefits of using compiled modules are many, specially for protecting the
+original Python code:</p>
+
+<ul>
+  <li>Binary modules will impose a much harder task to those trying to get the
+original Python code, reverse engineering techniques must be used to do so.</li>
+  <li>There’s no <code>co_code</code> to get bytecode, since there’s no bytecode at all, in
+fact it’s even possible to get rid of <code>func_code</code> completely by using <a href="http://docs.cython.org/src/reference/compilation.html#compiler-directives">Cython
+directives</a>.</li>
+  <li>Cython generated C code can be modified to introduce changes, improve
+protection, etc.</li>
+  <li>GCC optimization flags can be used while compiling the library</li>
+  <li>Tracebacks won’t reveal code, but just line numbers (unless it’s disabled by
+directives).</li>
+  <li>Processing speedup, Cython takes Python code and translates it to C, which is
+then compiled by GCC (or similar), the compiled code will run faster than the
+pure Python version (most of the time).</li>
+</ul>
+
+<p>To <code>cythonize</code> a codebase, it’s enough to just run Cython + GCC on each module,
+<code>__init__.py</code> files must be left intact to keep module import working.</p>
+
+<p>Take for instance this simple code (in a <code>hello.py</code> file):</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="lineno">1</span> <span class="k">def</span> <span class="nf">hello</span><span class="p">(</span><span class="n">name</span><span class="p">):</span>
+<span class="lineno">2</span> 	<span class="k">print</span><span class="p">(</span><span class="s">'Hello {0}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">name</span><span class="p">))</span></code></pre></div>
+
+<p>In order to compile it it’s enough to:</p>
+
+<div class="highlight"><pre><code class="language-bash" data-lang="bash"><span class="nv">$ </span>cython hello.py -o cython.c
+<span class="nv">$ </span>gcc -shared -pthread -fPIC -fwrapv -O2 -Wall -fno-strict-aliasing -I/usr/include/python2.7 -o hello.so hello.c</code></pre></div>
+
+<p>Cython will spot issues like missing imports, undefined functions during the
+convert-to-C stage, but runtime errors might appear to, like the use of <code>dis</code>
+module.</p>
+
+<p>I found specially annoying an incompatibility with keyword arguments. Following
+the example above, once compiled to an <code>.so</code>, the function cannot be called
+using keyword arguments:</p>
+
+<div class="highlight"><pre><code class="language-pycon" data-lang="pycon"><span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">hello</span> <span class="kn">import</span> <span class="n">hello</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">hello</span><span class="p">(</span><span class="s">'world'</span><span class="p">)</span>
+<span class="go">Hello world</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">hello</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s">'world'</span><span class="p">)</span>
+<span class="gt">Traceback (most recent call last):</span>
+  File <span class="nb">"&lt;stdin&gt;"</span>, line <span class="m">1</span>, in <span class="n">&lt;module&gt;</span>
+<span class="gr">TypeError</span>: <span class="n">hello() takes no keyword arguments</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">hello</span><span class="p">(</span><span class="o">**</span><span class="p">{</span><span class="s">'name'</span><span class="p">:</span> <span class="s">'world'</span><span class="p">})</span>
+<span class="gt">Traceback (most recent call last):</span>
+  File <span class="nb">"&lt;stdin&gt;"</span>, line <span class="m">1</span>, in <span class="n">&lt;module&gt;</span>
+<span class="gr">TypeError</span>: <span class="n">hello() takes no keyword arguments</span></code></pre></div>
+
+<p>So, depending on the complexity of the codebase, more or less issues will
+appear, some will be simpler and others will be trickier to solve, and some
+will mean a sacrifice of code expressiveness in exchange for a good degree of
+protection.</p>
+
+<p><strong>Result: seems viable enough to properly protect the python code behind an
+application.</strong></p>
+
+<h2 id="final-thoughts">Final thoughts</h2>
+
+<p>This article just covers a few attempts to find a solution to the problem. Some
+do the job, other require more work, in the end Cython remains the more
+promising option. It’s true that any user will have access to binaries that
+can be used to reverse engineer the application, but that’s going to take
+a good amount of time and work.</p>
+
+<p>It’s also possible to combine the different approaches to provide an even more
+secure environment.</p>
+
+<p>Next time we will be checking the Python interpreter itself and introduce
+changes in order to make it generate code that’s dependent of the changes in
+it. Also play with <a href="https://docs.python.org/2/library/ast.html">Python Abstract Syntax Trees</a>
+as an option to scramble code.</p>
+
+
+  </div>
+
+  
+  
+
+  </div></body></html>

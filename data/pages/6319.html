@@ -1,0 +1,85 @@
+<html><body><div><div class="post">
+  <p>Recently, I built an encrypted <a href="http://github.com/crodjer/qotr/">chat service</a>, which was based on <a href="http://www.tornadoweb.org/">tornado</a> and <a href="http://emberjs.com/">ember.js</a>. The project itself had grave security issues, so I shut it down, but while working on it I learned a few new things and testing websockets with tornado is one of them.</p>
+<p>Most of the material out there for this suggests developing separate client based tests, which I didn’t want to do. Eventually, I figured out that tornado already provides all the utilities to do unit/integration tests for websockets.</p>
+<p>First, we will need a websockets based echo server to test, lets call it <code>ws.py</code>. The websocket handler would be:</p>
+<div class="sourceCode"><pre class="sourceCode python"><code class="sourceCode python"><span class="im">from</span> tornado <span class="im">import</span> web, websocket
+
+<span class="kw">class</span> Echo(websocket.WebSocketHandler):
+
+    <span class="co"># Open allows for any number arguments, unlike what pylint thinks.</span>
+    <span class="co"># pylint: disable=W0221</span>
+    <span class="kw">def</span> <span class="bu">open</span>(<span class="va">self</span>):
+        <span class="va">self</span>.write_message(<span class="st">'hello'</span>)
+
+    <span class="kw">def</span> on_message(<span class="va">self</span>, message):
+        <span class="va">self</span>.write_message(message)
+
+    <span class="kw">def</span> on_close(<span class="va">self</span>):
+        <span class="va">self</span>.write_message(<span class="st">'bye'</span>)</code></pre></div>
+<p>Lets define an application which uses the above handler:</p>
+<div class="sourceCode"><pre class="sourceCode python"><code class="sourceCode python">APP <span class="op">=</span> web.Application([
+    (<span class="vs">r"/"</span>, Echo),
+])
+
+<span class="cf">if</span> <span class="va">__name__</span> <span class="op">==</span> <span class="st">"__main__"</span>:
+    APP.listen(<span class="dv">5000</span>)</code></pre></div>
+<p>Now, we will test the application out. Create a file, say <code>test_ws.py</code>:</p>
+<div class="sourceCode"><pre class="sourceCode python"><code class="sourceCode python"><span class="im">from</span> tornado <span class="im">import</span> testing, httpserver, gen, websocket
+<span class="im">from</span> ws <span class="im">import</span> APP
+
+<span class="kw">class</span> TestChatHandler(testing.AsyncTestCase):
+    <span class="cf">pass</span></code></pre></div>
+<p>We use tornado’s testing wrapper for the integration it provides with the event loop. Lets tell unittest how to setup the tests:</p>
+<div class="sourceCode"><pre class="sourceCode python"><code class="sourceCode python"><span class="kw">class</span> TestChatHandler(testing.AsyncTestCase):
+
+    <span class="kw">def</span> setUp(<span class="va">self</span>):
+        <span class="bu">super</span>(TestChatHandler, <span class="va">self</span>).setUp()
+        server <span class="op">=</span> httpserver.HTTPServer(APP)
+        socket, <span class="va">self</span>.port <span class="op">=</span> testing.bind_unused_port()
+        server.add_socket(socket)</code></pre></div>
+<p>We create a http server out of our application and get a socket bound to an unused port. We then ask the server to accept on the created socket. Don’t forget the <code>super</code> call, it ensures that the ioloop gets created. <code>unittest</code> will now ensure that a server and an ioloop is up and running before running tests.</p>
+<p>Moving forward, we need to define a helper for creating a websocket connection to the server. Tornado websocket provides a handly websocket client. It can be created with <code>websocket.websocket_connect</code>.</p>
+<div class="sourceCode"><pre class="sourceCode python"><code class="sourceCode python">    <span class="kw">def</span> _mk_connection(<span class="va">self</span>):
+        <span class="cf">return</span> websocket.websocket_connect(
+            <span class="st">'ws://localhost:{}/'</span>.<span class="bu">format</span>(<span class="va">self</span>.port)
+        )</code></pre></div>
+<p>We can write a simple test for this:</p>
+<div class="sourceCode"><pre class="sourceCode python"><code class="sourceCode python">    <span class="at">@testing.gen_test</span>
+    <span class="kw">def</span> test_hello(<span class="va">self</span>):
+        c <span class="op">=</span> <span class="cf">yield</span> <span class="va">self</span>._mk_connection()
+        <span class="co"># Get the initial hello from the server.</span>
+        response <span class="op">=</span> <span class="cf">yield</span> c.read_message()
+        <span class="co"># Make sure that we got a 'hello' not 'bye'</span>
+        <span class="va">self</span>.assertEqual(<span class="st">'hello'</span>, response)</code></pre></div>
+<p><code>testing.gen_test</code> is a wrapper over tornado’s <code>gen.coroutine</code>. It runs the test synchronously under the ioloop that <code>testing.AsyncTestCase</code> creates in <code>setUp</code>. The test checks for the ‘hello’ message that we expect from the server on connection. <code>yield</code> makes sure that we for the response from the server. Note that if you write a <code>yield c.read_message()</code> when a message from server isn’t expected, the coroutine will keep waiting, eventually raising <code>tornado.ioloop.TimeoutError</code> (5 seconds by default). Great, we can write lot of tests using just what we have now.</p>
+<p>The tests can be run via:</p>
+<pre><code>python -m tornado.testing discover</code></pre>
+<p>This could still be further improved. We need to yield and ignore the ‘hello’ message in every test, for every client. And in your application, it may be a more complicated handshake - possibly a few initial messages. Once you write a test for that handshake, it needn’t be re-written in every test. To avoid that, we will write an an abstraction over this:</p>
+<div class="sourceCode"><pre class="sourceCode python"><code class="sourceCode python">    <span class="at">@gen.coroutine</span>
+    <span class="kw">def</span> _mk_client(<span class="va">self</span>):
+        c <span class="op">=</span> <span class="cf">yield</span> <span class="va">self</span>._mk_connection()
+
+        <span class="co"># Discard the hello</span>
+        <span class="co"># This could be any initial handshake, which needs to be generalized</span>
+        <span class="co"># for most of the tests.</span>
+        _ <span class="op">=</span> <span class="cf">yield</span> c.read_message()
+
+        <span class="cf">raise</span> gen.Return(c)</code></pre></div>
+<p><code>_mk_client</code> here is a method in which you could place all the boilerplate. The key point here is the exception <code>gen.Return(c)</code> we raise in the end. <code>return</code> with a value is allowed only after Python <code>3.3</code>, so <code>tornado.gen</code> uses the value associated with this exception as the coroutine’s result.</p>
+<p>With <code>_mk_client</code> available, we can write tests which only include the relevant code:</p>
+<div class="sourceCode"><pre class="sourceCode python"><code class="sourceCode python">    <span class="at">@testing.gen_test</span>
+    <span class="kw">def</span> test_echo(<span class="va">self</span>):
+        <span class="co"># A client with the hello taken care of.</span>
+        c <span class="op">=</span> <span class="cf">yield</span> <span class="va">self</span>._mk_client()
+
+        <span class="co"># Send a 'foo' to the server.</span>
+        c.write_message(<span class="st">"foo"</span>)
+        <span class="co"># Get the 'foo' back.</span>
+        response <span class="op">=</span> <span class="cf">yield</span> c.read_message()
+        <span class="co"># Make sure that we got a 'foo' back and not 'bar'.</span>
+        <span class="va">self</span>.assertEqual(<span class="st">'foo'</span>, response)</code></pre></div>
+<p>The application built out of this post is available <a href="https://gist.github.com/crodjer/1e9989ab30fdc32db926">as a gist</a>.</p>
+
+
+</div>
+</div></body></html>

@@ -1,0 +1,175 @@
+<html><body><div><div class="content html_format"><p>
+      Давно уже перестало быть секретом, что Django-ORM в целом глупое как палка и не способно решать более менее серьезные задачи, и особо глупа в тех случаях, когда необходимо влиять извне на формирование разумных SQL запросов. Об одном из таких случаев и как я пытался с этим бороться — поведаю под катом.</p>
+<a name="habracut"/><p>
+Все началось с того, что ковыряние базы TecDoc навеяло мне идею реализовать свою систему хранения переводов в бд. Не долго думая я накидал такие модельки для приложения переводов и одну для издевательства:
+
+</p><pre><code class="python">class Translations(models.Model):
+    " переводы "
+    text = models.TextField(null=True, blank=True)
+    lng = models.SlugField(max_length=32, choices=settings.LANGUAGES, db_index=True)
+    des = models.ForeignKey("Designations", db_index=True, related_name='translations')
+
+    class Meta:
+        verbose_name = _("translation")
+        verbose_name_plural = _("translations")
+        ordering = ['lng']
+        # db_table='mlang_translations'
+
+
+class Designations(models.Model):
+    " описание (метка) перевода содержит только поле id"
+    class Meta:
+        verbose_name = _("designation")
+        verbose_name_plural = _("designations")
+        # db_table='mlang_designations'
+
+
+class Page(MPTTModel):
+    content = models.ForeignKey('mlang.Designations', null=True, blank=True, related_name="+")
+    keywords = models.ForeignKey('mlang.Designations', null=True, blank=True, related_name="+")
+    description = models.ForeignKey('mlang.Designations', null=True, blank=True, related_name="+")
+    title = models.ForeignKey('mlang.Designations', null=True, blank=True, related_name="+")
+    code = models.CharField(max_length=256, db_index=True)
+    parent = TreeForeignKey('self', null=True, blank=True)
+
+    # db_table='flatpages_page'
+</code></pre>
+<p>
+Работает это следующим образом:
+</p><p>
+Множество моделей ссылаются на метки переводов после чего можно получить перевод для поля на один из языков. Количество запросов в самом простом случае будет </p><code>1 + количество полей, которые надо перевести * количество объектов в выборке</code><p>.</p><p>
+Как видно из описания моделей, переводимые поля и сами переводы ссылаются на одну и ту же метку, что позволяет с легкостью форсировать саму метку при выборке переводов за счет прямого JOIN'а перевода к нужному полю. И вот тут то и начинаются пляски с бубном.
+</p><p>
+Начнем пожалуй с варианта «в лоб», который лучше не использовать, если других вариантов не существует: </p><a href="https://docs.djangoproject.com/en/dev/topics/db/sql/">QuerySet.raw</a><p> и получаем такой код:
+
+</p><pre><code class="python">Page.objects.raw("""
+select
+        fpage.id id,
+        content_translated.text content_translated,
+        title_translated.text title_translated,
+        keywords_translated.text keywords_translated,
+        description_translated.text description_translated
+from flatpages_page fpage
+        left join mlang_translations content_translated on fpage.content_id=content_translated.des_id and content_translated.lng=%s
+        left join mlang_translations description_translated on fpage.description_id=description_translated.des_id  and description_translated.lng=%s
+        left join mlang_translations keywords_translated on fpage.keywords_id=keywords_translated.des_id and keywords_translated.lng=%s
+        left join mlang_translations title_translated on fpage.title_id=title_translated.des_id and title_translated.lng=%s
+""", params=["ru", "ru", "ru", "ru"])
+</code></pre>
+<p>
+плюсы и минусы данного подхода расписывать думаю не надо.</p><p>
+естественно, если моделей много и/или надо получать переводы в нескольких вьюхах, и/или поля изменятся в какой-то момент — это будет кошмаром на яву.
+</p><p>
+начинаем активно гуглить на тему </p><code>django orm left join</code><p> дабы получить эквивалетный SQL запрос, но python/django way.
+</p><p>
+первое, что мне попалось на глаза — это подделать Q объект, так чтобы он превратился в LEFT JOIN: </p><a href="https://djangosnippets.org/snippets/257/">QLeftOuterJoin</a><p>, а если погуглить подольше и внимательнее можно заметить, что данное решение древнее как мамонты и примерно с 2010го года оно не работает. Попытки запустить успехом не увенчались.
+</p><p>
+потом в выдаче гугла встречаем некий "</p><a href="http://www.caktusgroup.com/blog/2009/09/28/custom-joins-with-djangos-queryjoin/">хак</a><p>" из коробки над QuerySet.query, который стандартными средствами позволяет вшить кастомный INNER/LEFT JOIN в QuerySet и для нашей экспериментальной выборки код будет выглядеть вот так:
+
+</p><pre><code class="python">        qs = Page.objects.filter(id__isnull=False) # костыль, иначе дальше не работает.
+        for field in Page._meta.local_fields:
+            if field.rel is not None and field.rel.to is Designations:
+                join = qs.query.join(
+                    (Page._meta.db_table, Translations._meta.db_table, ((field.name+'_id', 'des_id'),)),
+                    nullable=True,  # это LEFT JOIN
+                    join_field=Translations._meta.get_field_by_name('des')[0]
+                )
+                qs = qs.extra(
+                    select={
+                        field.name+"_translated": join+'.text'
+                    },
+                    where=[join+".lng=%s"],
+                    params=['ru']
+                )
+</code></pre>
+<p>
+Расскажу, что тут происходит: перебираем все поля модели Page и для каждого ForeignKey(Designations) генерим уникальный JOIN. В docstring query.join написано:
+</p><blockquote>'join_cols' is a tuple of tuples containing columns to join on ((l_id1, r_id1), (l_id2, r_id2))</blockquote><p>
+Т.е. 3-м элементом первого агрумента мы можем передать множество связывающих полей для условия, НО не можем сделать фильтрацию в пределах JOIN'a. В следствии чего в вызове qs.extra появились where и param, что в свою очередеть весь наш LEFT JOIN сломали в обычный INNER JOIN вида:
+
+</p><pre><code class="sql">SELECT ... FROM
+        flatpages_pages, mlang_translations t1, mlang_translations_t2, .....
+where
+      t1.lng='ru' AND t2.lng='ru' AND ......
+</code></pre>
+<p>
+С одной стороны можно сказать — это фича, если одно поле не переведено значит скрываем всю запись и отдаем 404ю. С другой стороны это совсем не то поведение, которое мне хочется по умолчанию.
+</p><p>
+Ну да ладно, идем дальше нормальным django way, описанном в документации: </p><a href="https://docs.djangoproject.com/en/dev/ref/models/querysets/#extra">QuerySet.extra</a><p> и напишем такую вспомогательную функцию для автоматической генерации переводов к нужной модели:
+
+</p><pre><code class="python">def translate(model, lng, exclude=None):
+    if exclude is not None and not isinstance(exclude, (list, tuple, set, frozenset,)):
+        raise TypeError('exclude must be iterable')
+
+    fields = []
+    for field in model._meta.fields:
+        if field.rel is not None and field.rel.to is Designations:
+            if exclude is not None and field.name in exclude:
+                continue
+            fields.append(
+                [field.name, map(lambda x: x[1], field.rel.get_joining_columns())[0]]
+            )
+    if not fields:
+        return {}
+    return dict(
+        tables=[
+            '"{trans._meta.db_table}" AS "trans_{pos}"'.format(trans=Translations, pos=pos)
+            for pos, val in enumerate(fields)
+        ],
+        select={
+            column[0] + "_translated": "trans_{0}.text".format(pos)
+            for pos, column in enumerate(fields)
+        },
+        where=[
+            "{model._meta.db_table}.{column[1]}=trans_{pos}.des_id and trans_{pos}.lng=%s".format(pos=pos,
+                                                                                                  column=column,
+                                                                                                  model=model)
+            for pos, column in enumerate(fields)
+        ],
+        params=[lng] * len(fields)
+    )
+</code></pre>
+<p>
+Работает она довольно просто: перебирает все ForeignKey(Designations) из переданной модели и заполняет словарь для передачи в QuerySet.extra в итоге получается такой вызов:
+
+</p><pre><code class="python">Page.objects.extra(**translate(Page, lng))
+</code></pre>
+<p>
+Смотрится красиво, НО это те же яйца только в профиль, что и в п2, только чистокровный INNER JOIN в тексте запроса…
+
+</p><b>upd:</b><p> Как и обещал дополняю статью новыми и окончательными результатми поиска ответов.
+</p><p>
+Все выше описанные способы опирались в основном на документацию и некоторые «хаки» без сильного углубления в подробности как это вообще работает в нутри.</p><p>
+Так вот, если посмотреть истодники класса Query в django.db.models.sql.query в частности саму функцию join можно заметить не хилую такую работу с словарями alias_map и join_map. join_map из себя представляет ни что иное как обычный словарь где в роли влюча идут кортежи, которые мы передаем 1м аргументом при вызове join, а значением выступает кортеж alias'ов для для точной идентификации join'a в запросе. alias_map же в роли ключей применяет те самые alias'ы, а в роли значения дескриптор самого JOIN'a, который потом и будет преобразован в SQL. Тип и формат дексриптора сводится к виду:
+</p><pre><code class="python">JoinInfo = namedtuple('JoinInfo',
+                      'table_name rhs_alias join_type lhs_alias '
+                      'join_cols nullable join_field')
+</code></pre><p>
+Само преобразование в SQL жестко захардкоржено, что полностью исключает вохможность без некого monkey patching'a в недрах django добавить возможность генерации JOIN'в умнее чем 
+</p><pre><code class="sql">LEFT OUTER JOIN table alias ON main_table.field=alias.field
+</code></pre>
+<p>
+НО, есть одно весомое но:</p><p>
+В погоне изящного решения я умудрился упустить из виду тот факт что наш left join из п.2 в целом и полностью рабочий и отвечает всем требованиям, но немного недосолен. Как написано во всех учебниках по SQL: LEFT JOIN подставляет NULL во все отсутствующие правые выборки, а следовательно мы можем раширить условие WHERE так чтобы п2 превратился в адекватный JEFT JOIN эквивалентый тому что описан в самом начале статьи. И код из п2 будет выглядеть вот так:
+</p><pre><code class="python">        qs = Page.objects.filter(id__isnull=False)  # иначе не запустится
+        for field in Page._meta.local_fields:
+            if field.rel is not None and field.rel.to is Designations:
+                alias = qs.query.join(
+                    (Page._meta.db_table, Translations._meta.db_table, ((field.name+"_id", 'des_id',),)),
+                    nullable=True,
+                    join_field=Translations._meta.get_field_by_name("des")[0]
+                )
+                qs = qs.extra(
+                    select={field.name+"_translated": alias+'.text'},
+                    where=["{0}.lng='{1}' or {0}.lng is null".format(alias, 'ru')],  #  добавил or lng is null
+                )
+</code></pre><p>
+на выходе получаем данные абсолютно идентичные SQL из Query.raw, вот только усложнили WHERE за счет переноса сюда фильтрации по языку, что поубавило читабельность конечного SQL и не могу однозначно сказать как это сказывается на скорости исполнения SQL на уровне бд относительно исходному. В целом можно сказать, что задача была решена, я смог избавиться от огромного количества ненужных запросов к бд за счет построения более умных запросов к бд не прибегая в написанию чистого SQL, что в свою очередь гарантирует переносимость кода между разными СУБД.
+</p><p>
+P.S: надеюсь кому-нибудь это небольше исследование поможет спать споконее.</p><p>
+Исходники можно пощупать на </p><a href="https://github.com/alexandr-nino/demo_ehop">github.com</a><p>.
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

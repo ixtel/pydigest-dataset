@@ -1,0 +1,86 @@
+<html><body><div><div class="content html_format">
+      <img src="https://habrastorage.org/getpro/habr/post_images/fa4/8d9/968/fa48d996844b0dd89817c8642351a091.png"/>
+<p>
+Хочу поведать поучительную историю ошибки в реализации функции urandom из модуля os в CPython на UNIX-подобных ОС (Linux, Mac OS X, etc.).
+</p><p>
+Цитата из </p><a href="https://docs.python.org/3.4/library/os.html#os.urandom">документации по тройке</a><p>:
+</p><blockquote>Return a string of n random bytes suitable for cryptographic use.<br/>
+<br/>
+This function returns random bytes from an OS-specific randomness source. The returned data should be unpredictable enough for cryptographic applications, though its exact quality depends on the OS implementation. On a Unix-like system this will query /dev/urandom, and on Windows it will use CryptGenRandom().</blockquote><a href="https://docs.python.org/2.7/library/os.html#os.urandom">Документация по двойке</a><p> добавляет:
+</p><blockquote>New in version 2.4.</blockquote><p>Другими словами, к примеру, под Linux, urandom читает и возвращает байты из системного устройства /dev/urandom. Напомню, что в этой ОС существуют два типичных устройства-источника энтропии: /dev/random и /dev/urandom. </p><a href="http://en.wikipedia.org/wiki//dev/random">Как известно</a><p>, первое устройство «медленное» и блокирующее, а второе «быстрое», и вопреки распространенному мнению, </p><a href="http://www.2uo.de/myths-about-urandom/">оба они криптостойкие источники (псевдо-)случайных чисел</a><p>. Сразу скажу, КДПВ к статье отношения не имеет и речь пойдёт совсем не о криптографии, безопасности </p><s>и об OpenSSL с Heartbleed-ом</s><p>.
+</p><p>
+Казалось бы, как можно ошибиться в реализации столь простой рутины? Как это часто бывает, дооптимизировались…
+</p><a name="habracut"/>
+<h5>2.4</h5><p>
+Возвратимся в конец 2004, выходит </p><s>Half-Life 2</s><p> CPython 2.4, </p><a href="http://web.archive.org/web/20061202094200/http://www.python.org/doc/2.4/whatsnew/whatsnew24.html">добавляя</a><p> такие привычные всем фичи как декораторы функций, множества (set), обратный порядок обхода (reversed) и list comprehensions, которые по ссылке названы generator expressions. Как люди без них могли вообще разрабатывать софт на Питоне?!
+</p><p>
+Выше уже писалось, что в том числе добавили os.urandom, имплементированную на самом Питоне. Давайте пофантазируем, как можно было бы написать urandom:
+</p><blockquote><font>def</font> urandom<font>(</font>n<font>)</font>:<br/>
+  <font>with</font> <font>open</font><font>(</font><font>'/dev/urandom'</font><font>,</font> <font>'rb'</font><font>)</font> <font>as</font> rnd:<br/>
+    <font>return</font> rnd.<font>read</font><font>(</font>n<font>)</font></blockquote><p>Вот так, три строчки. Причём, это абсолютно корректная реализация без ошибок, если не считать обработку исключений и прочие детали, чтобы соответствовать спецификации работы функции по докам. И тут чья-то светлая голова предлагает ускорить этот код. Как это возможно, спросите вы. Закешировав файловый объект, отвечает светлая голова.
+</p><blockquote>rnd <font>=</font> <font>None</font><br/>
+ <br/>
+<font>def</font> urandom<font>(</font>n<font>)</font>:<br/>
+  <font>if</font> rnd <font>is</font> <font>None</font>:<br/>
+    rnd <font>=</font> <font>open</font><font>(</font><font>'/dev/urandom'</font><font>,</font> <font>'rb'</font><font>)</font><br/>
+  <font>return</font> rnd.<font>read</font><font>(</font>n<font>)</font></blockquote><p>Какие проблемы появляются с такой реализацией? Скрипты, которые становятся демонами, падают при первом же вызове urandom после смерти родителя.
+
+</p><h5>fork()</h5><p>
+Многие в курсе, что системная функция </p><a href="http://en.wikipedia.org/wiki/Fork_(system_call)">fork()</a><p>, входящая в стандарт POSIX 2001 года и появившаяся в самой первой версии Unix, предназначена для порождения новых процессов методом «раздваивания», когда в системе появляется близнец процесса с идентичным окружением, но отдельным адресным пространством, и начинает работу он ровно с того самого места в коде, где был вызов fork(). Как правило, форки используют механизм copy-on-write, благодаря которому при создании процесса-близнеца («ребёнка») память физически не копируется. Вместо этого, из памяти родителя копируются страницы, в которые пишет близнец по мере своей работы. Это всё лирика, а нас же интересует следующая цитата из man fork:
+</p><blockquote>The child inherits copies of the parent's set of open file descriptors. Each file descriptor in the child refers to the same open file description (see open(2)) as the corresponding file descriptor in the parent. This means that the two descriptors share open file status flags, current file offset, and signal-driven I/O attributes</blockquote><p>Иначе говоря, файловые дескрипторы, принадлежащие питоновским file object-ам, после форка взаимосвязаны и ссылаются на один и тот же файл. Однако, если в одном процессе файл будет закрыт, то он </p><b>не</b><p> будет автоматически закрыт и в другом.
+</p><p>
+Ну fork и fork, скажете вы. Питон-то здесь причём? А при том что
+</p><ol>
+<li>поверх него работает multiprocessing*</li>
+<li><b>через него происходит демонизация</b></li>
+</ol><p>* с исправлением </p><a href="http://bugs.python.org/issue8713">#8713</a> <a href="https://docs.python.org/3/whatsnew/3.4.html#whatsnew-multiprocessing-no-fork">уже не всегда</a>
+<p>
+Благодаря fork-анию в multiprocessing-е дети изначально находятся в состоянии, которое было у главного процесса перед размножением. Что касается процесса демонизации (превращением в сервис в терминах Windows) — см. </p><a href="http://legacy.python.org/dev/peps/pep-3143/">PEP 3143</a><p>. Где-то в самом разгаре там происходит вызов fork(). И если по лучшим традициям закрывать в новоиспечённом демоне все файловые дескрипторы напрямую, не через close() (например, так: </p><font>os</font><p>.</p><font>closerange</font><font>(</font><font>3</font><font>,</font><font>256</font><font>)</font><p>), то os.urandom() рушится.
+</p><p>
+Примерно этими словами </p><a href="http://marc.info/?l=python-bugs-list&amp;m=124984793756728&amp;w=2">объясняли</a><p> пользователи CPython в начале 2005-го его разработчикам ошибку. Впрочем, Гвидо сначала пытался </p><s>строить из себя дурака</s><p> отнекиваться:
+</p><blockquote>I recommend to close this as invalid. The daemonization code is clearly broken.</blockquote><p>К счастью, люди смогли убедить царя в обратном, и, наконец, в июле </p><a href="http://hg.python.org/cpython/rev/c5888413412b">кеширование /dev/urandom убрали</a><p> — прошло более полугода. Обращаю внимание на то, как это сделали: в коде нет ни ссылки на номер бага, ни указания на причины патча, ни, в конце концов, просто поясняющего комментария. Работает, и хорошо.
+
+</p><h5>3.4</h5><p>
+Проходит 9 лет. В марте 2014 </p><a href="https://docs.python.org/3/whatsnew/3.4.html">выходит</a><p> CPython 3.4. Он добавляет такие нужные фичи, как… wait, oh shi
+</p><blockquote>No new syntax features were added in Python 3.4.</blockquote><p>Ладно-ладно, если серьёзно, прогресс большой: кучу библиотек приняли, к примеру, asyncio, о котором уже много писали на Хабре, безопасность улучшили, освобождение объектов подкрутили — не мне об этом рассказывать. Главное, что перед релизом нашлись люди, которые посчитали, что реализация /dev/urandom на Питоне адски медленная, и true performance может обеспечить только старый добрый C. В общем функцию переписали… и снова </p><a href="http://bugs.python.org/issue21207">наступили на те же самые грабли</a><p>. И никакой </p><a href="http://legacy.python.org/dev/peps/pep-0446/">PEP 446</a><p> им не помог. Патч </p><a href="http://hg.python.org/cpython/rev/d3e8db93dc18">вышел 24 апреля</a><p> и на этот раз уже содержал в изобилии комментарии, ссылку на баг и даже regression тесты.
+
+</p><h5>Какое мне до этого дело</h5><p>
+В качестве бонуса к статье, расскажу, как я споткнулся об эту ошибку. Рабочая система у меня Ubuntu 14.04 LTS, и, к сожалению, на ней
+</p><blockquote><font>import</font> <font>platform</font><br/>
+<font>platform</font>.<font>python_build</font><font>(</font><font>)</font><br/>
+<font>(</font><font>'default'</font><font>,</font> <font>'Apr 11 2014 13:05:11'</font><font>)</font></blockquote><p>У меня работал демонизирующий код, закрывающий все файловые дескрипторы. И вот ведь беда,
+</p><blockquote><font>import</font> <font>os</font><br/>
+<font>print</font><font>(</font><font>os</font>.<font>listdir</font><font>(</font><font>'/proc/self/fd'</font><font>)</font><font>)</font><br/>
+<font>import</font> <font>random</font><br/>
+<font>print</font><font>(</font><font>os</font>.<font>listdir</font><font>(</font><font>'/proc/self/fd'</font><font>)</font><font>)</font></blockquote><p> печатает
+</p><blockquote><code>['0', '1', '2', '3']</code><br/>
+<code>['0', '1', '2', '3', '4']</code></blockquote><p>Эксперимент не совсем чистый, т.к. os.listdir создаёт свой дескриптор в обоих случаях под последним номером. После импорта random открылся номер 3. Какому файлу он соответствует?
+</p><blockquote><font>print</font><font>(</font><font>os</font>.<font>readlink</font><font>(</font><font>'/proc/self/fd/3'</font><font>)</font><font>)</font></blockquote><blockquote><code>/dev/urandom</code></blockquote><p>Та-дам! Я всегда плохо относился к работе при импорте модулей… В данном случае, привожу окончание random.py:
+</p><blockquote><font>from</font> <font>os</font> <font>import</font> urandom <font>as</font> _urandom<br/>
+ <br/>
+<font>class</font> Random<font>(</font>_random.<font>Random</font><font>)</font>:<br/>
+    <font># ...</font><br/>
+    <font>def</font> <font>__init__</font><font>(</font><font>self</font><font>,</font> x<font>=</font><font>None</font><font>)</font>:<br/>
+        <font># ...</font><br/>
+        <font>self</font>.<font>seed</font><font>(</font>x<font>)</font><br/>
+        <font>self</font>.<font>gauss_next</font> <font>=</font> <font>None</font><br/>
+ <br/>
+    <font>def</font> seed<font>(</font><font>self</font><font>,</font> a<font>=</font><font>None</font><font>,</font> version<font>=</font><font>2</font><font>)</font>:<br/>
+        <font># ...</font><br/>
+        <font>if</font> a <font>is</font> <font>None</font>:<br/>
+            <font>try</font>:<br/>
+                a <font>=</font> <font>int</font>.<font>from_bytes</font><font>(</font>_urandom<font>(</font><font>32</font><font>)</font><font>,</font> <font>'big'</font><font>)</font><br/>
+            <font>except</font> <font>NotImplementedError</font>:<br/>
+                <font># ...</font></blockquote><p>Остается заметить, что import random делают Tornado, Twisted, uuid, и целая куча других библиотек, стандартных и не очень.
+</p><p>
+Надо заметить, что сначала я не совсем верно понял суть проблемы, необоснованно решив, что файловые дескрипторы ребёнка и родителя закрываются одновременно. Спасибо </p><a href="https://habrahabr.ru/users/kekekeks/" class="user_link">kekekeks</a><p> за </p><a href="http://habrahabr.ru/post/223981/#comment_7623189">восстановление полной картины этого бага</a><p>.
+
+</p><h5>Выводы</h5><p>
+Следует всегда думать об извечных проблемах fork() при разработке библиотек, всегда комментировать багфиксы в коде и внимательно читать сообщения о проблемах пользователей (по крайней мере, если они программисты).
+
+      
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

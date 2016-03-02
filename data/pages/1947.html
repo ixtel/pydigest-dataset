@@ -1,0 +1,352 @@
+<html><body><div><div class="entry">
+                                <p><a href="https://www.djangoproject.com/">Django</a> is an awesome framework for building web services using the Python language. However, it is not well-suited for handling long-lived connections, which are needed for realtime data push. In this article we’ll explain how to pair Django with <a href="http://fanout.io/">Fanout</a> to reach realtime nirvana.</p>
+<p><span id="more-929"/></p>
+<h3>How it works</h3>
+<p>The Fanout realtime push CDN gives web services realtime superpowers. The architecture is similar to a traditional caching CDN, except that Fanout is designed for pushing data rather than caching. Django applications can run behind Fanout to easily support realtime behaviors such as WebSockets, HTTP streaming, and HTTP long-polling.</p>
+<p><a href="http://blog.fanout.io/wp-content/uploads/2014/11/djfanout.png"><img class="alignnone size-full wp-image-1060" src="http://blog.fanout.io/wp-content/uploads/2014/11/djfanout.png" alt="djfanout" srcset="http://blog.fanout.io/wp-content/uploads/2014/11/djfanout-300x140.png 300w, http://blog.fanout.io/wp-content/uploads/2014/11/djfanout.png 483w" sizes="(max-width: 483px) 100vw, 483px"/></a></p>
+<p>The <a href="https://github.com/fanout/django-grip">django-grip</a> library is used to communicate with Fanout. “GRIP” is the name of Fanout’s <a href="/2013/02/10/http-grip-proxy-hold-technique/">open protocol</a> for communication between Fanout and the backend application. For example, to hold a request open in streaming mode, the Django application simply calls set_hold_stream() on the request object before returning the response:</p>
+<pre class="brush: python">from django_grip import set_hold_stream
+
+def endpoint(request):
+    set_hold_stream(request, 'test')
+    return HttpResponse('[stream open]\n')
+</pre>
+<p>The above code will instruct Fanout to send the response to the client, but keep the request open and subscribed to a channel called “test”. Fanout holds the request open by stripping any Content-Length header in the response (as well as switching to chunked encoding if the client supports HTTP 1.1). From the perspective of the Django application, the HTTP request will have completed, but the request between the client and Fanout will remain open.</p>
+<p>Whenever the server has data to push to any listening clients, it calls publish():</p>
+<pre class="brush: python">from gripcontrol import HttpStreamFormat
+from django_grip import publish
+...
+publish('test', HttpStreamFormat('hello world\n'))</pre>
+<p>The HttpStreamFormat encapsulates a chunk of response body to be sent. Under the hood, the publish() call performs an asynchronous HTTP POST to send the data to Fanout.</p>
+<p>The django-grip library also includes facilities for WebSockets and long-polling, which we will discuss later on in this article.</p>
+<h3>Why Fanout?</h3>
+<p>So many reasons. First, the inline proxying technique has some great benefits:</p>
+<ul>
+<li>Code consolidation. No need to split out your realtime code into a custom application (e.g. a Tornado or Node.js app).</li>
+<li>You get the simplicity of something like Faye or Pusher, but with the low-level network control of a custom application. Fanout is ideal for API creators.</li>
+<li>Django’s many features such as authentication, middleware, debugging, etc. become available through Fanout.</li>
+</ul>
+<p>Of course, Fanout being a cloud service means even more nice things:</p>
+<ul>
+<li>Delegating realtime push through an edge network such as Fanout is the key to high scalability.</li>
+<li>No additional servers to manage. Your Django application is all you need.</li>
+</ul>
+<h3>Headline example</h3>
+<p>To demonstrate how to use Fanout with Django, we’ll walk through the complete process of making a simple “headline” service that allows storage and retrieval of text messages. Whenever a headline is changed, updates will be pushed out to interested listeners. You can imagine this service being useful for marquees or broadcast alerts.</p>
+<p>We’ll start out by first building a non-realtime version of the headline API. We generally recommend that all projects start out this way. Get your CRUD stuff working reliably before you delve into realtime.</p>
+<p>Below is the data model for our app (“headlineapp”). Nothing out of the ordinary.</p>
+<pre class="brush: python">from django.db import models
+
+class Headline(models.Model):
+    type = models.CharField(max_length=64)
+    title = models.CharField(max_length=200)
+    text = models.TextField()
+    date = models.DateTimeField(auto_now=True)
+
+    def to_data(self):
+        out = dict()
+        out['id'] = str(self.id)
+        out['type'] = self.type
+        if self.title:
+            out['title'] = self.title
+        out['date'] = self.date.isoformat()
+        out['text'] = self.text
+        return out
+
+    def __unicode__(self):
+        return u'%s: %s' % (self.type, self.text[:100])
+</pre>
+<p>Headlines have a type, title, text, and automatic timestamp. The type field is intended to be machine-readable to determine how the headline should be displayed. The title and text fields are human-readable. The title field could be used as the title of a pop-up window, for example if the headline is used for an alert. The to_data() method is a convenience method that converts the object into a JSON-encodable data structure.</p>
+<p>Now for the view code:</p>
+<pre class="brush: python">import json
+import calendar
+from django.http import HttpResponse, HttpResponseNotModified, \
+    HttpResponseNotAllowed
+from django.shortcuts import get_object_or_404
+from headlineapp.models import Headline
+
+def _json_response(data):
+    body = json.dumps(data, indent=4) + '\n' # pretty print
+    return HttpResponse(body, content_type='application/json')
+
+def base(request):
+    if request.method == 'POST':
+        h = Headline(type='none', title='', text='')
+        h.save()
+        return _json_response(h.to_data())
+    else:
+        return HttpResponseNotAllowed(['POST'])
+
+def item(request, headline_id):
+    h = get_object_or_404(Headline, pk=headline_id)
+
+    if request.method == 'GET':
+        inm = request.META.get('HTTP_IF_NONE_MATCH')
+        etag = '"%s"' % calendar.timegm(h.date.utctimetuple())
+        if inm == etag:
+            resp = HttpResponseNotModified()
+        else:
+            resp = _json_response(h.to_data())
+        resp['ETag'] = etag
+        return resp
+    elif request.method == 'PUT':
+        hdata = json.loads(request.read())
+        h.type = hdata['type']
+        h.title = hdata.get('title', '')
+        h.text = hdata.get('text', '')
+        h.save()
+        hdata = h.to_data()
+        etag = '"%s"' % calendar.timegm(h.date.utctimetuple())
+        resp = _json_response(hdata)
+        resp['ETag'] = etag
+        return resp
+    else:
+        return HttpResponseNotAllowed(['GET', 'PUT'])
+</pre>
+<p>Lastly, the url mappings:</p>
+<pre class="brush: python">from django.conf.urls import patterns, url
+from headlineapp import views
+
+urlpatterns = patterns('',
+    url(r'^$', views.base, name='base'),
+    url(r'^(?P\d+)/$', views.item, name='item'),
+)
+</pre>
+<p>With this code, we have an API that lets us:</p>
+<ul>
+<li>POST / in order to create a new empty headline object and receive its id.</li>
+<li>PUT /{headline-id}/ to update a headline object.</li>
+<li>GET /{headline-id}/ to retrieve a headline object (with ETag support).</li>
+</ul>
+<p>Here’s how curl could be used to create a headline:</p>
+<pre class="brush: js">$ curl -X POST http://api.headlineapp.org/
+{
+    "date": "2014-10-30T05:47:44.666900+00:00", 
+    "text": "", 
+    "type": "none", 
+    "id": "1"
+}</pre>
+<p>Updating a headline:</p>
+<pre class="brush: js">$ curl -d '{"type":"normal", "text": "hello to the world"}' \
+  -X PUT http://api.headlineapp.org/1/
+{
+    "date": "2014-10-30T05:48:28.601426+00:00", 
+    "text": "hello to the world", 
+    "type": "normal", 
+    "id": "1"
+}</pre>
+<p>Getting the current value of a headline:</p>
+<pre class="brush: js">$ curl http://api.headlineapp.org/1/
+{
+    "date": "2014-10-30T05:48:28.601426+00:00", 
+    "text": "hello to the world", 
+    "type": "normal", 
+    "id": "1"
+}</pre>
+<p>Still with us? Up until this point all we’ve done is create a conventional, non-realtime API. Next we’ll add Fanout into the mix and liven things up!</p>
+<h3>Fanout configuration</h3>
+<p>Our headline API uses the domain “api.headlineapp.org”, which we’ve added as a virtual host in the Fanout control panel:</p>
+<p><a href="http://blog.fanout.io/wp-content/uploads/2014/11/fanoutdomain3.png"><img class="alignnone size-full wp-image-1042" src="http://blog.fanout.io/wp-content/uploads/2014/11/fanoutdomain3.png" alt="fanoutdomain3" srcset="http://blog.fanout.io/wp-content/uploads/2014/11/fanoutdomain3-300x132.png 300w, http://blog.fanout.io/wp-content/uploads/2014/11/fanoutdomain3.png 594w" sizes="(max-width: 594px) 100vw, 594px"/></a></p>
+<p>We’ve set it to route to our backend Django application running on Heroku. Of course you can run your own backend application anywhere and you can use any domain name.</p>
+<p>We also enable the WebSocket-over-HTTP protocol:</p>
+<p><a href="http://blog.fanout.io/wp-content/uploads/2014/11/fanoutwoh4.png"><img class="alignnone size-full wp-image-1043" src="http://blog.fanout.io/wp-content/uploads/2014/11/fanoutwoh4.png" alt="fanoutwoh4" srcset="http://blog.fanout.io/wp-content/uploads/2014/11/fanoutwoh4-300x168.png 300w, http://blog.fanout.io/wp-content/uploads/2014/11/fanoutwoh4.png 557w" sizes="(max-width: 557px) 100vw, 557px"/></a></p>
+<p>On the Django side, we need the django-grip library installed. We can get it with pip:</p>
+<pre class="brush: bash">pip install django-grip
+</pre>
+<p>In our project’s settings.py file, we include the GRIP middleware:</p>
+<pre class="brush: python">MIDDLEWARE_CLASSES = (
+    ...
+    'django_grip.GripMiddleware',
+    ...
+)</pre>
+<p>Finally, we need to set GRIP_PROXIES to contain the Fanout settings:</p>
+<pre class="brush: python">GRIP_PROXIES = [
+    {
+        'key': b64decode('{realm-key}'),
+        'control_uri': 'http://api.fanout.io/realm/{realm}',
+        'control_iss': '{realm}'
+    }
+]</pre>
+<p>Substitute {realm} and {realm-key} with your own Fanout credentials.</p>
+<p>For a more compact GRIP configuration, you can use a URL representation instead. This can be handy if you want to use environment variables for configuration, which is what we do for our instance based on Heroku. For example:</p>
+<pre class="brush: python">from django_grip import parse_grip_uri
+
+grip_url = 'http://api.fanout.io/realm/{realm}?iss={realm}' \
+           '&amp;key=base64:{realm-key}'
+GRIP_PROXIES = [parse_grip_uri(grip_url)]</pre>
+<p>Note: If you decide to configure via URL, be sure that your realm-key is URL-encoded. Not all Base64 characters are URL-safe.</p>
+<h3>Realtime!</h3>
+<p>Now that Fanout is in place, it’s time for the fun part. We’ll start simple and add support for <a href="http://www.html5rocks.com/en/tutorials/eventsource/basics/">Server-Sent Events (SSE)</a> to our Django application. Browsers can consume an SSE endpoint using the EventSource JavaScript API. It is the easiest way to push data in realtime to modern browsers.</p>
+<p>First, we’ll need some new includes:</p>
+<pre class="brush: python">...
+from gripcontrol import HttpStreamFormat
+from django_grip import set_hold_stream, publish
+...</pre>
+<p>We can look for the Accept header to determine if the client wants SSE:</p>
+<pre class="brush: python">...
+if request.method == 'GET':
+    if request.META.get('HTTP_ACCEPT') == 'text/event-stream':
+        set_hold_stream(request, 'headline-%s' % headline_id)
+        return HttpResponse(content_type='text/event-stream')
+    else:
+        # original GET code
+        ...
+</pre>
+<p>The set_hold_stream() call puts special instructions in the HTTP response telling Fanout to keep the request open and subscribe it to the specified channel.</p>
+<p>All that’s left is to publish updates whenever a headline changes, which we can do in the PUT handler:</p>
+<pre class="brush: python">...
+elif request.method == 'PUT':
+    hdata = json.loads(request.read())
+    h.type = hdata['type']
+    h.title = hdata.get('title', '')
+    h.text = hdata.get('text', '')
+    h.save()
+    hdata = h.to_data()
+    etag = '"%s"' % calendar.timegm(h.date.utctimetuple())
+
+    # publish
+    formats = list()
+    formats.append(HttpStreamFormat('event: update\ndata: %s\n\n' % hjson))
+    publish('headline-%s' % headline_id, formats)
+
+    resp = _json_response(hdata)
+    ...
+</pre>
+<p>The publish call pushes data on the specified channel in one or more formats. We use the HttpStreamFormat here, which specifies a chunk of HTTP response body to send. Since we’re implementing the SSE protocol, we make sure to send data with the proper formatting. The publish() call is asynchronous and does not block the calling thread.</p>
+<p>Consuming SSE from a browser is easy:</p>
+<pre class="brush: js">var es = new EventSource('http://api.headlineapp.org/1/');
+es.addEventListener('update', function (e) {
+    console.log(e.data);
+}, false);</pre>
+<p>There you have it! Just a few lines of code and we’ve got a massively scalable realtime API, completely defined and controlled by Django. Connecting clients don’t even know Fanout is there.</p>
+<h3>What about WebSockets?</h3>
+<p>Yes, with Fanout, Django can even use WebSockets! Fanout will bundle incoming WebSocket events into HTTP requests and send them to the Django application. Fanout will expect responses to contain bundled WebSocket events as well. You don’t really have to think about this, though, as the django-grip library includes a socket-like abstraction that takes care of the marshalling for you.</p>
+<p>Let’s add some basic WebSocket handler code to the headline project. First, we need another include:</p>
+<pre class="brush: python">...
+from gripcontrol import WebSocketMessageFormat
+...</pre>
+<p>And here’s the code that handles incoming requests and messages:</p>
+<pre class="brush: python">...
+def item(request, headline_id):
+    h = get_object_or_404(Headline, pk=headline_id)
+
+    # websocket handling
+    if request.wscontext:
+        ws = request.wscontext
+        if ws.is_opening():
+            ws.accept()
+            ws.subscribe('headline-%s' % headline_id)
+        while ws.can_recv():
+            message = ws.recv()
+            if message is None:
+                ws.close()
+                break
+        return HttpResponse()
+
+    elif request.method == 'GET':
+        ...
+</pre>
+<p>The django-grip middleware sets a wscontext property on every request object. If the incoming request was a WebSocket-over-HTTP request, then the property will be a socket-like object. Otherwise, the property will be set to None.</p>
+<p>The above code accepts all connections, and subscribes them to channels. It also reads all incoming messages but does nothing with them. If a close event is received (indicated by a None response to the ws.recv() call), then the WebSocket is cleanly closed. Just to be clear here, the Django application is not using WebSockets directly. It is all simulated within the django-grip library and transported over normal HTTP. For more information about the WebSocket-over-HTTP protocol, see the <a href="https://github.com/fanout/pushpin/blob/master/doc/websocket-over-http.md">spec</a>.</p>
+<p>You’ll notice that the WebSocket code path also returns an empty HttpResponse object. This is needed to satisfy middlewares that are expecting a proper response object to be returned by the view. However, this response is not sent back to the requestor. The django-grip middleware will end up hijacking and rewriting the response based on the actions taken with the request.wscontext object.</p>
+<p>Now for the publishing code. We’ll just publish the headline object in JSON format as the WebSocket message:</p>
+<pre class="brush: python">...
+# publish
+formats = list()
+formats.append(HttpStreamFormat('event: update\ndata: %s\n\n' % hjson))
+formats.append(WebSocketMessageFormat(hjson)) # websocket message
+publish('headline-%s' % headline_id, formats)
+...
+</pre>
+<p>Clients can then connect via WebSocket to a URI such as ws://api.headlineapp.org/1/ and receive realtime updates of the headline object. The <a href="http://www.websocket.org/echo.html">WebSocket.org Echo Test</a> can be handy for testing.</p>
+<p>Well that was easy. With just a few more lines of code, we now have a massively scalable and stateless (!) WebSocket API. As with our SSE implementation above, it is completely defined and controlled by Django, and Fanout is invisible to connecting clients.</p>
+<h3>How about long-polling?</h3>
+<p>So, you’re more of a long-polling person? We should be <a href="/2013/03/04/long-polling-doesnt-totally-suck/">friends</a>.</p>
+<p>Holding requests open for long-polling is similar to the way we handled streaming earlier. The difference is that instead of calling set_hold_stream() and publishing HttpStreamFormat objects, you call set_hold_longpoll() and publish HttpResponseFormat objects.</p>
+<p>For our headline service, we’ll make the long-polling work like <a href="http://code.realcrowd.com/restful-realtime/">RealCrowd’s API</a>, where the client can perform a conditional long-polling request based on ETags. We’ll deviate slightly by using a “Wait” header in the request instead of a query parameter. If the client makes a request including an If-None-Match header and a Wait header, and the value of If-None-Match matches the ETag known by the server, then the server should hold the request open rather than respond right away.</p>
+<p>The new includes:</p>
+<pre class="brush: python">...
+from gripcontrol import HttpResponseFormat
+from django_grip import set_hold_longpoll
+...</pre>
+<p>And the extra code to look for the Wait header and use long-polling if necessary:</p>
+<pre class="brush: python">...
+elif request.method == 'GET':
+    if request.META.get('HTTP_ACCEPT') == 'text/event-stream':
+        ...
+    else:
+        wait = request.META.get('HTTP_WAIT')
+        if wait:
+            wait = int(wait)
+            if wait &lt; 1:
+                wait = None
+            if wait &gt; 300:
+                wait = 300
+        inm = request.META.get('HTTP_IF_NONE_MATCH')
+        etag = '"%s"' % calendar.timegm(h.date.utctimetuple())
+        if inm == etag:
+            resp = HttpResponseNotModified()
+            if wait:
+                set_hold_longpoll(request, 'headline-%s' % headline_id,
+                    timeout=wait)
+        else:
+            resp = _json_response(h.to_data())
+        resp['ETag'] = etag
+        return resp
+...</pre>
+<p>The set_hold_longpoll() call puts special instructions in the HTTP response telling Fanout to keep the request open and subscribe it to the specified channel. Unlike streaming, where the response is sent to the client right away, in long-polling mode nothing is sent right away. The response is used for timeout purposes instead. We’ll still specify a 304 response then, which will be sent to the client if the timeout elapses.</p>
+<p>Publishing:</p>
+<pre class="brush: python">...
+hdata = h.to_data()
+hjson = json.dumps(hdata)
+etag = '"%s"' % calendar.timegm(h.date.utctimetuple())
+rheaders = {'ETag': etag}
+hpretty = json.dumps(hdata, indent=4) + '\n'
+
+# publish
+formats = list()
+formats.append(HttpResponseFormat(body=hpretty, headers=rheaders))
+formats.append(HttpStreamFormat('event: update\ndata: %s\n\n' % hjson))
+formats.append(WebSocketMessageFormat(hjson)) # websocket message
+publish('headline-%s' % headline_id, formats)
+...
+</pre>
+<p>When publishing HTTP responses, the entire response may be specified. For the body, we use the pretty-printed form of the JSON, and we also specify headers. This way, the client receives a consistent style of response whether long-polling or not.</p>
+<p>Notice how we’re specifying three formats for a single item at publish time. Fanout only delivers items to listeners if there is an available representation of the item based on the type of listener. We want to be able to publish data to WebSocket clients, streaming clients, <em>and</em> long-polling clients all at once, so we include all of these formats.</p>
+<p>Let’s try it out with curl. First, we’ll get the current value of a headline:</p>
+<pre class="brush: js">$ curl -i http://api.headlineapp.org/1/
+HTTP/1.1 200 OK
+Content-Type: application/json
+Etag: "1415266317"
+...
+
+{
+    "type": "hidden", 
+    "text": "", 
+    "date": "2014-11-06T09:31:57.795823+00:00", 
+    "id": "1"
+}</pre>
+<p>Now we’ll start a long-poll for changes:</p>
+<pre class="brush: js">$ curl -i -H 'If-None-Match: "1415266317"' \
+  -H 'Wait: 10' http://api.headlineapp.org/1/</pre>
+<p>If we wait 10 seconds, we’ll eventually get:</p>
+<pre class="brush: js">HTTP/1.1 304 NOT MODIFIED
+Etag: "1415266317"
+...
+</pre>
+<p>If we issue the same request again, and while the request is hanging open we modify the headline object with PUT, then the original request will receive the updated object right away:</p>
+<pre class="brush: js">HTTP/1.1 200 OK
+ETag: "1415944588"
+...
+
+{
+    "type": "normal", 
+    "text": "hello to the world", 
+    "date": "2014-11-14T05:56:28.522877+00:00", 
+    "id": "1"
+}</pre>
+<p>There you have it! Creating your own custom long-polling API like this couldn’t be easier.</p>
+<h3>Next-generation realtime</h3>
+<p>We hope you enjoy <a href="http://fanout.io/">Fanout</a> and the <a href="https://github.com/fanout/django-grip">django-grip</a> library. The complete code of the headline project is <a href="https://github.com/fanout/headline">on github</a>. Happy pushing!</p>
+ <p class="subtome"><span class="subtome-description">Liked this post? Follow this blog to get more.</span> <input type="button" value="Follow"/></p>                             </div>
+                        </div></body></html>

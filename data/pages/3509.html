@@ -1,0 +1,127 @@
+<html><body><div><div class="entry clear">
+								<p>A common problem when developing spiders is dealing with sites that use a heavy amount of JavaScript. It’s not uncommon for a page to require JavaScript to be executed in order to render the page properly. In this post we’re going to show you how you can use Splash to handle JavaScript in your Scrapy projects.</p>
+<h1>What is Splash?</h1>
+<p/>
+<p><a href="https://github.com/scrapinghub/splash">Splash</a> is our in-house solution for JavaScript rendering, implemented in Python using <a href="https://twistedmatrix.com/">Twisted</a> and <a href="http://qt-project.org/">QT</a>. Splash is a lightweight web browser which is capable of processing multiple pages in parallel, executing custom JavaScript in the page context, and much more. Best of all, it’s open source!</p>
+<h1>Setting Up Splash</h1>
+<p/>
+<p>The easiest way to set up Splash is through <a href="https://www.docker.com/">Docker</a>:</p>
+<pre>$ docker run -p 8050:8050 scrapinghub/splash
+</pre>
+<p>Splash will now be running on localhost:8050. If you’re on OS X, it will be running on the IP address of <a href="http://boot2docker.io/">boot2docker</a>’s virtual machine.</p>
+<p>If you would like to install Splash without using Docker, please refer to the <a href="http://splash.readthedocs.org/en/latest/install.html">documentation</a>.</p>
+<h1>Using Splash with Scrapy</h1>
+<p/>
+<p>Now that Splash is running, you can test it in your browser:</p>
+<pre>http://localhost:8050/</pre>
+<p>On the right enter a URL (e.g. <a href="http://amazon.com" rel="nofollow">http://amazon.com</a>) and click ‘Render me!’. Splash will display a screenshot of the page as well as charts and a list of requests with their timings. At the bottom you should see a textbox containing the rendered HTML.</p>
+<h2>Manually</h2>
+<p>You can use <a href="http://doc.scrapy.org/en/latest/topics/request-response.html#request-objects">Request</a> to send links to Splash:</p>
+<pre>req_url = "http://localhost:8050/render.json"
+body = json.dumps({
+    "url": url,
+    "har": 1,
+    "html": 0,
+})
+headers = Headers({'Content-Type': 'application/json'})
+yield scrapy.Request(req_url, self.parse_link, method='POST',
+                                 body=body, headers=headers)
+</pre>
+<p>If you’re using <a href="http://doc.scrapy.org/en/latest/topics/spiders.html#crawlspider">CrawlSpider</a>, the easiest way is to override the <em>process_links</em> function in your spider to replace links with their Splash equivalents:</p>
+<pre>def process_links(self, links):
+    for link in links:
+        link.url = "http://localhost:8050/render.html?" + urlencode({ 'url' : link.url })
+    return links
+</pre>
+<h2>ScrapyJS (recommended)</h2>
+<p>The preferred way to integrate Splash with Scrapy is using <a href="https://github.com/scrapinghub/scrapyjs">ScrapyJS</a>. You can install ScrapyJS using pip:</p>
+<pre>pip install scrapyjs</pre>
+<p>To use ScrapyJS in your project, you first need to enable the middleware:</p>
+<pre>DOWNLOADER_MIDDLEWARES = {
+    'scrapyjs.SplashMiddleware': 725,
+}
+</pre>
+<p>The middleware needs to take precedence over the HttpProxyMiddleware, which by default is at position 750, so we set the middleware to 725.</p>
+<p>You will then need to set the <em>SPLASH_URL</em> setting in your project’s settings.py:</p>
+<pre>SPLASH_URL = 'http://localhost:8050/'
+</pre>
+<p>Don’t forget, if you are using boot2docker on OS X, you will need to set this to the IP address of the boot2docker virtual machine, e.g.:</p>
+<pre>SPLASH_URL = 'http://192.168.59.103:8050/'
+</pre>
+<p>Scrapy currently doesn’t provide a way to override request fingerprints calculation globally, so you will also have to set a custom <em>DUPEFILTER_CLASS</em> and a custom cache storage backend:</p>
+<pre>DUPEFILTER_CLASS = 'scrapyjs.SplashAwareDupeFilter'
+HTTPCACHE_STORAGE = 'scrapyjs.SplashAwareFSCacheStorage'
+</pre>
+<p>If you already use another cache storage backend, you will need to subclass it and replace all calls to <em>scrapy.util.request.request_fingerprint</em> with <em>scrapyjs.splash_request_fingerprint</em>.</p>
+<p>Now that the Splash middleware is enabled, you can begin rendering your requests with Splash using the ‘splash’ meta key.</p>
+<p>For example, if we wanted to retrieve the rendered HTML for a page, we could do something like this:</p>
+<pre>import scrapy
+
+class MySpider(scrapy.Spider):
+    start_urls = ["http://example.com", "http://example.com/foo"]
+
+    def start_requests(self):
+        for url in self.start_urls:
+            yield scrapy.Request(url, self.parse, meta={
+                'splash': {
+                    'endpoint': 'render.html',
+                    'args': {'wait': 0.5}
+                }
+            })
+
+    def parse(self, response):
+        # response.body is a result of render.html call; it
+        # contains HTML processed by a browser.
+        # …
+</pre>
+<p>The ‘args’ dict contains arguments to send to Splash, you can find a full list of available arguments in the <a href="http://splash.readthedocs.org/en/latest/api.html">HTTP API documentation</a>. We don’t need to provide the <em>url</em> parameter in the args, as it will be pre-filled from the URL in the Request object. By default the endpoint is set to ‘render.json’, but here we have overridden it and set it to ‘render.html’ to provide a HTML response.</p>
+<h1>Running Custom JavaScript</h1>
+<p/>
+<p>Sometimes when visiting a website, you may need to press a button or close a modal to view the page properly. Splash allows you to run your own JavaScript code within the context of the web page you’re requesting. There are several ways you can accomplish this:</p>
+<h2>Using the js_source Parameter</h2>
+<p>The js_source parameter can be used to send the JavaScript you want to execute. It’s recommended that you send this as a POST parameter rather than GET due to web servers and proxies enforcing limits on the size of GET parameters. See curl example below:</p>
+<pre># Render page and modify its title dynamically
+curl -X POST -H 'content-type: application/json' \
+    -d '{"js_source": "document.title=\"My Title\";", "url": "http://example.com"}' \
+    'http://localhost:8050/render.html'
+</pre>
+<h2>Sending JavaScript in the Body</h2>
+<p>You can also set the Content-Type header to ‘application/javascript’ and send the JavaScript code you would like to execute in the body of the request. See curl example below:</p>
+<pre># Render page and modify its title dynamically
+curl -X POST -H 'content-type: application/javascript' \
+    -d 'document.title="My Title"; \
+    'http://localhost:8050/render.html?url=http://domain.com'
+</pre>
+<h2>Splash Scripts (recommended)</h2>
+<p>Splash supports Lua scripts through its <em><a href="http://splash.readthedocs.org/en/latest/api.html#execute">execute</a></em> endpoint. This is the preferred way to execute JavaScript as you can preload libraries, choose when to execute the JavaScript, and retrieve the output.</p>
+<p>Here’s an example script:</p>
+<pre>function main(splash)
+    splash:go("http://example.com")
+    splash:wait(0.5)
+    local title = splash:evaljs("document.title")
+    return {title=title}
+end
+</pre>
+<p>This will return a JSON object containing the title:</p>
+<pre>{
+    "title": "Some title"
+}
+</pre>
+<p>Every script requires a main function to act as the entry point. You can return a Lua table which will be rendered as JSON, which is what we have done here. The <em><a href="http://splash.readthedocs.org/en/latest/scripting-ref.html#splash-go">splash:go</a></em> function is used to tell Splash to visit the provided URL. The <em><a href="http://splash.readthedocs.org/en/latest/scripting-ref.html#splash-evaljs">splash:evaljs</a></em> function allows you to execute JavaScript within the page context, however, if you don’t need the result you should use <em><a href="http://splash.readthedocs.org/en/latest/scripting-ref.html#splash-runjs">splash:runjs</a></em> instead.</p>
+<p>You can test your Splash scripts in your browser by visiting your Splash instance’s index page (e.g. <a href="http://localhost:8050/" rel="nofollow">http://localhost:8050/</a>). It’s also possible to use Splash with IPython notebook as an interactive web-based development environment, see here for more details. Note: You will need to use the master branch in the meantime until Splash 1.5 is released, so instead of <em>docker pull scrapinghub/splash-jupyter</em> (as stated in the docs) you should do <em>docker pull scrapinghub/splash-jupyter:master</em>.</p>
+<p>A common scenario is that the user needs to click a button before the page is displayed. We can handle this using jQuery with Splash:</p>
+<pre>function main(splash)
+    splash:autoload("https://ajax.googleapis.com/ajax/libs/jquery/2.1.3/jquery.min.js")
+    splash:go("http://example.com")
+    splash:runjs("$('#some-button').click()")
+    return splash:html()
+end
+</pre>
+<p>Here we use <em><a href="http://splash.readthedocs.org/en/latest/scripting-ref.html#splash-autoload">splash:autoload</a></em> to load the jQuery library from Google’s CDN. We then tell Splash to visit the website and run our custom JavaScript to click the button with jQuery’s <em><a href="https://api.jquery.com/click/">click</a></em> function. The rendered HTML is then returned to the browser.</p>
+<p>You can find more info on running JavaScript with Splash in the <a href="http://splash.readthedocs.org/en/latest/api.html#execute-javascript">docs</a>, and for a more in-depth tutorial, check out the <a href="http://splash.readthedocs.org/en/latest/scripting-tutorial.html">Splash Scripts Tutorial</a>.</p>
+<p>We hope this tutorial gave you a nice introduction to Splash, and please let us know if you have any questions or comments!</p>
+<div id="jp-post-flair" class="sharedaddy sd-like-enabled sd-sharing-enabled"><div class="sharedaddy sd-block sd-like jetpack-likes-widget-wrapper jetpack-likes-widget-unloaded" id="like-post-wrapper-28801091-677-56d5a747c60f5" data-src="//widgets.wp.com/likes/#blog_id=28801091&amp;post_id=677&amp;origin=scrapinghub.wordpress.com&amp;obj_id=28801091-677-56d5a747c60f5" data-name="like-post-frame-28801091-677-56d5a747c60f5"><h3 class="sd-title">Like this:</h3><p class="likes-widget-placeholder post-likes-widget-placeholder"><span class="button"><span>Like</span></span> <span class="loading">Loading...</span></p><span class="sd-text-color"/><a class="sd-link-color"/></div>
+<p id="jp-relatedposts" class="jp-relatedposts">
+	<h3 class="jp-relatedposts-headline"><em>Related</em></h3>
+</p></div>											</div>
+			</div></body></html>

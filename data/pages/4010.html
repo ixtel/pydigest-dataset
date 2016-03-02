@@ -1,0 +1,229 @@
+<html><body><div><div class="content html_format"><p>
+      О Python на Хабре было много хороших статей. Как об особенностях реализации, так и о прикладных фичах, отсутствующих в других мейнстримных языках. Однако я с удивлением обнаружил (поправьте, если не прав), что есть одна важная тема, не раскрытая ни на Хабре, ни в русскоязычном интернете вообще. Эта статья будет посвящена такой штуке, как stack frame. Скорее всего она не скажет ничего, ну или может с учетом последнего пункта почти ничего нового опытным python-разработчикам, однако будет полезна новичкам (а может и вредна, но все примеры ниже).</p>
+<p>
+Я постарался написать статью так, чтобы её было удобно читать, открыв параллельно repl и </p><s>бездумно копировать туда код</s><p> эксперементируя. Поэтому по возможности большая часть примеров имеет вид «однострочники в интерпретаторе». 
+</p><p>
+Начнем мы немного издалека, с того что заметим, что Traceback это тоже объект, а потом найдем где там стековый кадр и уже перейдем к делу.
+</p><a name="habracut"/>
+<pre><code class="python">&gt;&gt;&gt; import requests
+&gt;&gt;&gt; requests.get(42)
+Traceback (most recent call last):
+  File "&lt;stdin&gt;", line 1, in &lt;module&gt;
+  File "/usr/lib/python3/dist-packages/requests/api.py", line 55, in get
+    return request('get', url, **kwargs)
+  File "/usr/lib/python3/dist-packages/requests/api.py", line 44, in request
+    return session.request(method=method, url=url, **kwargs)
+  File "/usr/lib/python3/dist-packages/requests/sessions.py", line 421, in request
+    prep = self.prepare_request(req)
+  File "/usr/lib/python3/dist-packages/requests/sessions.py", line 359, in prepare_request
+    hooks=merge_hooks(request.hooks, self.hooks),
+  File "/usr/lib/python3/dist-packages/requests/models.py", line 287, in prepare
+    self.prepare_url(url, params)
+  File "/usr/lib/python3/dist-packages/requests/models.py", line 338, in prepare_url
+    "Perhaps you meant http://{0}?".format(url))
+requests.exceptions.MissingSchema: Invalid URL '42': No schema supplied. Perhaps you meant http://42?
+</code></pre>
+<p>
+Выше мы видим Traceback, который содержит цепочку вызовов разных функций. 
+ 
+</p><pre><code class="python">&gt;&gt;&gt; import sys
+&gt;&gt;&gt; sys.last_traceback
+&lt;traceback object at 0x7f8c37378608&gt;
+</code></pre>
+
+<pre><code class="python">&gt;&gt;&gt; dir(sys.last_traceback)
+['tb_frame', 'tb_lasti', 'tb_lineno', 'tb_next']
+</code></pre>
+<p>
+Итак, выше мы видим объект содержащий последнее необработанное исключение. Его можно исследовать при помощи дебагера, чтобы посмотреть что же случилось. Можно и воспользоваться модулем Traceback. На этом не буду особо останавливаться, это несколько не по теме статьи.
+</p><p>
+Нас будет интересовать аттрибут tb_frame. Это собственно и есть stack frame (Стековый кадр). Суть его принципиально не отличается от аналогичного в С. При вызове функции её аргументы попадают в стек, после чего уже происходит её выполнение.
+</p><p>
+Однако есть два принципиальных отличия от C.
+</p><p>
+Во-первых, в силу того что Python язык интерпретируемый, стековый кадр в нем хранится в явном виде, а во-вторых, в силу того что объектно-ориентированный, он еще и является объектом.
+</p><p>
+Фактически это основной источник интроспекции в Python — модуль inspect частично является просто оберткой над ним. (а частично над другими функциями из sys).
+</p><p>
+Детальное описание всех атрибутов объекта можно прочитать в другом месте, поэтому перейдем к примерам применения.
+
+</p><h4>0) Как получить ссылку на stack frame</h4><p>
+Конечно, его можно достать из traceback'a. Но к счастью есть более способы работать с ним чем бросать исключения и смотреть traceback/
+
+</p><pre><code class="python">&gt;&gt;&gt; sys._getframe()
+&lt;frame object at 0x7fda9bffa388&gt;
+</code></pre><p>
+Возвращает текущий объект из стека вызовов. Можно также передать ему в качестве параметра глубину, чтобы получить объект находящий в стеке повыше. Впрочем, это можно сделать и используя атрибут f_back.
+</p><p>
+К сожалению, если мы запустили repl то мы находимся на вершине стека, по этому при вызове sys._getframe().f_back возвращает None, а sys._getframe(1) таки вовсе кидает исключение.
+
+</p><pre><code class="python">&gt;&gt;&gt; sys._getframe().f_back
+&gt;&gt;&gt; sys._getframe(1)
+Traceback (most recent call last):
+  File "&lt;stdin&gt;", line 1, in &lt;module&gt;
+ValueError: call stack is not deep enough
+</code></pre><p>
+Однако лямбда-функции позволят решить эту проблему:
+
+</p><pre><code class="python">&gt;&gt;&gt; (lambda: sys._getframe().f_back == sys._getframe(1))()
+True
+И даже (хотя это было ожидаемо)
+&gt;&gt;&gt; (lambda: sys._getframe().f_back is sys._getframe(1))()
+True
+</code></pre><p>
+Еще есть sys._current_frames(), но она имеет смысл в случае многопоточности. Дальше она упомянута не будет, но для полноты картины:
+
+</p><pre><code class="python">&gt;&gt;&gt; import threading
+&gt;&gt;&gt; sys._current_frames()
+{140576946280256: &lt;frame object at 0x7fda9bffa6c8&gt;}
+&gt;&gt;&gt; threading.Thread(target=lambda: print(sys._current_frames())).start()
+{140576883275520: &lt;frame object at 0x7fda9b337048&gt;, 140576946280256: &lt;frame object at 0x228fbc8&gt;}
+</code></pre><p>
+Ну, и тут самое время процитировать документацию к этим функциям:
+</p><blockquote>CPython implementation detail: This function should be used for internal and specialized purposes only. It is not guaranteed to exist in all implementations of Python.</blockquote>
+<p>
+Так что едва ли следует пользоваться для корыстных целей тем что будет ниже.
+
+</p><h4>1) Как определить кто вызвал функцию</h4><p>
+Подобная задача легко может всплыть во время дебага, особенно когда используется много сторонних и запутанных фреймфорков. Впрочем адепты черной магии могут использовать такой трюк и его вариации для куда менее безобидных вещей.
+</p><p>
+После прошлого подпункта должно быть в целом понятно, как это сделать. В самом деле, получить фрейм, в котором был произведен вызов функции очень просто: sys._getframe(1). Остается вопрос, как извлечь из фрейма нужную информацию.
+</p><p>
+Например, вот так:
+
+</p><pre><code class="python">&gt;&gt;&gt; threading.Thread(target=lambda: print(sys._getframe(1).f_code.co_name)).run()
+run
+</code></pre><p>
+Обсуждение Code object выходит за рамки статьи, может как-нибудь в другой раз. Но у frame object есть атрибут f_code, который представляет из себя code object, среди атрибутов которого есть в том числе имя метода соответсвующего code object.
+</p><p>
+Кстати, в случае с inspect внутри происходит фактичски тоже самое, но выглядит симпатичнее.
+
+</p><pre><code class="python">&gt;&gt;&gt; threading.Thread(target=lambda: print(inspect.stack()[1][3])).run()
+run
+</code></pre><p>
+Возможности злоупотребить полученным методом читатель найдет сам.</p><p>
+Еще один пример, подталкивающий к таким идеям:
+
+</p><pre><code class="python">&gt;&gt;&gt; threading.Thread(target=lambda: print('called from', sys._getframe(1).f_globals['__name__'])).run()
+called from threading
+</code></pre><p>
+Теперь, получив имя модуля, можно найти модуль в списке загруженных модулей по этому имени, а потом взять оттуда что-нибудь. И никакая Иерархия Классов не спасет от такого кощунства (хотя хорошая вероятно спасет от желания подобное делать)
+
+</p><h4>2) Изменяем locals у фрейма</h4><p>
+Информация в этом подпунтке не слишком нова и должно быть известна продвинутым питонистам, но тем не менее.
+</p><p>
+В этом пункте придется отойти от однострочников и написать полноценный пример.
+</p><p>
+Предположим, у нас есть следующий код:
+
+</p><pre><code class="python">import sys
+
+class Example(object):
+
+    def __init__(self):
+        pass
+
+    def check_noosphere_connection():
+        print('OK')
+        
+
+def proof(example):
+
+    a = 2
+    b = 2
+    example.check_noosphere_connection()
+    
+    print('2 + 2 = {}'.format(str(a + b)))
+
+def broken_evil_force():
+    def corrupted_noosphere(pseudo_self):
+        print('OK')
+        frame = sys._getframe()
+        frame.f_back.f_locals['a'] = 3
+    FakeExample = type('FakeExample', (), {'check_noosphere_connection': corrupted_noosphere})
+
+    proof(FakeExample())
+</code></pre>
+
+<pre><code class="python">% python habr_example.py 
+OK
+2 + 2 = 4
+</code></pre><p>
+Увы, но менять locals нельзя. Точнее, можно, но этот результат глобально не сохранится.
+</p><p>
+Вот две ссылки на эту тему, в одной из них автор достигует нужного результата модификацией байткода, а в другой меняет сам исходный код и компилирует.
+
+</p><a href="http://code.activestate.com/recipes/577283-decorator-to-expose-local-variables-of-a-function-">code.activestate.com/recipes/577283-decorator-to-expose-local-variables-of-a-function-</a>
+<a href="http://stackoverflow.com/a/4257352">stackoverflow.com/a/4257352</a>
+<p>
+Однако способ есть! </p><a href="http://pydev.blogspot.ru/2014/02/changing-locals-of-frame-frameflocals.html">pydev.blogspot.ru/2014/02/changing-locals-of-frame-frameflocals.html</a>
+<p>
+Вызов </p><i>сctypes.pythonapi.PyFrame_LocalsToFast(ctypes.py_object(frame), ctypes.c_int(0))</i><p> помогает сохранить изменения в locals.
+
+</p><pre><code class="python">import sys
+import ctypes
+
+class Example(object):
+
+    def __init__(self):
+        pass
+
+    def check_noosphere_connection():
+        print('OK')
+        
+
+def proof(example):
+
+    a = 2
+    b = 2
+    example.check_noosphere_connection()
+    print('2 + 2 = {}'.format(str(a + b)))
+
+def broken_evil_force():
+    def corrupted_noosphere(pseudo_self):
+        print('OK')
+        frame = sys._getframe()
+        frame.f_back.f_locals['a'] = 3
+    FakeExample = type('FakeExample', (), {'check_noosphere_connection': corrupted_noosphere})
+
+    proof(FakeExample())
+
+def evil_force():
+    def corrupted_noosphere(pseudo_self):
+        print('OK')
+        frame = sys._getframe()
+        frame.f_back.f_locals['a'] = 3
+        ctypes.pythonapi.PyFrame_LocalsToFast(ctypes.py_object(frame.f_back), ctypes.c_int(0))
+    FakeExample = type('FakeExample', (), {'check_noosphere_connection': corrupted_noosphere})
+
+    proof(FakeExample())
+
+
+if __name__ == '__main__':
+
+    broken_evil_force()
+    evil_force()
+</code></pre><p>
+Запускаем и получаем:
+
+</p><pre><code class="python">% python habr_example.py
+OK
+2 + 2 = 4
+OK
+2 + 2 = 5
+</code></pre><p>
+На этом, пожалуй, всё. Разве что добавлю: в случае traceback есть возможность ходить по фрейму не только вверх, но и вниз, хотя это уже должно было быть понятно.
+</p><p>
+Буду рад услышать комментарии и замечания, а также интересные примеры использования фреймов.
+
+</p><h4>Полезные ссылки (часть была в статье)</h4><p>
+1) </p><a href="https://docs.python.org/3.4/library/sys.html">docs.python.org/3.4/library/sys.html</a><p>
+2) </p><a href="https://docs.python.org/3/library/inspect.html">docs.python.org/3/library/inspect.html</a><p>
+3) </p><a href="http://code.activestate.com/recipes/577283-decorator-to-expose-local-variables-of-a-function-">code.activestate.com/recipes/577283-decorator-to-expose-local-variables-of-a-function-</a><p>
+4) </p><a href="http://stackoverflow.com/questions/4214936/how-can-i-get-the-values-of-the-locals-of-a-function-after-it-has-been-executed/4257352#4257352">stackoverflow.com/questions/4214936/how-can-i-get-the-values-of-the-locals-of-a-function-after-it-has-been-executed/4257352#4257352</a><p>
+5) </p><a href="http://pydev.blogspot.ru/2014/02/changing-locals-of-frame-frameflocals.html">pydev.blogspot.ru/2014/02/changing-locals-of-frame-frameflocals.html</a>
+      <p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

@@ -1,0 +1,86 @@
+<html><body><div><div class="post-text" itemprop="text">
+
+<p>I need to create a pivot table of 2000 columns by around 30-50 million rows from a dataset of around 60 million rows.  I've tried pivoting in chunks of 100,000 rows, and that works, but when I try to recombine the DataFrames by doing a .append() followed by .groupby('someKey').sum(), all my memory is taken up and python eventually crashes.</p>
+
+<p>How can I do a pivot on data this large with a limited ammount of RAM?</p>
+
+<p>EDIT: adding sample code</p>
+
+<p>The following code includes various test outputs along the way, but the last print is what we're really interested in.  Note that if we change segMax to 3, instead of 4, the code will produce a false positive for correct output.  The main issue is that if a shipmentid entry is not in each and every chunk that sum(wawa) looks at, it doesn't show up in the output.</p>
+
+<pre><code>import pandas as pd
+import numpy as np
+import random
+from pandas.io.pytables import *
+import os
+
+pd.set_option('io.hdf.default_format','table') 
+
+# create a small dataframe to simulate the real data.
+def loadFrame():
+    frame = pd.DataFrame()
+    frame['shipmentid']=[1,2,3,1,2,3,1,2,3] #evenly distributing shipmentid values for testing purposes
+    frame['qty']= np.random.randint(1,5,9) #random quantity is ok for this test
+    frame['catid'] = np.random.randint(1,5,9) #random category is ok for this test
+    return frame
+
+def pivotSegment(segmentNumber,passedFrame):
+    segmentSize = 3 #take 3 rows at a time
+    frame = passedFrame[(segmentNumber*segmentSize):(segmentNumber*segmentSize + segmentSize)] #slice the input DF
+
+    # ensure that all chunks are identically formatted after the pivot by appending a dummy DF with all possible category values
+    span = pd.DataFrame() 
+    span['catid'] = range(1,5+1)
+    span['shipmentid']=1
+    span['qty']=0
+
+    frame = frame.append(span)
+
+    return frame.pivot_table(['qty'],index=['shipmentid'],columns='catid', \
+                             aggfunc='sum',fill_value=0).reset_index()
+
+def createStore():
+
+    store = pd.HDFStore('testdata.h5')
+    return store
+
+segMin = 0
+segMax = 4
+
+store = createStore()
+frame = loadFrame()
+
+print('Printing Frame')
+print(frame)
+print(frame.info())
+
+for i in range(segMin,segMax):
+    segment = pivotSegment(i,frame)
+    store.append('data',frame[(i*3):(i*3 + 3)])
+    store.append('pivotedData',segment)
+
+print('\nPrinting Store')   
+print(store)
+print('\nPrinting Store: data') 
+print(store['data'])
+print('\nPrinting Store: pivotedData') 
+print(store['pivotedData'])
+
+print('**************')
+print(store['pivotedData'].set_index('shipmentid').groupby('shipmentid',level=0).sum())
+print('**************')
+print('$$$')
+for df in store.select('pivotedData',chunksize=3):
+    print(df.set_index('shipmentid').groupby('shipmentid',level=0).sum())
+
+print('$$$')
+store['pivotedAndSummed'] = sum((df.set_index('shipmentid').groupby('shipmentid',level=0).sum() for df in store.select('pivotedData',chunksize=3)))
+print('\nPrinting Store: pivotedAndSummed') 
+print(store['pivotedAndSummed'])
+
+store.close()
+os.remove('testdata.h5')
+print('closed')
+</code></pre>
+    </div>
+    </div></body></html>

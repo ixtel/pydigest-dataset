@@ -1,0 +1,330 @@
+<html><body><div><div class="entry-content">
+  <p>Deploying python applications is much trickier than it should be.</p>
+<p>Docker can simplify this, but even with Docker, there are a lot of nuances
+around how you package your python application, how you build it, how you pull
+in your python and non-python dependencies, and how you structure your images.</p>
+<p>I would like to share with you a strategy that I have developed for deploying
+Python apps that deals with a number of these issues.  I don’t want to claim
+that this is the <em>only</em> way to deploy Python apps, or even a particularly
+<em>right</em> way; in the rapidly evolving containerization ecosystem, new techniques
+pop up every day, and everyone’s application is different.  However, I humbly
+submit that this process is a good <em>default</em>.</p>
+<p>Rather than equivocate further about its abstract goodness, here are some
+properties of the following container construction idiom:</p>
+<ol>
+<li>It reduces build times from a naive “<code>sudo setup.py install</code>” by using
+   Python <a href="https://pypi.python.org/pypi/wheel">wheels</a> to cache repeatably
+   built binary artifacts.</li>
+<li>It reduces container size by separating <em>build</em> containers from <em>run</em>
+   containers.</li>
+<li>It is independent of other tooling, and should work fine with whatever
+   configuration management or container orchestration system you want to use.</li>
+<li>It uses <em>existing</em> Python tooling of <code>pip</code> and <code>virtualenv</code>, and therefore
+   doesn’t depend heavily on Docker.  A lot of the same concepts apply if you
+   have to build or deploy the same Python code into a non-containerized
+   environment.  You can also incrementally migrate towards containerization:
+   if your deploy environment is not containerized, you can still <em>build</em> and
+   <em>test</em> your wheels within a container and get the advantages of
+   containerization there, as long as your base image matches the
+   non-containerized environment you’re deploying to.  This means you can
+   quickly upgrade your build and test environments without having to upgrade
+   the host environment on finicky continuous integration hosts, such as
+   Jenkins or Buildbot.</li>
+</ol>
+<p>To test these instructions, I used Docker 1.5.0 (via boot2docker, but hopefully
+that is an irrelevant detail).  I also used an Ubuntu 14.04 base image (as you
+can see in the docker files) but hopefully the concepts should translate to
+other base images as well.</p>
+<p>In order to show how to deploy a sample application, we’ll need a sample
+application to deploy; to keep it simple, here’s some “hello world” sample code
+using Klein:</p>
+<table class="highlighttable"><tr><td class="linenos"/><td class="code"><div class="highlight"><pre><span class="c1"># deployme/__init__.py</span>
+<span class="kn">from</span> <span class="nn">klein</span> <span class="kn">import</span> <span class="n">run</span><span class="p">,</span> <span class="n">route</span>
+
+<span class="nd">@route</span><span class="p">(</span><span class="s1">'/'</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">home</span><span class="p">(</span><span class="n">request</span><span class="p">):</span>
+    <span class="n">request</span><span class="o">.</span><span class="n">setHeader</span><span class="p">(</span><span class="s2">"content-type"</span><span class="p">,</span> <span class="s2">"text/plain"</span><span class="p">)</span>
+    <span class="k">return</span> <span class="s1">'Hello, world!'</span>
+
+<span class="k">def</span> <span class="nf">main</span><span class="p">():</span>
+    <span class="n">run</span><span class="p">(</span><span class="s2">""</span><span class="p">,</span> <span class="mi">8081</span><span class="p">)</span>
+</pre></div>
+</td></tr></table>
+
+<p>And an accompanying <code>setup.py</code>:</p>
+<table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre> 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14</pre></div></td><td class="code"><div class="highlight"><pre><span class="kn">from</span> <span class="nn">setuptools</span> <span class="kn">import</span> <span class="n">setup</span><span class="p">,</span> <span class="n">find_packages</span>
+
+<span class="n">setup</span> <span class="p">(</span>
+    <span class="n">name</span>             <span class="o">=</span> <span class="s2">"DeployMe"</span><span class="p">,</span>
+    <span class="n">version</span>          <span class="o">=</span> <span class="s2">"0.1"</span><span class="p">,</span>
+    <span class="n">description</span>      <span class="o">=</span> <span class="s2">"Example application to be deployed."</span><span class="p">,</span>
+    <span class="n">packages</span>         <span class="o">=</span> <span class="n">find_packages</span><span class="p">(),</span>
+    <span class="n">install_requires</span> <span class="o">=</span> <span class="p">[</span><span class="s2">"twisted&gt;=15.0.0"</span><span class="p">,</span>
+                        <span class="s2">"klein&gt;=15.0.0"</span><span class="p">,</span>
+                        <span class="s2">"treq&gt;=15.0.0"</span><span class="p">,</span>
+                        <span class="s2">"service_identity&gt;=14.0.0"</span><span class="p">],</span>
+    <span class="n">entry_points</span>     <span class="o">=</span> <span class="p">{</span><span class="s1">'console_scripts'</span><span class="p">:</span>
+                        <span class="p">[</span><span class="s1">'run-the-app = deployme:main'</span><span class="p">]}</span>
+<span class="p">)</span>
+</pre></div>
+</td></tr></table>
+
+<p>Generating certificates is a bit tedious for a simple example like this one,
+but in a real-life application we are likely to face the deployment issue of
+native dependencies, so to demonstrate how to deal with that issue, that this
+<code>setup.py</code> depends on the <code>service_identity</code> module, which pulls in
+<code>cryptography</code> (which depends on OpenSSL) and its dependency <code>cffi</code> (which
+depends on <code>libffi</code>).</p>
+<p>To get started telling Docker what to do, we’ll need a base image that we can
+use for both build and run images, to ensure that certain things match up;
+particularly the native libraries that are used to build against.  This also
+speeds up subsquent builds, by giving a nice common point for caching.</p>
+<p>In this base image, we’ll set up:</p>
+<ol>
+<li>a Python runtime (PyPy)</li>
+<li>the C libraries we need (the <code>libffi6</code> and <code>openssl</code> ubuntu packages)</li>
+<li>a virtual environment in which to do our building and packaging</li>
+</ol>
+<table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre> 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+16</pre></div></td><td class="code"><div class="highlight"><pre><span class="c"># base.docker</span>
+<span class="k">FROM</span><span class="s"> ubuntu:trusty</span>
+
+<span class="k">RUN</span> <span class="nb">echo</span> <span class="s2">"deb http://ppa.launchpad.net/pypy/ppa/ubuntu trusty main"</span> &gt; <span class="se">\</span>
+    /etc/apt/sources.list.d/pypy-ppa.list
+
+<span class="k">RUN</span> apt-key adv --keyserver keyserver.ubuntu.com <span class="se">\</span>
+                --recv-keys 2862D0785AFACD8C65B23DB0251104D968854915
+<span class="k">RUN</span> apt-get update
+
+<span class="k">RUN</span> apt-get install -qyy <span class="se">\</span>
+    -o APT::Install-Recommends<span class="o">=</span><span class="nb">false</span> -o APT::Install-Suggests<span class="o">=</span><span class="nb">false</span> <span class="se">\</span>
+    python-virtualenv pypy libffi6 openssl
+
+<span class="k">RUN</span> virtualenv -p /usr/bin/pypy /appenv
+<span class="k">RUN</span> . /appenv/bin/activate<span class="p">;</span> pip install <span class="nv">pip</span><span class="o">==</span>6.0.8
+</pre></div>
+</td></tr></table>
+
+<p>The apt options <code>APT::Install-Recommends</code> and <code>APT::Install-Suggests</code> are just
+there to prevent <code>python-virtualenv</code> from pulling in a whole C development
+toolchain with it; we’ll get to that stuff in the build container.  In the run
+container, which is also based on this base container, we will just use
+virtualenv and pip for putting the already-built artifacts into the right
+place.  Ubuntu expects that these are purely development tools, which is why it
+recommends installation of python development tools as well.</p>
+<p>You might wonder “why bother with a virtualenv if I’m already in a container”?
+This is belt-and-suspenders isolation, but you can never have too much
+isolation.</p>
+<p>It’s true that in many cases, perhaps even most, simply installing stuff into
+the system Python with Pip works fine; however, for more elaborate
+applications, you may end up wanting to invoke a tool provided by your base
+container that is implemented in Python, but which requires dependencies
+managed by the host.  By putting things into a virtualenv regardless, we keep
+the things set up by the base image’s package system tidily separated from the
+things our application is building, which means that there should be no
+unforseen interactions, regardless of how complex the application’s usage of
+Python might be.</p>
+<p>Next we need to <em>build</em> the base image, which is accomplished easily enough
+with a docker command like:</p>
+<table class="highlighttable"><tr><td class="linenos"/><td class="code"><div class="highlight"><pre><span class="gp">$</span> docker build -t deployme-base -f base.docker .<span class="p">;</span>
+</pre></div>
+</td></tr></table>
+
+<p>Next, we need a container for building our application and its Python
+dependencies.  The dockerfile for that is as follows:</p>
+<table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre> 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+16
+17</pre></div></td><td class="code"><div class="highlight"><pre><span class="c"># build.docker</span>
+<span class="k">FROM</span><span class="s"> deployme-base</span>
+
+<span class="k">RUN</span> apt-get install -qy libffi-dev libssl-dev pypy-dev
+<span class="k">RUN</span> . /appenv/bin/activate<span class="p">;</span> <span class="se">\</span>
+    pip install wheel
+
+<span class="k">ENV</span><span class="s"> WHEELHOUSE=/wheelhouse</span>
+<span class="k">ENV</span><span class="s"> PIP_WHEEL_DIR=/wheelhouse</span>
+<span class="k">ENV</span><span class="s"> PIP_FIND_LINKS=/wheelhouse</span>
+
+<span class="k">VOLUME</span><span class="s"> /wheelhouse</span>
+<span class="k">VOLUME</span><span class="s"> /application</span>
+
+<span class="k">ENTRYPOINT</span><span class="s"> . /appenv/bin/activate; \</span>
+           <span class="nb">cd</span> /application<span class="p">;</span> <span class="se">\</span>
+           pip wheel .
+</pre></div>
+</td></tr></table>
+
+<p>Breaking this down, we first have it pulling from the base image we just built.
+Then, we install the development libraries and headers for each of the C-level
+dependencies we have to work with, as well as PyPy’s development toolchain
+itself.  Then, to get ready to build some wheels, we install the <code>wheel</code>
+package into the virtualenv we set up in the base image.  Note that the <code>wheel</code>
+package is only necessary for <em>building</em> wheels; the functionality to install
+them is built in to pip.</p>
+<p>Note that we then have two volumes: <code>/wheelhouse</code>, where the wheel output
+should go, and <code>/application</code>, where the application’s distribution (i.e. the
+directory containing <code>setup.py</code>) should go.</p>
+<p>The entrypoint for this image is simply running “<code>pip wheel</code>” with the
+appropriate virtualenv activated.  It runs against whatever is in the
+<code>/application</code> volume, so we could potentially build wheels for multiple
+different applications.  In this example, I’m using <code>pip wheel .</code> which builds
+the current directory, but you may have a <code>requirements.txt</code> which pins all
+your dependencies, in which case you might want to use <code>pip wheel -r
+requirements.txt</code> instead.</p>
+<p>At this point, we need to build the builder image, which can be accomplished
+with:</p>
+<table class="highlighttable"><tr><td class="linenos"/><td class="code"><div class="highlight"><pre><span class="gp">$</span> docker build -t deployme-builder -f build.docker .<span class="p">;</span>
+</pre></div>
+</td></tr></table>
+
+<p>This builds a <code>deployme-builder</code> that we can use to build the wheels for the
+application.  Since this is a prerequisite step for building the application
+container itself, you can go ahead and do that now.  In order to do so, we must
+tell the builder to use the current directory as the application being built
+(the volume at <code>/application</code>) and to put the wheels into a wheelhouse
+directory (one called <code>wheelhouse</code> will do):</p>
+<table class="highlighttable"><tr><td class="linenos"/><td class="code"><div class="highlight"><pre><span class="gp">$</span> mkdir -p wheelhouse<span class="p">;</span>
+<span class="gp">$</span> docker run --rm <span class="se">\</span>
+<span class="go">         -v "$(pwd)":/application \</span>
+<span class="go">         -v "$(pwd)"/wheelhouse:/wheelhouse \</span>
+<span class="go">         deployme-builder;</span>
+</pre></div>
+</td></tr></table>
+
+<p>After running this, if you look in the <code>wheelhouse</code> directory, you should see a
+bunch of wheels built there, including one for the application being built:</p>
+<table class="highlighttable"><tr><td class="linenos"/><td class="code"><div class="highlight"><pre><span class="gp">$</span> ls wheelhouse
+<span class="go">DeployMe-0.1-py2-none-any.whl</span>
+<span class="go">Twisted-15.0.0-pp27-none-linux_x86_64.whl</span>
+<span class="go">Werkzeug-0.10.1-py2-none-any.whl</span>
+<span class="go">cffi-0.9.0-py2-none-any.whl</span>
+<span class="gp">#</span> ...
+</pre></div>
+</td></tr></table>
+
+<p>At last, time to build the application container itself.  The setup for that is
+very short, since most of the work has already been done for us in the
+production of the wheels:</p>
+<table class="highlighttable"><tr><td class="linenos"/><td class="code"><div class="highlight"><pre><span class="c"># run.docker</span>
+<span class="k">FROM</span><span class="s"> deployme-base</span>
+
+<span class="k">ADD</span><span class="s"> wheelhouse /wheelhouse</span>
+<span class="k">RUN</span> . /appenv/bin/activate<span class="p">;</span> <span class="se">\</span>
+    pip install --no-index -f wheelhouse DeployMe
+
+<span class="k">EXPOSE</span><span class="s"> 8081</span>
+
+<span class="k">ENTRYPOINT</span><span class="s"> . /appenv/bin/activate; \</span>
+           run-the-app
+</pre></div>
+</td></tr></table>
+
+<p>During build, this dockerfile pulls from our shared base image, then adds the
+wheelhouse we just produced as a directory at <code>/wheelhouse</code>.  The only shell
+command that needs to run in order to get the wheels installed is <code>pip install
+TheApplicationYouJustBuilt</code>, with two options: <code>--no-index</code> to tell pip “don’t
+bother downloading anything from PyPI, everything you need should be right
+here”, and, <code>-f wheelhouse</code> which tells it where “here” is.</p>
+<p>The entrypoint for this one activates the virtualenv and invokes <code>run-the-app</code>,
+the setuptools entrypoint defined above in <code>setup.py</code>, which should be on the
+<code>$PATH</code> once that virtualenv is activated.</p>
+<p>The application build is very simple, just</p>
+<table class="highlighttable"><tr><td class="linenos"/><td class="code"><div class="highlight"><pre><span class="gp">$</span> docker build -t deployme-run -f run.docker .<span class="p">;</span>
+</pre></div>
+</td></tr></table>
+
+<p>to build the docker file.</p>
+<p>Similarly, running the application is just like any other docker container:</p>
+<table class="highlighttable"><tr><td class="linenos"/><td class="code"><div class="highlight"><pre><span class="gp">$</span> docker run --rm -it -p 8081:8081 deployme-run
+</pre></div>
+</td></tr></table>
+
+<p>You can then hit port 8081 on your docker host to load the application.</p>
+<p>The command-line for <code>docker run</code> here is just an example; for example, I’m
+passing <code>--rm</code> so that if you run this example just so that it won’t clutter up
+your container list.  Your environment will have its own way to call <code>docker
+run</code>, how to get your <code>VOLUME</code>s and <code>EXPOSE</code>d ports mapped, and discussing how
+to orchestrate your containers is out of scope for this post; you can pretty
+much run it however you like.  Everything the image needs is built in at this
+point.</p>
+<p>To review:</p>
+<ol>
+<li>have a common base container that contains all your non-Python (C libraries
+   and utilities) dependencies.  Avoid installing development tools here.</li>
+<li>use a virtualenv even though you’re in a container to avoid any surprises
+   from the host Python environment</li>
+<li>have a “build” container that just makes the virtualenv and puts wheel and
+   pip into it, and runs <code>pip wheel</code></li>
+<li>run the build container with your application code in a volume as input and
+   a wheelhouse volume as output</li>
+<li>create an application container by starting from the same base image and,
+   once again not installing any dev tools, <code>pip install</code> all the wheels that
+   you just built, turning off access to PyPI for that installation so it goes
+   quickly and deterministically based on the wheels you’ve built.</li>
+</ol>
+<p>While this sample application uses Twisted, it’s quite possible to apply this
+same process to just about any Python application you want to run inside
+Docker.</p>
+<p>I’ve <a href="https://github.com/glyph/deployme">put a sample project up on Github</a>
+which contain all the files referenced here, as well as “build” and “run” shell
+scripts that combine the necessary docker commandlines to go through the full
+process to build and run this sample app.  While it defaults to the PyPy
+runtime (as most networked Python apps generally should these days, since
+performance is so much better than CPython), if you have an application with a
+hard CPython dependency, I’ve also made a branch and pull request on that
+project for CPython, and you can look at the
+<a href="https://github.com/glyph/deployme/pull/1/files">relatively minor patch</a>
+required to get it working for CPython as well.</p>
+<p>Now that you have a container with an application in it that you might want to
+deploy,
+<a href="https://glyph.twistedmatrix.com/2014/12/docker-fast-dev-to-prod.html">my previous write-up on a quick way to securely push stuff to a production service</a>
+might be of interest.</p>
+<p>(<em>Once again, thanks to my employer, <a href="https://www.rackspace.com">Rackspace</a>,
+for sponsoring the time for me to write this post.  Thanks also to Shawn Ashlee
+and Jesse Spears for helping me refine these ideas and listening to me rant
+about them.  However, that expression of gratitude should not be taken as any
+kind of endorsement from any of these parties as to my technical suggestions or
+opinions here, as they are entirely my own.</em>)</p>
+</div>
+</div></body></html>

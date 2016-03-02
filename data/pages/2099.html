@@ -1,0 +1,414 @@
+<html><body><div><div id="content-container">
+	    
+	    
+
+
+
+
+<h1>Making Unreliable APIs Reliable with Python</h1>
+
+<p class="teaser">Small details can make truly dramatic differences in reliability.</p>
+<p>Originally published in the <a href="/python-newsletter/">Advanced Python Newsletter</a></p>
+
+<p>Part of modern programming includes making API calls to third-party
+services, over HTTP or HTTPS. For example, in the Facebook graph
+API, you can get a link to your profile picture:<sup><a href="#note_1">1</a></sup></p>
+
+
+<div class="highlight"><pre><ol><li><p class="line"><span class="kn">from</span> <span class="nn">urllib.parse</span> <span class="kn">import</span> <span class="n">quote</span>
+</p></li><li><p class="line"><span class="kn">import</span> <span class="nn">requests</span>
+</p></li><li><p class="line"><span class="kn">from</span> <span class="nn">creds</span> <span class="kn">import</span> <span class="n">fb_access_token</span>
+</p></li><li><p class="line"><span class="n">facebook_api_url</span> <span class="o">=</span> <span class="s">'https://graph.facebook.com/me/picture?redirect=false'</span>
+</p></li><li><p class="line"><span class="n">picture_data</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">facebook_api_url</span> <span class="o">+</span> <span class="s">'&amp;access_token='</span> <span class="o">+</span> <span class="n">quote</span><span class="p">(</span><span class="n">fb_access_token</span><span class="p">))</span>
+</p></li><li><p class="line"><span class="k">assert</span> <span class="n">picture_data</span><span class="o">.</span><span class="n">status_code</span> <span class="o">==</span> <span class="mi">200</span><span class="p">,</span> <span class="s">'API call failed: {} {}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span>
+</p></li><li><p class="line">    <span class="n">picture_data</span><span class="o">.</span><span class="n">status_code</span><span class="p">,</span> <span class="n">picture_data</span><span class="o">.</span><span class="n">text</span><span class="p">)</span>
+</p></li><li><p class="line"><span class="n">picture_url</span> <span class="o">=</span> <span class="n">picture_data</span><span class="o">.</span><span class="n">json</span><span class="p">()[</span><span class="s">'data'</span><span class="p">][</span><span class="s">'url'</span><span class="p">]</span>
+</p></li><li><p class="line"><span class="c"># Now we have the URL for the photo, and can do something with it.</span>
+</p></li></ol></pre></div>
+
+
+
+<p>That's easy enough. In practice, you need to do more work than
+that, because the service is not <em>perfectly reliable</em>.  Good
+APIs usually include thorough documentation, describing what endpoints
+require what parameters; what different response status codes mean;
+and so on. Of course, the providers of the API face the same technical
+challenges anyone does when exposing some service on the web:</p>
+
+<ul>
+    <li>Bugs happen. So do race conditions.</li>
+    <li>The endpoint's load balancer may dispatch a given request to
+    an ailing server.</li>
+    <li>An underlying data store may be only eventually
+    consistent... so your first request fails to find a needed
+    underlying resource.</li>
+</ul>
+
+<p>For these and other reasons, if you make 10,000 API calls, it may
+not be surprising if one of them doesn't respond as documented -
+especially for a popular service under heavy load.</p>
+
+<p>What are the possible failure modes? There are two I have seen in
+real-world web APIs:</p>
+
+<ul>
+    <li>You make a valid call (GET, POST, PUT, etc.) and it returns a
+    4xx or 5xx error. You make the same call again a moment later, and
+    it succeeds.</li>
+    <li>The call succeeds with a status code of 200. But its response
+    body fails to include something it should, such as a critical JSON object
+    field. When you make the same call again, the response body is
+    correctly fleshed out.</li>
+</ul>
+
+<p>This affects everyone. I routinely use some popular services,
+including Facebook and Amazon Web Services, whose APIs are
+staggeringly reliable given the sheer volume they see. But my
+colleagues and I have encountered these kinds of transient errors with
+both services, and others. For Facebook, a call to get an access token
+returns a 200, but was missing the "access_token" field; an immediate
+retry always had it. As an example in AWS, we've seen making one API
+call to create a resource; getting an acknowledgement back, with a
+resource ID; then another call (say, to add a tag) fails to find that
+resource... until we repeat the call one quarter-second later, when it
+succeeds without complaint.  Both of these happen much less than 1% of
+the time, but not close enough to 0%.</p>
+
+<p>Of course, web services can fail in other possible ways - extended
+outages, in particular. Right now, I'm going to focus on the above
+scenarios, and how you can make your Python applications deal with
+them well.</p>
+
+<h2>A Simple API</h2>
+
+<p>Let's start with a simple imaginary API for a todo-list
+service. All HTTP requests return a JSON object in the response
+body; the status codes are:</p>
+
+<ul>
+    <li>200 on success</li>
+    <li>401 if the credentials are wrong</li>
+    <li>403 if you don't have permission (you can't read other people's todo lists!)</li>
+</ul>
+
+<p>The endpoints and actions on them are:</p>
+
+<dl>
+    <dt>GET /items</dt>
+    <dd>Return a list of items on the todo list, in the format {"id": &lt;item_id&gt;, "summary": &lt;one-line summary&gt;}</dd>
+
+    <dt>GET /items/&lt;item_id&gt;</dt>
+    <dd>Get all available information for a specific todo item, in the format {"id": &lt;item_id&gt;, "summary": &lt;one-line summary&gt;, "description" : &lt;free-form text field&gt;}</dd>
+
+    <dt>POST /items</dt>
+    <dd>Create a new todo item. The POST body is a JSON object with two fields: "summary" (must be under 120 characters, no newline), and "description" (free-form text field).</dd>
+
+    <dt>DELETE /items/&lt;item_id&gt;</dt>
+    <dd>Mark the item as done. (I.e., strike it off the list, so GET /items will not show it.)</dd>
+</dl>
+
+<p>Each user has their own todo list, tied to the authentication
+layer. (We'll gloss over that part to keep this reasonably short.)
+For this article, I implemented a simple HTTP server <a href="https://github.com/migrateup/unreliable-todo-list-api-server/blob/master/api_server.py">providing
+this todo-list API</a>, if you'd like to try these out as you keep
+reading.
+
+</p><p>Given the above, your code can do things like:</p>
+
+
+<div class="highlight"><pre><ol><li><p class="line"><span class="kn">import</span> <span class="nn">requests</span>
+</p></li><li><p class="line"><span class="kn">from</span> <span class="nn">api_info</span> <span class="kn">import</span> <span class="n">API_DOMAIN</span>
+</p></li><li><p class="line"><span class="n">API_URL</span> <span class="o">=</span> <span class="s">'https://{}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">API_DOMAIN</span><span class="p">)</span>
+</p></li><li><p class="line"><span class="n">resp</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">API_URL</span> <span class="o">+</span> <span class="s">'/items'</span><span class="p">)</span>
+</p></li><li><p class="line"><span class="k">assert</span> <span class="n">resp</span><span class="o">.</span><span class="n">status_code</span> <span class="o">==</span> <span class="mi">200</span><span class="p">,</span> <span class="s">'Cannot get todo items: {}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">resp</span><span class="o">.</span><span class="n">status_code</span><span class="p">)</span>
+</p></li><li><p class="line"><span class="n">todo_items</span> <span class="o">=</span> <span class="n">resp</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
+</p></li><li><p class="line"><span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">todo_items</span><span class="p">:</span>
+</p></li><li><p class="line">    <span class="c"># Do something, like print it out, etc.</span>
+</p></li></ol></pre></div>
+
+
+
+<p>(In this article, for brevity I'm ignoring the authentication
+headers.)</p>
+
+<p>Now suppose this is a massive service operating at scale - with
+dozens of servers behind the endpoint load balancer, heavy use of
+queues to improve latency, and so on. Because of some rare race
+condition the service's engineering team has not quite ironed out, the
+response will fail with a 500 code - an internal server error - about
+once every 1,000 API requests. You are just a consumer of the service,
+so you can't do anything about it, except file a bug report and
+wait. What do you do in the meantime?
+</p>
+
+<p>The GET to /items is idempotent - i.e., has no additional side
+effects if done more than once.  This makes it safe to just retry the
+call. So let's automate that:</p>
+
+
+
+<div class="highlight"><pre><ol><li><p class="line"><span class="c"># Retry this many times before giving up.</span>
+</p></li><li><p class="line"><span class="n">MAX_TRIES</span> <span class="o">=</span> <span class="mi">3</span>
+</p></li><li><p class="line"><span class="n">tries</span> <span class="o">=</span> <span class="mi">0</span>
+</p></li><li><p class="line"><span class="n">resp</span> <span class="o">=</span> <span class="bp">None</span>
+</p></li><li><p class="line"><span class="k">while</span> <span class="bp">True</span><span class="p">:</span>
+</p></li><li><p class="line">    <span class="n">resp</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">API_URL</span> <span class="o">+</span> <span class="s">'/items'</span><span class="p">)</span>
+</p></li><li><p class="line">    <span class="k">if</span> <span class="n">resp</span><span class="o">.</span><span class="n">status_code</span> <span class="o">==</span> <span class="mi">500</span> <span class="ow">and</span> <span class="n">tries</span> <span class="o">&lt;</span> <span class="n">MAX_TRIES</span><span class="p">:</span>
+</p></li><li><p class="line">        <span class="n">tries</span> <span class="o">+=</span> <span class="mi">1</span>
+</p></li><li><p class="line">        <span class="k">continue</span>
+</p></li><li><p class="line">    <span class="k">break</span>
+</p></li><li><p class="line"><span class="n">todo_items</span> <span class="o">=</span> <span class="n">resp</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
+</p></li><li><p class="line"><span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">todo_items</span><span class="p">:</span>
+</p></li><li><p class="line">    <span class="c"># Do something, like print it out, etc.</span>
+</p></li></ol></pre></div>
+
+
+
+<p>This is much more robust. We know for a fact there is a 0.1%
+chance of failure, which we recognize by the status code. By retrying
+up to 3 times, we improved the reliability of this code block from
+99.9% (three "nines") to 99.9999999% (nine "nines").</p>
+
+<p>Of course, your application probably makes many such API
+calls. Suppose a user goes through a certain UI flow in their mobile
+app, which triggers 10 API calls; the original code has a nearly 1%
+chance of fatal error at some point. But if you wrap all such calls in
+a retry loop, that improves to better than 99.999999% reliability - only one
+"nine" lower than the retried single call!</p>
+
+<p>From experience using this API, we know that multiple endpoints are
+susceptible. So let's make this code reusable. In Python, the best way
+to do that is with a decorator.</p>
+
+
+
+<div class="highlight"><pre><ol><li><p class="line"><span class="k">def</span> <span class="nf">retry</span><span class="p">(</span><span class="n">func</span><span class="p">):</span>
+</p></li><li><p class="line">    <span class="k">def</span> <span class="nf">retried_func</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+</p></li><li><p class="line">        <span class="n">MAX_TRIES</span> <span class="o">=</span> <span class="mi">3</span>
+</p></li><li><p class="line">        <span class="n">tries</span> <span class="o">=</span> <span class="mi">0</span>
+</p></li><li><p class="line">        <span class="k">while</span> <span class="bp">True</span><span class="p">:</span>
+</p></li><li><p class="line">            <span class="n">resp</span> <span class="o">=</span> <span class="n">func</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+</p></li><li><p class="line">            <span class="k">if</span> <span class="n">resp</span><span class="o">.</span><span class="n">status_code</span> <span class="o">==</span> <span class="mi">500</span> <span class="ow">and</span> <span class="n">tries</span> <span class="o">&lt;</span> <span class="n">MAX_TRIES</span><span class="p">:</span>
+</p></li><li><p class="line">                <span class="n">tries</span> <span class="o">+=</span> <span class="mi">1</span>
+</p></li><li><p class="line">                <span class="k">continue</span>
+</p></li><li><p class="line">            <span class="k">break</span>
+</p></li><li><p class="line">        <span class="k">return</span> <span class="n">resp</span>
+</p></li><li><p class="line">    <span class="k">return</span> <span class="n">retried_func</span>
+</p></li></ol></pre></div>
+
+
+
+<p>This is then applied to the function that makes the HTTP call:</p>
+
+
+<div class="highlight"><pre><ol><li><p class="line"><span class="nd">@retry</span>
+</p></li><li><p class="line"><span class="k">def</span> <span class="nf">get_items</span><span class="p">():</span>
+</p></li><li><p class="line">    <span class="k">return</span> <span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">API_URL</span> <span class="o">+</span> <span class="s">'/items'</span><span class="p">)</span>
+</p></li><li><p class="line">
+</p></li><li><p class="line"><span class="n">todo_items</span> <span class="o">=</span> <span class="n">get_items</span><span class="p">()</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
+</p></li><li><p class="line"><span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">todo_items</span><span class="p">:</span>
+</p></li><li><p class="line">    <span class="c"># Do something with the item</span>
+</p></li></ol></pre></div>
+
+
+
+<p>To work properly, the <code>retry()</code> decorator must be
+applied to a function (or callable) that returns an instance of
+requests.Response. Such a function minimally encapsulates the action
+we want to automatically retry. Sometimes your code isn't naturally
+organized that way. I have found it helpful to factor out methods or
+functions following a certain naming convention that calls attention
+to their purpose, for example:</p>
+
+
+
+<div class="highlight"><pre><ol><li><p class="line"><span class="k">class</span> <span class="nc">TodoHelper</span><span class="p">:</span>
+</p></li><li><p class="line">    <span class="k">def</span> <span class="nf">fetch_all_items</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+</p></li><li><p class="line">        <span class="n">items_resp</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_get_items_response</span><span class="p">()</span>
+</p></li><li><p class="line">        <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">items_resp</span><span class="o">.</span><span class="n">json</span><span class="p">():</span>
+</p></li><li><p class="line">            <span class="k">yield</span> <span class="n">item</span>
+</p></li><li><p class="line">
+</p></li><li><p class="line">    <span class="c"># Methods named like "&lt;something&gt;_response" are understood</span>
+</p></li><li><p class="line">    <span class="c"># to return an instance of requests.Response. This can be</span>
+</p></li><li><p class="line">    <span class="c"># documented in the project's coding style guidelines.</span>
+</p></li><li><p class="line">    <span class="nd">@retry</span>
+</p></li><li><p class="line">    <span class="k">def</span> <span class="nf">_get_items_response</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+</p></li><li><p class="line">        <span class="k">return</span> <span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">API_URL</span> <span class="o">+</span> <span class="s">'/items'</span><span class="p">)</span>
+</p></li><li><p class="line">
+</p></li><li><p class="line"><span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">TodoHelper</span><span class="p">()</span><span class="o">.</span><span class="n">fetch_all_items</span><span class="p">():</span>
+</p></li><li><p class="line">    <span class="c"># Do something with the item</span>
+</p></li></ol></pre></div>
+
+
+
+<p>There's one other topic we need to mention. Look back up at the
+source for <code>retry()</code> for a moment. What's the algorithm for
+deciding whether to retry the API call? It's decided in the check
+"<code>if resp.status_code == 500</code>". What if you need
+different logic though? Maybe your application integrates with two
+different APIs, which infrequently fail in two different ways. In
+addition to the 500 error, one I have seen is a 4xx error being
+returned with valid authentication headers; the request would succeed
+when immediately retried with the same credentials. But for this one,
+we may not want to retry on 5xx status codes, as that could mask a
+different problem.</p>
+
+<h2>Customizing The Retry Decorator</h2>
+<p>What's needed is a way to parameterize the check. We do that by
+passing a <em>predicate</em>: a function object that takes a Response instance
+as its sole argument, and returns True or False depending on whether
+it is valid (or needs to be retried).</p>
+
+
+
+<div class="highlight"><pre><ol><li><p class="line"><span class="c"># is_valid represents our predicate function.</span>
+</p></li><li><p class="line"><span class="c"># Takes a response object argument; returns True or False.</span>
+</p></li><li><p class="line"><span class="k">def</span> <span class="nf">mk_retryer</span><span class="p">(</span><span class="n">is_valid</span><span class="p">):</span>
+</p></li><li><p class="line">    <span class="c"># retry() is the decorator we are building.</span>
+</p></li><li><p class="line">    <span class="k">def</span> <span class="nf">retry</span><span class="p">(</span><span class="n">func</span><span class="p">):</span>
+</p></li><li><p class="line">        <span class="k">def</span> <span class="nf">retried_func</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+</p></li><li><p class="line">            <span class="n">MAX_TRIES</span> <span class="o">=</span> <span class="mi">3</span>
+</p></li><li><p class="line">            <span class="n">tries</span> <span class="o">=</span> <span class="mi">0</span>
+</p></li><li><p class="line">            <span class="k">while</span> <span class="bp">True</span><span class="p">:</span>
+</p></li><li><p class="line">                <span class="n">resp</span> <span class="o">=</span> <span class="n">func</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+</p></li><li><p class="line">                <span class="k">if</span> <span class="ow">not</span> <span class="n">is_valid</span><span class="p">(</span><span class="n">resp</span><span class="p">)</span> <span class="ow">and</span> <span class="n">tries</span> <span class="o">&lt;</span> <span class="n">MAX_TRIES</span><span class="p">:</span>
+</p></li><li><p class="line">                    <span class="n">tries</span> <span class="o">+=</span> <span class="mi">1</span>
+</p></li><li><p class="line">                    <span class="k">continue</span>
+</p></li><li><p class="line">                <span class="k">assert</span> <span class="n">resp</span><span class="o">.</span><span class="n">status_code</span> <span class="o">==</span> <span class="mi">200</span><span class="p">,</span> \
+</p></li><li><p class="line">		    <span class="s">'Failure getting todo items: {}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">resp</span><span class="o">.</span><span class="n">status_code</span><span class="p">)</span>
+</p></li><li><p class="line">                <span class="k">break</span>
+</p></li><li><p class="line">            <span class="k">return</span> <span class="n">resp</span>
+</p></li><li><p class="line">        <span class="k">return</span> <span class="n">retried_func</span>
+</p></li><li><p class="line">    <span class="k">return</span> <span class="n">retry</span>
+</p></li></ol></pre></div>
+
+
+
+<p>With this tool, we can create custom retry decorators:</p>
+
+
+<div class="highlight"><pre><ol><li><p class="line"><span class="c"># A simple check that the status code is not 500.</span>
+</p></li><li><p class="line"><span class="k">def</span> <span class="nf">status_not_500</span><span class="p">(</span><span class="n">resp</span><span class="p">):</span>
+</p></li><li><p class="line">    <span class="k">return</span> <span class="n">resp</span><span class="o">.</span><span class="n">status_code</span> <span class="o">!=</span> <span class="mi">500</span>
+</p></li><li><p class="line"><span class="n">retry_on_internal_error</span> <span class="o">=</span> <span class="n">mk_retryer</span><span class="p">(</span><span class="n">is_valid</span> <span class="o">=</span> <span class="n">status_not_500</span><span class="p">)</span>
+</p></li><li><p class="line">
+</p></li><li><p class="line"><span class="c"># We can use a lambda to invert the logic.</span>
+</p></li><li><p class="line"><span class="k">def</span> <span class="nf">is_auth_error</span><span class="p">(</span><span class="n">resp</span><span class="p">):</span>
+</p></li><li><p class="line">    <span class="k">return</span> <span class="n">resp</span><span class="o">.</span><span class="n">status_code</span> <span class="o">&gt;=</span> <span class="mi">400</span> <span class="ow">and</span> <span class="n">resp</span><span class="o">.</span><span class="n">status_code</span> <span class="o">&lt;</span> <span class="mi">500</span>
+</p></li><li><p class="line"><span class="n">retry_on_auth_failure</span> <span class="o">=</span> <span class="n">mk_retryer</span><span class="p">(</span><span class="k">lambda</span> <span class="n">resp</span><span class="p">:</span> <span class="ow">not</span> <span class="n">is_auth_error</span><span class="p">(</span><span class="n">resp</span><span class="p">))</span>
+</p></li><li><p class="line">
+</p></li><li><p class="line"><span class="c"># Or inline a lambda directly.</span>
+</p></li><li><p class="line"><span class="c"># (This is also how you check the response body.)</span>
+</p></li><li><p class="line"><span class="n">retry_on_missing_id</span> <span class="o">=</span> <span class="n">mk_retryer</span><span class="p">(</span><span class="k">lambda</span> <span class="n">resp</span><span class="p">:</span> <span class="s">'summary'</span> <span class="ow">in</span> <span class="n">resp</span><span class="o">.</span><span class="n">json</span><span class="p">())</span>
+</p></li><li><p class="line">
+</p></li><li><p class="line"><span class="c"># You can create arbitrarily complex predicates, of course.</span>
+</p></li><li><p class="line"><span class="k">def</span> <span class="nf">is_fully_valid</span><span class="p">(</span><span class="n">resp</span><span class="p">):</span>
+</p></li><li><p class="line">    <span class="k">return</span> <span class="n">resp</span><span class="o">.</span><span class="n">status_code</span> <span class="o">&lt;</span> <span class="mi">400</span> <span class="ow">and</span> <span class="s">'summary'</span> <span class="ow">in</span> <span class="n">resp</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
+</p></li><li><p class="line"><span class="n">retry_on_anything_wrong</span> <span class="o">=</span> <span class="n">mk_retryer</span><span class="p">(</span><span class="n">is_fully_valid</span><span class="p">)</span>
+</p></li></ol></pre></div>
+
+
+
+<p>We can then apply these custom retry decorators at will.</p>
+
+
+<div class="highlight"><pre><ol><li><p class="line"><span class="nd">@retry_on_internal_error</span>
+</p></li><li><p class="line"><span class="k">def</span> <span class="nf">get_items</span><span class="p">():</span>
+</p></li><li><p class="line">    <span class="k">return</span> <span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">API_URL</span> <span class="o">+</span> <span class="s">'/items'</span><span class="p">)</span>
+</p></li><li><p class="line">
+</p></li><li><p class="line"><span class="nd">@retry_on_auth_failure</span>
+</p></li><li><p class="line"><span class="k">def</span> <span class="nf">get_resources_from_foreign_api</span><span class="p">():</span>
+</p></li><li><p class="line">    <span class="k">return</span> <span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">FOREIGN_API_URL</span> <span class="o">+</span> <span class="s">'/resources'</span><span class="p">)</span>
+</p></li></ol></pre></div>
+
+
+
+<h2>Class-Based Decorators Are Even More Flexible</h2>
+
+<p>There is an alternative approach, with class-based decorators. This
+has the advantage of letting you alter different aspects of the retry
+decorator more easily. It relies on the __call__ method <sup><a href="#note_2">2</a></sup>:</p>
+
+
+
+<div class="highlight"><pre><ol><li><p class="line"><span class="c"># This class will create the standard retry decorator.</span>
+</p></li><li><p class="line"><span class="c"># It only retries on a 500 status code.</span>
+</p></li><li><p class="line"><span class="k">class</span> <span class="nc">Retry</span><span class="p">:</span>
+</p></li><li><p class="line">    <span class="c"># By default, retry up to this many times.</span>
+</p></li><li><p class="line">    <span class="n">MAX_TRIES</span> <span class="o">=</span> <span class="mi">3</span>
+</p></li><li><p class="line">    <span class="c"># This method holds the validation check.</span>
+</p></li><li><p class="line">    <span class="k">def</span> <span class="nf">is_valid</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">resp</span><span class="p">):</span>
+</p></li><li><p class="line">        <span class="c"># By default, only retry if a status code is 500.</span>
+</p></li><li><p class="line">        <span class="k">return</span> <span class="n">resp</span><span class="o">.</span><span class="n">status_code</span> <span class="o">==</span> <span class="mi">500</span>
+</p></li><li><p class="line">
+</p></li><li><p class="line">    <span class="k">def</span> <span class="nf">__call__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">func</span><span class="p">):</span>
+</p></li><li><p class="line">        <span class="k">def</span> <span class="nf">retried_func</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+</p></li><li><p class="line">            <span class="n">tries</span> <span class="o">=</span> <span class="mi">0</span>
+</p></li><li><p class="line">            <span class="k">while</span> <span class="bp">True</span><span class="p">:</span>
+</p></li><li><p class="line">                <span class="n">resp</span> <span class="o">=</span> <span class="n">func</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+</p></li><li><p class="line">                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">is_valid</span><span class="p">(</span><span class="n">resp</span><span class="p">)</span> <span class="ow">or</span> <span class="n">tries</span> <span class="o">&gt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">MAX_TRIES</span><span class="p">:</span>
+</p></li><li><p class="line">                    <span class="k">break</span>
+</p></li><li><p class="line">                <span class="n">tries</span> <span class="o">+=</span> <span class="mi">1</span>
+</p></li><li><p class="line">            <span class="k">return</span> <span class="n">resp</span>
+</p></li><li><p class="line">        <span class="k">return</span> <span class="n">retried_func</span>
+</p></li><li><p class="line">
+</p></li><li><p class="line"><span class="c"># This will retry on 4xx failures only.</span>
+</p></li><li><p class="line"><span class="k">class</span> <span class="nc">RetryOnAuthFailure</span><span class="p">(</span><span class="n">Retry</span><span class="p">):</span>
+</p></li><li><p class="line">    <span class="k">def</span> <span class="nf">is_valid</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">resp</span><span class="p">):</span>
+</p></li><li><p class="line">        <span class="k">return</span> <span class="ow">not</span> <span class="p">(</span><span class="n">resp</span><span class="o">.</span><span class="n">status_code</span> <span class="o">&gt;=</span> <span class="mi">400</span> <span class="ow">and</span> <span class="n">resp</span><span class="o">.</span><span class="n">status_code</span> <span class="o">&lt;</span> <span class="mi">500</span><span class="p">)</span>
+</p></li><li><p class="line">    
+</p></li><li><p class="line"><span class="c"># This will retry on *any* 5xx error, and do so up to 5 times.</span>
+</p></li><li><p class="line"><span class="k">class</span> <span class="nc">RetryOnServerError</span><span class="p">(</span><span class="n">Retry</span><span class="p">):</span>
+</p></li><li><p class="line">    <span class="n">MAX_TRIES</span> <span class="o">=</span> <span class="mi">5</span>
+</p></li><li><p class="line">    <span class="k">def</span> <span class="nf">is_valid</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">resp</span><span class="p">):</span>
+</p></li><li><p class="line">        <span class="k">return</span> <span class="n">resp</span><span class="o">.</span><span class="n">status_code</span> <span class="o">&lt;</span> <span class="mi">500</span>
+</p></li><li><p class="line">
+</p></li><li><p class="line"><span class="c"># Now we create the decorator "functions" (callables, really).</span>
+</p></li><li><p class="line"><span class="n">retry_on_500</span> <span class="o">=</span> <span class="n">Retry</span><span class="p">()</span>
+</p></li><li><p class="line"><span class="n">retry_on_auth_failure</span> <span class="o">=</span> <span class="n">RetryOnAuthFailure</span><span class="p">()</span>
+</p></li><li><p class="line"><span class="n">retry_on_server_error</span> <span class="o">=</span> <span class="n">RetryOnServerError</span><span class="p">()</span>
+</p></li><li><p class="line">
+</p></li><li><p class="line"><span class="nd">@retry_on_500</span>
+</p></li><li><p class="line"><span class="k">def</span> <span class="nf">get_items</span><span class="p">():</span>
+</p></li><li><p class="line">    <span class="k">return</span> <span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">API_URL</span> <span class="o">+</span> <span class="s">'/items'</span><span class="p">)</span>
+</p></li><li><p class="line">
+</p></li><li><p class="line"><span class="nd">@retry_on_server_error</span>
+</p></li><li><p class="line"><span class="k">def</span> <span class="nf">get_single_item</span><span class="p">(</span><span class="n">item_id</span><span class="p">):</span>
+</p></li><li><p class="line">    <span class="k">return</span> <span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">API_URL</span> <span class="o">+</span> <span class="s">'/items/{}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">item_id</span><span class="p">))</span>
+</p></li><li><p class="line">
+</p></li><li><p class="line"><span class="nd">@retry_on_auth_failure</span>
+</p></li><li><p class="line"><span class="k">def</span> <span class="nf">drop_item</span><span class="p">(</span><span class="n">item_id</span><span class="p">):</span>
+</p></li><li><p class="line">    <span class="k">return</span> <span class="n">requests</span><span class="o">.</span><span class="n">delete</span><span class="p">(</span><span class="n">API_URL</span> <span class="o">+</span> <span class="s">'/items/{}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">item_id</span><span class="p">))</span>
+</p></li></ol></pre></div>
+
+
+
+<p>Using decorators in these ways gives you a lot of flexibility to
+make your API integrations more robust. If you need to add in time
+delays between retries, or inject an extra API call to refresh an
+access token or free some resource, etc., this approach gives you the
+hooks to do that and more. Try it out (all code in this essay is in
+the public domain), and <a href="mailto:aaron@migrateup.com">let me
+know what you think.</a>
+</p>
+
+<section id="footnotes">
+    <ol>
+	<li id="note_1"><p>Code in this essay uses the <a href="http://docs.python-requests.org/en/latest/">requests module</a>.
+	It's not part of the Python standard library, but in
+	practice I treat it like it is. Highly recommended for any application
+	that operates over HTTP.
+	</p></li>
+
+	<li id="note_2"><p><code>__call__</code> is a method of
+	<code>object</code> - the base class of all classes in Python - which
+	allows you to make any object <a href="http://www.rafekettler.com/magicmethods.html#callable">invokable
+	as a function</a>.</p>
+	</li>
+    </ol>
+</section>
+
+
+	</div> 
+
+    </div></body></html>

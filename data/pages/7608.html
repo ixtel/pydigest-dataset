@@ -1,0 +1,130 @@
+<html><body><div><div class="post-text" itemprop="text">
+
+<p>I've been using django-pyodbc-azure for a while on Linux, along with pydobc, FreeTDS and unixODBC to connect Django to SQL Server 2014. I ran into this problem with an application that had been working fine, and am having trouble debugging it. To reproduce the problem, I started a brand new Django app to keep things simple. Here's my virtualenv:</p>
+
+<pre><code>(azuretest)[vagrant@vagrant azuretest]$ pip freeze
+Django==1.8.6
+django-pyodbc-azure==1.8.3.0
+pyodbc==3.0.10
+</code></pre>
+
+<p>Here's my database config to connect to SQL Server:</p>
+
+<pre><code>DATABASES = {
+    'default': {
+        'ENGINE': 'sql_server.pyodbc',
+        'HOST': 'myserver.com',
+        'PORT': '1433',
+        'NAME': 'my_db',
+        'USER': 'my_db_user',
+        'PASSWORD': 'mypw',
+        'AUTOCOMMIT': True,
+        'OPTIONS': {
+            'driver': 'FreeTDS',
+            'autocommit': True,
+            'unicode_results': True,
+            'host_is_server': True,
+            'extra_params': 'tds_version=7.2',
+        },
+    },
+}
+</code></pre>
+
+<p>And I created a simple models.py:</p>
+
+<pre><code>class TestTemp(models.Model):
+    tempdate = models.DateField()
+</code></pre>
+
+<p>This set up has been working fine in a fairly complex Django project, which can still SELECT to this same database. However, whenever I try to do an UPDATE or migration, I've been getting this error:</p>
+
+<pre><code>(azuretest)[vagrant@vagrant azuretest]$ ./manage.py migrate home
+Operations to perform:
+  Apply all migrations: home
+Running migrations:
+  Rendering model states... DONE
+  Applying home.0001_initial...Traceback (most recent call last):
+  File "/home/vagrant/.virtualenvs/azuretest/lib/python3.4/site-packages/sql_server/pyodbc/base.py", line 389, in _set_aut
+ocommit
+    self.connection.rollback()
+pyodbc.Error: ('HY000', 'The driver did not supply an error!')
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "./manage.py", line 10, in &lt;module&gt;
+    execute_from_command_line(sys.argv)
+  File "/home/vagrant/.virtualenvs/azuretest/lib/python3.4/site-packages/django/core/management/__init__.py", line 354, in
+ execute_from_command_line
+    utility.execute()
+  File "/home/vagrant/.virtualenvs/azuretest/lib/python3.4/site-packages/django/core/management/__init__.py", line 346, in
+ execute
+    self.fetch_command(subcommand).run_from_argv(self.argv)
+  File "/home/vagrant/.virtualenvs/azuretest/lib/python3.4/site-packages/django/core/management/base.py", line 394, in run
+_from_argv
+    self.execute(*args, **cmd_options)
+  File "/home/vagrant/.virtualenvs/azuretest/lib/python3.4/site-packages/django/core/management/base.py", line 445, in exe
+cute
+    output = self.handle(*args, **options)
+  File "/home/vagrant/.virtualenvs/azuretest/lib/python3.4/site-packages/django/core/management/commands/migrate.py", line
+ 222, in handle
+    executor.migrate(targets, plan, fake=fake, fake_initial=fake_initial)
+  File "/home/vagrant/.virtualenvs/azuretest/lib/python3.4/site-packages/django/db/migrations/executor.py", line 110, in m
+igrate
+    self.apply_migration(states[migration], migration, fake=fake, fake_initial=fake_initial)
+  File "/home/vagrant/.virtualenvs/azuretest/lib/python3.4/site-packages/django/db/migrations/executor.py", line 154, in a
+pply_migration
+    self.recorder.record_applied(migration.app_label, migration.name)
+  File "/home/vagrant/.virtualenvs/azuretest/lib/python3.4/site-packages/django/db/migrations/recorder.py", line 67, in re
+cord_applied
+    self.migration_qs.create(app=app, name=name)
+  File "/home/vagrant/.virtualenvs/azuretest/lib/python3.4/site-packages/django/db/models/query.py", line 348, in create
+    obj.save(force_insert=True, using=self.db)
+  File "/home/vagrant/.virtualenvs/azuretest/lib/python3.4/site-packages/django/db/models/base.py", line 734, in save
+    force_update=force_update, update_fields=update_fields)
+  File "/home/vagrant/.virtualenvs/azuretest/lib/python3.4/site-packages/django/db/models/base.py", line 759, in save_base
+
+    with transaction.atomic(using=using, savepoint=False):
+  File "/home/vagrant/.virtualenvs/azuretest/lib/python3.4/site-packages/django/db/transaction.py", line 186, in __enter__
+
+    connection.set_autocommit(False)
+  File "/home/vagrant/.virtualenvs/azuretest/lib/python3.4/site-packages/django/db/backends/base/base.py", line 295, in se
+t_autocommit
+    self._set_autocommit(autocommit)
+  File "/home/vagrant/.virtualenvs/azuretest/lib/python3.4/site-packages/sql_server/pyodbc/base.py", line 390, in _set_aut
+ocommit
+    self.connection.autocommit = autocommit
+  File "/home/vagrant/.virtualenvs/azuretest/lib/python3.4/site-packages/django/db/utils.py", line 98, in __exit__
+    six.reraise(dj_exc_type, dj_exc_value, traceback)
+  File "/home/vagrant/.virtualenvs/azuretest/lib/python3.4/site-packages/django/utils/six.py", line 658, in reraise
+    raise value.with_traceback(tb)
+  File "/home/vagrant/.virtualenvs/azuretest/lib/python3.4/site-packages/sql_server/pyodbc/base.py", line 389, in _set_aut
+ocommit
+    self.connection.rollback()
+django.db.utils.Error: ('HY000', 'The driver did not supply an error!')
+</code></pre>
+
+<p>The weird part is that it successfully creates the table in SQL Server ([home_testtemp]), and seems to be erroring out on an un-necessary rollback. Any ideas on best ways to debug this further or fix the issue? When I run the SQL output by <code>./manage.py sqlmigrate home</code> directly against the database logged in with this username and password, it works fine.</p>
+
+<p>Thanks in advance.</p>
+
+<p>UPDATE 1: this isn't a good fix, but gets around what appears to be a problem with a rollback being called when it shouldn't. This change is made around line 389 of base.py in django-pyodbc-azure:</p>
+
+<p>This is ugly and gets rid of a safeguard, but makes things work in the meantime. Modifying base.py around line 389 in django-pyodbc-azure:</p>
+
+<pre><code>def _set_autocommit(self, autocommit):
+        self.connection.commit()
+
+#        with self.wrap_database_errors:
+#            if autocommit:
+#                self.connection.commit()
+#            else:
+#                self.connection.rollback()
+#            self.connection.autocommit = autocommit
+</code></pre>
+
+<p>Obviously, still looking for an actual fix rather than a hack and the root cause.</p>
+
+<p>UPDATE 2: Back out the change made in UPDATE 1 above to the original django-pyodbc. Then in the SETTINGS, change the tds_version to be either <code>7.0</code> or <code>7.1</code>. It works. If you change it to <code>7.2</code> or <code>7.3</code>, it breaks. Could this be a problem with the new DATE fields available starting in SQL Server 2008? Either way, a temp solution is to revert to TDS Version 7.1, and this is clearly useful information towards a fix.</p>
+    </div>
+    </div></body></html>

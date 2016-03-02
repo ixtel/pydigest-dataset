@@ -1,0 +1,338 @@
+<html><body><div><div class="all_external_links">
+          <p><img alt="Silvrback blog image" src="https://silvrback.s3.amazonaws.com/uploads/83cbc4ac-c4f7-4dd6-abdf-9757a3dd1bd9/1encrypt_large.jpg"/></p>
+
+<p>Django is a powerful python web framework, which follows the DRY (Don’t repeat yourself), and batteries included philosophies. At @Kipinhall, we are proud to use Django because of the rich ecosystem it offers via plugins &amp; its ever expanding community.</p>
+
+<p>Recently we created a provisioning API for 3rd party apps to access our course data, add/update users, create new classes/schedules etc. The API follows the standard <a href="http://en.wikipedia.org/wiki/Representational_state_transfer">REST protocol</a>, which can be cumbersome to roll out on your own. Luckily, Django provides an excellent plugin called <em>Django Tastypie</em>, which does lotta heavy lifting in writing REST compliant API's [Also checkout <a href="http://django-rest-framework.org/">Django Rest Framework</a>]. Furthermore, <em>Tastypie</em> comes with excellent documentation and its integration into the project was a breeze. More @ <a href="http://django-tastypie.readthedocs.org/en/latest/">tastypie</a>.</p>
+
+<p>This post will highlight some of our security requirements of the API and customizations we did to <em>Tastypie</em> to meet those requirements.</p>
+
+<h1 id="toc_0">Authentication</h1>
+
+<h2 id="toc_1">Problem</h2>
+
+<p>Tastypie comes with some default authentications, which don't necessarily fit our requirements. Our needs are similar to the way Google Analytics or <a href="http://mixpanel.com">Mixpanel</a> handle their client app requests, <strong>where each client app owns its own data</strong>.</p>
+
+<p>The following illustrates the use case,</p>
+
+<ul>
+<li>A 3rd party app will register with <strong>Kipinhall</strong> and get an <code>API Key</code>.</li>
+<li>They will use this <code>API Key</code> to perform actions such as adding users, authenticating users, creating content on their behalf, some administrative stuff etc.</li>
+<li>The data is fully owned by the app and cannot be viewed or modified by other 3rd party app.</li>
+</ul>
+
+<p>Because <em>Tastypie</em> treats all users equally, there is no clear way to distinguish between a <em>3rd party</em> or an <em>Application User</em>. In addition to that, it doesn't fully cover our security needs. To illustrate a few,</p>
+
+<ul>
+<li><code>API Key</code> for web based app is clearly exposed in the JS scripts. Anyone can then use that and make a call on behalf of the user. </li>
+<li>No domain restriction on the API calls.</li>
+<li>Token based authentication is directly tied to a user and does not expire.</li>
+<li>It needs to support chained authentication, which is only successful when all of the authentications are successful.</li>
+<li>Just like <code>request.user</code>, we need access to the <code>client</code> information. We can then filter the data, add analytics based on the usage &amp; much more.</li>
+</ul>
+
+<p>I can keep on going, but you get the idea. Fortunately, <em>Tastypie</em> is fully customizable and you can plugin your own authentication. So lets code.</p>
+
+<h2 id="toc_2">Solution</h2>
+
+<h3 id="toc_3">Client</h3>
+
+<p>To segregate between <em>3rd party</em> and an <em>Application User</em>, we will create a new model called <code>Client</code> in a package say <code>third_party</code>.</p>
+<div class="highlight"><pre><span class="k">class</span> <span class="nc">Client</span><span class="p">(</span><span class="n">models</span><span class="o">.</span><span class="n">Model</span><span class="p">):</span>
+  <span class="n">name</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">CharField</span><span class="p">(</span><span class="n">_</span><span class="p">(</span><span class="s">'Name'</span><span class="p">),</span> <span class="n">max_length</span> <span class="o">=</span> <span class="mi">25</span><span class="p">)</span>
+  <span class="n">base_uri</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">URLField</span><span class="p">(</span><span class="n">_</span><span class="p">(</span><span class="s">'Base URI'</span><span class="p">))</span>
+  <span class="n">api_key</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">CharField</span><span class="p">(</span><span class="n">_</span><span class="p">(</span><span class="s">'API Key'</span><span class="p">),</span> <span class="n">max_length</span> <span class="o">=</span> <span class="mi">25</span><span class="p">)</span>
+  <span class="n">secret_key</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">CharField</span><span class="p">(</span><span class="n">_</span><span class="p">(</span><span class="s">'Secret Key'</span><span class="p">),</span> <span class="n">max_length</span> <span class="o">=</span> <span class="mi">25</span><span class="p">)</span>
+  <span class="n">allowed_domain</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">TextField</span><span class="p">(</span><span class="n">_</span><span class="p">(</span><span class="s">'Allowed Domain'</span><span class="p">))</span>
+  <span class="n">allow_subdomains</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">BooleanField</span><span class="p">(</span><span class="n">_</span><span class="p">(</span><span class="s">'Allow Subdomains'</span><span class="p">))</span>
+  <span class="n">throttle_threshold</span> <span class="o">=</span> <span class="n">models</span><span class="o">.</span><span class="n">PositiveIntegerField</span><span class="p">(</span><span class="n">_</span><span class="p">(</span><span class="s">'Throttle Threshold'</span><span class="p">),</span> 
+                                                      <span class="n">default</span> <span class="o">=</span> <span class="mi">100</span><span class="p">)</span>
+
+  <span class="k">def</span> <span class="nf">save</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">force_insert</span> <span class="o">=</span> <span class="bp">False</span><span class="p">,</span> <span class="n">force_update</span> <span class="o">=</span> <span class="bp">False</span><span class="p">,</span> <span class="n">using</span> <span class="o">=</span> <span class="bp">None</span><span class="p">):</span>
+    <span class="sd">"""</span>
+<span class="sd">    Note `api_generator, sec_key_generator` is our custom methods, </span>
+<span class="sd">      but for starters you can use `get_random_string` </span>
+<span class="sd">      from django's crypto package.</span>
+<span class="sd">    """</span>
+    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">pk</span> <span class="ow">is</span> <span class="bp">None</span><span class="p">:</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">api_key</span> <span class="o">=</span> <span class="n">api_generator</span><span class="p">(</span><span class="mi">25</span><span class="p">)</span>
+      <span class="bp">self</span><span class="o">.</span><span class="n">secret_key</span> <span class="o">=</span> <span class="n">sec_key_generator</span><span class="p">(</span><span class="mi">25</span><span class="p">,</span> <span class="n">settings</span><span class="o">.</span><span class="n">SALT</span><span class="p">,</span> <span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">())</span>
+
+    <span class="nb">super</span><span class="p">(</span><span class="n">Client</span><span class="p">,</span> <span class="bp">self</span><span class="p">)</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="n">force_insert</span> <span class="o">=</span> <span class="n">force_insert</span><span class="p">,</span> 
+        <span class="n">force_update</span> <span class="o">=</span> <span class="n">force_update</span><span class="p">,</span> <span class="n">using</span> <span class="o">=</span> <span class="n">using</span><span class="p">)</span>
+</pre></div>
+<p>The model is pretty explanatory. Here are some salient points,</p>
+
+<ul>
+<li>We have a self serving <em>3rd party app</em> portal, where the user can request the API key.</li>
+<li>We hide the <code>api_key</code> and <code>secret_key</code> fields on the form and generate them on a new object creation.</li>
+<li>We store the domain name in <code>allowed_domain</code> field</li>
+<li><code>allow_subdomains</code> flag will allow subdomains e.g. <code>*.domain.com</code>.</li>
+<li>On a successful creation, we show the user the newly created <code>api_key</code> and the <code>secret_key</code>, which they will use to sign their requests.</li>
+</ul>
+
+<h3 id="toc_4">User Token Header</h3>
+
+<p>The <em>3rd party client</em> will initiate the first request by authenticating the user via <em>Oauth</em> or simple <em>user/password</em> mechanism. </p>
+
+<p>On successful authentication, we return the user token in the <code>response</code> headers, which the client is expected to store locally. This can be done via simple django view that returns the desired information.</p>
+
+<p>On subsequent requests, client is expected to pass <code>HTTP_TOKEN</code> header with the <code>username</code> and the <code>token</code> to ensure the right user is connected to the request.</p>
+<div class="highlight"><pre><span class="n">TOKEN</span><span class="p">:</span> <span class="o">&lt;</span><span class="n">username</span><span class="o">&gt;</span><span class="p">:</span><span class="o">&lt;</span><span class="n">token</span><span class="o">&gt;</span>
+</pre></div>
+<blockquote>
+<p>Make sure you add <code>tastypie</code> to <code>INSTALLED_APPS</code> and sync your DB. On every user creation, it creates a corresponding entry in the <code>ApiKey</code> table.</p>
+</blockquote>
+
+<p><em>Tastypie</em> comes with an existing token based user authentication, namely <code>ApiKeyAuthentication</code>, which we will slightly modify to look for <code>TOKEN</code> instead of the typical <code>Authorization</code> header it expects.</p>
+
+<blockquote>
+<p>Do not be confused by the name. The user related api key is really a token. Furthermore, we modified <code>ApiKey</code> to hold <code>expires</code> field, which ensures tokens don't last forever.</p>
+</blockquote>
+<div class="highlight"><pre><span class="k">class</span> <span class="nc">TokenUserAuthentication</span><span class="p">(</span><span class="n">ApiKeyAuthentication</span><span class="p">):</span>
+    <span class="sd">"""</span>
+<span class="sd">    Handles token auth, in which a client provides a username &amp; token,</span>
+<span class="sd">    which translates to `key` in the ApiKey table.</span>
+
+<span class="sd">    Note we are inheriting from `ApiKeyAuthentication`, which takes care</span>
+<span class="sd">    of token lookup. We are only overriding the method</span>
+<span class="sd">    `extra_credentials`.</span>
+
+<span class="sd">    Since the "Authorization" is now reserved for client header, we want </span>
+<span class="sd">    to use a different header for the user. Token is industry standard for </span>
+<span class="sd">    user based authentication, so we will stick with that. </span>
+<span class="sd">    Also, Api Key is industry norm for issuing it to 3rd party apps.</span>
+
+<span class="sd">    Not shown in here is validating token expiry date but its fairly easy by </span>
+<span class="sd">    adding `expires` date-time field to `ApiKey`. In addition to </span>
+<span class="sd">    that, we expect our clients to sign the token with the `secret_key` </span>
+<span class="sd">    but I left it out for the sake of brevity.</span>
+<span class="sd">    """</span>
+
+    <span class="k">def</span> <span class="nf">extract_credentials</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">request</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">request</span><span class="o">.</span><span class="n">META</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'HTTP_TOKEN'</span><span class="p">):</span>
+            <span class="n">username</span><span class="p">,</span> <span class="n">token</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">META</span><span class="p">[</span><span class="s">'HTTP_TOKEN'</span><span class="p">]</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s">':'</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+            <span class="k">return</span> <span class="n">username</span><span class="p">,</span> <span class="n">token</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s">'Incorrect token header.'</span><span class="p">)</span>
+</pre></div>
+<h3 id="toc_5">Client Header</h3>
+
+<p>To ensure no one can impersonate the client, we expect the <em>3rd party</em> apps to send an extra header identifying their identity. If you recall, the client requested for an API key and got in return an <code>api_key</code> and <code>secret_key</code>. Those two keys will be used in signing the header.</p>
+
+<p><em>Note, its recommended that the client performs these operations on the backend since the <code>secret_key</code> should never be exposed on the website. Fortunately, its lot easier for devices since they aren't exposed the same way the website pages are.</em></p>
+
+<h4 id="toc_6">Signature</h4>
+
+<p>The signing process requires the client to compute the request signature by signing the canonicalized URL.</p>
+
+<p>Assuming the 3rd party is using django, they can sign the request as follows</p>
+<div class="highlight"><pre><span class="kn">import</span> <span class="nn">hashlib</span>
+<span class="kn">import</span> <span class="nn">base64</span>
+
+<span class="k">def</span> <span class="nf">get_signed_request</span><span class="p">(</span><span class="n">request</span><span class="p">):</span>
+  <span class="c">#prep string</span>
+  <span class="n">hashable_string</span> <span class="o">=</span> <span class="n">b</span><span class="s">'</span><span class="si">%s%s%s</span><span class="s">'</span> <span class="o">%</span> <span class="p">(</span><span class="n">client</span><span class="o">.</span><span class="n">api_key</span><span class="p">,</span> 
+           <span class="n">client</span><span class="o">.</span><span class="n">secret_key</span><span class="p">,</span> 
+           <span class="n">request</span><span class="o">.</span><span class="n">build_absolute_uri</span><span class="p">(</span><span class="n">request</span><span class="o">.</span><span class="n">get_full_path</span><span class="p">()))</span>
+
+  <span class="n">m</span> <span class="o">=</span> <span class="n">hashlib</span><span class="o">.</span><span class="n">sha256</span><span class="p">(</span><span class="n">hashable_string</span><span class="p">)</span>
+  <span class="k">return</span> <span class="n">base64</span><span class="o">.</span><span class="n">b64encode</span><span class="p">(</span><span class="n">m</span><span class="o">.</span><span class="n">hexdigest</span><span class="p">())</span>
+</pre></div>
+<p>The client will dump the above value in every request as a <code>AUTHORIZATION</code> header, along with the <code>api_key</code>.</p>
+<div class="highlight"><pre><span class="c">#format</span>
+<span class="n">Authorization</span><span class="p">:</span> <span class="n">Kipin</span> <span class="o">&lt;</span><span class="n">api_key</span><span class="o">&gt;</span><span class="p">:</span><span class="o">&lt;</span><span class="n">signature</span><span class="o">&gt;</span>
+</pre></div><div class="highlight"><pre><span class="c">#assume api_key is 123456789</span>
+
+<span class="n">Authorization</span><span class="p">:</span> <span class="n">Kipin</span> <span class="mi">123456789</span><span class="p">:</span><span class="n">YTI5YmFjNzIzY2EyZDU5ZWQ3OGEyZDcxNWUxN2U5MmY</span><span class="o">=</span>
+</pre></div>
+<h3 id="toc_7">Client Authentication</h3>
+
+<p>Now that we have the <code>Authorization</code> header in the request, we need to verify its signature and depending on the result, we will either allow the request or raise a 401 unauthorized request error.</p>
+
+<p><em>Tastypie</em> provides multi authentication mechanism, where it checks list of authentication protocols till at least one of them returns true. <br/>
+Since we want all of the authentication protocols to succeed, we will slightly modify to ensure it does exactly that.</p>
+<div class="highlight"><pre><span class="k">class</span> <span class="nc">ChainedAuthentication</span><span class="p">(</span><span class="n">MultiAuthentication</span><span class="p">):</span>
+    <span class="sd">"""</span>
+<span class="sd">    Chained authentication ensures all authentications are passed </span>
+<span class="sd">    and return True else it will return False. </span>
+<span class="sd">    """</span>
+    <span class="k">def</span> <span class="nf">is_authenticated</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">request</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="sd">"""</span>
+<span class="sd">    Ensures all authentications return True. Should return either ``True`` </span>
+<span class="sd">        if allowed, ``False`` if not or an ``HttpResponse`` </span>
+<span class="sd">        if you need something custom.</span>
+<span class="sd">    """</span>
+    <span class="n">authorized</span> <span class="o">=</span> <span class="bp">False</span>
+
+    <span class="k">for</span> <span class="n">backend</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">backends</span><span class="p">:</span>
+        <span class="n">check</span> <span class="o">=</span> <span class="n">backend</span><span class="o">.</span><span class="n">is_authenticated</span><span class="p">(</span><span class="n">request</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+
+        <span class="k">if</span> <span class="n">check</span><span class="p">:</span>
+            <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">check</span><span class="p">,</span> <span class="n">HttpUnauthorized</span><span class="p">):</span>
+                <span class="k">return</span> <span class="n">check</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">request</span><span class="o">.</span><span class="n">_authentication_backend</span> <span class="o">=</span> <span class="n">backend</span>
+                <span class="n">authorized</span> <span class="o">=</span> <span class="n">check</span> <span class="o">==</span> <span class="bp">True</span>
+
+    <span class="k">return</span> <span class="n">authorized</span>
+</pre></div>
+<p>Now is a good time to write the client authentication class that will verify the client to who they claim to be. </p>
+<div class="highlight"><pre><span class="k">class</span> <span class="nc">ClientAuthentication</span><span class="p">(</span><span class="n">Authentication</span><span class="p">):</span>
+    <span class="sd">"""</span>
+<span class="sd">    Verifies the client signature</span>
+
+<span class="sd">    """</span>
+
+    <span class="k">def</span> <span class="nf">_unauthorized</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">HttpUnauthorized</span><span class="p">()</span>
+
+    <span class="k">def</span> <span class="nf">extract_credentials</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">request</span><span class="p">):</span>
+        <span class="sd">"""</span>
+<span class="sd">        Just extract the above header by splitting the </span>
+<span class="sd">        value by ':' as API Key and signature.</span>
+<span class="sd">        """</span>
+        <span class="k">if</span> <span class="n">request</span><span class="o">.</span><span class="n">META</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s">'HTTP_AUTHORIZATION'</span><span class="p">)</span> <span class="ow">and</span>     
+            <span class="n">request</span><span class="o">.</span><span class="n">META</span><span class="p">[</span><span class="s">'HTTP_AUTHORIZATION'</span><span class="p">]</span>
+                               <span class="o">.</span><span class="n">lower</span><span class="p">()</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s">'kipin '</span><span class="p">):</span>
+            <span class="n">auth_type</span><span class="p">,</span> <span class="n">data</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">META</span><span class="p">[</span><span class="s">'HTTP_AUTHORIZATION'</span><span class="p">]</span><span class="o">.</span><span class="n">split</span><span class="p">()</span>
+
+            <span class="k">if</span> <span class="n">auth_type</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span> <span class="o">!=</span> <span class="s">'kipin'</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s">"Incorrect authorization header."</span><span class="p">)</span>
+
+            <span class="k">return</span> <span class="n">data</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s">':'</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s">"Incorrect authorization header."</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">is_authenticated</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">request</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="sd">"""</span>
+<span class="sd">        Finds the client and checks the signature.</span>
+<span class="sd">        """</span>
+
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">api_key</span><span class="p">,</span> <span class="n">signature</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">extract_credentials</span><span class="p">(</span><span class="n">request</span><span class="p">)</span>
+        <span class="k">except</span> <span class="ne">ValueError</span><span class="p">:</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_unauthorized</span><span class="p">()</span>
+
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">api_key</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">signature</span><span class="p">:</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_unauthorized</span><span class="p">()</span>
+
+        <span class="c">#first check the client</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">lookup_kwargs</span> <span class="o">=</span> <span class="p">{</span><span class="n">api_key</span><span class="p">:</span> <span class="n">api_key</span><span class="p">}</span>
+            <span class="n">client</span> <span class="o">=</span> <span class="n">Client</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="o">**</span><span class="n">lookup_kwargs</span><span class="p">)</span>
+        <span class="k">except</span> <span class="p">(</span><span class="n">Client</span><span class="o">.</span><span class="n">DoesNotExist</span><span class="p">,</span> <span class="n">Client</span><span class="o">.</span><span class="n">MultipleObjectsReturned</span><span class="p">):</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_unauthorized</span><span class="p">()</span>
+
+        <span class="c">#verify_signature is exactly the same code as get_signed_request </span>
+        <span class="c">#except that it accepts list of strings to sign </span>
+        <span class="c">#and compares against the signature passed.</span>
+        <span class="c">#`verify_signature(self, signature, *args)`</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">client</span><span class="o">.</span><span class="n">verify_signature</span><span class="p">(</span><span class="n">base64</span><span class="o">.</span><span class="n">b64decode</span><span class="p">(</span><span class="n">signature</span><span class="p">),</span> 
+            <span class="n">request</span><span class="o">.</span><span class="n">build_absolute_uri</span><span class="p">(</span><span class="n">request</span><span class="o">.</span><span class="n">get_full_path</span><span class="p">())):</span>
+            <span class="k">return</span> <span class="bp">False</span>
+
+        <span class="c">#set the client, so views/resources can access this</span>
+        <span class="n">request</span><span class="o">.</span><span class="n">client</span> <span class="o">=</span> <span class="n">client</span>
+
+        <span class="k">return</span> <span class="bp">True</span>
+</pre></div>
+<h3 id="toc_8">Restricting Domains</h3>
+
+<p>There are two parts to domain validation, </p>
+
+<ul>
+<li>One is enabling <a href="http://en.wikipedia.org/wiki/Cross-origin_resource_sharing">CORS</a> on the server so 3rd party apps can make a cross-domain request. We will add the value from the field <code>Client.allowed_domains</code> to the response on a <code>CORS pre-flight</code> request.</li>
+<li>Check the domain origin to ensure that they match to the allowed domains for the given client. I will leave out for the reader to figure this out. [hint <code>middleware</code>]</li>
+</ul>
+
+<blockquote>
+<p>Note, anyone can mimic the <code>Origin</code> by doing <code>curl -H "Origin: http://allowed-domain.com"</code>, so just doing straight up validation of domain is not enough.</p>
+</blockquote>
+
+<p>Lets start with adding <em>CORS</em> information to the response via <code>middleware</code></p>
+<div class="highlight"><pre><span class="k">class</span> <span class="nc">CorsPreFlightCheckMiddleware</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
+
+    <span class="sd">"""</span>
+<span class="sd">    Pre flight check for CORS request. You can also extend this to</span>
+<span class="sd">    add domain validation.</span>
+<span class="sd">    """</span>
+
+    <span class="k">def</span> <span class="nf">process_request</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">request</span><span class="p">):</span>
+        <span class="sd">'''</span>
+<span class="sd">        If CORS preflight header, then create an empty body response </span>
+<span class="sd">       (200 OK) and return it</span>
+
+<span class="sd">       Django won't bother calling any other request view/exception </span>
+<span class="sd">       middleware along with the requested view; it will call </span>
+<span class="sd">       any response middlewares.</span>
+<span class="sd">        '''</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">request</span><span class="o">.</span><span class="n">method</span> <span class="o">==</span> <span class="s">'OPTIONS'</span> <span class="ow">and</span>
+            <span class="s">'HTTP_ACCESS_CONTROL_REQUEST_METHOD'</span> <span class="ow">in</span> <span class="n">request</span><span class="o">.</span><span class="n">META</span><span class="p">):</span>
+            <span class="k">return</span> <span class="n">http</span><span class="o">.</span><span class="n">HttpResponse</span><span class="p">()</span>
+
+        <span class="k">return</span> <span class="bp">None</span>
+
+    <span class="k">def</span> <span class="nf">process_response</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">request</span><span class="p">,</span> <span class="n">response</span><span class="p">):</span>
+        <span class="sd">'''</span>
+<span class="sd">        Add the respective CORS headers for pre-flight check</span>
+<span class="sd">        '''</span>
+        <span class="c">#only do this in case of 'OPTIONS' request.</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">request</span><span class="o">.</span><span class="n">method</span> <span class="o">==</span> <span class="s">'OPTIONS'</span> <span class="ow">and</span>
+            <span class="s">'HTTP_ACCESS_CONTROL_REQUEST_METHOD'</span> <span class="ow">in</span> <span class="n">request</span><span class="o">.</span><span class="n">META</span><span class="p">):</span>
+
+            <span class="c">#default entries</span>
+            <span class="n">response</span><span class="p">[</span><span class="s">'Access-Control-Allow-Headers'</span><span class="p">]</span> <span class="o">=</span> <span class="s">'Content-Type'</span>
+
+            <span class="c">#extract the client API Key</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="n">api_key</span><span class="p">,</span> <span class="n">signature</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">extract_credentials</span><span class="p">(</span><span class="n">request</span><span class="p">)</span>
+                <span class="c">#verify the signature as above</span>
+
+                <span class="n">client</span> <span class="o">=</span> <span class="n">Client</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">api_key</span> <span class="o">=</span> <span class="n">api_key</span><span class="p">)</span>
+                <span class="n">response</span><span class="p">[</span><span class="s">'Access-Control-Allow-Origin'</span><span class="p">]</span> <span class="o">=</span> 
+                    <span class="n">client</span><span class="o">.</span><span class="n">allowed_domain</span>
+                <span class="c">#you can store the information as a JSONField </span>
+                <span class="c">#in Client model                </span>
+                <span class="n">response</span><span class="p">[</span><span class="s">'&lt;Other-CORS-RELATED-Headers&gt;'</span><span class="p">]</span> <span class="o">=</span> <span class="s">'&lt;value&gt;'</span>
+
+            <span class="k">except</span> <span class="ne">ValueError</span><span class="p">,</span> <span class="n">ObjectDoesNotExist</span><span class="p">:</span>
+                <span class="c">#assumes you configured this, which you should</span>
+                <span class="n">response</span><span class="p">[</span><span class="s">'Access-Control-Allow-Origin'</span><span class="p">]</span> <span class="o">=</span> 
+                    <span class="n">Site</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">get_current</span><span class="p">()</span><span class="o">.</span><span class="n">domain</span>
+
+        <span class="k">return</span> <span class="n">response</span>
+</pre></div>
+<h3 id="toc_9">Securing Resources</h3>
+
+<p>We need to secure our resources with the above authentication mechanisms.</p>
+<div class="highlight"><pre><span class="c">#Since we do not believe in redundant code, lets create a base meta class.</span>
+<span class="k">class</span> <span class="nc">ClientAuthenticationMixin</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
+    <span class="n">authentication</span> <span class="o">=</span> <span class="n">ChainedAuthentication</span><span class="p">(</span><span class="n">ClientAuthentication</span><span class="p">(),</span> 
+                                           <span class="n">TokenUserAuthentication</span><span class="p">())</span>
+
+<span class="k">class</span> <span class="nc">CourseResource</span><span class="p">(</span><span class="n">ModelResource</span><span class="p">):</span>
+    <span class="sd">""" </span>
+<span class="sd">    Note the `CacheableMixin` which caches our endpoints.</span>
+<span class="sd">    """</span>
+    <span class="k">class</span> <span class="nc">Meta</span><span class="p">(</span><span class="n">ClientAuthenticationMixin</span><span class="p">,</span> <span class="n">DomainValidatorMixin</span><span class="p">,</span>
+                                   <span class="n">ThrottleMixin</span><span class="p">,</span> <span class="n">CacheableMixin</span><span class="p">):</span>
+        <span class="n">allowed_methods</span> <span class="o">=</span> <span class="p">[</span><span class="s">'get'</span><span class="p">]</span>
+        <span class="n">queryset</span> <span class="o">=</span> <span class="n">Course</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">all</span><span class="p">()</span>    
+</pre></div>
+<p>Finally, add <code>CorsPreFlightCheckMiddleware</code> middleware to your <code>MIDDLEWARE_CLASSES</code> setting in your <code>settings.py</code>.</p>
+
+<h1 id="toc_10">Conclusion</h1>
+
+<p>I skipped a lot of things, especially validating domains on an actual HTTP request, throttling based on client settings, munging sensitive information etc. So if some of the code doesn't make sense, please let me know.</p>
+
+<p>You don't have to use all of the techniques above but you can start with enforcing your API users to use TLS/SSL protocol. </p>
+
+<p>Note that security is ever evolving and in <strong><em>no way</em></strong> the above suggestions should be considered as an iron clad solution. </p>
+
+<p>Security is all about opportunity cost to a malicious hacker. Making it tougher and longer for them to hack is a good deterrent.</p>
+
+<p><em>follow me on <a href="https://twitter.com/agileseeker">@agileseeker</a></em></p>
+
+        </div>
+        </div></body></html>

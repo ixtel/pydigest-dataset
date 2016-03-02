@@ -1,0 +1,69 @@
+<html><body><div><div class="entry-content">
+		<p>I have <a title="Visualizing Summer Travels" href="http://geoffboeing.com/2014/08/visualizing-summer-travels/">previously written</a> about my GPS location data from this summer’s travels. The data set, gathered with the OpenPaths app, contains lat-long coordinates and timestamps. Without city or country data, any visualizations would be very simplistic because all I have is coordinates and timestamps.</p>
+<p>It would be nice to reverse geocode these coordinates to add city and country data to each point. Then, I could create richer, more informative marker popups that include this new geographical information.</p>
+<p><span id="more-73"/></p>
+<p>Texas A&amp;M Geoservices runs a nice <a href="https://geoservices.tamu.edu/Services/ReverseGeocoding/">web service</a> that allows you to upload a data set of lat-long values as a batch, and receive address data back. However, their database only covers the United States (it requires you to have a <em>state</em> field in addition to lat and long) so it won’t work for this case.</p>
+<h2>Reverse Geocode with the Google Maps API</h2>
+<p>Instead, I will use the Google Maps API.  Google provides a <a href="https://developers.google.com/maps/documentation/geocoding/#ReverseGeocoding">JSON API</a> that allows you to request address data for a coordinate pair. Using Python, I will reverse geocode each of the 1,759 GPS coordinates in my data set to city + country. The original data set is <a href="http://geoffboeing.com/wp-content/uploads/2014/08/summer-travel-gps-no-city-country.csv">available here</a> and all of this code is available in <a href="http://nbviewer.ipython.org/github/gboeing/2014-summer-travels/blob/master/reverse-geocode-latlong.ipynb">this IPython notebook</a>. First I import the necessary modules:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+import pandas as pd
+import json, requests
+</pre>
+<p>Next I load the data set that contains lat-long coordinates and add three new columns – geocode_data (to contain the JSON blob Google sends back), city, and country:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+df = pd.read_csv('summer-trip-gps.csv')
+df['geocode_data'] = ''
+df['city'] = ''
+df['country'] = ''
+</pre>
+<p>Now I write a function to handle the reverse geocoding requests. This function takes a string argument, latlng, in the form of “48.355328,11.7917104” and sends it to the geocoder API. If the API returns a result, then the function returns it to the caller. Otherwise it returns an empty object. Note: you’ll need to sign up for a Google <a href="https://developers.google.com/maps/documentation/geocoding/#api_key">API key</a> to make these calls.</p>
+<pre class="brush: python; title: ; notranslate" title="">
+def reverseGeocode(latlng):
+    result = {}
+    url = 'https://maps.googleapis.com/maps/api/geocode/json?latlng={0}&amp;key={1}'
+    apikey = 'YOUR-API-KEY-HERE'
+    request = url.format(latlng, apikey)
+    data = json.loads(requests.get(request).text)
+    if len(data['results']) &gt; 0:
+        result = data['results'][0]
+    return result
+</pre>
+<p>Next I write a loop to traverse the data set and call the reverseGeocode() function for the lat-long data in each row:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+for i, row in df.iterrows():
+    df['geocode_data'][i] = reverseGeocode(df['lat'][i].astype(str) + ',' + df['lon'][i].astype(str))
+</pre>
+<h2>Parsing City and Country data</h2>
+<p>Due to the ambiguity of terminology in different countries – city vs town, state vs province, county vs region, etc. – most reverse geocoders return a full address with normalized address elements (see <a href="http://developer.factual.com/api-docs-v4/#Geotag">Factual’s API</a> for an example using <a href="http://www.openstreetmap.org/">OSM</a> data). Google, however, returns a more flexible array of address components, each tagged with one or more “types.” I’ll have to parse this data to find city name – or the closest thing to it – for each set of coordinates.</p>
+<p>We begin by looping through each row in the data set. For each row, search inside the address_components array for an item that contains the string “country” in its list of types. Then do the same in search of a component that represents municipality. Depending on the country, different types of components could represent what I call a city or town in the United States. I’ll search in order for “city”, “postal_town”, “administrative_area_level_2”, and “administrative_area_level_1” – and when one is found I’ll break out of the loop.</p>
+<p>Lastly, I’ll save the data set with cities and countries to a CSV file:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+for i, row in df.iterrows():
+    if 'address_components' in row['geocode_data']:
+        #first try to identify the country
+        for component in row['geocode_data']['address_components']:
+            if 'country' in component['types']:
+                df['country'][i] = component['long_name']
+        #now try to identify the municipality
+        for component in row['geocode_data']['address_components']:
+            if 'locality' in component['types']:
+                df['city'][i] = component['long_name']
+                break
+            elif 'postal_town' in component['types']:
+                df['city'][i] = component['long_name']
+                break
+            elif 'administrative_area_level_2' in component['types']:
+                df['city'][i] = component['long_name']
+                break
+            elif 'administrative_area_level_1' in component['types']:
+                df['city'][i] = component['long_name']
+                break
+df.to_csv('geocoded.csv', encoding='utf-8', index=False)
+</pre>
+<h2>Next steps</h2>
+<p>That’s it. I now have a data set that contains lat-long coordinate pairs, timestamps, city name, and country. For reference, once again here is the <a href="http://geoffboeing.com/wp-content/uploads/2014/08/summer-travel-gps-no-city-country.csv">original data set</a> and here is the new <a href="http://geoffboeing.com/wp-content/uploads/2014/08/summer-travel-gps-full.csv">reverse geocoded data set</a>. Interestingly, Google’s API returned no results for any of the lat-long coordinates in Kosovo, so I had to enter the city and country for these (few) rows manually.</p>
+<p>This Python code can be easily changed to use a different geocoding API (such as Factual’s) or extract the full address text instead of city and country components. You could also easily tweak this geocoder to search for municipality in other types of address components, but these four I used covered my entire data set accurately. The data can be visualized with nice informational pop-ups now with tools like <a href="http://geoffboeing.com/2014/08/visualizing-summer-travels-with-cartodb/">CartoDB</a>, <a href="http://geoffboeing.com/2014/08/visualizing-summer-travels-part-3-leaflet/">Leaflet</a>, or <a href="http://geoffboeing.com/2014/08/visualizing-summer-travels-part-4-mapbox-tilemill/">Mapbox and Tilemill</a>.</p>
+	</div>
+
+	
+	</div></body></html>

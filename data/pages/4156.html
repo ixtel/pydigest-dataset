@@ -1,0 +1,80 @@
+<html><body><div><div id="entry" class="usertext">
+<p>I had this idea for a while to learn a few modern languages by porting my <a href="https://github.com/isagalaev/ijson">iterative JSON parser</a> written in Python as a test case. It only makes sense because, unlike most tutorials, it provides you with a <em>real</em> real-world problem and in the end you might also get a useful piece of code.</p>
+<p>I started with <a href="http://www.rust-lang.org/">Rust</a>, and I already have plans to do the same with Go and Clojure afterwards. I won't be giving you any introduction to Rust though, as there's <a href="https://www.google.com/?q=rust+language+review">a lot of those around the Web</a>. I'll try to share what I didn't find in those.</p>
+<p><a name="more"/></p>
+<h2>Resources</h2>
+<ul>
+<li>The <a href="http://doc.rust-lang.org/book/">online book</a> is a very good starting material, it gives a wide shallow overview of the language principles and provides pointers on where to go next.</li>
+<li>The <a href="http://doc.rust-lang.org/std/index.html">API docs</a> are essential but are hard to navigate for a beginner because Rust tends to implement everything in myriads of small interfaces. You can't simply have a flat list of everything you can do with, say, a String. Instead, you get the top level of a <a href="http://doc.rust-lang.org/std/str/">non-obvious hierarchy of features</a>. One of the way around that is asking Google things like "rust convert int to str" or "rust filter sequence".</li>
+<li>When Google doesn't help you've got a <a href="http://users.rust-lang.org/">user forum</a> and the IRC channel #rust on irc.mozilla.org. Both are very much alive and haven't yet failed me a single time!</li>
+</ul>
+<h2>Lexer</h2>
+<p>After a few days of fumbling around, feeling incredibly dense and switching from condemning the language to praising it every 15 minutes I've got a <a href="https://github.com/isagalaev/ijson-rust/blob/4195be607cbf3f1068d8cd0d9c35952461be1390/src/main.rs">working JSON lexer</a>. It's still in the playground mode: short, clumsy and not structured in any meaningful way. Following are some notes on the language.</p>
+<h2>Complexity</h2>
+<p>The amount of control you have over things is staggering. Which is another way of saying that the language is rather complicated. From the get-go you worry about the difference between strings and string slices (pointers into strings), values on the heap ("boxed") vs. values on the stack and dynamic vs. static dispatch for calling methods of traits. Feels very opposite to what I'm used to in Python, but on the other hand I <em>did</em> try to come out of my comfort zone :-)</p>
+<p>Here's a little taste of that. The Lexer owns a fixed buffer of bytes within which it searches for lexemes and returns them one by one as steps of an iteration. So my first idea was to define an iterator of pointers ("slices" in Rust parlance) into that buffer to avoid copying each lexeme into its own separate object:</p>
+<pre><code>impl Iterator for Lexer {
+    type Item = &amp;[u8];  // a "pointer" to an array of unsigned bytes
+    // ...
+}
+</code></pre>
+<p>This turns out to be <em>impossible</em>, because Rust wants to know the lifetime of pointers but in this case it simply can't tell how a yielded pointer is related to the lifetime of the Lexer's internal buffer. It doesn't know who and how has created that Lexer object, it is not guaranteed to be the same block of code that now iterates over it. Since you can't have a pointer to something in limbo, you have to construct a dynamic, <em>ownable</em> vector of bytes and return it from an iteration step, so a consumer would hold onto it independent of the source buffer:</p>
+<pre><code>impl Iterator for Lexer {
+    type Item = Vec&lt;u8&gt;; // a growable vector of bytes
+
+    fn next(&amp;mut self) -&gt; Option&lt;Vec&lt;u8&gt;&gt; { // don't mind the Option&lt;&gt; part
+        let mut result = vec![];
+        // .... 
+        result.extend(self.buf[start..self.pos].iter().cloned()); // more on that later…
+        Some(result)
+    }
+}
+</code></pre>
+<p>By the way, this is the kind of learning experience that only comes with a <em>real</em> real-world task. Tutorials tend to avoid this kind of messiness.</p>
+<p>About that <code>.iter().clone()</code> thing… Turns out there are quite a few subtly different ways of pushing an array of bytes into a vector:</p>
+<ul>
+<li><code>vector.push_all()</code> is the easiest one but it complains that it's being deprecated in favor of <code>.extend()</code>;</li>
+<li><code>vector.extend()</code> wants an iterator, which you have to create explicitly with <code>.iter()</code> which would yield pointers to bytes instead of bytes, so you have to explicitly dereference and copy them with <code>.clone()</code>;</li>
+<li><code>vector.write()</code> does accept an array of bytes, but(!) since it's an implementation of an I/O protocol it might return an error that Rust won't let you ignore silently, even though it can't really happen here.</li>
+</ul>
+<p>Compare this to something like <code>vector.extend(iterable)</code> in Python where <code>iterable</code> can be either an iterator or something that can become an iterator — the language doesn't care. It's an excellent example of what people mean talking about "better productivity of dynamic languages". (Which comes at the price of performance, of course — I'm not trying to pretend that there's one single true way here.)</p>
+<h2>Polymorphism</h2>
+<p>Rust solves the <a href="http://c2.com/cgi/wiki?ExpressionProblem">Expression problem</a> with "traits". Traits are almost the same thing as interfaces in Java except that objects themselves don't claim to adhere to interfaces. Instead, you first define your data structures and then implement traits <em>for them</em> separately (Clojurists would recognize their Protocols here). This separation allows you to bind your traits to external objects and vice-versa. It also means that methods tend to group into rather fine-grained bundles. It does feel kind of right but might complicate maintenance and is harder to document.</p>
+<p>What's really refreshing though and what feels <em>definitely</em> right is that there's no classical object inheritance. Begone rigid class hierarchies!</p>
+<h2>Error handling</h2>
+<p>Rust uses the idea of return values as <a href="http://en.wikipedia.org/wiki/Tagged_union">tagged unions</a> representing both a successful result and an error and leaves it to the caller to analyze it. Thankfully, Rust enforces error checking: you simply cannot access a successful value implicitly without indicating how you want to deal with an error.</p>
+<p>You either have to manually match all possible variants of a result (the compiler won't let you omit the <code>Error</code> part):</p>
+<pre><code>let result = str::from_utf8(bytes);
+match result {
+    Error(e) =&gt; // deal with a decoding error `e`
+    Ok(s) =&gt; // deal with a string `s`
+}
+</code></pre>
+<p>Or you can use various helpers:</p>
+<pre><code>// Turn Ok/Error thing into a subtly different form &lt;YourType&gt;/None, losing the error
+let s = str::from_utf8(bytes).ok();
+
+// Insist further on having a non-empty value defaulting to a complete program stop
+// (panic!) if it's not available
+let s = str::from_utf8(bytes).ok().unwrap();
+
+// Obtain a final value of your type doing an early return from the function 
+// in case of an error
+let s = try!(str::from_utf8(bytes));
+</code></pre>
+<p>To be honest, I'm not a fan of this approach and am personally very much content with traditional exceptions. But that calls for a whole another blog post though (already drafted). For now I tend to use <code>panic!()</code> for every error and not bother but I will have to replace them all eventually with something more in line with the Rust philosophy.</p>
+<p>Speaking of exceptions, tracebacks (or "stack traces") in Rust are displayed backwards, as <a href="http://yellerapp.com/posts/2015-01-22-upside-down-stacktraces.html">in most languages</a>. The problem is aggravated by the Rust compiler having <em>very</em> verbose error messages and trying to display as many of them as possible in one go. I understand how it makes sense if what you're compiling is a huge browser engine but I'm really tired of scrolling my terminal window back and forth. I miss Python :-(</p>
+<h2>Modularity</h2>
+<p>Modularity in Rust isn't bound to the file system and uses somewhat misleading terminology:</p>
+<ul>
+<li>
+<p>A <strong>crate</strong> is what I'd actually call a module or a package. It's something that compiles into a single library (or an executable). Its source can consist of any number of files located anywhere, they all declare their crate explicitly in the source.</p>
+</li>
+<li>
+<p>A <strong>module</strong> is simply an arbitrary namespace to contain some stuff you want grouped for some reason. A file can define several modules, and they can be nested.</p>
+</li>
+</ul>
+<p>What's important is that Rust comes bundled with <code>cargo</code> — an official tool that does building, packaging and installation. And there's an official packages repository. I strongly believe a language cannot be considered modern without one (sorry, C++!)
+
+</p></div>
+</div></body></html>

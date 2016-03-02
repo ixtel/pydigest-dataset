@@ -1,0 +1,88 @@
+<html><body><div><div class="article-wrap">
+      <p>Almost a year ago, in Waza 2013, Alex Gaynor delivered an excellent talk on <a href="http://vimeo.com/61044810">“Why Python, Ruby and Javascript are slow”</a> . The key of his talk, as he emphasised, is in the present tense. In other words, even if these languages <em>are</em> slower now, it does not mean that the situation is hopeless and will necessarily stay that way forever.</p>
+
+<p>When one asks a question among the lines of why Python is slower than C, dynamic typing is the first answer to get thrown around. While it is true that dynamically  typed programming languages have some overhead associated with them, it may not be the major factor slowing down <em>your</em> Python code.</p>
+
+<p>Dynamic typing (and other <em>magic</em> features of programming languages like Python) make the interpreters for the language harder to optimise. There is a huge difference between interpreter being harder to optimise and your code being slower, however. In fact, as Alex himself mentions in the talk, we have had years of research focusing on what is the best way to perform type checking at runtime. This research has already lead to ways of making this overhead negligible.</p>
+
+<p>In reality, the significant runtime differences between Pythonic code and C boil down to different data structures and algorithms used in each of the cases. Sometimes even without the programmers being aware of them.</p>
+
+<h2 id="you-code-differently-in-python">You Code Differently in Python</h2>
+
+<p>Let’s illustrate the point in previous paragraph with an example from Alex’s talk.
+A Python programmer would be likely to use a similar code snippet to code a container for 2D point in Python:</p>
+
+
+
+<p>The solution easy to read, even easier to code and elegant in general.</p>
+
+<p>A C developer, on the other hand, would use a <code>struct</code> for 2D point container:</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">struct</span> <span class="n">Point</span> <span class="p">{</span>
+   <span class="nb">int</span> <span class="n">x</span><span class="p">;</span>
+   <span class="nb">int</span> <span class="n">y</span><span class="p">;</span>
+<span class="p">};</span></code></pre></div>
+
+<p>While this solution is as elegant and as easy to work with as the Pythonic solution, it is completely different data structure.  Here we tell the compiler that each point would have exactly two fields, <code>x</code> and <code>y</code>. Knowing the size of these fields, the compiler could take the hint and allocate  them near each other, as a single contiguous memory block. In other words, the structure would be similar to an array. The compiler would know exactly where <code>x</code> and <code>y</code> fields of a given point are at any time. We could also access both of these fields in memory easily, just by looking some constant offset away from where the point itself is.</p>
+
+<p>Pythonic code uses a hash table-like data structure to perform a similar task.  The interpreter cannot simply preallocate a contiguous block of memory to store both <code>x</code> and <code>y</code> next to each other to make them easily accessible. This is impossible as we could also have any number of keys present in the dictionary at any time. We could also delete these keys if we wanted to. The interpreter must use a hash function to be able to map any input you could throw at him to a memory location. Needless to say, these functions add a some overhead to the calculation. While it is usually small, it may as well be significant enough to slow down your code, especially if you have to do a lot of them.</p>
+
+<p>If someone was to directly translate the pythonic code to C++, they would probably  end up with something similar to:</p>
+
+<div class="highlight"><pre><code class="language-c--" data-lang="c++"><span class="n">std</span><span class="o">::</span><span class="n">hash_set</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="p">,</span> <span class="kt">int</span><span class="o">&gt;</span> <span class="n">point</span><span class="p">;</span>
+<span class="n">point</span><span class="p">[</span><span class="err">“</span><span class="n">x</span><span class="err">”</span><span class="p">]</span> <span class="o">=</span> <span class="n">x</span>
+<span class="n">point</span><span class="p">[</span><span class="err">“</span><span class="n">y</span><span class="err">”</span><span class="p">]</span> <span class="o">=</span> <span class="n">y</span></code></pre></div>
+
+<p>Looking at the code snippet, it looks as if the language designers themselves went to great lengths to make the hash tables as complicated to use as possible, just so nobody would use them by accident. And rightfully so. Because of this <em>feature</em>, a newcomer to the C world would be able to spot that there’s something ridiculously wrong with this code. This begs to question why is it acceptable in Python?</p>
+
+<p>The answer is in the “dictionaries are lightweight objects” mindset of Python programmers.
+Consider the following code, which is the closest thing in Python to the C <code>struct</code> above<sup id="fnref:1"/>:</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="lineno">1</span> <span class="k">class</span> <span class="nc">Point</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
+<span class="lineno">2</span>     <span class="n">x</span><span class="p">,</span> <span class="n">y</span> <span class="o">=</span> <span class="bp">None</span><span class="p">,</span> <span class="bp">None</span>
+<span class="lineno">3</span>     <span class="k">def</span> <span class="nf">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">):</span>
+<span class="lineno">4</span>          <span class="bp">self</span><span class="o">.</span><span class="n">x</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">y</span> <span class="o">=</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span></code></pre></div>
+
+<p>This representation provides useful hints to the compiler, just like the C <code>struct</code> does. For instance, in the second line, we are explicitly telling the interpreter that our point object will always have at least two fields <code>x</code> and <code>y</code> when it is created, hoping it would be able to deal with them.</p>
+
+<p>Unfortunately, the standard Python interpreter, also called CPython, is not able to make much use of this representation. The following code block takes 186 microseconds to run on my machine:</p>
+
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="k">def</span> <span class="nf">sum_</span><span class="p">(</span><span class="n">points</span><span class="p">):</span>
+    <span class="n">sum_x</span><span class="p">,</span> <span class="n">sum_y</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span>
+    <span class="k">for</span> <span class="n">point</span> <span class="ow">in</span> <span class="n">points</span><span class="p">:</span>
+        <span class="n">sum_x</span> <span class="o">+=</span> <span class="n">point</span><span class="p">[</span><span class="s">'x'</span><span class="p">]</span>
+        <span class="n">sum_y</span> <span class="o">+=</span> <span class="n">point</span><span class="p">[</span><span class="s">'y'</span><span class="p">]</span>
+    <span class="k">return</span> <span class="n">sum_x</span><span class="p">,</span> <span class="n">sum_y</span></code></pre></div>
+
+<p>A similar code block that replaces <code>point['x']</code> with <code>point.x</code> takes 201 microseconds to run on the same machine. In other words, using the class <code>Point</code> is 8% slower.</p>
+
+<p>In CPython, <code>point.x</code> is often executed in the same way as the statement  <code>dict(point)['x']</code><sup id="fnref:2"/>.
+This means that the class implementation of a point still uses a dictionary lookup, as  before, with some additional overhead. In this sense, it is easy to see why the dictionaries are thought to be “lightweight objects”.</p>
+
+<p>Some Python implementations that were specifically designed to be efficient, such as <a href="http://pypy.org">PyPy</a>, are able to flip the scales for these two approaches around. For instance, the same code snippets run for 21.6 and 3.75 microseconds respectively when  using PyPy instead of Python. While both of these results are significantly faster than their CPython counterparts, using a class is 5.76 <em>times</em> faster under this JIT-capable interpreter, than using a dictionary. In other words, PyPy are able to use correct data structure here.</p>
+
+<p>I encourage you to look at the smallest number again – 3.75 microseconds. This number means that we could perform 266 000 of these calculations in a second, all from Python, with dynamic typing, monkey-patching, etc. still built into it. All of this, by just using a better data structure, both in the code, and in the implementation. Next time, you are writing a line of code in Python, have a thought of what data structure you are using, both explicitly and implicitly, and ask yourself whether there is a better one. This is what you would do in C, is it?</p>
+
+<p>Finally, I like to believe that this article is a clear example why the future is bright for Python (and similar languages). The standard Python implementation, CPython is there  only to act as reference. It has never been designed to be the fastest one. As we have seen today, alternative implementations, like PyPy, are already able to optimise your code to great lengths. These optimisations are possible, even with all the challenges offered by the nature of the programming language. We only had 23 years of Python interpreter development, how would things look like when Python is 42, like C?</p>
+
+
+
+      <hr/>
+      <footer role="contentinfo">
+        <div class="article-author-bottom">
+          <img src="/images/avatar.png" class="bio-photo" alt="Saulius Lukauskas bio photo"/>
+<h3>Saulius Lukauskas</h3>
+<p>MSc student at Imperial College, Python developer, Data believer</p>
+
+<a href="http://facebook.com/saulius.lukauskas" class="author-social" target="_blank"><i class="icon-facebook"/> Facebook</a>
+
+<a href="http://linkedin.com/in/sauliuslukauskas" class="author-social" target="_blank"><i class="icon-linkedin"/> LinkedIn</a>
+
+<a href="http://github.com/sauliusl" class="author-social" target="_blank"><i class="icon-github"/> Github</a>
+
+
+        </div>
+        <p class="byline"><strong>Why Your Python Runs Slow. Part 1: Data Structures</strong> was published on <time datetime="2014-02-13T00:00:00+00:00">February 13, 2014</time> by <a href="/about" title="About Saulius Lukauskas">Saulius Lukauskas</a>.</p>
+      </footer>
+    </div>
+    </div></body></html>

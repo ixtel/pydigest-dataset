@@ -1,0 +1,202 @@
+<html><body><div><article>
+
+
+
+
+<header>
+    <h1>Linear Programming in Python with CVXOPT</h1>
+</header>
+
+ 
+
+
+<p>In a <a class="reference external" href="/blog/linear-programming-in-python-with-pulp.html">previous post</a>,
+I compared the performances of two Linear Programming (LP) solvers, COIN and
+GLPK, called by a Python library named <a class="reference external" href="https://pypi.python.org/pypi/PuLP">PuLP</a>. It then took around 100 ms to solve
+problems of moderate size. As it turns out, this is <em>way too slow</em> for this
+kind of problems, probably due to the fact that PuLP calls solvers externally
+via the command line. In this second post, I used the <a class="reference external" href="http://cvxopt.org/">CVXOPT</a> library and compared the performances with the previous
+approach. As it turns out, using CVXOPT is 50~70 times faster! Where it took
+100 ms with PuLP, it now takes 2~3 ms with CVXOPT on my machine.</p>
+<p>You can try out the <a class="reference external" href="/files/lp-benchmark.py">benchmarking script</a> and test on
+yours ;)</p>
+<div class="section" id="cvxopt-setup">
+<h2>CVXOPT setup</h2>
+<p>If you don't plan on using external solvers such as GLPK or MOSEK, installing
+CVXOPT on Ubuntu or Debian is as simple as:</p>
+<pre class="code bash literal-block">
+<span class="nv">$ </span>sudo apt-get install python-cvxopt
+</pre>
+<p>To install GLPK as well, you'd best build from source. An easy way to get
+everything done automatically is to use <tt class="docutils literal">pip</tt>:</p>
+<pre class="code bash literal-block">
+<span class="nv">$ </span>sudo apt-get install libglpk-dev
+<span class="nv">$ </span>sudo <span class="nv">CVXOPT_BUILD_GLPK</span><span class="o">=</span>1 pip install cvxopt
+</pre>
+<p>You should now be able to import <tt class="docutils literal">cvxopt</tt> from Python.</p>
+</div>
+<div class="section" id="matrix-vector-lp-problem">
+<h2>Matrix-vector LP problem</h2>
+<p>The problem for this benchmark is the same as in the previous post: find
+a vector <span class="math">\({\bf x} \in [x_\min, x_\max]^n\)</span>
+ that minimizes the maximum of
+a set of affine functions:</p>
+<p class="math">
+\begin{equation*}
+\begin{array}{rl}
+    \textrm{minimize} &amp; m \\
+    \textrm{subject to}
+    &amp; \forall i, \ a_i + \sum_j b_{ij}\,x_j \leq m \\
+    &amp; \forall i, x_\min \leq x_i \leq x_\max \\
+\end{array}
+\end{equation*}
+</p>
+<p>However, from <a class="reference external" href="http://cvxopt.org/userguide/coneprog.html">CVXOPT's documentation</a>,
+CVXOPT takes LP problems formulated as:</p>
+<p class="math">
+\begin{equation*}
+\begin{array}{rl}
+    \textrm{minimize} &amp; {\bf c}^\top {\bf x} \\
+    \textrm{subject to}
+    &amp; {\bf G} {\bf x} \leq {\bf h} \\
+    &amp; {\bf A} {\bf x} = {\bf b}
+\end{array}
+\end{equation*}
+</p>
+<p>We thus need to formulate our problem in matrix-vector form. First, we append
+<span class="math">\(m\)</span>
+ as the last coordinate of the variables vector <span class="math">\({\bf x}\)</span>
+ so
+that <span class="math">\(m = {\bf c}^\top {\bf x}\)</span>
+ with <span class="math">\({\bf c} = [0\ 0\ \ldots\ 0\
+1]^\top\)</span>
+. Next, we stack the scalars <span class="math">\(a_i\)</span>
+ into a vector <span class="math">\(\bf a\)</span>
+,
+and the vectors <span class="math">\({\bf b}_i\)</span>
+ into a matrix <span class="math">\(\bf B\)</span>
+. The LP problem
+becomes:</p>
+<p class="math">
+\begin{equation*}
+\begin{array}{rl}
+    \textrm{minimize} &amp; {\bf c}^\top {\bf x} \\
+    \textrm{s.t.}
+    &amp; {\bf a} + {\bf B} {\bf x} \leq {\bf 0} \\
+    &amp; x_\min \leq {\bf x} \leq x_\max
+\end{array}
+\end{equation*}
+</p>
+<p>Where the vector notation <span class="math">\({\bf a} \leq {\bf b}\)</span>
+ means <span class="math">\(\forall i,
+a_i \leq b_i\)</span>
+. Each instance of our benchmark problem is then a pair
+<span class="math">\(({\bf a}, {\bf B})\)</span>
+ that we will generate by uniform random sampling in
+<span class="math">\([-1, 1]^n \times [-1, 1]^{n \times n}\)</span>
+.</p>
+</div>
+<div class="section" id="solving-lps-from-cvxopt">
+<h2>Solving LPs from CVXOPT</h2>
+<p>Here is the function that solves the LP corresponding to an instance
+<span class="math">\(({\bf a}, {\bf B})\)</span>
+:</p>
+<pre class="code python literal-block">
+<span class="kn">from</span> <span class="nn">numpy</span> <span class="kn">import</span> <span class="n">array</span><span class="p">,</span> <span class="n">eye</span><span class="p">,</span> <span class="n">hstack</span><span class="p">,</span> <span class="n">ones</span><span class="p">,</span> <span class="n">vstack</span><span class="p">,</span> <span class="n">zeros</span>
+
+<span class="k">def</span> <span class="nf">cvxopt_solve_minmax</span><span class="p">(</span><span class="n">n</span><span class="p">,</span> <span class="n">a</span><span class="p">,</span> <span class="n">B</span><span class="p">,</span> <span class="n">x_min</span><span class="o">=-</span><span class="mi">42</span><span class="p">,</span> <span class="n">x_max</span><span class="o">=</span><span class="mi">42</span><span class="p">,</span> <span class="n">solver</span><span class="o">=</span><span class="bp">None</span><span class="p">):</span>
+    <span class="n">c</span> <span class="o">=</span> <span class="n">hstack</span><span class="p">([</span><span class="n">zeros</span><span class="p">(</span><span class="n">n</span><span class="p">),</span> <span class="p">[</span><span class="mi">1</span><span class="p">]])</span>
+
+    <span class="c"># cvxopt constraint format: G * x &lt;= h</span>
+    <span class="c"># first,  a + B * x[0:n] &lt;= x[n]</span>
+    <span class="n">G1</span> <span class="o">=</span> <span class="n">zeros</span><span class="p">((</span><span class="n">n</span><span class="p">,</span> <span class="n">n</span> <span class="o">+</span> <span class="mi">1</span><span class="p">))</span>
+    <span class="n">G1</span><span class="p">[</span><span class="mi">0</span><span class="p">:</span><span class="n">n</span><span class="p">,</span> <span class="mi">0</span><span class="p">:</span><span class="n">n</span><span class="p">]</span> <span class="o">=</span> <span class="n">B</span>
+    <span class="n">G1</span><span class="p">[:,</span> <span class="n">n</span><span class="p">]</span> <span class="o">=</span> <span class="o">-</span><span class="n">ones</span><span class="p">(</span><span class="n">n</span><span class="p">)</span>
+    <span class="n">h1</span> <span class="o">=</span> <span class="o">-</span><span class="n">a</span>
+
+    <span class="c"># then, x_min &lt;= x &lt;= x_max</span>
+    <span class="n">x_min</span> <span class="o">=</span> <span class="n">x_min</span> <span class="o">*</span> <span class="n">ones</span><span class="p">(</span><span class="n">n</span><span class="p">)</span>
+    <span class="n">x_max</span> <span class="o">=</span> <span class="n">x_max</span> <span class="o">*</span> <span class="n">ones</span><span class="p">(</span><span class="n">n</span><span class="p">)</span>
+    <span class="n">G2</span> <span class="o">=</span> <span class="n">vstack</span><span class="p">([</span>
+        <span class="n">hstack</span><span class="p">([</span><span class="o">+</span><span class="n">eye</span><span class="p">(</span><span class="n">n</span><span class="p">),</span> <span class="n">zeros</span><span class="p">((</span><span class="n">n</span><span class="p">,</span> <span class="mi">1</span><span class="p">))]),</span>
+        <span class="n">hstack</span><span class="p">([</span><span class="o">-</span><span class="n">eye</span><span class="p">(</span><span class="n">n</span><span class="p">),</span> <span class="n">zeros</span><span class="p">((</span><span class="n">n</span><span class="p">,</span> <span class="mi">1</span><span class="p">))])])</span>
+    <span class="n">h2</span> <span class="o">=</span> <span class="n">hstack</span><span class="p">([</span><span class="n">x_max</span><span class="p">,</span> <span class="o">-</span><span class="n">x_min</span><span class="p">])</span>
+
+    <span class="n">c</span> <span class="o">=</span> <span class="n">cvxopt</span><span class="o">.</span><span class="n">matrix</span><span class="p">(</span><span class="n">c</span><span class="p">)</span>
+    <span class="n">G</span> <span class="o">=</span> <span class="n">cvxopt</span><span class="o">.</span><span class="n">matrix</span><span class="p">(</span><span class="n">vstack</span><span class="p">([</span><span class="n">G1</span><span class="p">,</span> <span class="n">G2</span><span class="p">]))</span>
+    <span class="n">h</span> <span class="o">=</span> <span class="n">cvxopt</span><span class="o">.</span><span class="n">matrix</span><span class="p">(</span><span class="n">hstack</span><span class="p">([</span><span class="n">h1</span><span class="p">,</span> <span class="n">h2</span><span class="p">]))</span>
+    <span class="n">sol</span> <span class="o">=</span> <span class="n">cvxopt</span><span class="o">.</span><span class="n">solvers</span><span class="o">.</span><span class="n">lp</span><span class="p">(</span><span class="n">c</span><span class="p">,</span> <span class="n">G</span><span class="p">,</span> <span class="n">h</span><span class="p">,</span> <span class="n">solver</span><span class="o">=</span><span class="n">solver</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">array</span><span class="p">(</span><span class="n">sol</span><span class="p">[</span><span class="s">'x'</span><span class="p">])</span><span class="o">.</span><span class="n">reshape</span><span class="p">((</span><span class="n">n</span> <span class="o">+</span> <span class="mi">1</span><span class="p">,))</span>
+</pre>
+<p>You can choose which solver to use via the <tt class="docutils literal">solver</tt> keyword argument, for
+example <tt class="docutils literal"><span class="pre">solver='glpk'</span></tt> to use GLPK. Leaving it to <tt class="docutils literal">None</tt> will call
+CVXOPT's default solver for Linear Cone Programs, which should be less
+efficient than GLPK as it solves a more general class of problems.</p>
+<div class="section" id="disabling-the-output-from-glpk-in-cvxopt">
+<h3>Disabling the output from GLPK in CVXOPT</h3>
+<p>A minor problem I had was to disable solver outputs in CVXOPT. The standard way
+to do that is via the <tt class="docutils literal">options</tt> dictionary in <tt class="docutils literal">cvxopt.solvers</tt>, which is
+passed to the selected solver at instantiation time:</p>
+<pre class="code python literal-block">
+<span class="n">cvxopt</span><span class="o">.</span><span class="n">solvers</span><span class="o">.</span><span class="n">options</span><span class="p">[</span><span class="s">'show_progress'</span><span class="p">]</span> <span class="o">=</span> <span class="bp">False</span>
+</pre>
+<p>It works for the default solver, but not with GLPK. A post on CVXOPT's bulletin
+board points to the parameter <tt class="docutils literal">LPX_K_MSGLEV</tt>, but it didn't work with my
+version (1.1.7) of the software either. A docstring in the source code <a class="reference external" href="https://github.com/cvxopt/cvxopt/blob/f3ca94fb997979a54b913f95b816132f7fd44820/src/C/glpk.c">src/C/glpk.c</a>
+mentions another parameter <tt class="docutils literal">msg_lev</tt>, which works for me:</p>
+<pre class="code python literal-block">
+<span class="n">cvxopt</span><span class="o">.</span><span class="n">solvers</span><span class="o">.</span><span class="n">options</span><span class="p">[</span><span class="s">'LPX_K_MSGLEV'</span><span class="p">]</span> <span class="o">=</span> <span class="mi">0</span>         <span class="c"># old versions of cvxopt</span>
+<span class="n">cvxopt</span><span class="o">.</span><span class="n">solvers</span><span class="o">.</span><span class="n">options</span><span class="p">[</span><span class="s">'msg_lev'</span><span class="p">]</span> <span class="o">=</span> <span class="s">'GLP_MSG_OFF'</span>  <span class="c"># works on cvxopt 1.1.7</span>
+</pre>
+</div>
+</div>
+<div class="section" id="comparing-solver-performances">
+<h2>Comparing solver performances</h2>
+<p>In this benchmark, I compared four methods:</p>
+<ul class="simple">
+<li><tt class="docutils literal">pulp_coin</tt>: COIN called via PuLP</li>
+<li><tt class="docutils literal">pulp_glpk</tt>: GLPK called via PuLP</li>
+<li><tt class="docutils literal">cvxopt</tt>: CVXOPT's default (general) solver</li>
+<li><tt class="docutils literal">cvxopt_glpk</tt>: GLPK called via CVXOPT</li>
+</ul>
+<p>Here is a sample of computation times on my machine for problems of size
+<span class="math">\(n=10\)</span>
+:</p>
+<pre class="code python literal-block">
+<span class="n">In</span> <span class="p">[</span><span class="mi">1</span><span class="p">]:</span> <span class="o">%</span><span class="n">timeit</span> <span class="n">solve_random_minmax</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="s">'pulp_coin'</span><span class="p">)</span>
+<span class="mi">10</span> <span class="n">loops</span><span class="p">,</span> <span class="n">best</span> <span class="n">of</span> <span class="mi">3</span><span class="p">:</span> <span class="mf">30.4</span> <span class="n">ms</span> <span class="n">per</span> <span class="n">loop</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">2</span><span class="p">]:</span> <span class="o">%</span><span class="n">timeit</span> <span class="n">solve_random_minmax</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="s">'pulp_glpk'</span><span class="p">)</span>
+<span class="mi">10</span> <span class="n">loops</span><span class="p">,</span> <span class="n">best</span> <span class="n">of</span> <span class="mi">3</span><span class="p">:</span> <span class="mf">23.3</span> <span class="n">ms</span> <span class="n">per</span> <span class="n">loop</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">3</span><span class="p">]:</span> <span class="o">%</span><span class="n">timeit</span> <span class="n">solve_random_minmax</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="s">'cvxopt'</span><span class="p">)</span>
+<span class="mi">100</span> <span class="n">loops</span><span class="p">,</span> <span class="n">best</span> <span class="n">of</span> <span class="mi">3</span><span class="p">:</span> <span class="mf">2.22</span> <span class="n">ms</span> <span class="n">per</span> <span class="n">loop</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">4</span><span class="p">]:</span> <span class="o">%</span><span class="n">timeit</span> <span class="n">solve_random_minmax</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="s">'cvxopt_glpk'</span><span class="p">)</span>
+<span class="mi">1000</span> <span class="n">loops</span><span class="p">,</span> <span class="n">best</span> <span class="n">of</span> <span class="mi">3</span><span class="p">:</span> <span class="mi">330</span> <span class="err">µ</span><span class="n">s</span> <span class="n">per</span> <span class="n">loop</span>
+</pre>
+<p>In this case, calling GLPK from CVXOPT rather than PuLP is 70 times faster! The
+reason is most likely that PuLP writes files and call the command line, while
+CVXOPT uses its own internal modules. Meanwhile, CVXOPT-GLPK is faster than
+CVXOPT, which is also expected because the default solver in CVXOPT handles
+a larger class of problems called Cone Programs.</p>
+<p>Here is more benchmarking data:</p>
+<img alt="Humanoid climbing a box using tilted support surfaces" class="noborder align-center" src="https://scaron.info/images/lp-benchmark.png"/>
+<p>The bottom line is:</p>
+<ul class="simple">
+<li><tt class="docutils literal">cvxopt_glpk</tt> is 2 to 10 times faster than <tt class="docutils literal">cvxopt</tt>,</li>
+<li><tt class="docutils literal">cvxopt_glpk</tt> and <tt class="docutils literal">cvxopt</tt> are 10 to 70 times faster than PuLP.</li>
+</ul>
+<p>This difference is especially significant on small problems. You can try for
+yourself on your own machine, the full benchmark script is available here:
+<a class="reference external" href="/files/lp-benchmark.py">lp-benchmark.py</a>.</p>
+</div>
+
+
+                    <footer>
+                        Design adapted from <a href="https://www.adriancourreges.com/">Adrian Courrèges</a>.
+                        Content on this website is under the <a rel="license" href="https://creativecommons.org/licenses/by/4.0/">CC-BY 4.0</a> license.
+                        <a href="https://scaron.info/tags.html"><p class="search-icon">⚲</p></a>
+                    </footer>
+                </article>
+                </div></body></html>

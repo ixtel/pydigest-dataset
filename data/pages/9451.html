@@ -1,0 +1,136 @@
+<html><body><div><div class="post-text" itemprop="text">
+
+<p>I'd like to generate video using <code>AWS Lambda</code> feature.</p>
+
+<p>I've followed instructions found <a href="http://docs.aws.amazon.com/lambda/latest/dg/with-s3-example-deployment-pkg.html#with-s3-example-deployment-pkg-python">here</a> and <a href="http://www.perrygeo.com/running-python-with-compiled-code-on-aws-lambda.html">here</a>.</p>
+
+<p>And I now have the following process to build my <code>Lambda</code> function:</p>
+
+<h2>Step 1</h2>
+
+<p>Fire a <code>Amazon Linux EC2</code> instance and run this as root on it:</p>
+
+<pre class="lang-sh prettyprint-override"><code>#! /usr/bin/env bash
+
+# Install the SciPy stack on Amazon Linux and prepare it for AWS Lambda
+
+yum -y update
+yum -y groupinstall "Development Tools"
+yum -y install blas --enablerepo=epel
+yum -y install lapack --enablerepo=epel
+yum -y install atlas-sse3-devel --enablerepo=epel
+yum -y install Cython --enablerepo=epel
+yum -y install python27
+yum -y install python27-numpy.x86_64
+yum -y install python27-numpy-f2py.x86_64
+yum -y install python27-scipy.x86_64
+
+/usr/local/bin/pip install --upgrade pip
+mkdir -p /home/ec2-user/stack
+/usr/local/bin/pip install moviepy -t /home/ec2-user/stack
+
+cp -R /usr/lib64/python2.7/dist-packages/numpy /home/ec2-user/stack/numpy
+cp -R /usr/lib64/python2.7/dist-packages/scipy /home/ec2-user/stack/scipy
+
+tar -czvf stack.tgz /home/ec2-user/stack/*
+</code></pre>
+
+<h2>Step 2</h2>
+
+<p>I scp the resulting tarball to my laptop. And then run this script to build a zip archive.</p>
+
+<pre class="lang-sh prettyprint-override"><code>#! /usr/bin/env bash
+
+mkdir tmp
+rm lambda.zip
+tar -xzf stack.tgz -C tmp
+
+zip -9 lambda.zip process_movie.py
+zip -r9 lambda.zip *.ttf
+cd tmp/home/ec2-user/stack/
+zip -r9 ../../../../lambda.zip *
+</code></pre>
+
+<p><code>process_movie.py</code> script is at the moment only a test to see if the stack is ok:</p>
+
+<pre class="lang-py prettyprint-override"><code>def make_movie(event, context):
+    import os
+    print(os.listdir('.'))
+    print(os.listdir('numpy'))
+    try:
+        import scipy
+    except ImportError:
+        print('can not import scipy')
+
+    try:
+        import numpy
+    except ImportError:
+        print('can not import numpy')
+
+    try:
+        import moviepy
+    except ImportError:
+        print('can not import moviepy')
+</code></pre>
+
+<h2>Step 3</h2>
+
+<p>Then I upload the resulting archive to S3 to be the source of my <code>lambda</code> function.
+When I test the function I get the following <code>callstack</code>:</p>
+
+<pre><code>START RequestId: 36c62b93-b94f-11e5-9da7-83f24fc4b7ca Version: $LATEST
+['tqdm', 'imageio-1.4.egg-info', 'decorator.pyc', 'process_movie.py', 'decorator-4.0.6.dist-info', 'imageio', 'moviepy', 'tqdm-3.4.0.dist-info', 'scipy', 'numpy', 'OpenSans-Regular.ttf', 'decorator.py', 'moviepy-0.2.2.11.egg-info']
+['add_newdocs.pyo', 'numarray', '__init__.py', '__config__.pyc', '_import_tools.py', 'setup.pyo', '_import_tools.pyc', 'doc', 'setupscons.py', '__init__.pyc', 'setup.py', 'version.py', 'add_newdocs.py', 'random', 'dual.pyo', 'version.pyo', 'ctypeslib.pyc', 'version.pyc', 'testing', 'dual.pyc', 'polynomial', '__config__.pyo', 'f2py', 'core', 'linalg', 'distutils', 'matlib.pyo', 'tests', 'matlib.pyc', 'setupscons.pyc', 'setup.pyc', 'ctypeslib.py', 'numpy', '__config__.py', 'matrixlib', 'dual.py', 'lib', 'ma', '_import_tools.pyo', 'ctypeslib.pyo', 'add_newdocs.pyc', 'fft', 'matlib.py', 'setupscons.pyo', '__init__.pyo', 'oldnumeric', 'compat']
+can not import scipy
+'module' object has no attribute 'core': AttributeError
+Traceback (most recent call last):
+  File "/var/task/process_movie.py", line 91, in make_movie
+    import numpy
+  File "/var/task/numpy/__init__.py", line 122, in &lt;module&gt;
+    from numpy.__config__ import show as show_config
+  File "/var/task/numpy/numpy/__init__.py", line 137, in &lt;module&gt;
+    import add_newdocs
+  File "/var/task/numpy/numpy/add_newdocs.py", line 9, in &lt;module&gt;
+    from numpy.lib import add_newdoc
+  File "/var/task/numpy/lib/__init__.py", line 13, in &lt;module&gt;
+    from polynomial import *
+  File "/var/task/numpy/lib/polynomial.py", line 11, in &lt;module&gt;
+    import numpy.core.numeric as NX
+AttributeError: 'module' object has no attribute 'core'
+
+END RequestId: 36c62b93-b94f-11e5-9da7-83f24fc4b7ca
+REPORT RequestId: 36c62b93-b94f-11e5-9da7-83f24fc4b7ca  Duration: 112.49 ms Billed Duration: 200 ms     Memory Size: 1536 MB    Max Memory Used: 14 MB
+</code></pre>
+
+<p>I cant understand why python does not found the core directory that is present in the folder structure.</p>
+
+<p>EDIT:</p>
+
+<p>Following @jarmod advice I've reduced the <code>lambda</code>function to:</p>
+
+<pre class="lang-py prettyprint-override"><code>def make_movie(event, context):
+    print('running make movie')
+    import numpy
+</code></pre>
+
+<p>I now have the following error:</p>
+
+<pre><code>START RequestId: 6abd7ef6-b9de-11e5-8aee-918ac0a06113 Version: $LATEST
+running make movie
+Error importing numpy: you should not try to import numpy from
+        its source directory; please exit the numpy source tree, and relaunch
+        your python intepreter from there.: ImportError
+Traceback (most recent call last):
+  File "/var/task/process_movie.py", line 3, in make_movie
+    import numpy
+  File "/var/task/numpy/__init__.py", line 127, in &lt;module&gt;
+    raise ImportError(msg)
+ImportError: Error importing numpy: you should not try to import numpy from
+        its source directory; please exit the numpy source tree, and relaunch
+        your python intepreter from there.
+
+END RequestId: 6abd7ef6-b9de-11e5-8aee-918ac0a06113
+REPORT RequestId: 6abd7ef6-b9de-11e5-8aee-918ac0a06113  Duration: 105.95 ms Billed Duration: 200 ms     Memory Size: 1536 MB    Max Memory Used: 14 MB
+</code></pre>
+    </div>
+    </div></body></html>

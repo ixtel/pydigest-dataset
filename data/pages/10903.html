@@ -1,0 +1,235 @@
+<html><body><div><div class="entry-content">
+<footer class="post-info">
+        <abbr class="published" title="2016-02-19T00:00:00-07:00">
+                February 19 2016
+        </abbr>
+
+<p/>
+
+
+</footer>      <p>In our <a href="http://blog.apcelent.com/json-web-token-tutorial-example-python.html">last post</a>
+we gave a detailed description about JSON Web Tokens. In this post we are going
+to show a sample JSON Web Token Authentication mechanism with the Django Web Framework.</p>
+<p><a href="https://www.owasp.org">Owasp</a> defines Authentication as the process of verification
+that an individual, entity or website is who it claims to be. Authentication in
+the context of web applications is commonly performed by submitting a user name
+or ID and one or more items of private information that only a given user should
+know.</p>
+<p>HTTP by its nature is stateless, regardless of the backend. Hence most web
+frameworks come with auth and session management feature. In a typical
+browser-server case; the browser manages a list of key/value pairs,
+known as cookies, for each domain. Cookies can be accessed by the server (read)
+by parsing the Cookie HTTP request header. These cookies can be managed by the
+server(create, modify, delete) using the Set-Cookie HTTPresponse header.</p>
+<p>Web-targeted frameworks provide functions to deal with cookies on a higher level,
+lets take a look into the django.</p>
+<p><img src="http://blog.apcelent.com/images/apcelent-json-authentication-django.png"/></p>
+<h5 id="djangos-built-in-authentication">Django's Built in Authentication</h5>
+<p>Django has <a href="https://docs.djangoproject.com/en/dev/topics/http/sessions/">session</a>
+and <a href="https://docs.djangoproject.com/en/dev/topics/auth/">authentication</a> management
+built-in. It takes care of session and auth via Middlewares, that modify
+incoming requests and outgoing responses.</p>
+<p>Django Session Middleware takes an <a href="https://github.com/django/django/blob/master/django/contrib/sessions/middleware.py#L14">incoming request</a>
+looks for a session key in the request’s cookies, and then sets request.session
+to a SessionStore instance. If the request session is modified, or if the
+configuration is to save the session every time, it saves the changes and sets a
+session cookie or deletes if the session has been emptied.</p>
+<p>The <a href="https://github.com/django/django/blob/master/django/contrib/auth/middleware.py">Auth Middleware</a>
+sets request.user to a LazyUser. LazyUser here is being used to delay the
+instantiation of the wrapped class. When <code>request.user</code> is accessed – say by
+<code>@login_required</code> decorator – LazyUser calls <code>django.contrib.auth.get_user()</code>,
+passing in the request; <code>get_user()</code> pulls information out of the session and, if the
+user is authenticated, returns the appropriate User instance. However,
+if there is no session details for the user, an attempt is made to authenticate
+the user.</p>
+<p>How do we authenticate the user?</p>
+<p>Given a dict of credentials(username and password) we call the
+<code>django.contrib.auth.autenticate(**credentials)</code>. This function returns
+the User object, if successful, or <code>None</code> if credentials were not correct.</p>
+<p>Given an authenticated User object, we call the <code>django.contrib.auth.login(request, user)</code>.
+This stores the authentication backend and the user's id into the session. Since,
+one of the variable in session stands modified, <code>request.session</code> should be updated,
+this is done by <code>process_response</code> in <a href="https://github.com/django/django/blob/53ccffdb8c8e47a4d4304df453d8c79a9be295ab/django/contrib/sessions/middleware.py#L18">Session Middleware</a>.</p>
+<h5 id="custom-authentication-backend-in-django">Custom Authentication backend in Django</h5>
+<p>Django has an easily extensible authentication backend. It allows the ability to
+change what method checks our user's credentials. An example of this is to create
+a Social Authentication backend. OAuth providers like Facebook, provide
+the details of the currently authenticated user. But to maintain the <code>login_required</code>
+decorator or use the <code>request.user</code> variable we still need to have them logged
+into django. This is what can be achieved by a custom Auth backend.</p>
+<p>Let's implement a basic custom auth backend, where password of all the user's is
+alphaQ.</p>
+<p>Username: alpha
+Password: alphapass</p>
+<div class="highlight"><pre><span class="c"># import the User object</span>
+<span class="kn">from</span> <span class="nn">django.contrib.auth.models</span> <span class="kn">import</span> <span class="n">User</span>
+
+<span class="c"># Define backend class</span>
+<span class="k">class</span> <span class="nc">BasicCustomBackend</span><span class="p">(</span><span class="nb">object</span><span class="p">):</span>
+
+    <span class="c"># Create an authentication method</span>
+    <span class="k">def</span> <span class="nf">authenticate</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">username</span><span class="o">=</span><span class="bp">None</span><span class="p">,</span> <span class="n">password</span><span class="o">=</span><span class="bp">None</span><span class="p">):</span>
+
+        <span class="k">try</span><span class="p">:</span>
+            <span class="c"># Try to find a user matching the username provided</span>
+            <span class="n">user</span> <span class="o">=</span> <span class="n">User</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">username</span><span class="o">=</span><span class="n">username</span><span class="p">)</span>
+
+            <span class="c"># if successful return user if not return None</span>
+            <span class="k">if</span> <span class="n">password</span> <span class="o">==</span> <span class="s">'alphapass'</span><span class="p">:</span>
+                <span class="k">return</span> <span class="n">user</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="k">return</span> <span class="bp">None</span>
+        <span class="k">except</span> <span class="n">User</span><span class="o">.</span><span class="n">DoesNotExist</span><span class="p">:</span>
+            <span class="c"># No user was found</span>
+            <span class="k">return</span> <span class="bp">None</span>
+
+    <span class="c"># Required for the backend to work properly</span>
+    <span class="k">def</span> <span class="nf">get_user</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">user_id</span><span class="p">):</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">User</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">pk</span><span class="o">=</span><span class="n">user_id</span><span class="p">)</span>
+        <span class="k">except</span> <span class="n">User</span><span class="o">.</span><span class="n">DoesNotExist</span><span class="p">:</span>
+            <span class="k">return</span> <span class="bp">None</span>
+</pre></div>
+
+
+<p>And in the <code>settings.py</code> we add</p>
+<div class="highlight"><pre>AUTHENTICATION_BACKENDS = ( 'path.to.Backend', )
+</pre></div>
+
+
+<p>This backend is not good for production use, but good enough to demostrate a
+custom backend. Do refer to the <a href="https://docs.djangoproject.com/en/1.9/topics/auth/customizing/">official docs</a>.</p>
+<h5 id="jwt-and-django-auth">JWT and Django Auth</h5>
+<p>Now that we have understood, the basic authentication process in django, and have
+written a custom auth backend. Lets move to writing a custom backend based on JSON
+Web Tokens. To brush up on how JWT Auth works, it will be good to read our
+<a href="http://blog.apcelent.com/json-web-token-tutorial-example-python.html">article on JWT</a>.</p>
+<p>As is evident from the article, there are four steps :</p>
+<ol>
+<li>
+<p>Browsers sends a POST request with <code>username</code> and <code>password</code> to the server.</p>
+</li>
+<li>
+<p>Server creates a token, and is returned to the browser.</p>
+</li>
+<li>
+<p>Browser sends Token in Auth Headers.</p>
+</li>
+<li>
+<p>Server validates the Token, and returns the protected information in the response.</p>
+</li>
+</ol>
+<p>Having a Token Based Authentication requires following steps :</p>
+<ol>
+<li>
+<p>A python library to generate and validate JWTs, we will use
+<a href="https://github.com/mpdavis/python-jose/">python-jose</a>.</p>
+</li>
+<li>
+<p>A django view that takes username and password and returns a Token</p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">jose</span> <span class="kn">import</span> <span class="n">jws</span>
+<span class="kn">from</span> <span class="nn">django.http</span> <span class="kn">import</span> <span class="n">HttpResponse</span>
+<span class="kn">import</span> <span class="nn">datetime</span>
+<span class="kn">from</span> <span class="nn">django.contrib.auth</span> <span class="kn">import</span> <span class="n">authenticate</span>
+
+<span class="k">def</span> <span class="nf">create_jwt</span><span class="p">(</span><span class="n">request</span><span class="p">):</span>
+
+    <span class="sd">"""</span>
+<span class="sd">    the above token need to be saved in database, and a one-to-one</span>
+<span class="sd">    relation should exist with the username/user_pk</span>
+<span class="sd">    """</span>
+
+    <span class="n">username</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">POST</span><span class="p">[</span><span class="s">'username'</span><span class="p">]</span>
+    <span class="n">password</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">POST</span><span class="p">[</span><span class="s">'password'</span><span class="p">]</span>
+    <span class="n">user</span> <span class="o">=</span> <span class="n">authenticate</span><span class="p">(</span><span class="n">username</span><span class="o">=</span><span class="n">username</span><span class="p">,</span> <span class="n">password</span><span class="o">=</span><span class="n">password</span><span class="p">)</span>
+    <span class="n">expiry</span> <span class="o">=</span> <span class="n">datetime</span><span class="o">.</span><span class="n">date</span><span class="o">.</span><span class="n">today</span><span class="p">()</span> <span class="o">+</span> <span class="n">timedelta</span><span class="p">(</span><span class="n">days</span><span class="o">=</span><span class="mi">50</span><span class="p">)</span>
+    <span class="n">token</span> <span class="o">=</span> <span class="n">jws</span><span class="o">.</span><span class="n">sign</span><span class="p">({</span><span class="s">'username'</span><span class="p">:</span> <span class="n">user</span><span class="o">.</span><span class="n">username</span><span class="p">,</span> <span class="s">'expiry'</span><span class="p">:</span><span class="n">expiry</span><span class="p">},</span> <span class="s">'seKre8'</span><span class="p">,</span> <span class="n">algorithm</span><span class="o">=</span><span class="s">'HS256'</span><span class="p">)</span>
+
+<span class="k">return</span> <span class="n">HttpResponse</span><span class="p">(</span><span class="n">token</span><span class="p">)</span>
+</pre></div>
+
+
+</li>
+<li>
+<p>Custom Auth Backend for the Tokens</p>
+<div class="highlight"><pre><span class="k">class</span> <span class="n">JWTAuthentication</span>(<span class="n">object</span>):
+
+    <span class="s">"""</span>
+<span class="s">    Simple token based authentication.</span>
+<span class="s">    Clients should authenticate by passing the token key in the "</span><span class="n">Authorization</span><span class="s">"</span>
+<span class="s">    HTTP header, prepended with the string "</span><span class="n">Token</span> <span class="s">".  For example:</span>
+<span class="s">    Authorization: Token 401f7ac837da42b97f613d789819ff93537bee6a</span>
+<span class="s">    """</span>
+
+    <span class="n">def</span> <span class="n">authenticate</span>(<span class="k">self</span>, <span class="n">request</span>):
+        <span class="n">auth</span> = <span class="n">get_authorization_header</span>(<span class="n">request</span>).<span class="nb">split</span>()
+
+        <span class="k">if</span> <span class="nb">not</span> <span class="n">auth</span> <span class="o">or</span> <span class="n">auth</span>[<span class="mi">0</span>].<span class="n">lower</span>() != <span class="n">b'token':</span>
+            <span class="k">return</span> <span class="n">None</span>
+
+        <span class="n">try:</span>
+            <span class="k">token</span> = <span class="n">auth</span>[<span class="mi">1</span>].<span class="n">decode</span>()
+        <span class="n">except</span> <span class="n">UnicodeError:</span>
+            <span class="n">msg</span> = <span class="n">_</span>(<span class="s">'Invalid token header. Token string should not contain invalid characters.'</span>)
+            <span class="n">raise</span> <span class="n">exceptions</span>.<span class="n">AuthenticationFailed</span>(<span class="n">msg</span>)
+
+        <span class="k">return</span> <span class="k">self</span>.<span class="n">authenticate_credentials</span>(<span class="k">token</span>)
+
+    <span class="n">def</span> <span class="n">authenticate_credentials</span>(<span class="k">self</span>, <span class="n">payload</span>):
+
+        <span class="n">decoded_dict</span> = <span class="n">jws</span>.<span class="n">verify</span>(<span class="n">payload</span>, <span class="s">'seKre8'</span>, <span class="n">algorithms</span>=[<span class="s">'HS256'</span>])
+
+        <span class="n">username</span> = <span class="n">decoded_dict</span>.<span class="n">get</span>(<span class="s">'username'</span>, <span class="n">None</span>)
+        <span class="n">expiry</span> = <span class="n">decoded_dict</span>.<span class="n">get</span>(<span class="s">'expiry'</span>, <span class="n">None</span>)
+
+        <span class="n">try:</span>
+            <span class="n">usr</span> = <span class="n">User</span>.<span class="n">objects</span>.<span class="n">get</span>(<span class="n">username</span>=<span class="n">username</span>)
+        <span class="n">except</span> <span class="n">model</span>.<span class="n">DoesNotExist:</span>
+            <span class="n">raise</span> <span class="n">exceptions</span>.<span class="n">AuthenticationFailed</span>(<span class="n">_</span>(<span class="s">'Invalid token.'</span>))
+
+        <span class="k">if</span> <span class="nb">not</span> <span class="n">usr</span>.<span class="n">is_active:</span>
+            <span class="n">raise</span> <span class="n">exceptions</span>.<span class="n">AuthenticationFailed</span>(<span class="n">_</span>(<span class="s">'User inactive or deleted.'</span>))
+
+        <span class="k">if</span> <span class="n">expiry</span> &lt; <span class="n">datetime</span>.<span class="n">date</span>.<span class="n">today</span>():
+            <span class="n">raise</span> <span class="n">exceptions</span>.<span class="n">AuthenticationFailed</span>(<span class="n">_</span>(<span class="s">'Token Expired.'</span>))
+
+        <span class="k">return</span> (<span class="n">usr</span>, <span class="n">payload</span>)
+
+    <span class="n">def</span> <span class="n">authenticate_header</span>(<span class="k">self</span>, <span class="n">request</span>):
+        <span class="k">return</span> <span class="s">'Token'</span>
+</pre></div>
+
+
+</li>
+</ol>
+<p>Hope the above article shows how to implement JWT with django. The above steps
+are just for the purpose of demonstration, and should not be
+used in production. The following are amongst popular libraries help with Token
+Based Authentication:</p>
+<p><a href="https://github.com/James1345/django-rest-knox/">django-rest-know</a></p>
+<p><a href="https://github.com/jpadilla/django-jwt-auth">django-jwt-auth</a></p>
+<p>Hope the article was of help. Feel free to submit your thoughts in the comments.</p>
+      <p>
+    
+        tags: 
+           <a href="http://blog.apcelent.com/tag/python.html">python</a>
+           <a href="http://blog.apcelent.com/tag/django.html">django</a>
+           <a href="http://blog.apcelent.com/tag/jsonwebtokens.html">jsonwebtokens</a>
+    
+    
+      </p>
+
+      
+      <span class="st_linkedin_large" displaytext="LinkedIn"/>
+      <span class="st_facebook_large" displaytext="Facebook"/>
+      <span class="st_pinterest_large" displaytext="Pinterest"/>
+      <span class="st_email_large" displaytext="Email"/>
+
+      
+      
+      
+
+      
+
+    </div>
+    </div></body></html>

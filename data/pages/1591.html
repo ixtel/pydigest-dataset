@@ -1,0 +1,369 @@
+<html><body><div><div class="content">
+      
+        <h1 class="content-title">Saturday morning hacks: Building an Analytics App with Flask</h1>
+      
+      
+      
+  
+  
+  
+    <p><a href="http://media.charlesleifer.com/blog/photos/coffee-cup-scaled.jpg" title="Saturday morning hacks"><img alt="Saturday morning hacks" class="img-responsive" src="http://m.charlesleifer.com/t/800x-/blog/photos/coffee-cup-scaled.jpg?key=xFJansgcRXa5MCBauZSUhQ"/></a></p>
+<p>A couple years back I wrote about <a href="/blog/experimenting-with-an-analytics-web-service-using-python-and-cassandra-/">building an Analytics service with Cassandra</a>. As fun as that project was to build, the reality was that Cassandra was completely unsuitable for my actual needs, so I decided to switch to something simpler. I'm happy to say the replacement app has been running without a hitch for the past 5 months taking up only about 20 MB of RAM! In this post I'll show how to build a lightweight Analytics service using Flask.</p>
+<h3>Analytics request/response cycle</h3>
+<p>The analytics service we'll be building will follow a blueprint popularized by Google Analytics. Here's how it works:</p>
+<ul>
+<li>Each page we wish to track will include a <code>&lt;script&gt;</code> tag referencing a JavaScript file served by our analytics app (placed in your base template, for example).</li>
+<li>Someone visits your site and their browser executes the JavaScript file.</li>
+<li>The JavaScript contains code to read the current page's title, URL, as well as other interesting metadata.</li>
+<li><strong>Now the cool part</strong>, the script will dynamically create a new <code>&lt;img&gt;</code> element, specifying as it's <code>src</code> a URL served by our analytic's app.</li>
+<li>The page metadata we collected is encoded in the querystring of the new image's <code>src</code> attribute, which is in turn parsed by our analytics server.</li>
+<li>The analytics server adds a new row to the database and returns a 1-pixel gif.</li>
+</ul>
+<p>Here is a diagram of the requests and responses:</p>
+<p><a href="http://media.charlesleifer.com/blog/photos/analytics-flow.png" title="Analytics Flow"><img alt="Analytics Flow" class="img-responsive" src="http://m.charlesleifer.com/t/800x-/blog/photos/analytics-flow.png?key=cZ5BbjpeMLJ_SRYpZFE8Qw"/></a></p>
+<h3>Design considerations</h3>
+<p>Since this is running on a VPS with limited resources, and because my blog doesn't really receive that much traffic, we'll go with something lightweight and functional. I like the Flask framework for projects of all sizes, but it should work really well for this particular app. We'll also use <a href="http://docs.peewee-orm.com/">peewee ORM</a> for storing the page-views and, later in this post, running queries against our analytics data. All told our app will be less than 100 lines of code including comments!</p>
+<h4>Relational Database</h4>
+<p>In order to be able to easily run lots of ad-hoc queries, we'll use a relational database to store the page-view data. I chose to use BerkeleyDB's SQLite interface because it is a lightweight embedded database, and won't take up too much RAM. I could have also chosen <a href="/blog/sqlite-small-fast-reliable-choose-any-three-/">SQLite</a>, but BerkeleyDB provides <a href="http://www.oracle.com/technetwork/database/berkeleydb/learnmore/bdbvssqlite-wp-186779.pdf">much higher</a> concurrent transaction throughput than SQLite does. In the event the analytics site gets hammered, it should be able to keep up with the traffic:</p>
+<p><a href="http://media.charlesleifer.com/blog/photos/p1405279996.65.png" title="p1405279996.65.png"><img alt="p1405279996.65.png" class="img-responsive" src="http://m.charlesleifer.com/t/800x-/blog/photos/p1405279996.65.png?key=-lmVnGZAzqFj-R0soKa7zw"/></a></p>
+<p>If you're already running Postgresql or MySQL, then feel free to use them instead.</p>
+<h4>WSGI Server</h4>
+<p>There are <a href="http://wsgi.readthedocs.org/en/latest/servers.html">a lot of options</a> to choose from, but my preference is to use <a href="http://www.gevent.org/">gevent</a>. Gevent is a coroutine-based networking library that mixes lightweight threads (greenlets) with libev's event loop. Through the use of some pretty deep monkey-patching, gevent turns your normal, blocking python code into non-blocking without any special syntax or APIs (just one big monkeypatch). Gevent's WSGI server, while pretty basic, provides solid performance with very low overhead. As with the database, if you're already running something else or are familiar with a different library, feel free to use that instead.</p>
+<h3>Creating the virtualenv</h3>
+<p>Begin by creating a new virtualenv for the analytics app and installing <code>flask</code> and <code>peewee</code> (and optionally, <code>gevent</code>):</p>
+<div class="highlight"><pre><span class="gp">$</span> virtualenv analytics
+<span class="go">New python executable in analytics/bin/python2</span>
+<span class="go">Also creating executable in analytics/bin/python</span>
+<span class="go">Installing setuptools, pip...done.</span>
+
+<span class="gp">$</span> <span class="nb">cd</span> analytics/
+<span class="gp">$</span> <span class="nb">source</span> bin/activate
+<span class="gp">$</span> pip install flask peewee
+<span class="go">...</span>
+<span class="go">...</span>
+<span class="go">Successfully installed flask peewee Werkzeug Jinja2 itsdangerous markupsafe</span>
+<span class="go">Cleaning up...</span>
+
+<span class="gp">$</span> pip install gevent  <span class="c1">#  Optional.</span>
+</pre></div>
+<p>If you'd like to compile the Python SQLite driver with support for BerkeleyDB, check out the <code>berkeley_build.sh</code> script in the <em>playhouse</em> module (<em>lib/python2.7/site-packages/playhouse/berkeley_build.sh</em>). This script will fetch and compile BerkeleyDB, then compile <em>pysqlite</em> against the BerkeleyDB sqlite libraries. For more detailed instructions, <a href="/blog/building-the-python-sqlite-driver-for-use-with-berkeleydb/">check out this post</a>. You can also skip this step and just use peewee's standard <a href="http://docs.peewee-orm.com/en/latest/peewee/api.html#SqliteDatabase">SqliteDatabase</a> class.</p>
+<h3>Implementing the Flask App</h3>
+<p>Let's start by creating the skeleton of our Flask app. As discussed, there will be two views: one to serve the JavaScript file, and one to serve the 1-pixel GIF. In the <code>analytics</code> directory, create a new file <code>analytics.py</code> and add the following lines of code. This code specifies the boilerplate for our application as well as some configuration values:</p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">base64</span> <span class="kn">import</span> <span class="n">b64decode</span>
+<span class="kn">import</span> <span class="nn">datetime</span>
+<span class="kn">import</span> <span class="nn">json</span>
+<span class="kn">import</span> <span class="nn">os</span>
+<span class="kn">from</span> <span class="nn">urlparse</span> <span class="kn">import</span> <span class="n">parse_qsl</span><span class="p">,</span> <span class="n">urlparse</span>
+
+<span class="kn">from</span> <span class="nn">flask</span> <span class="kn">import</span> <span class="n">Flask</span><span class="p">,</span> <span class="n">Response</span><span class="p">,</span> <span class="n">abort</span><span class="p">,</span> <span class="n">request</span>
+<span class="kn">from</span> <span class="nn">peewee</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="kn">from</span> <span class="nn">playhouse.berkeleydb</span> <span class="kn">import</span> <span class="n">BerkeleyDatabase</span>  <span class="c1"># Optional.</span>
+
+
+<span class="c1"># 1 pixel GIF, base64-encoded.</span>
+<span class="n">BEACON</span> <span class="o">=</span> <span class="n">b64decode</span><span class="p">(</span><span class="s1">'R0lGODlhAQABAIAAANvf7wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw=='</span><span class="p">)</span>
+
+<span class="c1"># Store the database file in the app directory.</span>
+<span class="n">APP_DIR</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">dirname</span><span class="p">(</span><span class="n">__file__</span><span class="p">)</span>
+<span class="n">DATABASE_NAME</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">APP_DIR</span><span class="p">,</span> <span class="s1">'analytics.db'</span><span class="p">)</span>
+<span class="n">DOMAIN</span> <span class="o">=</span> <span class="s1">'http://127.0.0.1:5000'</span>  <span class="c1"># TODO: change me.</span>
+
+<span class="c1"># Simple JavaScript which will be included and executed on the client-side.</span>
+<span class="n">JAVASCRIPT</span> <span class="o">=</span> <span class="s1">''</span> <span class="c1"># TODO: add javascript implementation.</span>
+
+<span class="c1"># Flask application settings.</span>
+<span class="n">DEBUG</span> <span class="o">=</span> <span class="nb">bool</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'DEBUG'</span><span class="p">))</span>
+<span class="n">SECRET_KEY</span> <span class="o">=</span> <span class="s1">'secret - change me'</span>  <span class="c1"># TODO: change me.</span>
+
+<span class="n">app</span> <span class="o">=</span> <span class="n">Flask</span><span class="p">(</span><span class="n">__name__</span><span class="p">)</span>
+<span class="n">app</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">from_object</span><span class="p">(</span><span class="n">__name__</span><span class="p">)</span>
+
+<span class="n">database</span> <span class="o">=</span> <span class="n">BerkeleyDatabase</span><span class="p">(</span><span class="n">DATABASE_NAME</span><span class="p">)</span>  <span class="c1"># or SqliteDatabase(DATABASE_NAME)</span>
+
+<span class="k">class</span> <span class="nc">PageView</span><span class="p">(</span><span class="n">Model</span><span class="p">):</span>
+    <span class="c1"># TODO: add model definition.</span>
+
+    <span class="k">class</span> <span class="nc">Meta</span><span class="p">:</span>
+        <span class="n">database</span> <span class="o">=</span> <span class="n">database</span>
+
+<span class="nd">@app.route</span><span class="p">(</span><span class="s1">'/a.gif'</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">analyze</span><span class="p">():</span>
+    <span class="c1"># TODO: implement 1pixel gif view.</span>
+
+<span class="nd">@app.route</span><span class="p">(</span><span class="s1">'/a.js'</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">script</span><span class="p">():</span>
+    <span class="c1"># TODO: implement javascript view.</span>
+
+<span class="nd">@app.errorhandler</span><span class="p">(</span><span class="mi">404</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">not_found</span><span class="p">(</span><span class="n">e</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">Response</span><span class="p">(</span><span class="s1">'Not found.'</span><span class="p">)</span>
+
+<span class="k">if</span> <span class="n">__name__</span> <span class="o">==</span> <span class="s1">'__main__'</span><span class="p">:</span>
+    <span class="n">database</span><span class="o">.</span><span class="n">create_tables</span><span class="p">([</span><span class="n">PageView</span><span class="p">],</span> <span class="n">safe</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+    <span class="n">app</span><span class="o">.</span><span class="n">run</span><span class="p">()</span>
+</pre></div>
+<p>As you can see we have two simple views: one to serve the JavaScript, and one to analyze the data sent back from the visitor's browser and serve a 1-pixel GIF.</p>
+<h3>Getting information from the Browser</h3>
+<p>Let's begin with the JavaScript that will run on the client-side. This code will extract some basic information from the page:</p>
+<ul>
+<li>The URL of the page, including the querystring parameters (<code>document.location.href</code>).</li>
+<li>The page's title (<code>document.title</code>).</li>
+<li>The referring page's URL, if it exists (<code>document.referrer</code>).</li>
+</ul>
+<p>There are other attributes we could also extract, which you can add if you're interested, such as:</p>
+<ul>
+<li>The cookie key/value pairs (<code>document.cookie</code>).</li>
+<li>The last-modified date of the document (<code>document.lastModified</code>).</li>
+<li><a href="http://www.w3schools.com/jsref/dom_obj_document.asp">And more</a>.</li>
+</ul>
+<p>After extracting the information, we will pass it to the <code>analyze</code> view in the query-string. For simplicity, we will have the JavaScript execute immediately once it is loaded by the visitor's browser, so we will wrap everything in a self-invoking anonymous function. Finally, we will use the browser's <code>encodeURIComponent</code> function to make values safe for passing through the query-string:</p>
+<div class="highlight"><pre><span class="p">(</span><span class="kd">function</span><span class="p">()</span> <span class="p">{</span>
+  <span class="kd">var</span> <span class="nx">img</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">Image</span><span class="p">,</span>
+      <span class="nx">url</span> <span class="o">=</span> <span class="nb">encodeURIComponent</span><span class="p">(</span><span class="nb">document</span><span class="p">.</span><span class="nx">location</span><span class="p">.</span><span class="nx">href</span><span class="p">),</span>
+      <span class="nx">title</span> <span class="o">=</span> <span class="nb">encodeURIComponent</span><span class="p">(</span><span class="nb">document</span><span class="p">.</span><span class="nx">title</span><span class="p">),</span>
+      <span class="nx">ref</span> <span class="o">=</span> <span class="nb">encodeURIComponent</span><span class="p">(</span><span class="nb">document</span><span class="p">.</span><span class="nx">referrer</span><span class="p">);</span>
+  <span class="nx">img</span><span class="p">.</span><span class="nx">src</span> <span class="o">=</span> <span class="s1">'%s/a.gif?url='</span> <span class="o">+</span> <span class="nx">url</span> <span class="o">+</span> <span class="s1">'&amp;t='</span> <span class="o">+</span> <span class="nx">title</span> <span class="o">+</span> <span class="s1">'&amp;ref='</span> <span class="o">+</span> <span class="nx">ref</span><span class="p">;</span>
+<span class="p">})();</span>
+</pre></div>
+<p>We've left a placeholder using the Python string interpolation parameter <code>%s</code> to allow our app to pass in the <code>DOMAIN</code> configuration value.</p>
+<p>Replace the <code>JAVASCRIPT</code> configuration value in your application file with the following "minified" version of the above JavaScript code:</p>
+<div class="highlight"><pre><span class="c1"># Simple JavaScript which will be included and executed on the client-side.</span>
+<span class="n">JAVASCRIPT</span> <span class="o">=</span> <span class="s2">"""(function(){</span>
+<span class="s2">    var d=document,i=new Image,e=encodeURIComponent;</span>
+<span class="s2">    i.src='</span><span class="si">%s</span><span class="s2">/a.gif?url='+e(d.location.href)+'&amp;ref='+e(d.referrer)+'&amp;t='+e(d.title);</span>
+<span class="s2">    })()"""</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s1">'</span><span class="se">\n</span><span class="s1">'</span><span class="p">,</span> <span class="s1">''</span><span class="p">)</span>
+</pre></div>
+<p>We can now fill in the <code>script</code> view to serve our javascript file:</p>
+<div class="highlight"><pre><span class="nd">@app.route</span><span class="p">(</span><span class="s1">'/a.js'</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">script</span><span class="p">():</span>
+    <span class="k">return</span> <span class="n">Response</span><span class="p">(</span>
+        <span class="n">app</span><span class="o">.</span><span class="n">config</span><span class="p">[</span><span class="s1">'JAVASCRIPT'</span><span class="p">]</span> <span class="o">%</span> <span class="p">(</span><span class="n">app</span><span class="o">.</span><span class="n">config</span><span class="p">[</span><span class="s1">'DOMAIN'</span><span class="p">]),</span>
+        <span class="n">mimetype</span><span class="o">=</span><span class="s1">'text/javascript'</span><span class="p">)</span>
+</pre></div>
+<h3>Storing the page-view data</h3>
+<p>The script we wrote will send three values to the <code>analyze</code> view, containing the page's URL, title, and referring page. We can now fill in the <code>PageView</code> model definition to store this data.</p>
+<p>On the server-side, we will also be able to access the visitor's IP address and the request headers sent by the visitor's browser, so we will add columns for those values as well as the timestamp indicating when the request was made.</p>
+<p>Since each browser may send a different collection of headers, and each page may have a different set of querystring parameters, we will store these as JSON in a TextField. If you're using Postgresql, you could also use <a href="http://docs.peewee-orm.com/en/latest/peewee/playhouse.html#HStoreField">HStore</a> or the <a href="http://docs.peewee-orm.com/en/latest/peewee/playhouse.html#JSONField">native JSON data-type</a>.</p>
+<p>Here is the definition of the <code>PageView</code> model, along with a simple <code>JSONField</code> suitable for storing the query-string parameters and request headers:</p>
+<div class="highlight"><pre><span class="k">class</span> <span class="nc">JSONField</span><span class="p">(</span><span class="n">TextField</span><span class="p">):</span>
+    <span class="sd">"""Store JSON data in a TextField."""</span>
+    <span class="k">def</span> <span class="nf">python_value</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">value</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">value</span> <span class="ow">is</span> <span class="ow">not</span> <span class="bp">None</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">value</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">db_value</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">value</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">value</span> <span class="ow">is</span> <span class="ow">not</span> <span class="bp">None</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">value</span><span class="p">)</span>
+
+<span class="k">class</span> <span class="nc">PageView</span><span class="p">(</span><span class="n">Model</span><span class="p">):</span>
+    <span class="n">domain</span> <span class="o">=</span> <span class="n">CharField</span><span class="p">()</span>
+    <span class="n">url</span> <span class="o">=</span> <span class="n">TextField</span><span class="p">()</span>
+    <span class="n">timestamp</span> <span class="o">=</span> <span class="n">DateTimeField</span><span class="p">(</span><span class="n">default</span><span class="o">=</span><span class="n">datetime</span><span class="o">.</span><span class="n">datetime</span><span class="o">.</span><span class="n">now</span><span class="p">,</span> <span class="n">index</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+    <span class="n">title</span> <span class="o">=</span> <span class="n">TextField</span><span class="p">(</span><span class="n">default</span><span class="o">=</span><span class="s1">''</span><span class="p">)</span>
+    <span class="n">ip</span> <span class="o">=</span> <span class="n">CharField</span><span class="p">(</span><span class="n">default</span><span class="o">=</span><span class="s1">''</span><span class="p">)</span>
+    <span class="n">referrer</span> <span class="o">=</span> <span class="n">TextField</span><span class="p">(</span><span class="n">default</span><span class="o">=</span><span class="s1">''</span><span class="p">)</span>
+    <span class="n">headers</span> <span class="o">=</span> <span class="n">JSONField</span><span class="p">()</span>
+    <span class="n">params</span> <span class="o">=</span> <span class="n">JSONField</span><span class="p">()</span>
+
+    <span class="k">class</span> <span class="nc">Meta</span><span class="p">:</span>
+        <span class="n">database</span> <span class="o">=</span> <span class="n">database</span>
+</pre></div>
+<p>Now we can add a method to the <code>PageView</code> model which will extract all the relevant values from the request. The <code>urlparse</code> module contains helpful functions for extracting portions of the request, and we will use this to extract the visitor's URL and the querystring parameters:</p>
+<div class="highlight"><pre><span class="k">class</span> <span class="nc">PageView</span><span class="p">(</span><span class="n">Model</span><span class="p">):</span>
+    <span class="c1"># ... field definitions ...</span>
+
+    <span class="nd">@classmethod</span>
+    <span class="k">def</span> <span class="nf">create_from_request</span><span class="p">(</span><span class="n">cls</span><span class="p">):</span>
+        <span class="n">parsed</span> <span class="o">=</span> <span class="n">urlparse</span><span class="p">(</span><span class="n">request</span><span class="o">.</span><span class="n">args</span><span class="p">[</span><span class="s1">'url'</span><span class="p">])</span>
+        <span class="n">params</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">parse_qsl</span><span class="p">(</span><span class="n">parsed</span><span class="o">.</span><span class="n">query</span><span class="p">))</span>
+
+        <span class="k">return</span> <span class="n">PageView</span><span class="o">.</span><span class="n">create</span><span class="p">(</span>
+            <span class="n">domain</span><span class="o">=</span><span class="n">parsed</span><span class="o">.</span><span class="n">netloc</span><span class="p">,</span>
+            <span class="n">url</span><span class="o">=</span><span class="n">parsed</span><span class="o">.</span><span class="n">path</span><span class="p">,</span>
+            <span class="n">title</span><span class="o">=</span><span class="n">request</span><span class="o">.</span><span class="n">args</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'t'</span><span class="p">)</span> <span class="ow">or</span> <span class="s1">''</span><span class="p">,</span>
+            <span class="n">ip</span><span class="o">=</span><span class="n">request</span><span class="o">.</span><span class="n">headers</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'X-Forwarded-For'</span><span class="p">,</span> <span class="n">request</span><span class="o">.</span><span class="n">remote_addr</span><span class="p">),</span>
+            <span class="n">referrer</span><span class="o">=</span><span class="n">request</span><span class="o">.</span><span class="n">args</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'ref'</span><span class="p">)</span> <span class="ow">or</span> <span class="s1">''</span><span class="p">,</span>
+            <span class="n">headers</span><span class="o">=</span><span class="nb">dict</span><span class="p">(</span><span class="n">request</span><span class="o">.</span><span class="n">headers</span><span class="p">),</span>
+            <span class="n">params</span><span class="o">=</span><span class="n">params</span><span class="p">)</span>
+</pre></div>
+<p>The final step will be to fill in the <code>analyze</code> view. This view will create a new <code>PageView</code> and return a 1-pixel GIF. As a safeguard, we will check for the presence of a URL in the querystring to ensure we don't accidentally create blank rows:</p>
+<div class="highlight"><pre><span class="nd">@app.route</span><span class="p">(</span><span class="s1">'/a.gif'</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">analyze</span><span class="p">():</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">request</span><span class="o">.</span><span class="n">args</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'url'</span><span class="p">):</span>
+        <span class="n">abort</span><span class="p">(</span><span class="mi">404</span><span class="p">)</span>
+
+    <span class="k">with</span> <span class="n">database</span><span class="o">.</span><span class="n">transaction</span><span class="p">():</span>
+        <span class="n">PageView</span><span class="o">.</span><span class="n">create_from_request</span><span class="p">()</span>
+
+    <span class="n">response</span> <span class="o">=</span> <span class="n">Response</span><span class="p">(</span><span class="n">app</span><span class="o">.</span><span class="n">config</span><span class="p">[</span><span class="s1">'BEACON'</span><span class="p">],</span> <span class="n">mimetype</span><span class="o">=</span><span class="s1">'image/gif'</span><span class="p">)</span>
+    <span class="n">response</span><span class="o">.</span><span class="n">headers</span><span class="p">[</span><span class="s1">'Cache-Control'</span><span class="p">]</span> <span class="o">=</span> <span class="s1">'private, no-cache'</span>
+    <span class="k">return</span> <span class="n">response</span>
+</pre></div>
+<h3>Running the app</h3>
+<p>If you'd like to test out the app at this point, you can run it in debug mode by specifying <code>DEBUG=1</code> on the command-line:</p>
+<div class="highlight"><pre><span class="gp">(analytics) $</span> <span class="nv">DEBUG</span><span class="o">=</span><span class="m">1</span> python analytics.py
+<span class="go"> * Running on http://127.0.0.1:5000/ (Press CTRL+C to quit)</span>
+<span class="go"> * Restarting with reloader</span>
+</pre></div>
+<p>You can view the javascript by loading <a href="http://127.0.0.1:5000/a.js">http://127.0.0.1:5000/a.js</a> . If you have another web-app running locally, you can add the following tag to one of the pages to test the analytics app:</p>
+<div class="highlight"><pre><span class="p">&lt;</span><span class="nt">script</span> <span class="na">src</span><span class="o">=</span><span class="s">"http://127.0.0.1:5000/a.js"</span> <span class="na">type</span><span class="o">=</span><span class="s">"text/javascript"</span><span class="p">&gt;&lt;/</span><span class="nt">script</span><span class="p">&gt;</span>
+</pre></div>
+<p>To deploy the app to a product environment, I'd suggest looking into using a dedicated WSGI server. I like using <a href="http://www.gevent.org/">gevent</a> because it is extremely lightweight and provides great performance. You can modify <code>analytics.py</code> to serve requests using gevent instead of the Flask server. The following code will run the analytics app on port 5000 using gevent:</p>
+<div class="highlight"><pre><span class="k">if</span> <span class="n">__name__</span> <span class="o">==</span> <span class="s1">'__main__'</span><span class="p">:</span>
+   <span class="kn">from</span> <span class="nn">gevent.wsgi</span> <span class="kn">import</span> <span class="n">WSGIServer</span>
+   <span class="n">WSGIServer</span><span class="p">((</span><span class="s1">''</span><span class="p">,</span> <span class="mi">5000</span><span class="p">),</span> <span class="n">app</span><span class="p">)</span><span class="o">.</span><span class="n">serve_forever</span><span class="p">()</span>
+</pre></div>
+<p>Because gevent uses monkey-patching to achieve it's high concurrency, it is necessary to add the following line to the <strong>very top</strong> of the <code>analytics.py</code> file:</p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">gevent</span> <span class="kn">import</span> <span class="n">monkey</span><span class="p">;</span> <span class="n">monkey</span><span class="o">.</span><span class="n">patch_all</span><span class="p">()</span>
+</pre></div>
+<h2>Querying the Data</h2>
+<p>The real fun begins after you've started to collect data for a couple days and can run queries on it. In this section we'll look at some interesting ways we can query the data collected by the analytics app.</p>
+<p>Using data from my blog, we'll run some queries on the past seven days of traffic:</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">analytics</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span> <span class="nn">datetime</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">week_ago</span> <span class="o">=</span> <span class="n">datetime</span><span class="o">.</span><span class="n">date</span><span class="o">.</span><span class="n">today</span><span class="p">()</span> <span class="o">-</span> <span class="n">datetime</span><span class="o">.</span><span class="n">timedelta</span><span class="p">(</span><span class="n">days</span><span class="o">=</span><span class="mi">7</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">base</span> <span class="o">=</span> <span class="n">PageView</span><span class="o">.</span><span class="n">select</span><span class="p">()</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">PageView</span><span class="o">.</span><span class="n">timestamp</span> <span class="o">&gt;=</span> <span class="n">week_ago</span><span class="p">)</span>
+</pre></div>
+<p>First off, let's see how many page-views I got during the past week:</p>
+
+<p>How many different IPs visited my site?</p>
+<div class="highlight"><pre><span class="gp">&gt;&gt;&gt; </span><span class="n">base</span><span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">PageView</span><span class="o">.</span><span class="n">ip</span><span class="p">)</span><span class="o">.</span><span class="n">group_by</span><span class="p">(</span><span class="n">PageView</span><span class="o">.</span><span class="n">ip</span><span class="p">)</span><span class="o">.</span><span class="n">count</span><span class="p">()</span>
+<span class="go">850</span>
+</pre></div>
+<p>What are the top 10 pages?</p>
+<div class="highlight"><pre><span class="k">print</span> <span class="p">(</span><span class="n">base</span>
+       <span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">PageView</span><span class="o">.</span><span class="n">title</span><span class="p">,</span> <span class="n">fn</span><span class="o">.</span><span class="n">Count</span><span class="p">(</span><span class="n">PageView</span><span class="o">.</span><span class="n">id</span><span class="p">))</span>
+       <span class="o">.</span><span class="n">group_by</span><span class="p">(</span><span class="n">PageView</span><span class="o">.</span><span class="n">title</span><span class="p">)</span>
+       <span class="o">.</span><span class="n">order_by</span><span class="p">(</span><span class="n">fn</span><span class="o">.</span><span class="n">Count</span><span class="p">(</span><span class="n">PageView</span><span class="o">.</span><span class="n">id</span><span class="p">)</span><span class="o">.</span><span class="n">desc</span><span class="p">())</span>
+       <span class="o">.</span><span class="n">tuples</span><span class="p">())[:</span><span class="mi">10</span><span class="p">]</span>
+
+<span class="c1"># Prints...</span>
+<span class="p">[(</span><span class="s1">'Postgresql HStore, JSON data-type and Arrays with Peewee ORM'</span><span class="p">,</span>
+  <span class="mi">88</span><span class="p">),</span>
+ <span class="p">(</span><span class="s2">"Describing Relationships: Django's ManyToMany Through"</span><span class="p">,</span>
+  <span class="mi">73</span><span class="p">),</span>
+ <span class="p">(</span><span class="s1">'Using python and k-means to find the dominant colors in images'</span><span class="p">,</span>
+  <span class="mi">66</span><span class="p">),</span>
+ <span class="p">(</span><span class="s1">'SQLite: Small. Fast. Reliable. Choose any three.'</span><span class="p">,</span> <span class="mi">58</span><span class="p">),</span>
+ <span class="p">(</span><span class="s1">'Using python to generate awesome linux desktop themes'</span><span class="p">,</span>
+  <span class="mi">54</span><span class="p">),</span>
+ <span class="p">(</span><span class="s2">"Don't sweat the small stuff - use flask blueprints"</span><span class="p">,</span> <span class="mi">51</span><span class="p">),</span>
+ <span class="p">(</span><span class="s1">'Using SQLite Full-Text Search with Python'</span><span class="p">,</span> <span class="mi">48</span><span class="p">),</span>
+ <span class="p">(</span><span class="s1">'Home'</span><span class="p">,</span> <span class="mi">47</span><span class="p">),</span>
+ <span class="p">(</span><span class="s1">'Blog Entries'</span><span class="p">,</span> <span class="mi">46</span><span class="p">),</span>
+ <span class="p">(</span><span class="s1">'Django Patterns: Model Inheritance'</span><span class="p">,</span> <span class="mi">44</span><span class="p">)]</span>
+</pre></div>
+<p>During what four hour period of the day do I receive the most traffic?</p>
+<div class="highlight"><pre><span class="n">hour</span> <span class="o">=</span> <span class="n">fn</span><span class="o">.</span><span class="n">date_part</span><span class="p">(</span><span class="s1">'hour'</span><span class="p">,</span> <span class="n">PageView</span><span class="o">.</span><span class="n">timestamp</span><span class="p">)</span> <span class="o">/</span> <span class="mi">4</span>
+<span class="n">id_count</span> <span class="o">=</span> <span class="n">fn</span><span class="o">.</span><span class="n">Count</span><span class="p">(</span><span class="n">PageView</span><span class="o">.</span><span class="n">id</span><span class="p">)</span>
+<span class="k">print</span> <span class="p">(</span><span class="n">base</span>
+       <span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">hour</span><span class="p">,</span> <span class="n">id_count</span><span class="p">)</span>
+       <span class="o">.</span><span class="n">group_by</span><span class="p">(</span><span class="n">hour</span><span class="p">)</span>
+       <span class="o">.</span><span class="n">order_by</span><span class="p">(</span><span class="n">id_count</span><span class="o">.</span><span class="n">desc</span><span class="p">())</span>
+       <span class="o">.</span><span class="n">tuples</span><span class="p">())[:]</span>
+<span class="p">[(</span><span class="mi">3</span><span class="p">,</span> <span class="mi">208</span><span class="p">),</span>
+ <span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">201</span><span class="p">),</span>
+ <span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">194</span><span class="p">),</span>
+ <span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">183</span><span class="p">),</span>
+ <span class="p">(</span><span class="mi">4</span><span class="p">,</span> <span class="mi">178</span><span class="p">),</span>
+ <span class="p">(</span><span class="mi">5</span><span class="p">,</span> <span class="mi">169</span><span class="p">)]</span>
+</pre></div>
+<p>Based on these numbers, it looks like I get most of my traffic mid-day around lunch-time, and the least amount of traffic in the late evening before midnight, but overall traffic is fairly even.</p>
+<p>What are some of the most popular user-agents?</p>
+<div class="highlight"><pre><span class="kn">from</span> <span class="nn">collections</span> <span class="kn">import</span> <span class="n">Counter</span>
+<span class="n">c</span> <span class="o">=</span> <span class="n">Counter</span><span class="p">(</span><span class="n">pv</span><span class="o">.</span><span class="n">headers</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'User-Agent'</span><span class="p">)</span> <span class="k">for</span> <span class="n">pv</span> <span class="ow">in</span> <span class="n">base</span><span class="p">)</span>
+<span class="k">print</span> <span class="n">c</span><span class="o">.</span><span class="n">most_common</span><span class="p">(</span><span class="mi">5</span><span class="p">)</span>
+<span class="p">[(</span><span class="s1">u'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/37.0.2062.120 Safari/537.36'</span><span class="p">,</span>
+  <span class="mi">81</span><span class="p">),</span>
+ <span class="p">(</span><span class="s1">u'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/37.0.2062.120 Safari/537.36'</span><span class="p">,</span>
+  <span class="mi">70</span><span class="p">),</span>
+ <span class="p">(</span><span class="s1">u'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:32.0) Gecko/20100101 Firefox/32.0'</span><span class="p">,</span>
+  <span class="mi">50</span><span class="p">),</span>
+ <span class="p">(</span><span class="s1">u'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_9_4) AppleWebKit/537.78.2 (KHTML, like Gecko) Version/7.0.6 Safari/537.78.2'</span><span class="p">,</span>
+  <span class="mi">37</span><span class="p">),</span>
+ <span class="p">(</span><span class="s1">u'Mozilla/5.0 (Windows NT 6.1; WOW64; rv:32.0) Gecko/20100101 Firefox/32.0'</span><span class="p">,</span>
+  <span class="mi">37</span><span class="p">)]</span>
+</pre></div>
+<p>It's basically up to you what you want to do with the data. One fun query will generate a list of all the pages, in order, that were visited by a particular IP address. This can shed some light on how people browse your site from page-to-page:</p>
+<div class="highlight"><pre><span class="n">inner</span> <span class="o">=</span> <span class="n">base</span><span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">PageView</span><span class="o">.</span><span class="n">ip</span><span class="p">,</span> <span class="n">PageView</span><span class="o">.</span><span class="n">url</span><span class="p">)</span><span class="o">.</span><span class="n">order_by</span><span class="p">(</span><span class="n">PageView</span><span class="o">.</span><span class="n">timestamp</span><span class="p">)</span>
+<span class="n">query</span> <span class="o">=</span> <span class="p">(</span><span class="n">PageView</span>
+         <span class="o">.</span><span class="n">select</span><span class="p">(</span><span class="n">PageView</span><span class="o">.</span><span class="n">ip</span><span class="p">,</span> <span class="n">fn</span><span class="o">.</span><span class="n">GROUP_CONCAT</span><span class="p">(</span><span class="n">PageView</span><span class="o">.</span><span class="n">url</span><span class="p">)</span><span class="o">.</span><span class="n">alias</span><span class="p">(</span><span class="s1">'urls'</span><span class="p">))</span>
+         <span class="o">.</span><span class="n">from_</span><span class="p">(</span><span class="n">inner</span><span class="o">.</span><span class="n">alias</span><span class="p">(</span><span class="s1">'t1'</span><span class="p">))</span>
+         <span class="o">.</span><span class="n">group_by</span><span class="p">(</span><span class="n">PageView</span><span class="o">.</span><span class="n">ip</span><span class="p">)</span>
+         <span class="o">.</span><span class="n">order_by</span><span class="p">(</span><span class="n">fn</span><span class="o">.</span><span class="n">Count</span><span class="p">(</span><span class="n">PageView</span><span class="o">.</span><span class="n">url</span><span class="p">)</span><span class="o">.</span><span class="n">desc</span><span class="p">())</span>
+<span class="k">print</span> <span class="p">{</span><span class="n">pv</span><span class="o">.</span><span class="n">ip</span><span class="p">:</span> <span class="n">pv</span><span class="o">.</span><span class="n">urls</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s1">','</span><span class="p">)</span> <span class="k">for</span> <span class="n">pv</span> <span class="ow">in</span> <span class="n">query</span><span class="p">[:</span><span class="mi">10</span><span class="p">]}</span>
+
+<span class="c1"># Prints something like the following:</span>
+<span class="p">{</span>
+  <span class="s1">u'xxx.xxx.xxx.xxx'</span><span class="p">:</span> <span class="p">[</span>
+    <span class="s1">u'/blog/peewee-was-baroque-so-i-rewrote-it/'</span><span class="p">,</span>
+    <span class="s1">u'/blog/peewee-was-baroque-so-i-rewrote-it/'</span><span class="p">,</span>
+    <span class="s1">u'/blog/'</span><span class="p">,</span>
+    <span class="s1">u'/blog/postgresql-hstore-json-data-type-and-arrays-with-peewee-orm/'</span><span class="p">,</span>
+    <span class="s1">u'/blog/search/'</span><span class="p">,</span>
+    <span class="s1">u'/blog/the-search-for-the-missing-link-what-lies-between-sql-and-django-s-orm-/'</span><span class="p">,</span>
+    <span class="s1">u'/blog/how-do-you-use-peewee-/'</span><span class="p">],</span>
+  <span class="s1">u'xxx.xxx.xxx.xxx'</span><span class="p">:</span> <span class="p">[</span>
+    <span class="s1">u'/blog/dont-sweat-small-stuff-use-flask-blueprints/'</span><span class="p">,</span>
+    <span class="s1">u'/'</span><span class="p">,</span>
+    <span class="s1">u'/blog/'</span><span class="p">,</span>
+    <span class="s1">u'/blog/migrating-to-sqlite/'</span><span class="p">,</span>
+    <span class="s1">u'/blog/'</span><span class="p">,</span>
+    <span class="s1">u'/blog/saturday-morning-hacks-revisiting-the-notes-app/'</span><span class="p">],</span>
+  <span class="s1">u'xxx.xxx.xxx.xxx'</span><span class="p">:</span> <span class="p">[</span>
+    <span class="s1">u'/blog/using-python-to-generate-awesome-linux-desktop-themes/'</span><span class="p">,</span>
+    <span class="s1">u'/'</span><span class="p">,</span>
+    <span class="s1">u'/blog/'</span><span class="p">,</span>
+    <span class="s1">u'/blog/customizing-google-chrome-s-new-tab-page/'</span><span class="p">,</span>
+    <span class="s1">u'/blog/-wallfix-using-python-to-set-my-wallpaper/'</span><span class="p">,</span>
+    <span class="s1">u'/blog/simple-botnet-written-python/'</span><span class="p">],</span>
+  <span class="c1"># etc...</span>
+<span class="p">}</span>
+</pre></div>
+<h2>Ideas for improving the app</h2>
+<ul>
+<li>Build a web interface or API for querying the pageview data-set.</li>
+<li>Normalize the request headers using either a join table or something like <a href="http://docs.peewee-orm.com/en/latest/peewee/playhouse.html#HStoreField">Postgresql HStore</a> (or JSONB if you're using 9.4).</li>
+<li>Collect user cookies and track users between visits.</li>
+<li>Use a GeoIP tool to identify users' locations based on their IP.</li>
+<li>Implement canvas fingerprinting to better identify unique visitors.</li>
+<li>Write more cool queries to extract data about your audience!</li>
+</ul>
+<h2>Thanks for reading</h2>
+<p>Thanks for taking the time to read this post, I hope you found it interesting! Feel free to <a href="#comments">leave a comment</a> below or <a href="/contact/">contact me</a> if you have any questions.</p>
+<p>You can find the source code for the analytics app and the "reports" hosted in this <a href="https://gist.github.com/coleifer/9899de010c647823a14f">GitHub gist</a>.</p>
+<h2>Links</h2>
+
+<p>If you enjoyed this post and are looking for more projects like this, check out <a href="/blog/tags/saturday-morning-hacks/">the list of saturday-morning hack posts</a>.</p>
+  
+  
+
+  
+  
+  
+
+  
+  
+  
+
+  
+  
+  
+
+  
+  
+  
+
+  
+  
+  
+
+
+<hr/>
+
+  <p>Commenting has been closed, but please feel free to <a href="/contact/">contact me</a></p>
+
+
+    </div>
+
+    </div></body></html>

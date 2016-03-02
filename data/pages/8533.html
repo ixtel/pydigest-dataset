@@ -1,0 +1,253 @@
+<html><body><div><article class="post tag-mongodb tag-tinkertank tag-python container">
+
+  <header class="hero cover">
+
+  <h1 class="post-title">The MongoDB Statbox - Graphs of stats in 5cm by 6cm</h1>
+
+  <nav class="post-share">
+
+    <a class="twitter" href="https://twitter.com/share?text=The%20MongoDB%20Statbox%20-%20Graphs%20of%20stats%20in%205cm%20by%206cm&amp;url=https://www.compose.io/articles/the-mongodb-statbox/&amp;via=composeio">
+      <span class="hidden">Share on Twitter</span>
+      <svg><use xlink:href="#twitter"/></svg>
+    </a>
+
+    <a href="https://www.facebook.com/sharer/sharer.php?u=https://www.compose.io/articles/the-mongodb-statbox/">
+      <span class="hidden">Share on Facebook</span>
+      <svg><use xlink:href="#facebook"/></svg>
+    </a>
+
+    <a href="https://plus.google.com/share?url=https://www.compose.io/articles/the-mongodb-statbox/">
+      <span class="hidden">Share on Google+</span>
+      <svg><use xlink:href="#google-plus"/></svg>
+    </a>
+
+    <a href="http://news.ycombinator.com/submitlink?u=https://www.compose.io/articles/the-mongodb-statbox/&amp;t=The MongoDB Statbox - Graphs of stats in 5cm by 6cm">
+      <span class="hidden">Vote on Hacker News</span>
+      <svg><use xlink:href="#y-combinator"/></svg>
+    </a>
+  </nav>
+
+  <span class="post-date">Published <time datetime="2015-12-10">Dec 10, 2015</time></span>
+
+</header>
+  <p><em>Using just a Pi Zero, a Unicorn Hat, a slice of Python and a plug-in of Wifi, find out how you can turn you database stats into shining beacons of information in the return of the TinkerTank.</em></p>
+
+<p>Back in the days when Compose was called something else, we also had the TinkerTank where we brought the world of making and the world of databases together to make some cool gadgetry. The last project, <a href="https://www.compose.io/articles/tinkertank-mongodb-in-lights/">MongoDB in Lights</a> lit up RGB LEDs on an Arduino shield. But there was an issue with that project... it needed a PC or Mac to hand to act as a proxy, gathering and preparing statistics. Those statistics were gathered over a serial connection and displayed in lights. A year and a half on and we thought we must be able to do better than that. So let's start with the hardware of the <em>MongoDB Statbox</em>....</p>
+
+
+
+<p>The video is sped up so you don't have to wait so long to see the lights changing. If you can't play the video, it looks like this:</p>
+
+<p><img src="https://res.cloudinary.com/dyyck73ly/image/upload/v1449595029/ycusffoyzrtqakhfulwa.jpg" alt=""/></p>
+
+<p>Well, you can't really see the brains like that so let's pull the top off...</p>
+
+<p><img src="https://res.cloudinary.com/dyyck73ly/image/upload/v1449595062/lks3unommbxmaerdkpsi.jpg" alt=""/></p>
+
+<p>If you can already tell what's needed there skip to the Software section further on. Otherwise read on:</p>
+
+<h2 id="hardwareandossetup">Hardware and OS setup</h2>
+
+<p>We decided to build this using the $5 Raspberry Pi Zero, partly because it's so cheap and small and partly because if anyone else wants to build their own, they can use any other recent Raspberry Pi model (A+, B+, Pi 2) as well. The RGB LEDs use the <a href="https://shop.pimoroni.com/products/unicorn-hat">Pimoroni Unicorn Hat</a> available in the US through <a href="https://www.adafruit.com/products/2288">AdaFruit</a> which has a Python library to support it. The Pi Zero keeps its cost down by not having any header pins on the board, so until someone starts shipping ready-headered Pi Zeros, you'll need to solder in a 40x2 pin header onto the board. The other bits needed are a USB to OTG cable, a WiFi dongle, a microSD card of 8GB or more and a power supply (a good one with 2amps out - those LEDs eat power). </p>
+
+<p>We aren't going to run through the process of setting up the Pi Zero. You'll need to get the latest copy of Raspian Linux, Jessie, from the <a href="https://www.raspberrypi.org/downloads/raspbian/">Raspberry Pi site</a>. For setting up, you'll also want a keyboard and display initially - you'll need to plug them in and follow their <a href="https://www.raspberrypi.org/documentation/installation/installing-images/README.md">guide</a> to get it onto the SD card ready to boot. To attach the keyboard and display to the Pi Zero you'll need a USB-OTG hub as it lacks the USB ports of it's bigger siblings. Now, with microSD card installed, you can boot up the device, log in and use <code>raspi-config</code> to expand the filesystem, set a hostname, turn on SSH access and turn off booting into the X desktop. You'll also want to attach it to your WiFi network. There's various guides but the TL;DR version for a typical network is, as root, edit <code>/etc/wpa_supplicant/wpa_supplicant.conf</code> and append:</p>
+
+<pre><code> network={
+        ssid="YourWiFiSSID"
+        psk="YourPassword"
+        key_mgmt=WPA-PSK
+}
+</code></pre>
+
+<p>With the obvious substitutions made, of course. If the WiFi dongle is plugged in too, reboot to test it. </p>
+
+<p>Once the Wifi is working, disassemble everything. Plug the Unicorn Hat into the Pi Zero, plug the WiFi adapter into the USB-OTG cable and plug that into the USB port. Now plug the power into the Pi Zero and after a minute or so you should be able to, on a machine on the same WiFi network, run <code>ssh pi@yourhostname.local</code> and get connected. If you are running Windows, you won't be able to use mDNS, the technology behind <code>.local</code> addresses, by default. The simplest way to activate it is to install iTunes for Windows – just install it, you don't have to use it – and that will add mDNS support for you.</p>
+
+<p>We now have a rather lovely little device. A full Linux system which you can remotely log into over WiFi with SSH. You may already be brimming with ideas on how to use that little configuration, but for us... we've got a database to query and lights to illuminate so let's move on to...</p>
+
+<h2 id="softwaresetup">Software setup</h2>
+
+<p>We're now going to create a database connection, read a statistic from it and turn it into a rolling graph. And we'll be doing this in Python, mainly because that's what the API for the Unicorn hat supports. Talking about Unicorn Hat support, you'll find the full instructions for installing that on its <a href="https://github.com/pimoroni/unicorn-hat">Github page</a> - the short version of which is run:</p>
+
+<pre><code class="language-shell">curl -sS get.pimoroni.com/unicornhat | bash  
+</code></pre>
+
+<p>Which will set up the libraries and the demos. After you've finished playing with the demos (Unicorn paint is quite fun), we can get back to our task, the next step of which is to connect to MongoDB.  For this we'll need Pymongo so either <code>pip install pymongo</code> (for Python 2.7) or <code>pip3 install pymongo</code> (for Python 3.x). We can start building out code now. There's a finished version of this code, statbox.py, up in the <a href="https://github.com/compose-ex/statbox">Compose examples repository</a> but we'll step through and explain it here as we build it up. The first step is to import us some libraries:</p>
+
+<pre><code class="language-python">import pymongo  
+import unicornhat as unicorn  
+import sys,ssl,time  
+</code></pre>
+
+<p>Now we want to connect to MongoDB...</p>
+
+<h3 id="mongodbconnections">MongoDB connections</h3>
+
+<p>The statistic we've chosen to track is the number of current connections. We could have gone for something simpler taken from a collection query or aggregation and nothing stops you from doing just that when you decide to implement this. Our choice makes life a little more interesting here as we need to have an admin privileged account to see the server statistics. For this reason we're going to connect to one of Compose's MongoDB+ deployments. The older elastic deployments of MongoDB at Compose don't have the ability to give MongoDB users admin privileges. But we do have to make an SSL connection to the MongoDB+ system and remember to create an admin user with admin privileges. Then we can write some code like this:</p>
+
+<pre><code class="language-python">connecturl = "mongodb://user:password@host1.example.com:port,host2.example.com:port2/admin?ssl=true"  
+client = pymongo.MongoClient(connecturl,ssl_ca_certs="./cacert.pem",ssl_cert_reqs=ssl.CERT_OPTIONAL)  
+</code></pre>
+
+<p>The <code>connecturl</code> string comes from the Compose console's overview, under <em>Connection Strings</em> for the admin database of the deployment we're using. You can tell that because it ends "/admin?ssl=true". We use that URL to connect in the next line, but there's a couple of extra parameters we need to specify. We need the public TLS certificate for the server saved to a file named <code>cacert.pem</code> first. Compose users will find that on the overview page for their MongoDB+ deployment too. Once we have that file we can tell the PyMongo library to use that with <code>ssl_ca_certs="./cacert.pem"</code> and to ensure it just verifies the self-signed certificate, we add <code>ssl_cert_reqs=ssl.CERT_OPTIONAL</code> (which is the only reason we imported the ssl library). We're light on error checking here as this is just an example, so let's assume that all works.</p>
+
+<p>We'll set up some colors:</p>
+
+<pre><code class="language-python"> red=[255,0,0]
+ green=[0,255,0]
+ blue=[0,0,255]
+ black=[0,0,0]
+ white=[255,255,255]
+</code></pre>
+
+<p>And then initialize two arrays for the values and colours of our data. We'll also set our current maximum value for that data:</p>
+
+<pre><code class="language-python">maxval=8  
+values=[ 0, 0, 0, 0, 0, 0, 0, 0 ]  
+colors=[ black, black, black, black, black, black, black, black]  
+</code></pre>
+
+<p>Time to initialize those LEDs and the first thing to do here is set the brightness to something minimal. These can be some very bright LEDs and unless you want people who see what you have made staggering away emoting "The goggles, they do nothing!", you need to set the brightness low. Also, you may install this device in a box at some point and discover things are not as correctly oriented as you'd hoped. Uncomment the <code>rotation</code> line and rotate things in software rather than disassembling them:</p>
+
+<pre><code class="language-python">unicorn.brightness(0.10)  
+#unicorn.rotation(90)
+</code></pre>
+
+<p>Now we can dive into a loop to start updating the display:</p>
+
+<pre><code class="language-python">while True:  
+  conncounts = client["admin"].command({"serverStatus":1})["connections"]
+  newval=conncounts["current"]
+</code></pre>
+
+<p>We use a <a href="https://docs.mongodb.org/manual/reference/command/serverStatus/"><code>serverStatus</code></a> command on the server. It's packed full of server information, but what we're after is the connections section. That has the current, maximum and lifetime counts for connections. We just extract the current value as <code>newval</code>. The next question for us is what colour is that column going to be. If we retrieve the last value and compare newval with it we could say if it's unchanged from the last value, make it blue, if it's higher, make  it red for rising, if it's lower, make it green for um... going down. Yes, we could:</p>
+
+<pre><code class="language-python">  oldval=values[7]
+  if oldval==newval:
+    newcol=blue
+  elif oldval&lt;newval:
+    newcol=red
+  elif oldval&gt;newval:
+    newcol=green
+</code></pre>
+
+<p>Then, we can see if we still have enough space for the newest value by comparing it with the maximum value. That maximum starts off at 8, representing the 8 single pixels. If the new value is greater than the maximum value, the latter is doubled until that's not the case. If that wasn't needed then in case things have been over-scaled, the whole set of current values are checked to see if they are all below half the maximum value. If they are, it takes the maximum value down. This little process ensures that as much of the display is showing information as possible. As the color coding makes rises and falls visible it will show trends even when the 8x8 LED resolution isn't up to it:</p>
+
+<pre><code class="language-python">  if newval&gt;maxval:
+    while newval&gt;maxval:
+      maxval=maxval*2
+      newcol=white
+  elif maxval&gt;8:
+    midval=maxval/2
+    scaledown=True
+    for i in range(0,8):
+      if values[i]&gt;midval:
+        scaledown=False
+    if scaledown:
+      maxval=midval
+      newcol=white
+</code></pre>
+
+<p>With the new values worked out, we can push them into our list of displayable values and discard the oldest values:</p>
+
+<pre><code class="language-python">  values.pop(0)
+  colors.pop(0)
+  values.append(newval)
+  colors.append(newcol)
+
+#  print(values)
+</code></pre>
+
+<p>For demonstration and validation purposes, we can print the values here. Uncomment as needed.</p>
+
+<p>Now comes the main show, lighting the pixels. First we calculate a fudge factor for our bars – this is the maximum value divided by 8. Then we scan through the columns, taking the value, dividing it by the fudge and then drawing that many pixels in the column's colour and filling in the rest with black:</p>
+
+<pre><code class="language-python">  fudge=maxval/8
+
+  for x in range(0,8):
+    val=values[x]
+    col=colors[x]
+    adjval=int(val/fudge)
+    for y in range(0,adjval):
+      unicorn.set_pixel(x,y,col[0],col[1],col[2])
+    if adjval&lt;8:
+      for y in range(adjval,8):
+        unicorn.set_pixel(x,y,0,0,0)
+</code></pre>
+
+<p>And with everything set up and drawn, there's only one last thing to do before going to sleep for five seconds.... show the world your work:</p>
+
+<pre><code class="language-python">  unicorn.show()
+  time.sleep(5)
+</code></pre>
+
+<p>And everything keeps happily looping, the graph keeps moving, marking where it rescaled in white, showing trending up and down even with high numbers.</p>
+
+<h2 id="upandrunning">Up and running</h2>
+
+<p>To run our statbox.py we need to give it root privileges. Because of reasons. Well, most I/O is locked down on the Pi is why. It can be unlocked but for most purposes it is easy enough to just run <code>sudo python3 statbox.py</code> and see how things light up.</p>
+
+<p>The final stage would be to make the program run as soon as you powered up the Pi. There's a couple of things you need to do for this to work. First run <code>raspi-config</code> and select "4 Wait for Network at Boot", then select the "Slow" option. The side effect of this is that the <code>/etc/rc.local</code> file will run after, instead of alongside, the boot process. We can now edit the <code>/etc/rc.local</code> file and before the <code>exit 0</code> at the end insert:</p>
+
+<pre><code>python3 /home/pi/statbox/statbox.py &amp;  
+</code></pre>
+
+<p>The <code>rc.local</code> file is run as root so we don't need to sudo, but we do want to make one change as it won't be running in our application's directory. This means we need to use an absolute path to our security certificate. Change the line where we connect to MongoDB to:</p>
+
+<pre><code class="language-python">client = pymongo.MongoClient(connecturl,ssl_ca_certs="/home/pi/statbox/cacert.pem",ssl_cert_reqs=ssl.CERT_OPTIONAL)  
+</code></pre>
+
+<p>Reboot and you should have everything running automatically.</p>
+
+<h2 id="whatnext">What Next?</h2>
+
+<p>There's lots of possibilities for this device. There's more than enough power to run a web server so you could make it on-the-fly configurable. Or you could make it look more finished with a custom built box. For us, this is a proof-of-concept that you can make powerful desktop devices that are able to acquire database data on their own. The next step? Keep following here for the next Compose TinkerTank – we might surprise you.</p>
+
+  <footer class="post-footer">
+
+  <nav class="post-share">
+
+    <a class="twitter" href="https://twitter.com/share?text=The%20MongoDB%20Statbox%20-%20Graphs%20of%20stats%20in%205cm%20by%206cm&amp;url=https://www.compose.io/articles/the-mongodb-statbox/&amp;via=composeio">
+      <span class="hidden">Share on Twitter</span>
+      <svg><use xlink:href="#twitter"/></svg>
+    </a>
+
+    <a href="https://www.facebook.com/sharer/sharer.php?u=https://www.compose.io/articles/the-mongodb-statbox/">
+      <span class="hidden">Share on Facebook</span>
+      <svg><use xlink:href="#facebook"/></svg>
+    </a>
+
+    <a href="https://plus.google.com/share?url=https://www.compose.io/articles/the-mongodb-statbox/">
+      <span class="hidden">Share on Google+</span>
+      <svg><use xlink:href="#google-plus"/></svg>
+    </a>
+
+    <a href="http://news.ycombinator.com/submitlink?u=https://www.compose.io/articles/the-mongodb-statbox/&amp;t=The MongoDB Statbox - Graphs of stats in 5cm by 6cm">
+      <span class="hidden">Vote on Hacker News</span>
+      <svg><use xlink:href="#y-combinator"/></svg>
+    </a>
+
+    <a class="subscribe-btn" href="https://www.compose.io/articles/rss/">
+      <svg><use xlink:href="#subscribe"/></svg> Subscribe
+    </a>
+  </nav>
+
+
+      <figure class="author-bio">
+
+        <img class="avatar" src="//www.gravatar.com/avatar/3c427b45eb4d51770a5ec7f9e4d62c9f?s=250&amp;d=mm&amp;r=x" alt="Dj Walker-Morgan"/>
+
+        <figcaption>
+          <strong>Dj Walker-Morgan</strong> is Compose's resident Content Curator, and has been both a developer and writer since Apples came in II flavors and Commodores had Pets. Love this article? Head over to <a href="/articles/author/dj/">Dj Walker-Morgan’s author page</a> and keep reading.
+        </figcaption>
+
+      </figure>
+
+
+</footer>
+
+</article>
+
+
+
+  </div></body></html>

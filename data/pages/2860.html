@@ -1,0 +1,257 @@
+<html><body><div><div class="blog-content col-sm-12">
+            <p/><p>This blog has run on many languages, starting by the one I know the most: <a href="http://www.php.net" target="_blank">PHP</a> (with <a href="http://www.symfony.com" target="_blank">Symfony</a> framework), trying to learn new things by migrating to <a href="http://www.python.org" target="_blank">Python</a> (with <a href="http://www.djangoproject.com" target="_blank">Django</a> framework) and is now running under <a href="http://www.golang.org" target="_blank">Go</a>.</p>
+
+<h5>The (very-micro-)framework I've wrote to learn</h5>
+
+<p>So this blog is now running under <a href="http://www.golang.org" target="_blank">Golang</a> and particularly under <a href="http://www.github.com/eko/gofast" target="_blank">Gofast</a>, a micro-framework I've wrote in order to learn the language. Its code is open-sourced on my Github account so you can take a look if you are interested in. This is really simple code that allows to run a simple web application (as this website).</p>
+<p>Golang comes with some really powerful packages that helps me a lot in this migration.</p>
+
+<p>Here is a simple "Hello world" rendered using Gofast:</p>
+
+<pre code="go">
+<code>
+package main
+
+import (
+    "github.com/eko/gofast"
+)
+
+func main() {
+    g := gofast.Bootstrap()
+    router := g.GetRouter()
+
+    router.Get("homepage", "/", func (c gofast.Context) {
+        response := c.GetResponse()
+        response.Write([]byte("Hello world"))
+    })
+
+    g.Handle()
+}
+</code>
+</pre>
+
+<p>You can see that here, we bootstrap the micro-framework and retrieve the <span class="red">context</span> structure.</p>
+<p>From this structure, you can retrieve the router (as done in the example below), the request, the response and the templating.</p>
+
+<h5>Rendering templates with Pongo2 library</h5>
+
+<p>Gofast micro-framework templating is using <a href="" target="_blank">Pongo2</a> library as it allows to use quite-same templates as Django ones.
+Almost all functions are working (excepts date ones as it is really different in Go) so I do not have to rewrite all my templates for the migration.</p>
+
+<p>Imagine you have a <span class="red">homepage.html</span> template, this library allows you to render a Jinja template (Django templating syntax) by simply using the following code:</p>
+
+<pre class="go">
+<code>
+var template = pongo2.Must(pongo2.FromFile("homepage.html"))
+
+template.ExecuteWriter(pongo2.Context{
+    "request": context.GetRequest(),
+    "response": context.GetResponse(),
+}, context.GetResponse())
+</code>
+</pre>
+
+<p>Additionnally, you also pass your request, response and router objects to your view so you can retrieve a request parameter for instance by simply calling:</p>
+
+<pre class="jinja">
+<code>
+{{ request.GetParameter("name") }}
+</code>
+</pre>
+
+<h5>Map your database tables to a Golang struct using Goorp library</h5>
+
+<p>We now have to request our database (I use MySQL as it is an historic database) to obtain our articles, tags and other data we need to display on our website.</p>
+
+<p>I choose to use <a href="https://github.com/coopernurse/gorp" target="_blank">Goorp</a> library to map my database tables with a Go struct.</p>
+
+<p>Start by creating your struct (here, it is my article table):</p>
+
+<pre class="go">
+<code>
+type Article struct {
+    Id      int       `db:"id"`
+    Title   string    `db:"title"`
+    Content string    `db:"content"`
+    Url     string    `db:"url"`
+    Date    string    `db:"date"`
+}
+</code>
+</pre>
+
+<p>Then, you have to map your struct to a specific table. This can be done this way:</p>
+
+<pre class="go">
+<code>
+import (
+    "github.com/coopernurse/gorp"
+    _ "github.com/go-sql-driver/mysql"
+    "database/sql"
+)
+
+db, err := sql.Open("mysql", "user:password@tcp(host:port)/dbname")
+if err != nil { log.Fatalln("Fail to connect to database", err) }
+
+dbmap := &amp;gorp.DbMap{Db: db, Dialect: gorp.MySQLDialect{"InnoDB", "UTF8"}}
+dbmap.AddTableWithName(Article{}, "article").SetKeys(true, "id")
+</code>
+</pre>
+
+<p>Now that our database is mapped to our struct, we can start querying on it and retrieve an array of Article struct:</p>
+
+<pre class="go">
+<code>
+var articles []Article
+_, err := dbmap.Select(&amp;articles, "SELECT * FROM article")
+if err != nil { panic(err) }
+</code>
+</pre>
+
+<h5>Display my Github activity using Github JSON API</h5>
+
+<p>To do that, we also have to display some structs corresponding to the Github API structure and map the API results with our defined structs:</p>
+
+<pre class="go">
+<code>
+type GithubRepo struct {
+    Id   int    `json:"id"`
+    Name string `json:"name"`
+    Url  string `json:"url"`
+}
+
+type GithubActor struct {
+    Id         int    `json:"id"`
+    Login      string `json:"login"`
+    GravatarId string `json:"gravatar_id"`
+    Url        string `json:"url"`
+    AvatarUrl  string `json:"avatar_url"`
+}
+
+type GithubAuthor struct {
+    Email string `json:"email"`
+    Name  string `json:"name"`
+}
+
+type GithubCommit struct {
+    Sha      string       `json:"sha"`
+    Author   GithubAuthor `json:"author"`
+    Message  string       `json:"message"`
+    Distinct bool         `json:"distinct"`
+    Url      string       `json:"url"`
+}
+
+type GithubIssue struct {
+    Number int `json:"number"`
+}
+
+type GithubPayload struct {
+    Ref          string         `json:"ref"`
+    Head         string         `json:"head"`
+    Commits      []GithubCommit `json:"commits"`
+    Issue        GithubIssue    `json:"issue"`
+}
+
+type GithubEvent struct {
+    Id        string        `json:"id"`
+    Type      string        `json:"type"`
+    Actor     GithubActor   `json:"actor"`
+    Repo      GithubRepo    `json:"repo"`
+    Payload   GithubPayload `json:"payload"`
+}
+</code>
+</pre>
+
+<p>Once the structs are ready, we can perform our API call and map the results to these structs:</p>
+
+<pre class="go">
+<code>
+import (
+    "net/http"
+    "encoding/json"
+)
+
+res, err := http.Get("https://api.github.com/users/eko/events")
+if err != nil { panic(err) }
+
+body, err := ioutil.ReadAll(res.Body)
+
+events := make([]GithubEvent,0)
+err = json.Unmarshal(body, &amp;events)
+if err != nil { panic(err) }
+</code>
+</pre>
+
+<p>Quite simple, no? The <span class="red">json.Unmarshal()</span> method will map our results so easily.</p>
+
+<p>And yes, it's another thing for my migration solved, easily, thanks to Golang native packages.</p>
+
+<h5>Generate blog posts RSS and Atom feeds using feeds library</h5>
+
+<p>Last thing I had to do to make my personal website run fully as it was before was to create a RSS and Atom feed for my blog posts. To do that, I've used the <a href="https://github.com/gorilla/feeds" target="_blank">feeds library</a>.</p>
+
+<p>I simply have to retrieve my blog posts and form a feed item, like that:</p>
+
+<pre class="go">
+<code>
+import (
+    "github.com/gorilla/feeds"
+)
+
+// Retrieve the blog posts
+var articles []Article
+_, err := dbmap.Select(&amp;articles, "select * from article order by id desc limit 10")
+if err != nil { }
+
+// Creates the feed
+now  := time.Now()
+feed := &amp;feeds.Feed{
+    Title:       "Vincent Composieux - Blog",
+    Link:        &amp;feeds.Link{Href: "http://vincent.composieux.fr/blog"},
+    Description: "A web engineer blog posts",
+    Author:      &amp;feeds.Author{"Vincent Composieux", "vincent.composieux@gmail.com"},
+    Created:     now,
+}
+
+var items = []*feeds.Item{}
+
+for _, article := range articles {
+    datetime, _ := time.Parse("2006-01-02 15:04:05", article.Date)
+
+    items = append(items, &amp;feeds.Item{
+        Title:       article.Title,
+        Link:        &amp;feeds.Link{Href: fmt.Sprintf("http://vincent.composieux.fr/article/%s", article.Url)},
+        Description: article.Content,
+        Author:      &amp;feeds.Author{"Vincent Composieux", "vincent.composieux@gmail.com"},
+        Created:    datetime
+    })
+}
+
+feed.Items = items
+</code>
+</pre>
+
+<p>Now that we have our feed loaded with our articles feed items, we can simply ask it to generate a <span class="red">.ToRss()</span> or a <span class="red">.ToAtom()</span> XML string and write it to the net/http response:</p>
+
+<pre class="go">
+<code>
+rss, err := feed.ToRss()
+if err != nil { panic(err) }
+
+response := c.GetResponse()
+response.Header().Set("Content-Type", "text/xml")
+response.Write([]byte(rss))
+</code>
+</pre>
+
+<p>Well, all of our frontend features are migrated into Go language, and moreover, it has allowed me to learn a lot about this language.</p>
+
+<h5>Some other Golang frameworks ressources you can try</h5>
+
+<p>
+</p>
+
+
+<p>Hope it has be helpful for you. Do not hesitate to contact me if you have some additional questions or comment directly on this blog post.</p>
+        </div>
+
+        </div></body></html>

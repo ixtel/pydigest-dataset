@@ -1,0 +1,45 @@
+<html><body><div><div class="section">
+              <h1>placebo 0.8.0</h1>
+
+              
+
+
+<p>Make boto3 calls that look real but have no effect</p><p>
+
+
+
+
+
+
+
+
+placebo</p><p>=======</p><p>[![Build Status](https://travis-ci.org/garnaat/placebo.svg)](https://travis-ci.org/garnaat/placebo)</p><p>[![Code Health](https://landscape.io/github/garnaat/placebo/master/landscape.svg?style=flat)](https://landscape.io/github/garnaat/placebo/master)</p><p>Placebo allows you to mock boto3 calls that look just like normal calls but</p><p>actually have no effect at all.  It does this by allowing you to record a set</p><p>of calls and save them to a data file and then replay those calls later</p><p>(e.g. in a unit test) without ever hitting the AWS endpoints.</p><p>Installation</p><p>------------</p><p>```</p><p>$ pip install placebo</p><p>```</p><p>Quickstart</p><p>----------</p><p>Placebo uses the event mechanism in botocore to do most of its work.  To start</p><p>with, you need a boto3 Session object.</p><p>```</p><p>import boto3</p><p>import placebo</p><p>session = boto3.Session()</p><p>```</p><p>Once you have a Session object, you can tell placebo about the Session like</p><p>this:</p><p>```</p><p>pill = placebo.attach(session, data_path='/path/to/response/directory')</p><p>```</p><p>The ``data_path`` is a path to a directory where you want responses to be stored</p><p>or that contains previously recorded responses you want to playback.</p><p>The ``attach`` function returns an instance of a ``Pill`` object.  This object</p><p>will be used to control all recording and playback of requests for all clients</p><p>created by this session object.</p><p>The first thing you will probably want to do is record some requests.  To do</p><p>this, simply:</p><p>```</p><p>pill.record()</p><p>```</p><p>By default, the ``record`` method will cause all responses from all services to</p><p>be recorded to the ``data_path``.  If you are only interested in responses from</p><p>one certain services, you can limit the recording by passing in a list of</p><p>service names.</p><p>```</p><p>pill.record(services='ec2,iam')</p><p>```</p><p>This would limit to recording to responses from the ``ec2`` service and the</p><p>``iam`` service.  If you want to restrict recording to only certain operations</p><p>in a single service, you can do this:</p><p>```</p><p>pill.record(services='ec2', operations='DescribeInstances,DescribeKeyPairs')</p><p>```</p><p>From this point on, any clients that match the recording specification and are</p><p>created from the session will be placebo-aware.  To record responses, just</p><p>create the client and use it as you normally would.</p><p>```</p><p>lambda = session.client('lambda')</p><p>lambda.list_functions()</p><p>... more lambda calls ...</p><p>```</p><p>Each response will be saved as an individual JSON data file in the ``data_path``</p><p>path you specified when you attached the session.  Multiple responses from the</p><p>same service and operation are stored as separate files and will be replayed in</p><p>the same order on playback.</p><p>Later, to replay saved requests:</p><p>```</p><p>import boto3</p><p>import placebo</p><p>session = boto3.Session()</p><p>pill = placebo.attach(session, data_path='/path/to/response/directory')</p><p>pill.playback()</p><p>lambda = session.client('lambda')</p><p>lambda.list_functions()</p><p>... mocked response will be returned</p><p>```</p><p>#### Manual Mocking</p><p>You can also add mocked responses manually:</p><p>```</p><p>list_functions_response = [</p><p>    {</p><p>        "Version": "$LATEST",</p><p>        "CodeSha256": "I8Scq2g6ZKcPIvhKzvZqCiV4pDysxq4gZ+jLcMmDy5Y=",</p><p>        "FunctionName": "foobar",</p><p>        "MemorySize": 128,</p><p>        "CodeSize": 876521,</p><p>        "FunctionArn": "arn:aws:lambda:us-west-2:123456789012:function:foobar",</p><p>        "Handler": "foobar.handler",</p><p>        "Role": "arn:aws:iam::123456789012:role/foobar-role",</p><p>        "Timeout": 30,</p><p>        "LastModified": "2015-11-06T22:30:32.164+0000",</p><p>        "Runtime": "python2.7",</p><p>        "Description": "Foos all of the bars"</p><p>    }]</p><p>pill.save_response(service='lambda', operation='ListFunctions',</p><p>                   response_data=list_functions_response, http_response=200)</p><p>```</p><p>You can add additional responses to a particular operation and the responses</p><p>will be returned in order.  The final parameter is the HTTP response code which</p><p>is optional.  The default value is 200.</p><p>#### Usage as a decorator</p><p>Placebo also provides a decorator for easier usage.</p><p>First, you'll want to decorate your test method with `placebo_session` and include the `session` kwarg in your method, ex:</p><p>```python</p><p>@placebo_session</p><p>def test_your_function(self, session):</p><p>    foo = Foo()</p><p>    arn = foo.create_iam_roles(session)</p><p>    self.assertEqual(arn, "arn:aws:iam::123:role/{}".format(foo.role_name))</p><p>```</p><p>Now, you'll be able to record the AWS interactions with an environment variable:</p><p>```bash</p><p>$ PLACEBO_MODE=record nosetests tests.tests:TestFoo.test_create_iam_roles</p><p>```</p><p>You can optionally pass an AWS profile to use:</p><p>```bash</p><p>$ PLACEBO_PROFILE=foo PLACEBO_MODE=record nosetests tests.tests:TestFoo.test_create_iam_roles</p><p>```</p><p>In this example, it has created the following JSON blobs:</p><p>```bash</p><p>tests/placebo/TestFoo.test_create_iam_roles</p><p>tests/placebo/TestFoo.test_create_iam_roles/iam.CreateRole_1.json</p><p>tests/placebo/TestFoo.test_create_iam_roles/iam.GetRole_1.json</p><p>tests/placebo/TestFoo.test_create_iam_roles/iam.GetRolePolicy_1.json</p><p>tests/placebo/TestFoo.test_create_iam_roles/iam.PutRolePolicy_1.json</p><p>```</p><p>After the JSON has been created, simply drop the environment variables and re-run your test:</p><p>```bash</p><p>$ nosetests tests.tests:TestFoo.test_create_iam_roles</p><p>```
+
+</p><a name="downloads"> </a>
+
+
+<ul class="nodot">
+  <li><strong>Downloads (All Versions):</strong></li>
+  <li>
+    <span>0</span> downloads in the last day
+  </li>
+  <li>
+    <span>231</span> downloads in the last week
+  </li>
+  <li>
+    <span>1596</span> downloads in the last month
+  </li>
+</ul>
+
+
+
+
+
+
+
+
+
+            </div>
+
+
+          </div></body></html>

@@ -1,0 +1,73 @@
+<html><body><div><div class="body" role="main">
+            
+  <div class="section" id="tutorial-1-tailing-a-real-time-log-file">
+<span id="tutorial1"/><h1>Tutorial 1: Tailing a real-time log file</h1>
+<p>sh has the ability to respond to subprocesses in an event-driven fashion.
+A typical example of where this would be useful is tailing a log file for
+a specific pattern, then responding to that value immediately:</p>
+<div class="highlight-python"><div class="highlight"><pre><span class="kn">from</span> <span class="nn">sh</span> <span class="kn">import</span> <span class="n">tail</span>
+
+<span class="k">for</span> <span class="n">line</span> <span class="ow">in</span> <span class="n">tail</span><span class="p">(</span><span class="s">"-f"</span><span class="p">,</span> <span class="s">"info.log"</span><span class="p">,</span> <span class="n">_iter</span><span class="o">=</span><span class="bp">True</span><span class="p">):</span>
+    <span class="k">if</span> <span class="s">"ERROR"</span> <span class="ow">in</span> <span class="n">line</span><span class="p">:</span>
+        <span class="n">send_an_email_to_support</span><span class="p">(</span><span class="n">line</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>The <code class="docutils literal"><span class="pre">_iter</span></code>  <a class="reference internal" href="../special_arguments.html#special-arguments"><span>special keyword argument</span></a> takes a
+command that would normally block until completion, and turns its output
+into a real-time iterable.  See <a class="reference internal" href="../index.html#iterable"><span>Iterating over output</span></a>.</p>
+<p>Of course, you can do more than just tail log files.  Any program that
+produces output can be iterated over.  Say you wanted to send an email to a
+coworker if their C code emits a warning:</p>
+<div class="highlight-python"><div class="highlight"><pre><span class="kn">from</span> <span class="nn">sh</span> <span class="kn">import</span> <span class="n">gcc</span><span class="p">,</span> <span class="n">git</span>
+
+<span class="k">for</span> <span class="n">line</span> <span class="ow">in</span> <span class="n">gcc</span><span class="p">(</span><span class="s">"-o"</span><span class="p">,</span> <span class="s">"awesome_binary"</span><span class="p">,</span> <span class="s">"awesome_source.c"</span><span class="p">,</span> <span class="n">_iter</span><span class="o">=</span><span class="bp">True</span><span class="p">):</span>
+    <span class="k">if</span> <span class="s">"warning"</span> <span class="ow">in</span> <span class="n">line</span><span class="p">:</span>
+        <span class="c"># parse out the relevant info</span>
+        <span class="n">filename</span><span class="p">,</span> <span class="n">line</span><span class="p">,</span> <span class="n">char</span><span class="p">,</span> <span class="n">message</span> <span class="o">=</span> <span class="n">line</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s">":"</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span>
+
+        <span class="c"># find the commit using git</span>
+        <span class="n">commit</span> <span class="o">=</span> <span class="n">git</span><span class="p">(</span><span class="s">"blame"</span><span class="p">,</span> <span class="s">"-e"</span><span class="p">,</span> <span class="n">filename</span><span class="p">,</span> <span class="n">L</span><span class="o">=</span><span class="s">"</span><span class="si">%d</span><span class="s">,</span><span class="si">%d</span><span class="s">"</span> <span class="o">%</span> <span class="p">(</span><span class="n">line</span><span class="p">,</span><span class="n">line</span><span class="p">))</span>
+
+        <span class="c"># send them an email</span>
+        <span class="n">email_address</span> <span class="o">=</span> <span class="n">parse_email_from_commit_line</span><span class="p">(</span><span class="n">commit</span><span class="p">)</span>
+        <span class="n">send_email</span><span class="p">(</span><span class="n">email_address</span><span class="p">,</span> <span class="n">message</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>Using <code class="docutils literal"><span class="pre">_iter</span></code> is a great way to respond to events from another program, but
+your script can’t do anything else while you’re looping; the process must
+end for the loop to finish, unless you explicitly <code class="docutils literal"><span class="pre">break</span></code> on some
+condition.  You could try to put this loop in another thread, but sh provides
+an easier method via callbacks:</p>
+<div class="highlight-python"><div class="highlight"><pre><span class="kn">from</span> <span class="nn">sh</span> <span class="kn">import</span> <span class="n">tail</span>
+
+<span class="k">def</span> <span class="nf">process_log_line</span><span class="p">(</span><span class="n">line</span><span class="p">):</span>
+    <span class="k">if</span> <span class="s">"ERROR"</span> <span class="ow">in</span> <span class="n">line</span><span class="p">:</span>
+        <span class="n">send_an_email_to_support</span><span class="p">(</span><span class="n">line</span><span class="p">)</span>
+
+<span class="n">process</span> <span class="o">=</span> <span class="n">tail</span><span class="p">(</span><span class="s">"-f"</span><span class="p">,</span> <span class="s">"info.log"</span><span class="p">,</span> <span class="n">_out</span><span class="o">=</span><span class="n">process_log_line</span><span class="p">)</span>
+
+<span class="c"># ... do other stuff here ...</span>
+
+<span class="n">process</span><span class="o">.</span><span class="n">wait</span><span class="p">()</span>
+</pre></div>
+</div>
+<p>The <code class="docutils literal"><span class="pre">_out</span></code> <a class="reference internal" href="../special_arguments.html#special-arguments"><span>special keyword argument</span></a> lets you
+to assign a callback to STDOUT.  This callback will receive each line of
+output from <code class="docutils literal"><span class="pre">tail</span> <span class="pre">-f</span></code> and allow you to do the same processing that we
+did earlier.  See <a class="reference internal" href="../index.html#callbacks"><span>STDOUT/ERR callbacks</span></a>.</p>
+<div class="section" id="would-you-like-to-know-more">
+<h2>Would you like to know more?</h2>
+<p>sh (previously <a class="reference external" href="http://pypi.python.org/pypi/pbs">pbs</a>) is a full-fledged
+subprocess interface for Python that
+allows you to call any program as if it were a function:</p>
+<div class="highlight-python"><div class="highlight"><pre><span class="kn">from</span> <span class="nn">sh</span> <span class="kn">import</span> <span class="n">ifconfig</span>
+<span class="k">print</span><span class="p">(</span><span class="n">ifconfig</span><span class="p">(</span><span class="s">"wlan0"</span><span class="p">))</span>
+</pre></div>
+</div>
+
+</div>
+</div>
+
+
+          </div>
+        </div></body></html>

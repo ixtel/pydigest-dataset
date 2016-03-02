@@ -1,0 +1,298 @@
+<html><body><div><div class="post-text" itemprop="text">
+<p>Here is a start. This implements three tests of Gu et. al 2008 based on the asymptotic normal distribution, and now also two conditional test based on the exact distribution.</p>
+
+<p>The score test works reasonably well if the counts are not too small (say larger than 10 or 20), and the exposure times are not very unequal. For smaller counts the results can be either a bit conservative or liberal, and other methods would be better. The version 'sqrt' did very well in their simulations, but might have a bit less power than the score test when that one works.</p>
+
+<pre><code>'''Test for ratio of Poisson intensities in two independent samples
+
+Author: Josef Perktold
+License: BSD-3
+
+destination statsmodels
+
+'''
+
+
+from __future__ import division
+import numpy as np
+from scipy import stats
+
+
+# copied from statsmodels.stats.weightstats
+def _zstat_generic2(value, std_diff, alternative):
+    '''generic (normal) z-test to save typing
+
+    can be used as ztest based on summary statistics
+    '''
+    zstat = value / std_diff
+    if alternative in ['two-sided', '2-sided', '2s']:
+        pvalue = stats.norm.sf(np.abs(zstat))*2
+    elif alternative in ['larger', 'l']:
+        pvalue = stats.norm.sf(zstat)
+    elif alternative in ['smaller', 's']:
+        pvalue = stats.norm.cdf(zstat)
+    else:
+        raise ValueError('invalid alternative')
+    return zstat, pvalue
+
+
+def poisson_twosample(count1, exposure1, count2, exposure2, ratio_null=1,
+                      method='score', alternative='2-sided'):
+    '''test for ratio of two sample Poisson intensities
+
+    If the two Poisson rates are g1 and g2, then the Null hypothesis is
+
+    H0: g1 / g2 = ratio_null
+
+    against one of the following alternatives
+
+    H1_2-sided: g1 / g2 != ratio_null
+    H1_larger: g1 / g2 &gt; ratio_null
+    H1_smaller: g1 / g2 &lt; ratio_null
+
+    Parameters
+    ----------
+    count1: int
+        Number of events in first sample
+    exposure1: float
+        Total exposure (time * subjects) in first sample
+    count2: int
+        Number of events in first sample
+    exposure2: float
+        Total exposure (time * subjects) in first sample
+    ratio: float
+        ratio of the two Poisson rates under the Null hypothesis. Default is 1.
+    method: string
+        Method for the test statistic and the p-value. Defaults to `'score'`.
+        Current Methods are based on Gu et. al 2008
+        Implemented are 'wald', 'score' and 'sqrt' based asymptotic normal
+        distribution, and the exact conditional test 'exact-cond', and its mid-point
+        version 'cond-midp', see Notes
+    alternative : string
+        The alternative hypothesis, H1, has to be one of the following
+
+           'two-sided': H1: ratio of rates is not equal to ratio_null (default)
+           'larger' :   H1: ratio of rates is larger than ratio_null
+           'smaller' :  H1: ratio of rates is smaller than ratio_null
+
+    Returns
+    -------
+    stat, pvalue two-sided
+
+    not yet
+    #results : Results instance
+    #    The resulting test statistics and p-values are available as attributes.
+
+
+    Notes
+    -----
+    'wald': method W1A, wald test, variance based on separate estimates
+    'score': method W2A, score test, variance based on estimate under Null
+    'wald-log': W3A
+    'score-log' W4A
+    'sqrt': W5A, based on variance stabilizing square root transformation
+    'exact-cond': exact conditional test based on binomial distribution
+    'cond-midp': midpoint-pvalue of exact conditional test
+
+    The latter two are only verified for one-sided example.
+
+    References
+    ----------
+    Gu, Ng, Tang, Schucany 2008: Testing the Ratio of Two Poisson Rates,
+    Biometrical Journal 50 (2008) 2, 2008
+
+    '''
+
+    # shortcut names
+    y1, n1, y2, n2 = count1, exposure1, count2, exposure2
+    d = n2 / n1
+    r = ratio_null
+    r_d = r / d
+
+    if method in ['score']:
+        stat = (y1 - y2 * r_d) / np.sqrt((y1 + y2) * r_d)
+        dist = 'normal'
+    elif method in ['wald']:
+        stat = (y1 - y2 * r_d) / np.sqrt(y1 + y2 * r_d**2)
+        dist = 'normal'
+    elif method in ['sqrt']:
+        stat = 2 * (np.sqrt(y1 + 3 / 8.) - np.sqrt((y2 + 3 / 8.) * r_d))
+        stat /= np.sqrt(1 + r_d)
+        dist = 'normal'
+    elif method in ['exact-cond', 'cond-midp']:
+        from statsmodels.stats import proportion
+        bp = r_d / (1 + r_d)
+        y_total = y1 + y2
+        stat = None
+        pvalue = proportion.binom_test(y1, y_total, prop=bp, alternative=alternative)
+        if method in ['cond-midp']:
+            # not inplace in case we still want binom pvalue
+            pvalue = pvalue - 0.5 * stats.binom.pmf(y1, y_total, bp)
+
+        dist = 'binomial'
+
+    if dist == 'normal':
+        return _zstat_generic2(stat, 1, alternative)
+    else:
+        return stat, pvalue
+
+
+from numpy.testing import assert_allclose
+
+# testing against two examples in Gu et al
+
+print('\ntwo-sided')
+# example 1
+count1, n1, count2, n2 = 60, 51477.5, 30, 54308.7
+
+s1, pv1 = poisson_twosample(count1, n1, count2, n2, method='wald')
+pv1r = 0.000356
+assert_allclose(pv1, pv1r*2, rtol=0, atol=5e-6)
+print('wald', s1, pv1 / 2)   # one sided in the "right" direction
+
+s2, pv2 = poisson_twosample(count1, n1, count2, n2, method='score')
+pv2r = 0.000316
+assert_allclose(pv2, pv2r*2, rtol=0, atol=5e-6)
+print('score', s2, pv2 / 2)   # one sided in the "right" direction
+
+s2, pv2 = poisson_twosample(count1, n1, count2, n2, method='sqrt')
+pv2r = 0.000285
+assert_allclose(pv2, pv2r*2, rtol=0, atol=5e-6)
+print('sqrt', s2, pv2 / 2)   # one sided in the "right" direction
+
+print('\ntwo-sided')
+# example2
+# I don't know why it's only 2.5 decimal agreement, rounding?
+count1, n1, count2, n2 = 41, 28010, 15, 19017
+s1, pv1 = poisson_twosample(count1, n1, count2, n2, method='wald', ratio_null=1.5)
+pv1r = 0.2309
+assert_allclose(pv1, pv1r*2, rtol=0, atol=5e-3)
+print('wald', s1, pv1 / 2)   # one sided in the "right" direction
+
+s2, pv2 = poisson_twosample(count1, n1, count2, n2, method='score', ratio_null=1.5)
+pv2r = 0.2398
+assert_allclose(pv2, pv2r*2, rtol=0, atol=5e-3)
+print('score', s2, pv2 / 2)   # one sided in the "right" direction
+
+s2, pv2 = poisson_twosample(count1, n1, count2, n2, method='sqrt', ratio_null=1.5)
+pv2r = 0.2499
+assert_allclose(pv2, pv2r*2, rtol=0, atol=5e-3)
+print('sqrt', s2, pv2 / 2)   # one sided in the "right" direction
+
+print('\none-sided')
+# example 1 onesided
+count1, n1, count2, n2 = 60, 51477.5, 30, 54308.7
+
+s1, pv1 = poisson_twosample(count1, n1, count2, n2, method='wald', alternative='larger')
+pv1r = 0.000356
+assert_allclose(pv1, pv1r, rtol=0, atol=5e-6)
+print('wald', s1, pv1)   # one sided in the "right" direction
+
+s2, pv2 = poisson_twosample(count1, n1, count2, n2, method='score', alternative='larger')
+pv2r = 0.000316
+assert_allclose(pv2, pv2r, rtol=0, atol=5e-6)
+print('score', s2, pv2)   # one sided in the "right" direction
+
+s2, pv2 = poisson_twosample(count1, n1, count2, n2, method='sqrt', alternative='larger')
+pv2r = 0.000285
+assert_allclose(pv2, pv2r, rtol=0, atol=5e-6)
+print('sqrt', s2, pv2)   # one sided in the "right" direction
+
+# 'exact-cond', 'cond-midp'
+
+s2, pv2 = poisson_twosample(count1, n1, count2, n2, method='exact-cond',
+                            ratio_null=1, alternative='larger')
+pv2r = 0.000428  # typo in Gu et al, switched pvalues between C and M
+assert_allclose(pv2, pv2r, rtol=0, atol=5e-4)
+print('exact-cond', s2, pv2)   # one sided in the "right" direction
+
+s2, pv2 = poisson_twosample(count1, n1, count2, n2, method='cond-midp',
+                            ratio_null=1, alternative='larger')
+pv2r = 0.000310
+assert_allclose(pv2, pv2r, rtol=0, atol=5e-4)
+print('cond-midp', s2, pv2)   # one sided in the "right" direction
+
+
+print('\none-sided')
+# example2 onesided
+# I don't know why it's only 2.5 decimal agreement, rounding?
+count1, n1, count2, n2 = 41, 28010, 15, 19017
+s1, pv1 = poisson_twosample(count1, n1, count2, n2, method='wald',
+                            ratio_null=1.5, alternative='larger')
+pv1r = 0.2309
+assert_allclose(pv1, pv1r, rtol=0, atol=5e-4)
+print('wald', s1, pv1)   # one sided in the "right" direction
+
+s2, pv2 = poisson_twosample(count1, n1, count2, n2, method='score',
+                            ratio_null=1.5, alternative='larger')
+pv2r = 0.2398
+assert_allclose(pv2, pv2r, rtol=0, atol=5e-4)
+print('score', s2, pv2)   # one sided in the "right" direction
+
+s2, pv2 = poisson_twosample(count1, n1, count2, n2, method='sqrt',
+                            ratio_null=1.5, alternative='larger')
+pv2r = 0.2499
+assert_allclose(pv2, pv2r, rtol=0, atol=5e-4)
+print('score', s2, pv2)   # one sided in the "right" direction
+
+# 'exact-cond', 'cond-midp'
+
+s2, pv2 = poisson_twosample(count1, n1, count2, n2, method='exact-cond',
+                            ratio_null=1.5, alternative='larger')
+pv2r = 0.2913
+assert_allclose(pv2, pv2r, rtol=0, atol=5e-4)
+print('exact-cond', s2, pv2)   # one sided in the "right" direction
+
+s2, pv2 = poisson_twosample(count1, n1, count2, n2, method='cond-midp',
+                            ratio_null=1.5, alternative='larger')
+pv2r = 0.2450
+assert_allclose(pv2, pv2r, rtol=0, atol=5e-4)
+print('cond-midp', s2, pv2)   # one sided in the "right" direction
+</code></pre>
+
+<p>This prints </p>
+
+<pre><code>two-sided /2
+wald 3.38491255626 0.000356004664253
+score 3.417401839 0.000316109441024
+sqrt 3.44548501956 0.00028501778109
+
+two-sided /2
+wald 0.73544663636 0.231033764105
+score 0.706630933035 0.239897930348
+sqrt 0.674401392575 0.250028078819
+
+one-sided
+wald 3.38491255626 0.000356004664253
+score 3.417401839 0.000316109441024
+sqrt 3.44548501956 0.00028501778109
+
+one-sided
+wald 0.73544663636 0.231033764105
+score 0.706630933035 0.239897930348
+score 0.674401392575 0.250028078819
+</code></pre>
+
+<p>The exact conditional test would be relatively easy to implement but is very conservative and has low power. The approximately exact tests will require a bit more effort (for which I will not have time at the moment).</p>
+
+<p>(As often: The actual calculation are a few lines. Deciding on interface, adding documentation and unit tests is more work.)</p>
+
+<p><strong>EDIT</strong> </p>
+
+<p>The above script now also includes the exact conditional test and it's midpoint p-value version, checked with the two examples for one-sided alternative in Gu et al.</p>
+
+<p>Example 1: one-sided</p>
+
+<pre><code>exact-cond None 0.00042805269405
+cond-midp None 0.000310132441983
+</code></pre>
+
+<p>Example 2: one-sided</p>
+
+<pre><code>exact-cond None 0.291453753765
+cond-midp None 0.245173718501
+</code></pre>
+
+<p>currently there is no test statistic for the conditional tests returned</p>
+    </div>
+    </div></body></html>

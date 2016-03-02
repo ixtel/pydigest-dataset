@@ -1,0 +1,278 @@
+<html><body><div><div id="blogTextContainer" class="blogTextContainer">
+
+      <h1>Dissecting WebSocket's Overhead</h1>
+      <div>
+         <p class="blogpost_authordate">
+            <time>2014-01-15</time>, Tobias Oberstein
+         </p>
+         
+            
+         
+         
+         <span>
+            
+         </span>
+         
+      </div>
+      <p>WebSocket itself has very low overhead, but one must be careful not to loose efficiency on lower layers.</p>
+<h2>Introduction</h2>
+<p>The WebSocket protocol <em>itself</em> has very low overhead. The following table lists the overhead in octets per (unfragmented) WebSocket message:</p>
+<p/><center>      <br/>
+<table>
+<tr>
+<th>Payload</th><th>Client-to-server</th><th>Server-to-client</th>
+</tr>
+<tr>
+<td>&lt;126</td><td>6</td><td>2</td>
+</tr>
+<tr>
+<td>&lt;64k</td><td>8</td><td>4</td>
+</tr>
+<tr>
+<td>&lt;2**63</td><td>12</td><td>8</td>
+</tr>
+</table>
+</center>
+
+<p>Further, WebSocket allows to transmit binary payloads without any recoding or escaping.</p>
+<p>However, this is not the end of the story;) </p>
+<p>The overhead when sending application data over WebSocket occurs on multiple levels:</p>
+<ol>
+<li>WebSocket</li>
+<li>TLS (if running secure WebSocket)</li>
+<li>TCP</li>
+<li>IP</li>
+<li>Ethernet / other</li>
+</ol>
+<p>I did a couple of measurements using a JavaScript WebSocket client running in a browser that sends 8 WebSocket text messages with a string payload of length 13 characters in a loop over a GbE switched Ethernet LAN.</p>
+<p>The client JavaScript essentially does this:</p>
+<div class="codebox blogCodebox">
+   <pre class="brush: javascript; toolbar: false; gutter: false; auto-links: false; highlight: []">
+        var sock = new WebSocket("ws://192.168.1.100");
+
+        sock.onopen = function() {
+           for (var i = 0; i 
+</pre></div>
+
+<p>The server (based on <a href="http://autobahn.ws/python/"><strong>Autobahn</strong>|Python</a> and running on <a href="http://twistedmatrix.com/">Twisted</a> / <a href="http://www.freebsd.org">FreeBSD</a>) is configured to just echo back any WebSocket messages it receives.</p>
+<h2>Results</h2>
+<p>The results (recorded with <a href="http://www.wireshark.org/">Wireshark</a>, see logs at the end) are somewhat surprising:</p>
+<figure>
+   <a href="/static/img/blog/dissecting-websocket-overhead/results.xlsx">
+   <img src="/static/img/blog/dissecting-websocket-overhead/results.png" class="imgCentered"/>
+   </a>
+</figure>
+
+<p>As can be seen from above numbers:</p>
+<p class="catchline">
+The overhead induced by TCP/IP and TLS in particular can dwarf the overhead of WebSocket itself.
+</p>
+
+<p><br/></p>
+<p>When running <strong>TLS</strong></p>
+<ul>
+<li>all tested browsers and <strong>Autobahn</strong>|Python will produce (at least) a new TLS record on each and every WebSocket message sent</li>
+<li>all tested browsers send each TLS record in a new TCP segment</li>
+<li><strong>Autobahn</strong>|Python sends multiple TLS records batched inside a single TCP segment</li>
+</ul>
+<p>The browsers will send the 8 WebSocket message to the wire like this:</p>
+<div class="codehilite"><pre>TCP/IP segm. | TLS record hdr | WebSocket frame hdr | WebSocket msg1 payload | TLS cipher padd. etc
+TCP/IP segm. | TLS record hdr | WebSocket frame hdr | WebSocket msg2 payload | TLS cipher padd. etc
+TCP/IP segm. | TLS record hdr | WebSocket frame hdr | WebSocket msg3 payload | TLS cipher padd. etc
+...
+</pre></div>
+
+
+<p>Autobahn|Python sends this:</p>
+<div class="codehilite"><pre>TCP/IP segment |
+    TLS record hdr | WebSocket frame hdr | WebSocket msg1 payload | TLS cipher padding etc
+    TLS record hdr | WebSocket frame hdr | WebSocket msg2 payload | TLS cipher padding etc
+    TLS record hdr | WebSocket frame hdr | WebSocket msg3 payload | TLS cipher padding etc
+    ...
+</pre></div>
+
+
+<p><br/></p>
+<p>When running <strong>plain TCP</strong></p>
+<ul>
+<li>all tested browsers will produce a new TCP segment on each and every WebSocket message sent</li>
+<li><a href="http://autobahn.ws/python/"><strong>Autobahn</strong>|Python</a> will send out multiple WebSocket messages within one TCP segment</li>
+</ul>
+<p>The browsers will send the 8 WebSocket message to the wire like this:</p>
+<div class="codehilite"><pre>TCP/IP segment | WebSocket frame hdr | WebSocket msg1 payload
+TCP/IP segment | WebSocket frame hdr | WebSocket msg2 payload
+TCP/IP segment | WebSocket frame hdr | WebSocket msg3 payload
+...
+</pre></div>
+
+
+<p>Autobahn|Python sends this:</p>
+<div class="codehilite"><pre>TCP/IP segment |
+    WebSocket frame hdr | WebSocket msg1 payload
+    WebSocket frame hdr | WebSocket msg2 payload
+    WebSocket frame hdr | WebSocket msg3 payload
+    ...
+</pre></div>
+
+
+<p><br/></p>
+<p><strong>Optimization 1</strong></p>
+<p>From an efficiency point of view, the optimal way of sending multiple application level messages while reusing the message framing provided by WebSocket would be:</p>
+<div class="codehilite"><pre>TCP/IP segment |
+    TLS record hdr |
+        WebSocket frame hdr | WebSocket msg1 payload
+        WebSocket frame hdr | WebSocket msg2 payload
+        WebSocket frame hdr | WebSocket msg3 payload
+        ...
+    | TLS cipher padding etc
+</pre></div>
+
+
+<p>However, this can only be done by changing the WebSocket <em>implementation</em>, which in the case of browsers isn't a viable option.
+<br/></p>
+<p><strong>Optimization 2</strong></p>
+<p>If the application can easily do it's own message framing (as e.g. when using JSON or MsgPack), the optimal sending would be:</p>
+<div class="codehilite"><pre>TCP/IP segment |
+    TLS record hdr |
+        WebSocket frame hdr |
+            WebSocket msg1 payload
+            WebSocket msg2 payload
+            WebSocket msg3 payload
+            ...
+    | TLS cipher padding etc
+</pre></div>
+
+
+<p>This optimization can be done without any change to existing WebSocket implementations. The only requirement is that applications need an application message serialization format that allows for batching of multiple application level messages into one WebSocket message.</p>
+<p>A simple scheme would work like this:</p>
+<ol>
+<li>Application messages are not sent directly as individual WebSocket messages (e.g. from JavaScript in browsers), but put into a queue.</li>
+<li>A worker sends out all application messages pending in the queue batched up into a single WebSocket message every 100ms or so.</li>
+</ol>
+<p>The tradeoff is between (added) message latency (tuned via queue sender frequency) and wire-level efficiency.
+<br/></p>
+<h2>Conclusions</h2>
+<p class="catchline">
+1.   The overhead induced by TCP/IP and TLS in particular can dwarf the overhead of WebSocket itself.
+</p>
+
+<p class="catchline">
+2.   Applications can use application-level message batching to effectively reduce the overhead that can be induced by TCP/IP and TLS.
+</p>
+
+<h2>Measurements</h2>
+<h3>Chrome 34 / TLS 1.2</h3>
+<p><strong>Chrome 34: sending 8 WebSocket text messages of payload 13 characters in a loop over TLS 1.2:</strong></p>
+<figure>
+   <a href="/static/img/blog/dissecting-websocket-overhead/chrome_1.png">
+   <img src="/static/img/blog/dissecting-websocket-overhead/chrome_1.png" class="imgCentered"/>
+   </a>
+</figure>
+
+<hr/>
+<p><strong>Autobahn|Python: echo'ing 8 WebSocket text messages of payload 13 characters over TLS 1.2:</strong></p>
+<figure>
+   <figcaption/>
+   <a href="/static/img/blog/dissecting-websocket-overhead/chrome_2.png">
+   <img src="/static/img/blog/dissecting-websocket-overhead/chrome_2.png" class="imgCentered"/>
+   </a>
+</figure>
+
+<h3>Chrome 34 / plain TCP</h3>
+<p><strong>Chrome 34: sending 8 WebSocket text messages of payload 13 characters in a loop over plain TCP:</strong></p>
+<figure>
+   <img src="/static/img/blog/dissecting-websocket-overhead/chrome_3.png" class="imgCentered"/>
+   
+</figure>
+
+<hr/>
+<p><strong>Autobahn|Python: echo'ing 8 WebSocket text messages of payload 13 characters over plain TCP:</strong></p>
+<figure>
+   <a href="/static/img/blog/dissecting-websocket-overhead/chrome_4.png">
+   <img src="/static/img/blog/dissecting-websocket-overhead/chrome_4.png" class="imgCentered"/>
+   </a>
+</figure>
+
+<hr/>
+<h3>Firefox 28 / TLS 1.2</h3>
+<p><strong>Firefox 28: sending 8 WebSocket text messages of payload 13 characters in a loop over TLS 1.2:</strong></p>
+<figure>
+   <a href="/static/img/blog/dissecting-websocket-overhead/firefox28_1.png">
+   <img src="/static/img/blog/dissecting-websocket-overhead/firefox28_1.png" class="imgCentered"/>
+   </a>
+</figure>
+
+<hr/>
+<p><strong>Autobahn|Python: echo'ing 8 WebSocket text messages of payload 13 characters over TLS 1.2:</strong></p>
+<figure>
+   <a href="/static/img/blog/dissecting-websocket-overhead/firefox28_2.png">
+   <img src="/static/img/blog/dissecting-websocket-overhead/firefox28_2.png" class="imgCentered"/>
+   </a>
+</figure>
+
+<h3>Firefox 28 / plain TCP</h3>
+<p><strong>Firefox 28: sending 8 WebSocket text messages of payload 13 characters in a loop over plain TCP:</strong></p>
+<figure>
+   <a href="/static/img/blog/dissecting-websocket-overhead/firefox28_3.png">
+   <img src="/static/img/blog/dissecting-websocket-overhead/firefox28_3.png" class="imgCentered"/>
+   </a>
+</figure>
+
+<hr/>
+<p><strong>Autobahn|Python: echo'ing 8 WebSocket text messages of payload 13 characters over plain TCP:</strong></p>
+<figure>
+   <a href="/static/img/blog/dissecting-websocket-overhead/firefox28_4.png">
+   <img src="/static/img/blog/dissecting-websocket-overhead/firefox28_4.png" class="imgCentered"/>
+   </a>
+</figure>
+
+<h3>Firefox 26 / TLS 1.0</h3>
+<p><strong>Firefox 26: sending 8 WebSocket text messages of payload 13 characters in a loop over TLS 1.0:</strong></p>
+<figure>
+   <a href="/static/img/blog/dissecting-websocket-overhead/firefox26_1.png">
+   <img src="/static/img/blog/dissecting-websocket-overhead/firefox26_1.png" class="imgCentered"/>
+   </a>
+</figure>
+
+<hr/>
+<p><strong>Autobahn|Python: echo'ing 8 WebSocket text messages of payload 13 characters over TLS 1.0:</strong></p>
+<figure>
+   <a href="/static/img/blog/dissecting-websocket-overhead/firefox26_2.png">
+   <img src="/static/img/blog/dissecting-websocket-overhead/firefox26_2.png" class="imgCentered"/>
+   </a>
+</figure>
+
+<h3>IE11 / TLS 1.2</h3>
+<p><strong>IE11: sending 8 WebSocket text messages of payload 13 characters in a loop over TLS 1.2:</strong></p>
+<figure>
+   <a href="/static/img/blog/dissecting-websocket-overhead/ie11_1.png">
+   <img src="/static/img/blog/dissecting-websocket-overhead/ie11_1.png" class="imgCentered"/>
+   </a>
+</figure>
+
+<hr/>
+<p><strong>Autobahn|Python: echo'ing 8 WebSocket text messages of payload 13 characters over TLS 1.2:</strong></p>
+<figure>
+   <a href="/static/img/blog/dissecting-websocket-overhead/ie11_2.png">
+   <img src="/static/img/blog/dissecting-websocket-overhead/ie11_2.png" class="imgCentered"/>
+   </a>
+</figure>
+
+<h3>IE11 / plain TCP</h3>
+<p><strong>IE11: sending 8 WebSocket text messages of payload 13 characters in a loop over plain TCP:</strong></p>
+<figure>
+   <a href="/static/img/blog/dissecting-websocket-overhead/ie11_3.png">
+   <img src="/static/img/blog/dissecting-websocket-overhead/ie11_3.png" class="imgCentered"/>
+   </a>
+</figure>
+
+<hr/>
+<p><strong>Autobahn|Python: echo'ing 8 WebSocket text messages of payload 13 characters over plain TCP:</strong></p>
+<figure>
+   <a href="/static/img/blog/dissecting-websocket-overhead/ie11_4.png">
+   <img src="/static/img/blog/dissecting-websocket-overhead/ie11_4.png" class="imgCentered"/>
+   </a>
+</figure>
+   </div>
+
+   </div></body></html>

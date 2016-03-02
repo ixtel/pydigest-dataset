@@ -1,0 +1,68 @@
+<html><body><div><div class="content html_format"><p>
+      С недавних пор в сервисе AWS Lambda появилась нативная поддержка Python 2.7. Для тех, кто не в курсе, что такое AWS Lambda, отсылаю к </p><a href="http://habrahabr.ru/company/epam_systems/blog/245949/"> статье на хабре</a><p>. Основное преимущество использования сервиса — создание масштабируемой беcсерверной архитектуры. В данной статье я расскажу о способе подружить AWS Lambda и PostgreSQL.
+</p><a name="habracut"/><p>
+ Основная проблема использования AWS Lambda совместно с кодом на Python возникает из-за того, что окружение, выполняющее код представляет собой короткоживущий instance (виртуальный сервер), в который невозможно доустановить необходимые бинарные компоненты. Более того, использование кода на python требует создания так называемого deployment package. Типичная схема создания такого пакета вкратце такова — в каталог с используемым кодом копируем все содержание $VIRTUAL_ENV/lib/python2.7/site-packages, запаковываем в zip архив, загружаем через AWS консоль или утилиты командной строки в сервис, настраиваем вызов и т.п. Интересующихся отсылаю к документации веб-сервиса, поскольку намерен написать не о детальной настройке, а о конкретной проблеме.
+</p><p>
+Если Вы попытаетесь использовать подобную схему работы с sqlalchemy и PostgreSQL, то при попытке вызова кода, использующего запрос к базе, получите примерно следующее:
+
+</p><pre><code class="html">START RequestId: 23af180b-7b22-11e5-beac-0b062a6930ba Version: $LATEST
+Unable to import module 'lambda': libpq.so.5: cannot open shared object file: No such file or directory
+
+END RequestId: 23af180b-7b22-11e5-beac-0b062a6930ba
+REPORT RequestId: 23af180b-7b22-11e5-beac-0b062a6930ba	Duration: 0.32 ms	Billed Duration: 100 ms 	Memory Size: 1024 MB	Max Memory Used: 38 MB	
+</code></pre><p>
+Это происходит из-за того, что psycopg2 — библиотека для работы с PostgreSQL в Python — представляет собой расширение, использующее код на C и shared library libpq.so из состава дистрибутива PostgreSQL.
+</p><p>
+Решение в данном случае такое (все действия производились на дистрибутиве Fedora 22):</p><p>
+1) Качаем исходники PostgreSQL со страницы </p><a href="http://www.postgresql.org/ftp/source">http://www.postgresql.org/ftp/source</a>
+<p>
+2) Выполняем команды
+</p><pre><code class="bash">tar xzvf postgresql-9.4.5.tar.gz
+cd postgresql-9.4.5
+./configure
+make
+</code></pre><p>
+3) Создаем и активируем virtualenv, которое используем для создания deployment package:
+</p><pre><code class="bash">virtualenv ./env
+source ./env/bin/activate
+</code></pre><p>
+4) Дальше работаем с репозиторием psycopg2:
+</p><pre><code class="bash">git clone  -b maint_2_6 https://github.com/psycopg/psycopg2
+</code></pre><p>
+5) Из подкаталога src/interfaces/libpq копируем файл libpq.a в каталог с клонированным дистрибутивом psycopg2. Запускаем сборку:
+</p><pre><code class="bash">cd psycopg2
+python setup.py build_ext -L  ./
+</code></pre><p>
+Альтернативный вариант -положить libpq.a в каталог /usr/lib64 или иной, определяемый переменной окружения LD_LIBRARY_PATH, и в файле setup.cfg раскомментировать параметр static_libpq=1. </p><p>
+4) Ставим пакет:
+</p><pre><code class="bash">python setup.py install
+</code></pre><p>
+Теперь при использовании этого virtualenv для создания deployment package на отсутствие shared library ругани не будет.
+</p><p>
+К сожалению, подобный подход никак нельзя назвать универсальным.</p><s> В частности, мне так и не удалось решить проблему с pillow.</s><b>См. UPDATE 2</b>
+<p>
+Буду благодарен, если кто-нибудь из хабражителей выскажет конструктивные мысли по этому поводу.
+
+</p><b>UPDATE.</b><p> Вот альтернативное решение:</p><p>
+1) При сборке пакета указываем опцию rpath как /var/task/lib:
+
+</p><pre><code class="bash"> python setup.py build_ext -R /var/task/lib
+</code></pre><p>
+В deployment package создаем подкаталог lib, куда складываем бинарные shared library:
+</p><pre><code class="bash">(env)[random1st@localhost lambda]$ ls lib/
+libpq.so  libpq.so.5  libpq.so.5.7
+</code></pre>
+
+<b>UPDATE 2.</b><p> Pip с какой-то версии поддерживает указание опций сборки в requirements.txt. Так что можно и так:
+</p><pre><code class="bash">(env)[random1st@localhost lambda]$ cat requirements.txt |grep option
+Pillow==2.5.1 --global-option="build_ext" --global-option="--rpath=/var/task/lib"
+psycopg2==2.5.3 --global-option="build_ext" --global-option="--rpath=/var/task/lib"
+</code></pre>
+<b>UPDATE 3.</b><p> В облаке Amazon коннект происходит практически мгновенно, а в течении этого года обещают возможность прикрутить лямбду к вашему VPC.
+
+      
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

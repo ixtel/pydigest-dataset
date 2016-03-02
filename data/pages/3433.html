@@ -1,0 +1,91 @@
+<html><body><div><div class="post-body entry-content" id="post-body-2552740841908049032" itemprop="description articleBody">
+<p>
+Ok, so, this is a post I wanted to write for some time already and never really got the time to do...
+</p><p>
+First off, this is a design I've worked some times during the years on client-side applications (Python and Javascript). It revolves around some simple concepts which can be used to develop small to big sized applications, and is suited to places where there are more long-lived instances -- which is usually the case on client-side applications (and usually not for server-side web applications).
+</p><p>
+These are also the concepts I used when implementing PyVmMonitor (</p><a href="http://pyvmmonitor.com/">http://pyvmmonitor.com</a><p>).
+</p><p>
+For those interested, although PyVmMonitor is closed source, the non-domain specific bits are actually open source and may be found at the links below (so, they may be cloned in git and I'll reference them in this post):
+
+</p><a href="https://github.com/fabioz/pyvmmonitor-framework">https://github.com/fabioz/pyvmmonitor-framework</a>
+<a href="https://github.com/fabioz/pyvmmonitor-core">https://github.com/fabioz/pyvmmonitor-core</a>
+
+<b>1. Plugin system based on interfaces</b><p> (interfaces in this case being the java concept of interfaces or ABCs in Python) -- usually I like to be explicit about the interfaces provided and registering the implementors for those interfaces (if you want your programs to be extensible, you really should be programming based on interfaces -- for me it helps to think how a client would consume it, instead of thinking about issues on how to actually implement it).
+</p><p>
+This is also the mechanism that provides dependency-injection (so, you can swap out some implementor -- although it's not the classing dependency-injection because you still ask for things instead of them appearing magically for you at some variable).
+</p><p>
+The structure would be something like:
+
+</p><pre><code>
+pm = PluginManager()
+pm.register(EPView, 'my.View') # As a note, EP is a short for 'Extension Point'.
+pm.register(EPMenu, 'my.Menu1') # Implementors are registered as strings to avoid 
+pm.register(EPMenu, 'my.Menu2') # having to import the classes (to cut on startup time).
+
+</code></pre>
+<p>
+An example of use would be:
+
+</p><pre><code>
+# Keeps the EPView instance alive inside the PluginManager 
+# (more details ahead on item #2) and starts the view main loop.
+view = pm.get_instance(EPView).main_loop()
+
+# The EPView implementation could create its menus by asking the EPMenus registered.
+menus = pm.get_implementations(EPMenu)
+for menu in menus:
+    view.create_menu(menu)
+
+</code></pre>
+<span class="Apple-tab-span"> </span><p>
+The actual implementation that PyVmMonitor is using can be found at </p><a href="https://github.com/fabioz/pyvmmonitor-core/blob/master/pyvmmonitor_core/plugins.py">https://github.com/fabioz/pyvmmonitor-core/blob/master/pyvmmonitor_core/plugins.py</a>
+<p>
+You can see that we're not worried about discoverability as most plugin frameworks are, as we're being explicit about registering things (and it should be easy to add that to the structure if we do need the extensibility for clients).
+</p><p>
+Also, in this particular implementation, I actually skipped the plugins as things are self contained and I didn't want the added complexity, but usually you'd register plugins and then the extension points and implementations would be registered only through plugins (and would specify the dependencies to other plugins).
+
+</p><b>2. A place to hold your instances:</b>
+<p>
+I like to keep track of where instances I created are... usually it's difficult to track things in long-lived applications (which is usually not a problem in web-based applications because the model is really the database and objects are short-lived).
+</p><p>
+In the Eclipse SDK for instance it's easy to see many singleton-like structures spread apart many places and there's no unified approach to it. Every place has an API, so, there's a platform which has a workbench which has a part which has an editor... (I know, that's plain object orientation, but I find that lacking when extending things and there's always a different API for accessing anything).
+</p><p>
+So, instead of using many different APIs there are 2 main places where instances live -- and that's also the place to query for instances:
+
+</p><ul>
+<li> The PluginManager itself: it's the place to ask for any extension/service in the application, so, it's fair that it can also keep the needed references alive (and we could also query for existing services/extensions in a shell/debugger).</li>
+<li> Inside the PluginManager, an extension named EPModelsContainer is provided and it's the place to put the actual models (in a tree-like structure) to compose your domain (for instance, in PyVmMonitor a new AttachedProcess is created for each attached process and has as a child a model for the the actual monitoring, where the statistics gathered are kept in the client side).</li>
+</ul>
+<p>
+Note that this means that the 'ownership' of the items is one of these 2 places -- and they're quite different: when it's in the PluginManager, it'll be kept alive until the application finishes (although it's lazily started). For items in the EPModelsContainer, when any instance leaves the EPModelsContainer it should be readily deleted as well as anything it holds (so, other places should only keep a weak-reference or should monitor the removal of the item from the models container to make the proper cleanup so that the object can be garbage collected at that point).
+</p><p>
+The actual extension point that PyVmMonitor is using can be found at </p><a href="https://github.com/fabioz/pyvmmonitor-framework/blob/master/pyvmmonitor_framework/extensions/ep_models_container.py">https://github.com/fabioz/pyvmmonitor-framework/blob/master/pyvmmonitor_framework/extensions/ep_models_container.py</a><p> (note that it provides classes-based filtering and tree-iteration and could be extended to provide a JQuery-like api to query it).
+</p><p>
+Also, test-cases should test that before/after each test, all the instances created in the PluginManager and in the EPModelsContainer are garbage-collected! Note that on non-deterministic garbage-collection implementations such as PyPy/Jython this is not feasible because they aren't immediately collected, but on CPython with reference counting, this works great. So, at least test on CPython -- then if you don't have binary dependencies, run on PyPy :)
+
+</p><b>3. Callbacks:</b>
+<p>
+As we've just defined that the instances ownership is really on the EPModelsContainer, there's room for callbacks which only keep weak-references to bound methods when you're interested is something -- in which case </p><a href="https://github.com/fabioz/pyvmmonitor-core/blob/master/pyvmmonitor_core/callback.py">https://github.com/fabioz/pyvmmonitor-core/blob/master/pyvmmonitor_core/callback.py</a><p> is a pretty good implementation for that... note that for top-level methods, strong references are kept.
+</p><p>
+Why you may ask? Well, the main reason is that this use-case is usually for closures, so, it may be hard to find a place to add the function to -- and if it's a top level, the function will be alive until the end of times anyway (i.e.: process shutdown).
+</p><p>
+Anyways, this is probably a case that should only be used with care as unregistering must be explicit and things in the function scope will be kept alive!
+
+</p><b>4. A standard selection mechanism.</b>
+<p>
+Again, as we just defined that all our model lives inside EPModelsContainer, the selection is usually simply keeping the id of the object(s) selected.
+</p><p>
+In PyVmMonitor, the base extension for this is the EPSelectionService. The concept is pretty simple: clients can listen to changes in the selection (through a Callback), can trigger selection changes and can get the current selection. As PyVmMonitor accepts multiple selection to inspect multiple processes at once, it always deals with a list(obj_id) and clients act accordingly to the selection to show the proper UI.
+</p><p>
+The extension interface used in PyVmMonitor lives at </p><a href="https://github.com/fabioz/pyvmmonitor-framework/blob/master/pyvmmonitor_framework/extensions/ep_selection_service.py">https://github.com/fabioz/pyvmmonitor-framework/blob/master/pyvmmonitor_framework/extensions/ep_selection_service.py</a>
+
+<b>5. Undo/redo:</b><p> Well, in PyVmMonitor there's really no undo/redo functionality because it's not really required for what it does, but on other applications I worked that had undo/redo, the basis was actually on the model entities that entered the EPModelsContainer: if they implemented an interface saying that they provided changes in them, they'd be tracked and commands would be automatically added to a command list for undo/redo purposes when the model changed (simply by recording the id of the object and the attributes new/previous values -- as well as providing a memento for the specific object when it entered/left the EPModelsContainer)... This is a bit different from using the command pattern because it's all done from the outside as we'd actually be hearing changes in the model instead of actively changing how we code to add the command pattern (which IMHO makes code much more verbose than it needs to be).
+
+</p><b>6. The actual UI...</b><p> Well, for PyVmMonitor I didn't go through the effort of actually creating a reusable UI, and other projects I worked in which did have that concern aren't actually mine to open source, but the idea here would be making a view which would query for EPMenu, EPToolbar, EPAction, EPCentralWidget, EPDock, etc and would create the actual UI from that. For PyVmMonitor I just have a simple non-extensible UI which listens to the EPSelectionService and updates its central editor accordingly, and the UI has a 'def set_model' which receives the actual model or models it should show.
+</p><p>
+Well, that's it, hope you liked the approach, as I said, I've used it some times in the last years and it works great for me (but I'm interested if there are better approaches out there which could be reused or improve on those aspects).
+
+</p><p/>
+</div>
+</div></body></html>

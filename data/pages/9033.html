@@ -1,0 +1,247 @@
+<html><body><div><div class="entry-content">
+		<p>In the <a href="https://orenmn.wordpress.com/2015/12/25/understanding-cpython-by-patching-part-1/">previous post</a>, we patched CPython to change the base of the representation of an ‘int’ object from decimal to hexadecimal.</p>
+<p>In this post we would further explore CPython, in order to add some more patches to our patched CPython version. This time, our goal is to turn the default base of integer literals in Python source code from decimal to hexadecimal, i.e. we want the following behavior:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+&gt;&gt;&gt; hex(2f)
+0x2f
+&gt;&gt;&gt; 100 - 1
+ff
+</pre>
+<p>We watched <a href="https://www.youtube.com/watch?v=R31NRWgoIWM">From Source to Code: How CPython’s Compiler Works by Brett Cannon</a> (Now that’s a cool name) some time ago, so we kind of know the steps taken by the CPython interpreter to run a piece of Python source code:</p>
+<ol>
+<li>decoding</li>
+<li>tokenizing</li>
+<li>parsing</li>
+<li>transforming the CST into an AST (in addition to Brett’s talk, you might refer to <a href="http://eli.thegreenplace.net/2009/02/16/abstract-vs-concrete-syntax-trees/">Eli’s post</a> for more info)</li>
+<li>compiling</li>
+<li>executing the bytecode</li>
+</ol>
+<p>Somewhere along these steps, there are two things we must change.</p>
+<p>The first is the way the interpreter determines whether some characters are a number (or anything according to syntax) or a syntax error. The current behavior:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+&gt;&gt;&gt; 2f
+  File "&lt;stdin&gt;", line 1
+    2f
+     ^
+SyntaxError: invalid syntax
+</pre>
+<p>The second is the way the interpreter converts an integer literal in the source into a Python ‘int’ object. The current behavior:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+&gt;&gt;&gt; 100
+64
+&gt;&gt;&gt; 0x100
+100
+</pre>
+<p>First thing first, we would go over the interpreter’s steps, and find out which of them are relevant to us.</p>
+<p>Decoding is about converting the Python source code bytes from any encoding into the right format for the tokenizer and parser. But what is the right format for them? We google ‘python source encoding’, and find <a href="https://www.python.org/dev/peps/pep-3120/">PEP 3120</a>, which says that utf-8 is Python’s default source encoding. Is it because CPython internally stores the characters of a ‘str’ object as a utf-8 encoded string? We google ‘python internal string representation’, and find <a href="https://www.python.org/dev/peps/pep-0393/">PEP 0393</a>, which says that for each ‘str’, CPython checks what is the max number of bytes needed to encode any of the chars in the string. If the max number of bytes needed is 2, the internal representation of the characters of the ‘str’ would be an array of Py_UCS2 (a 16 bits char type). Similarly, if that max was 1 or 4 bytes, it would be an array of Py_UCS1 (an 8 bits char type) or Py_UCS4 (a 32 bits char type) respectively. By the way, reading PEP 0393 gives us another important hint: CPython’s equivalent of Python’s ‘str’ is PyUnicode_Type.<br/>
+Anyway, this internal representation is definitely not utf-8. With our newly acquired knowledge, we might guess that decoding is about converting Python source code bytes (which is assumed to be a utf-8 encoded string unless explicitly specified otherwise) into that cool representation described in PEP 0393.<br/>
+ Back to business, while decoding, the interpreter doesn’t care about syntax yet, and definitely has nothing to do with converting anything into an ‘int’ object, so we won’t explore the code that does the decoding deliberately (but if we are lucky, we might accidentally find out whether our guess was right).</p>
+<p>Tokenizing is about splitting the decoded source into tokens. According to Brett’s aforementioned talk, it seems like identifying a token isn’t like splitting ‘x=3+2’ into [‘x’, ‘=’, ‘3’, ‘+’, ‘2’], but also identifying ‘x’ as a NAME token, ‘3’ and ‘2’ as NUMBER tokens, etc. Could it be that as part of the tokenizing, a literal such as 2f is identified as a syntax error, because it doesn’t look like any valid token? </p>
+<p>Parsing is about constructing a CST (AKA a parse tree) out of the tokens the tokenizer has produced. Could it be that at this point an integer NUMBER token is converted and stored as an ‘int’ object in a node in the CST?</p>
+<p>Transforming the CST into an AST is quite self explanatory. Could it be that at this point an integer NUMBER node in the CST is converted and stored as an ‘int’ object in a node in the AST?<br/>
+We can’t believe an integer NUMBER token would be stored in the AST in any form other than an ‘int’ object (Certainly NUMBER tokens don’t suffer from the ‘Pikachu Syndrome’ and refuse to evolve into an ‘int’ object, right?). But could we be certain about it? We google ‘python ast example’, and find yet another <a href="http://eli.thegreenplace.net/2009/11/28/python-internals-working-with-python-asts">useful post by Eli</a>, this time about the ast module.<br/>
+Now that we know how, we use the ast module to simulate a very simple AST:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+&gt;&gt;&gt; import ast
+&gt;&gt;&gt; ast.dump(ast.parse('0x10 + 0b111', mode='eval'))
+'Expression(body=BinOp(left=Num(n=16), op=Add(), right=Num(n=7)))'
+</pre>
+<p>Great! As we thought, integers are not stored in the AST as the strings they once were in the source. Well, we still don’t really know those integers are stored as ‘int’ objects, but we know they are parsed and stored as numbers (instead of strings), and this is enough for our purpose.</p>
+<p>Now, how can we find the pieces of code in CPython that do the tokenizing, the parsing, and the transforming of the CST into an AST?<br/>
+In the previous post we found the C implementation of the builtin ‘hex’ function in Python\bltinmodule.c. This time, we search in bltinmodule.c for ‘eval’, and find builtin_eval_impl. This function must eventually take all of the aforementioned interpreter’s steps, maybe except for decoding (if our guess about the decoding was right). All right, it seems like we just have to follow carefully the execution of builtin_eval_impl, and we would certainly find the tokenizing, the parsing, and the transforming of the CST into an AST functions.<br/>
+We start looking at builtin_eval_impl. Most of it deals with preparing the locals and globals, but the end of the function looks interesting:</p>
+<pre class="brush: cpp; title: ; notranslate" title="">
+static PyObject *
+builtin_eval_impl(PyModuleDef *module, PyObject *source, PyObject *globals,
+                  PyObject *locals)
+/*[clinic end generated code: output=7284501fb7b4d666 input=11ee718a8640e527]*/
+{
+    PyObject *result, *source_copy;
+    const char *str;
+    ...
+    if (PyCode_Check(source)) {
+        ...
+        return PyEval_EvalCode(source, globals, locals);
+    }
+    ...
+    str = source_as_string(source, "eval", "string, bytes or code", &amp;cf, &amp;source_copy);
+    ...
+    result = PyRun_StringFlags(str, Py_eval_input, globals, locals, &amp;cf);
+    ...
+    return result;
+}
+</pre>
+<p>The first time the source parameter is being accessed is when it is passed to PyCode_Check. We search for ‘PyCode_Check’, and find out it is a simple macro defined in Include\code.h: </p>
+<pre class="brush: cpp; title: ; notranslate" title="">
+#define PyCode_Check(op) (Py_TYPE(op) == &amp;PyCode_Type)
+</pre>
+<p>The macro just tells us if a CPython object’s type is PyCode_Type. This is probably the type of the ‘code’ object, but we search for ‘PyCode_Type’ just in case. Indeed, we find it in Objects\codeobject.c, and it is as we thought:</p>
+<pre class="brush: cpp; title: ; notranslate" title="">
+PyTypeObject PyCode_Type = {
+    PyVarObject_HEAD_INIT(&amp;PyType_Type, 0)
+    "code",
+    ...
+};
+</pre>
+<p>Back to builtin_eval_impl, if ‘eval’ received a ‘code’ object as the source parameter, it just calls PyEval_EvalCode. But we are interested in Python source code that contains integer literals, so we assume the source parameter is a ‘str’ object.<br/>
+The source ‘str’ object is converted into a C string by <i>source_as_string</i>. Wait a moment… Convert a ‘str’ object into a C string? That means either taking the bytes of its Py_UCS1/Py_UCS2/Py_UCS4 array as is, or converting the ‘str’ into some encoding. We search for ‘source_as_string’, and find it also in bltinmodule.c:</p>
+<pre class="brush: cpp; title: ; notranslate" title="">
+static const char *
+source_as_string(PyObject *cmd, const char *funcname, const char *what, PyCompilerFlags *cf, PyObject **cmd_copy)
+{
+    const char *str;
+    ...
+    if (PyUnicode_Check(cmd)) {
+        ...
+        str = PyUnicode_AsUTF8AndSize(cmd, &amp;size);
+        ...
+    }
+    ...
+    return str;
+}
+</pre>
+<p>First, the cmd parameter (the source) is passed to PyUnicode_Check. Earlier, we realized CPython’s equivalent of Python’s ‘str’ is PyUnicode_Type. We google ‘PyUnicode_Type’, and find <a href="https://docs.python.org/3/c-api/unicode.html">Unicode Objects and Codecs – Python 3.5.1 documentation</a>. We search there for PyUnicode_Check, and find:</p>
+<blockquote><p>int <code class="descname">PyUnicode_Check</code><span class="sig-paren">(</span><a class="reference internal" title="PyObject" href="https://docs.python.org/3/c-api/structures.html#c.PyObject">PyObject</a><em> *o</em><span class="sig-paren">)</span></p>
+<p>Return true if the object <em>o</em> is a Unicode object or an instance of a Unicode subtype.
+</p></blockquote>
+<p>So if the received source is a ‘str’ object (or an instance of a ‘str’ subclass), it is converted into utf-8, and the utf-8 encoded string is returned. Hmmm… Looks like our guess was wrong. It seems like the right format for the tokenizer and parser is actually a utf-8 encoded string.</p>
+<p>Back to builtin_eval_impl, the ‘str’ source is converted into a utf-8 encoded string, and passed to PyRun_StringFlags, along with the globals and locals. Which means PyRun_StringFlags still has to do all of the job following the decoding. We search for ‘PyRun_StringFlags’, and find it in Python\pythonrun.c:</p>
+<pre class="brush: cpp; title: ; notranslate" title="">
+PyObject *
+PyRun_StringFlags(const char *str, int start, PyObject *globals,
+                  PyObject *locals, PyCompilerFlags *flags)
+{
+    ...
+    mod = PyParser_ASTFromStringObject(str, filename, start, flags, arena);
+    if (mod != NULL)
+        ret = run_mod(mod, filename, globals, locals, flags, arena);
+    ...
+    return ret;
+}
+</pre>
+<p>If we had to guess, we would say <i>PyParser_ASTFromStringObject</i> does everything from decoded source to AST, and <i>run_mod</i> receives the AST and does all the rest.<br/>
+We search for ‘PyParser_ASTFromStringObject’ and find it too in Python\pythonrun.c:</p>
+<pre class="brush: cpp; title: ; notranslate" title="">
+/* Preferred access to parser is through AST. */
+mod_ty
+PyParser_ASTFromStringObject(const char *s, PyObject *filename, int start,
+                             PyCompilerFlags *flags, PyArena *arena)
+{
+    ...
+    node *n = PyParser_ParseStringObject(s, filename,
+                                         &amp;_PyParser_Grammar, start, &amp;err,
+                                         &amp;iflags);
+    ...
+    if (n) {
+        ...
+        mod = PyAST_FromNodeObject(n, flags, filename, arena);
+        PyNode_Free(n);
+    }
+    ...
+    return mod;
+}
+</pre>
+<p>We guess that the PyParser_ParseStringObject does everything from decoded source to CST, and the PyAST_FromNodeObject transforms the CST into an AST. We search for ‘PyAST_FromNodeObject’, find it in Python\ast.c, and give it a quick look that confirms our guess:</p>
+<pre class="brush: cpp; title: ; notranslate" title="">
+/* Transform the CST rooted at node * to the appropriate AST
+*/
+
+mod_ty
+PyAST_FromNodeObject(const node *n, PyCompilerFlags *flags,
+                     PyObject *filename, PyArena *arena)
+{
+    ...
+}
+</pre>
+<p>Awesome! Even though diving right into PyAST_FromNodeObject is quite tempting, it would probably be better for us to explore the interpreter’s steps in order. Thus, we would first complete our quest of finding the tokenizer and the parser, and only then go back to PyAST_FromNodeObject.</p>
+<p>We search for ‘PyParser_ParseStringObject’, and find it in Parser\parsetok.c:</p>
+<pre class="brush: cpp; title: ; notranslate" title="">
+node *
+PyParser_ParseStringObject(const char *s, PyObject *filename,
+                           grammar *g, int start,
+                           perrdetail *err_ret, int *flags)
+{
+    struct tok_state *tok;
+    ...
+    if (*flags &amp; PyPARSE_IGNORE_COOKIE)
+        tok = PyTokenizer_FromUTF8(s, exec_input);
+    else
+        tok = PyTokenizer_FromString(s, exec_input);
+    ...
+    return parsetok(tok, g, start, err_ret, flags);
+}
+</pre>
+<p>Seems like we have found the functions that do the tokenizing, right? We search for ‘PyTokenizer_FromUTF8’, and find its definition right next to the definition of PyTokenizer_FromString, in Parser\tokenizer.c:</p>
+<pre class="brush: cpp; title: ; notranslate" title="">
+/* Set up tokenizer for string */
+
+struct tok_state *
+PyTokenizer_FromString(const char *str, int exec_input)
+{
+    struct tok_state *tok = tok_new();
+    ...
+    str = decode_str(str, exec_input, tok);
+    ...
+    tok-&gt;buf = tok-&gt;cur = tok-&gt;end = tok-&gt;inp = (char*)str;
+    return tok;
+}
+
+struct tok_state *
+PyTokenizer_FromUTF8(const char *str, int exec_input)
+{
+    struct tok_state *tok = tok_new();
+    ...
+    tok-&gt;input = str = translate_newlines(str, exec_input, tok);
+    ...
+    tok-&gt;str = str;
+    ...
+    strcpy(tok-&gt;encoding, "utf-8");
+    ...
+    tok-&gt;buf = tok-&gt;cur = tok-&gt;end = tok-&gt;inp = (char*)str;
+    return tok;
+}
+</pre>
+<p>We are disappointed to find out that each of these two just sets up a tok_state (i.e. a tokenizer struct), that would only be used later to do the tokenizing.<br/>
+Also, it seems like our second guess about the decoding (i.e. the right format for the tokenizer and parser is a utf-8 encoded string) was right. In PyTokenizer_FromString the source string isn’t already a utf-8 encoded string, so decode_str is called, and in PyTokenizer_FromUTF8 it is already a utf-8 encoded string, so no decoding is needed.<br/>
+To be on the safe side, we take a quick look at decode_str (which we also find in Parser\tokenizer.c):</p>
+<pre class="brush: cpp; title: ; notranslate" title="">
+/* Decode a byte string STR for use as the buffer of TOK.
+   Look for encoding declarations inside STR, and record them
+   inside TOK.  */
+
+static const char *
+decode_str(const char *input, int single, struct tok_state *tok)
+{
+    PyObject* utf8 = NULL;
+    const char *str;
+    ...
+    tok-&gt;input = str = translate_newlines(input, single, tok);
+    ...
+    if (tok-&gt;enc != NULL) {
+        utf8 = translate_into_utf8(str, tok-&gt;enc);
+        ...
+        str = PyBytes_AsString(utf8);
+    }
+    ...
+    tok-&gt;decoding_buffer = utf8; /* CAUTION */
+    return str;
+}
+</pre>
+<p>Indeed, decode_str converts a C string into a utf-8 encoded string. This ‘CAUTION’ comment is kind of scary, but we assume it doesn’t really matter to us.</p>
+<p>Back to PyParser_ParseStringObject, we must conclude that <i>parsetok</i> (also defined in parsetok.c) does the tokenizing and the parsing on its own. </p>
+<p>This post has become much longer than I have expected, so we would end this post with a short recap, and continue our journey on the next post. </p>
+<p>We found some things that would help us reach our goal:</p>
+<ol>
+<li>Sometime before the construction of the AST is finished, integer literals are parsed and stored as numbers (specifically, as Python ‘int’ objects, we guess).</li>
+<li><i>PyAST_FromNodeObject</i> in Python\ast.c transforms the CST into an AST.</li>
+<li><i>parsetok</i> in Parser\parsetok.c does the tokenizing and the parsing.</li>
+</ol>
+<p>We also learned some other interesting things:</p>
+<ol>
+<li>Python’s default source encoding is utf-8, and decoding is actually converting source code encoded in any other encoding into a utf-8 encoded string.</li>
+<li>The internal representation of the characters of a ‘str’ object’s is a Py_UCS1/Py_UCS2/Py_UCS4 array, according to the max number of bytes needed to encode any of the chars in the string (as described best in PEP 0393).</li>
+</ol>
+<p><a href="https://orenmn.wordpress.com/2016/01/09/understanding-cpython-by-patching-part-3">part 3</a></p>
+<div id="jp-post-flair" class="sharedaddy sd-like-enabled sd-sharing-enabled"><div class="sharedaddy sd-block sd-like jetpack-likes-widget-wrapper jetpack-likes-widget-unloaded" id="like-post-wrapper-104378497-417-56d5a8361afcf" data-src="//widgets.wp.com/likes/#blog_id=104378497&amp;post_id=417&amp;origin=orenmn.wordpress.com&amp;obj_id=104378497-417-56d5a8361afcf" data-name="like-post-frame-104378497-417-56d5a8361afcf"><h3 class="sd-title">Like this:</h3><p class="likes-widget-placeholder post-likes-widget-placeholder"><span class="button"><span>Like</span></span> <span class="loading">Loading...</span></p><span class="sd-text-color"/><a class="sd-link-color"/></div></div>			</div>
+
+	</div></body></html>

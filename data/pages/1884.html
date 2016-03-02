@@ -1,0 +1,118 @@
+<html><body><div><section class="post-content">
+<p class="post-reading">
+<span class="post-reading-time"/> read
+</p>
+<a name="topofpage"/>
+<p>It's about time I write about <a href="https://github.com/jupyter/tmpnb">tmpnb</a>, a project the Jupyter/IPython developers have been working on. <a href="https://twitter.com/ellisonbg">Brian Granger</a>, one of the project leads, has been asking me over the past few months about enabling some more ambitious use cases of our Docker containers within <a href="https://registry.hub.docker.com/repos/ipython/">IPython</a> and <a href="https://registry.hub.docker.com/repos/jupyter/">Jupyter</a>:</p>
+<ul>
+<li>Provisioned notebooks for usability studies</li>
+<li>Instant notebooks for demos</li>
+<li>JupyterHub for our team</li>
+</ul>
+<p><a href="https://twitter.com/HelenShenWrites">Helen Shen</a>, science writer, and <a href="https://twitter.com/Richvn">Richard Van Noorden</a>, <a href="http://www.nature.com/">Nature</a> reporter, have been working on <a href="http://www.nature.com/news/interactive-notebooks-sharing-the-code-1.16261">an article on the IPython Notebook</a>. They asked us if we could create a way for readers to try the notebook. After reflecting on the current JupyterHub code, I realized that with our Docker images and our <a href="https://github.com/jupyter/configurable-http-proxy">configurable http proxy</a> (node-http-proxy with an admin API), we could easily setup paths and route users. Like any good (deranged) programmer, I first wrote this in bash:</p>
+<div class="highlight"><pre><code class="language-bash" data-lang="bash"><span class="c">#!/usr/bin/env bash</span>
+<span class="nv">myrand</span><span class="o">=</span><span class="sb">`</span>head -c <span class="m">30</span> /dev/urandom <span class="p">|</span> xxd -p<span class="sb">`</span>
+<span class="nv">cont</span><span class="o">=</span><span class="k">$(</span> docker run -it -d -P -e <span class="nv">RAND_BASE</span><span class="o">=</span><span class="nv">$myrand</span> jupyter/demo <span class="k">)</span>
+<span class="nv">port</span><span class="o">=</span><span class="k">$(</span> docker port <span class="nv">$cont</span> <span class="m">8888</span> <span class="p">|</span> cut -d<span class="s2">":"</span> -f2 <span class="k">)</span>
+
+<span class="c"># proxy on         *:8000</span>
+<span class="c"># admin on 127.0.0.1:8001</span>
+curl -H <span class="s2">"Authorization: token $CONFIGPROXY_AUTH_TOKEN"</span> <span class="se">\</span>
+     -XPOST -d <span class="s1">'{"target":"http://localhost:'</span><span class="nv">$port</span><span class="s1">'"}'</span> <span class="se">\</span>
+     http://localhost:8001/api/routes/<span class="nv">$myrand</span>
+curl -H <span class="s2">"Authorization: token $CONFIGPROXY_AUTH_TOKEN"</span> <span class="se">\</span>
+     http://localhost:8001/api/routes <span class="p">|</span> python -m json.tool
+
+<span class="c"># Spit out the URL for the new notebook server</span>
+<span class="nb">echo</span> <span class="sb">`</span>curl -s icanhazip.com<span class="sb">`</span>:8000/<span class="nv">$myrand</span>/
+</code></pre></div>
+<p>Yay! As soon as I had this working it was time to start on a Tornado app to do the same dynamically. I immediately told <a href="https://twitter.com/minrk">Min RK</a> about it and he seemed to like it.</p>
+<p><em>"Nifty! Temporary notebook servers. That could be a thing."</em></p>
+<p><img src="https://speakerd.s3.amazonaws.com/presentations/f5dca2a02e41013233bb1ac45923d988/slide_10.jpg?1412783050" alt=""/></p>
+<h1>↓</h1>
+<p><img src="https://speakerd.s3.amazonaws.com/presentations/f5dca2a02e41013233bb1ac45923d988/slide_11.jpg?1412783050" alt=""/></p>
+<p>Roughly speaking, the tornado application does the above and just a bit more. When the user lands at a hosted tmpnb server:</p>
+<ul>
+<li>A Docker container gets started (the <a href="https://registry.hub.docker.com/u/jupyter/demo/">jupyter/demo image</a> by default)</li>
+<li>A random path is created for them, e.g. <code>/user-asdf/</code></li>
+<li>The proxy is told to route <code>/user-asdf/</code> to the local Docker container running on some port</li>
+<li>The user is redirected to their fresh server.</li>
+</ul>
+<p><em>Whoa whoa whoa, are you saying this will run any Docker container with IPython notebook inside?</em></p>
+<p>Yes, with some caveats. tmpnb needs to be able to tell the underlying containers what path they're being served from so that instead of trying to load <code>/static/notebook.js</code>, it loads <code>/user-A/static/notebook.js</code></p>
+<p>We're working to make this compatible with any IPython notebook Docker container while allowing some configurability. <a href="https://twitter.com/smashwilson">Ash Wilson</a> wants to go further, making this work with <a href="https://github.com/jupyter/tmpnb/pull/69#discussion_r19055529">any Docker container</a>. It's possible so long as all paths are relative (<code>../static/util.js</code>) or adjusted for their assigned base path (<code>/user-a/static/util.js</code>).</p>
+<h2>Tutorials! Books! Learning!</h2>
+<p><img src="https://d23f6h5jpj26xu.cloudfront.net/rujc2e9z7jada_small.gif" alt=""/></p>
+<p><a href="https://github.com/odewahn">Andrew Odewahn</a>, the CTO of O'Reilly Media, and Paco Nathan, mad scientist, have been <a href="https://github.com/odewahn/docker-at-oreilly">driving efforts</a> to make Dockerfiles &amp; Docker images <a href="https://github.com/ceteri/jem-docker">paired with books</a>. They're doing fantastic work so that you can type:</p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">docker run -it -p 8888:8888 ceteri/jem
+</code></pre></div>
+<p>to pull up an IPython notebook with content for a book and play along.</p>
+<p>Just prior to the <a href="https://speakerdeck.com/rgbkrk/tmpnb-at-pytexas">public demo of tmpnb at PyTexas</a>, I called up Andrew to tell him about the tmpnb efforts. He was super excited, just as I was, to get something like this working for authored content.</p>
+<p>Andrew: <em>"We're going to be running a tutorial at Strata using a Docker image we've been working on, do you think we could use this for that?"</em></p>
+<p>Kyle: <em>"Well, there's some engineering work to be done but we can try to make it work."</em></p>
+<p>Fast forward many PRs, some last minute coordinating of a trip to Strata, and we got our prototype pushed forward for the tutorial. Meanwhile, the IPython team at large is very excited about tmpnb. Notables: Min <a href="https://github.com/jupyter/tmpnb/pull/10">added the culling</a> and wrote <a href="https://github.com/jupyter/configurable-http-proxy/pull/8">a trie in Javascript</a> (key-value lookups are not O(1) in JavaScript??!?!?).</p>
+<p>Once we got to a stable state and Andrew put up the Just Enough Math server to Strata, we did some load testing which was a combination of slimerjs/phantomjs and <a href="https://github.com/minrk/nbbot">Min's nbbot</a> (that he wrote just for this). It was clear we were going to need spawn pools in the long run (containers ready to be routed) and that we had some socket and file descriptor issues.</p>
+<p><img src="https://d23f6h5jpj26xu.cloudfront.net/qvrhxbeay9zxpq_small.jpg" alt=""/></p>
+<p>The morning of PyData at Strata, Brian Granger comes over to me before his and Fernando's opening talks, "Is tmpnb ready?" I can only respond "Yes? Maybe. Sure, why not." As Brian walks back up to the stage, worry comes over me as I had not applied the updates to the currently deployed system. "Really hope this works." What preceded was 30 minutes of relative bliss as 5... 10... 20... 40... 80 users logged on to tmpnb.org. Everyone was able to follow along with the notebooks themselves, clicking and opening the notebooks that Fernando was running through. We got our first tweet as this was going on</p>
+
+
+<p>Woohoo! Eventually though, the dreaded hand raised:</p>
+<p><em>"Hey, tmpnb.org isn't working anymore. Can you share a link to the notebooks?"</em></p>
+<p>The proxy could no longer get file descriptors.</p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">13:28:11.164 - Proxy error:  code=EMFILE, errno=EMFILE, syscall=connect
+13:28:11.408 - Proxy error:  code=EMFILE, errno=EMFILE, syscall=connect
+13:28:11.666 - Proxy error:  code=EMFILE, errno=EMFILE, syscall=connect
+</code></pre></div>
+<p>Ouch.</p>
+<p>While checking on what was going on with the file descriptors, we noticed that <code>lsof</code> + Docker didn't play well since the filesystems aren't the same.</p>
+<div class="highlight"><pre><code class="language-text" data-lang="text"><a class="__cf_email__" href="/cdn-cgi/l/email-protection" data-cfemail="7a0815150e3a1e1f1715">[email protected]</a>:~# lsof 2&gt; /dev/null | grep python | cut -c 88- | sort | uniq -c | sort -nr | head
+  25861 anon_inode
+  13570 can't identify protocol
+   7814 pipe
+   3067 /dev/urandom
+   2682 /home/jupyter/.ipython/profile_default/history.sqlite
+   1833 /dev/null
+   1637 /
+   1587 /usr/lib/x86_64-linux-gnu/libzmq.so.3.1.0 (stat: No such file or directory)
+   1587 /usr/lib/x86_64-linux-gnu/libstdc++.so.6.0.19 (path dev=8,1, inode=7783)
+   1587 /usr/lib/x86_64-linux-gnu/libsqlite3.so.0.8.6 (path dev=8,1, inode=7737)
+</code></pre></div>
+<p>Even with the troubles above, Olivier Grisel wanted to run one for his tutorial too. We quickly wrapped one up based on the <code>jupyter/demo</code> image within a few minutes and off he went.</p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">FROM jupyter/demo
+
+USER root
+RUN rm -rf ipython_examples *.ipynb
+ADD . /home/jupyter
+RUN chown jupyter:jupyter . -R
+RUN pip3 install psutil
+
+USER jupyter
+</code></pre></div>
+<p>Apparently his ran without any hitches. He is one of my favorite people in the world. Note: he did not have nginx in front - it was straight to the configurable proxy AND the proxy was running in Docker instead of supervisor.</p>
+<p>One optimization I took out of this (not clear in the above <code>anon_inode</code> references) was to pull the static content out of the container and serve via nginx. That really helped performance in addition to saving file descriptors.</p>
+<h3>Just Enough Math</h3>
+<p>When it came to the Just Enough Math tutorial, I was able to get static content served on the nginx box quickly by pulling the right static content out of the docker images directly using <code>docker cp</code>. With that fix just in time for the tutorial, it was another chance to see tmpnb live (albeit on the strataconf.com domain).</p>
+<blockquote class="twitter-tweet" lang="en"><p>Watching <a href="https://twitter.com/pacoid">@pacoid</a> and <a href="https://twitter.com/allenday">@allenday</a> rocking the IPython notebook and the audience using tmpnb at <a href="https://twitter.com/hashtag/Strataconf?src=hash">#Strataconf</a> <a href="http://t.co/HwSyGn3RP2">pic.twitter.com/HwSyGn3RP2</a></p>— Kyle R Kelley (@rgbkrk) <a href="https://twitter.com/rgbkrk/status/522449621378154496">October 15, 2014</a></blockquote>
+
+<p>Great! It started off well and for most folks they got to just experience the content. No thought to the platform it was running on, they just got to focus on the IPython notebook and the tutorial content. Wonderful.</p>
+<p>45 minutes in this time, with a bigger crowd (around 150) we hit our limits again. This time we ran out of actual socket descriptors for the proxy. Doing some digging live during the tutorial, we found out where the issues laid.</p>
+<p>For each notebook of each user, 3 extra sockets were being opened - one for each of IPython's websockets for <code>shell</code>, <code>stdin</code>, and <code>iopub</code>. <em>That's on every notebook file.</em> This meant that the first notebook was "ok" but then new notebooks (Not servers, the actual files, e.g. Untitled0.ipynb, Untitled1.ipynb) would open 3 more socket descriptors. Because this was proxied from nginx -&gt; node -&gt; docker, you can double that number too.</p>
+<p>With only two notebooks per user and 110 users, that's on the order of 1430 sockets. Node was running as nobody and could only open 1024 ports. Despite my (primitive) attempts to change ulimits on the fly, I couldn't get it stable right then and there.</p>
+<h3>NYC Python Meetup</h3>
+<p><a href="https://twitter.com/dontusethiscode">James Powell</a>, having seen <a href="https://speakerdeck.com/rgbkrk/tmpnb-at-pytexas">my talk at PyTexas on tmpnb</a>, asked if I could speak at the NYC Python meetup. Since I had the lightning talk ready and had a new system up with <a href="https://twitter.com/smashwilson">Ash Wilson</a>'s spawn pool PR, I decided to give it a go.</p>
+<blockquote class="twitter-tweet" data-cards="hidden" lang="en"><p>Showed off <a href="https://twitter.com/smashwilson">@smashwilson</a>'s tmpnb PR <a href="https://t.co/RWSj3Rd9ps">https://t.co/RWSj3Rd9ps</a> at <a href="https://twitter.com/nycpython">@nycpython</a> tonight. Flawless 0s nb demo! Thanks <a href="https://twitter.com/dontusethiscode">@dontusethiscode</a> and pals!</p>— Kyle R Kelley (@rgbkrk) <a href="https://twitter.com/rgbkrk/status/522965532770074624">October 17, 2014</a></blockquote>
+
+<p>Needless to say, that went flawlessly (besides my own laptop display issues) and the audience was wonderful.</p>
+<h2>Put some Teeth on that Cloud</h2>
+<p><img src="https://d23f6h5jpj26xu.cloudfront.net/j98s5ozwffseya_small.png" alt=""/></p>
+<p>Currently I've been deploying this on fairly hefty machines, subdividing the machines up to give individual users (roughly) the same amount of storage they would come to expect on a VPS (virtual private server). One of Rackspace's <a href="http://www.rackspace.com/cloud/servers/onmetal/">OnMetal</a> Memory boxes has half a terabyte of RAM, so I figured I could subdivide that up into 512 MB chunks. With 1000 users, that gives us roughly 12 GB for the main OS.</p>
+<p>The price of the OnMetal Memory machines is $1600, so the per user per month price is <em>$1.60</em>. Packing bare metal with containers looks very economical to me but I'm also subdividing 24 cores across 1000 users. What does a typical cheap VPS do for slicing cores (other than telling you that you're sharing a CPU)? I'd like to explore all this quite a bit more. If I'm off, please let me know.</p>
+<h2>Thanks Rackspace, O'Reilly, Nature, Others</h2>
+<p>The temporary notebook service has been graciously hosted by <a href="https://developer.rackspace.com">Rackspace</a> on their OnMetal servers. Andrew Odewahn &amp; O'Reilly ran the Just Enough Math server at Strata. I am forever grateful to both companies for driving forward with such new technologies and letting me explore with them.</p>
+<p>Thank you to Richard Van Noorden, Brian Granger, and Min RK for spawning the initial impetus and ideas behind tmpnb. Oh and Docker! :D</p>
+<hr/>
+<p>Comments on <a href="http://www.reddit.com/r/Python/comments/2l3gk4/creating_an_instant_temporary_ipython_notebook/">Reddit via <code>/r/python</code></a> or <a href="https://twitter.com/rgbkrk/status/529005294064775168">on Twitter</a>.</p>
+<h3>Read this next</h3>
+<p><a href="/ops-lessons-and-instant-temporary-ipython-jupyter-notebooks/">Ops Lessons on Instant Temporary IPython Notebooks</a></p>
+</section>
+</div></body></html>

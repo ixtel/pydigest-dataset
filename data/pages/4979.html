@@ -1,0 +1,127 @@
+<html><body><div><div class="entry-content">
+		<p><a href="http://en.wikipedia.org/wiki/Geolocation">Geolocation</a> is the process of identifying the geographic location of an object such as a mobile phone or a computer. Twitter allows its users to provide their location when they publish a tweet, in the form of latitude and longitude coordinates. With this information, we are ready to create some nice visualisation for our data, in the form of interactive maps.</p>
+<p>This article briefly introduces the <a href="http://geojson.org/">GeoJSON</a> format and <a href="http://leafletjs.com/">Leaflet.js</a>, a nice Javascript library for interactive maps, and discusses its integration with the Twitter data we have collected in the previous parts of this tutorial (see <a href="http://marcobonzanini.com/2015/03/23/mining-twitter-data-with-python-part-4-rugby-and-term-co-occurrences/">Part 4</a> for details on the rugby data set).</p>
+<p>Tutorial Table of Contents:</p>
+
+<h2>GeoJSON</h2>
+<p>GeoJSON is a format for encoding geographic data structures. The format supports a variety of geometric types that can be used to visualise the desired shapes onto a map. For our examples, we just need the simplest structure, a <tt>Point</tt>. A point is identified by its coordinates (latitude and longitude). </p>
+<p>In GeoJSON, we can also represent objects such as a <tt>Feature</tt> or a <tt>FeatureCollection</tt>. The first one is basically a geometry with additional properties, while the second one is a list of features.</p>
+<p>Our Twitter data set can be represented in GeoJSON as a <tt>FeatureCollection</tt>, where each tweet would be an individual <tt>Feature</tt> with its one geometry (the aforementioned <tt>Point</tt>).</p>
+<p>This is how the JSON structure looks like:</p>
+<pre class="brush: jscript; title: ; notranslate" title="">
+{
+    "type": "FeatureCollection",
+    "features": [
+        { 
+            "type": "Feature",
+            "geometry": {
+                "type": "Point", 
+                "coordinates": [some_latitude, some_longitude]
+            },
+            "properties": {
+                "text": "This is sample a tweet",
+                "created_at": "Sat Mar 21 12:30:00 +0000 2015"
+            }
+        },
+        /* more tweets ... */
+    ]
+}
+</pre>
+<h2>From Tweets to GeoJSON</h2>
+<p>Assuming the data are stored in a single file as described in the first chapter of this tutorial, we simply need to iterate all the tweets looking for the <em>coordinates</em> field, which may or may not be present. Keep in mind that you need to use <em>coordinates</em>, because the <em>geo</em> field is deprecated (see <a href="https://dev.twitter.com/overview/api/tweets">the API</a>).</p>
+<p>This code will read the data set, looking for tweets where the coordinates are explicitely given. Once the GeoJSON data structure is created (in the form of a Python dictionary), then the data are dumped into a file called <tt>geo_data.json</tt>:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+# Tweets are stored in "fname"
+with open(fname, 'r') as f:
+    geo_data = {
+        "type": "FeatureCollection",
+        "features": []
+    }
+    for line in f:
+        tweet = json.loads(line)
+        if tweet['coordinates']:
+            geo_json_feature = {
+                "type": "Feature",
+                "geometry": tweet['coordinates'],
+                "properties": {
+                    "text": tweet['text'],
+                    "created_at": tweet['created_at']
+                }
+            }
+            geo_data['features'].append(geo_json_feature)
+
+# Save geo data
+with open('geo_data.json', 'w') as fout:
+    fout.write(json.dumps(geo_data, indent=4))
+</pre>
+<h2>Interactive Maps with Leaflet.js</h2>
+<p><a href="http://leafletjs.com">Leaflet.js</a> is an open-source Javascript library for interactive maps. You can create maps with tiles of your choice (e.g. from OpenStreetMap or MapBox), and overlap interactive components.</p>
+<p>In order to prepare a web page that will host a map, you simply need to include the library and its CSS, by putting in the head section of your document the following lines:</p>
+<pre class="brush: xml; title: ; notranslate" title="">
+&lt;link rel="stylesheet" href="http://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.3/leaflet.css" /&gt;
+&lt;script src="http://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.3/leaflet.js"&gt;&lt;/script&gt;
+</pre>
+<p>Moreover, we have all our GeoJSON data in a separate file, so we want to load the data dynamically rather than manually put all the points in the map. For this purpose, we can easily play with <a href="https://jquery.com/">jQuery</a>, which we also need to include:</p>
+<pre class="brush: xml; title: ; notranslate" title="">
+&lt;script src="http://code.jquery.com/jquery-2.1.0.min.js"&gt;&lt;/script&gt;
+</pre>
+<p>The map itself will be placed into a <tt>div</tt> element:</p>
+<pre class="brush: xml; title: ; notranslate" title="">
+&lt;!-- this goes in the &lt;head&gt; --&gt;
+&lt;style&gt;
+#map {
+    height: 600px;
+}
+&lt;/style&gt;
+&lt;!-- this goes in the &lt;body&gt; --&gt;
+&lt;div id="map"&gt;&lt;/div&gt;
+</pre>
+<p>We’re now ready to create the map with Leaflet: </p>
+<pre class="brush: jscript; title: ; notranslate" title="">
+// Load the tile images from OpenStreetMap
+var mytiles = L.tileLayer('http://{s}.tile.osm.org/{z}/{x}/{y}.png', {
+    attribution: '&amp;copy; &lt;a href="http://osm.org/copyright"&gt;OpenStreetMap&lt;/a&gt; contributors'
+});
+// Initialise an empty map
+var map = L.map('map');
+// Read the GeoJSON data with jQuery, and create a circleMarker element for each tweet
+// Each tweet will be represented by a nice red dot
+$.getJSON("./geo_data.json", function(data) {
+    var myStyle = {
+        radius: 2,
+        fillColor: "red",
+        color: "red",
+        weight: 1,
+        opacity: 1,
+        fillOpacity: 1
+    };
+
+    var geojson = L.geoJson(data, {
+        pointToLayer: function (feature, latlng) {
+            return L.circleMarker(latlng, myStyle);
+        }
+    });
+    geojson.addTo(map)
+});
+// Add the tiles to the map, and initialise the view in the middle of Europe
+map.addLayer(mytiles).setView([50.5, 5.0], 5);
+</pre>
+<p>A screenshot of the results:</p>
+<p><a href="https://marcobonzanini.files.wordpress.com/2015/06/rugby-map-osm.png"><img src="https://marcobonzanini.files.wordpress.com/2015/06/rugby-map-osm.png?w=300&amp;h=203" alt="rugby-map-osm" class="alignnone size-medium wp-image-148"/></a></p>
+<p>The above example uses OpenStreetMap for the tile images, but Leaflet lets you choose other services. For example, in the following screenshot the tiles are coming from MapBox. </p>
+<p><a href="https://marcobonzanini.files.wordpress.com/2015/06/rugby-map-mapbox.png"><img src="https://marcobonzanini.files.wordpress.com/2015/06/rugby-map-mapbox.png?w=300&amp;h=217" alt="rugby-map-mapbox" class="alignnone size-medium wp-image-149"/></a></p>
+<p>You can see the interactive maps in action here:</p>
+
+<h2>Summary</h2>
+<p>In general there are many options for data visualisation in Python, but in terms of browser-based interaction, Javascript is also an interesting option, and the two languages can play well together. This article has shown that building a simple interactive map is a fairly straightforward process. </p>
+<p>With a few lines of Python, we’ve been able to transform our data into a common format (GeoJSON) that can be passed onto Javascript for visualisation. Leaflet.js is a nice Javascript library that, almost out of the box, lets us create some nice interactive maps.</p>
+<p>Tutorial Table of Contents:</p>
+
+<p><a href="http://www.twitter.com/marcobonzanini">@MarcoBonzanini</a></p>
+<div id="jp-post-flair" class="sharedaddy sd-like-enabled sd-sharing-enabled"><div class="sharedaddy sd-block sd-like jetpack-likes-widget-wrapper jetpack-likes-widget-unloaded" id="like-post-wrapper-82018920-147-56d5a79e4eef8" data-src="//widgets.wp.com/likes/#blog_id=82018920&amp;post_id=147&amp;origin=marcobonzanini.wordpress.com&amp;obj_id=82018920-147-56d5a79e4eef8" data-name="like-post-frame-82018920-147-56d5a79e4eef8"><h3 class="sd-title">Like this:</h3><p class="likes-widget-placeholder post-likes-widget-placeholder"><span class="button"><span>Like</span></span> <span class="loading">Loading...</span></p><span class="sd-text-color"/><a class="sd-link-color"/></div>
+<p id="jp-relatedposts" class="jp-relatedposts">
+	<h3 class="jp-relatedposts-headline"><em>Related</em></h3>
+</p></div>	</div>
+
+	
+</div></body></html>

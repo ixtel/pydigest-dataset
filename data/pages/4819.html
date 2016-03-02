@@ -1,0 +1,311 @@
+<html><body><div><post no-compile=""><h2 id="overview">Overview</h2>
+<p>I've spent some time thinking about generating personalized recommendations for articles since I began working on an <a href="http://www.pinza.co/">iOS reading companion for the Pinboard.in bookmarking service</a>. One of the features I want to provide is a feed of recommended articles for my users based on articles they've saved and read. In this tutorial we will look at how to implement a similar feature: how to recommend articles for users based on articles they've shared on Twitter.</p>
+
+<p>The main tools we will use are Python and Neo4j, a graph database. We will use Python for fetching the data from Twitter, extracting keywords from the articles shared and for inserting the data into Neo4j. To find recommendations we will use Cypher, the Neo4j query language.</p>
+<h3 id="neo4j">Neo4j</h3>
+<p>Neo4j is a type of NoSQL database known as a <a href="http://neo4j.com/developer/graph-database/">graph database</a>. Instead of tables or documents, the fundamental data type of a graph database is a graph (nodes and edges). Modeling data as a graph allows for efficiently generating recommendations by traversing the graph. If you haven't been exposed to Neo4j before check out some this <a href="http://neo4j.com/developer/get-started/">material</a>. Getting started with Neo4j is as easy as downloading the latest version <a href="http://neo4j.com/download/">here</a> or using a hosted instance from <a href="http://www.graphenedb.com/">GrapheneDB</a> or <a href="http://graphstory.com/">GraphStory</a>. There's even a Cloud Formation config for easily spinning up AWS instances <a href="https://github.com/neo4j-contrib/ec2neo">here</a>.</p>
+<h3 id="python-libraries">Python Libraries</h3>
+<p>There are lots of great open source Python libraries available. Here are three that we'll be using:</p>
+<ul>
+<li><strong><a href="https://github.com/tweepy/tweepy">Tweepy</a></strong> - a lightweight wrapper around the Twitter API. We will use Tweepy to make authenticated requests to Twitter to search for links shared by people we follow on Twitter (our Twitter friends). Install with <code>pip install tweepy</code>.</li>
+<li><strong><a href="https://github.com/codelucas/newspaper">Newspaper3k</a></strong> - Newspaper is a library for article scraping, parsing and keyword extraction. We will use Newspaper to extract the text from the links our friends have shared on Twitter and find relevant keywords for each article. Install with <code>pip install newspaper3k</code> (assuming Python 3).</li>
+<li><strong><a href="https://github.com/nigelsmall/py2neo">Py2neo</a></strong> - Py2neo is a Python binding for Neo4j. We will use Py2neo to execute queries against Neo4j, mainly for data insertion. Install with <code>pip install py2neo</code>.</li>
+</ul>
+
+<p>We first need some data to power our recommender system. As I mentioned earlier, this data will come from Twitter. Specifcally, we are interested in links that our friends have posted to Twitter. At a high level, what we want to do is ask Twitter for a list of all of our friends (users that we are following), then iterate through this list and for each friend find all the URLs that they have shared on Twitter (we will just make the assumption that any url shared on Twitter is an article).</p>
+<p>To use the Twitter API we will need to create a Twitter application and generate the necessary keys for authentication. If you haven't created a Twitter application before you can find out how to do it <a href="https://dev.twitter.com/">here</a>. </p>
+<p>Once we have our API keys we can use Tweepy to create an authenticated Tweepy instance:</p>
+<pre><code class="lang-python">im{}{}rt tw{}{}py
+co{}{}um{}{}_k{}{} = 'x{}{}'
+co{}{}um{}{}_s{}{}ret = 'x{}{}'
+</code></pre>
+<p>We've imported the Tweepy library, declared our API tokens and authentication method and instanciated an instance of <code>tweepy.API</code> called <code>api</code>. The next step is to get a list of all our friends. We can do that with a single call to the Tweepy api instance:</p>
+<pre><code>ids = api.friends_ids()
+</code></pre><p><code>ids</code> now contains a list of Twitter user ids. To find all urls shared by our friends we'll need to ask Twitter for each friend's status (a tweet is a <code>status</code> in the Twitter docs) and look through each status for a url. Let's start by seeing how we can ask Twitter for our friends' tweets:</p>
+<pre><code>for fr{}{}nd in id{}{}
+    st{}{}us{}{} = ap{}{}us{}{}_t{}{}el{}{}e({}{}=f{}{}en{}{} co{}{}t={}{}00)
+    for st{}{}us in st{}{}us{}{}:
+</code></pre><p>Now that we have a status we need to determine if it has a url in it. Fortunately the <code>status</code> model object retuned by Tweepy makes it very easy to find urls embedded in a tweet. Pictures, videos, and urls embedded in a tweet are extracted into an <code>entities</code> object in the status object with any urls residing in a sub object called <code>urls</code>. You can see the complete data format in the Twitter docs <a href="https://dev.twitter.com/overview/api/tweets">here</a>.</p>
+<pre><code>for friend in ids:
+    statuses = api.user_timeline(id=friend, count=1000)
+    for status in statuses:
+        if status.entities and status.entities['urls']:
+            for url in status.entities['urls']:
+                # now we have a url that was embedded in a tweet
+</code></pre><p>Once we've found a url let's store the url and the tweet's author's username into a list, which we'll then write to a csv file to use later. The full code for fetching friends' urls and writing to the csv file looks like this:</p>
+<pre><code class="lang-python,linenums=true">im{}{}rt tw{}{}py
+co{}{}um{}{}_k{}{} = 'x{}{}'
+co{}{}um{}{}_s{}{}ret = 'x{}{}'
+</code></pre>
+<h2 id="parsing-articles-with-newspaper">Parsing articles with Newspaper</h2>
+<p>Now that we have some urls, the next step is to figure out what all these articles are about. We will do this using the newspaper3k Python library. Newspaper has features for scraping articles from a news site and extracting elements from each article, including the full text of the article, keywords, the authors and even any images and videos included in the article.</p>
+<p>Here's an example:</p>
+<pre><code>In [1]: from newspaper import Article
+
+In [2]: a = Article('http://www.lyonwj.com/using-neo4j-spatial-and-leaflet-js-with-mapbox/')
+
+In [3]: a.download()
+
+In [4]: a.parse()
+
+In [5]: a.nlp()
+
+In [6]: a.authors
+Out[6]: ['William Lyon']
+
+In [7]: a.keywords
+Out[7]:
+['lyon',
+ 'location',
+ 'william',
+ 'polygon',
+ 'mapbox',
+ 'businessnode',
+ 'neo4j',
+ 'node',
+ 'category',
+ 'businesses',
+ 'query',
+ 'spatial',
+ 'using',
+ 'data',
+ 'map',
+ 'search',
+ 'business']
+
+In [8]: a.summary
+Out[8]: 'Neo4j Spatial is a plugin for Neo4j ...'
+
+
+In [9]: a.top_img
+Out[9]: 'http://www.lyonwj.com/public/img/out.gif'
+</code></pre><p>Let's define a function to download the article, parse it and extract the keywords and authors:</p>
+<pre><code class="lang-python,linenums=true">def pa{}{}eU{}{}(u{}{}):
+    a = Ar{}{}cl{}{}ur{}{}
+    tr{}{}
+</code></pre>
+<h2 id="inserting-into-neo4j">Inserting Into Neo4j</h2>
+<p>Once we have the keywords and authors of the article we are ready to insert everything into Neo4j. Here's the data model that we'll be working with:</p>
+<p><img src="https://dl.dropboxusercontent.com/u/67572426/datamodel_1.png" alt="Topic Recommendation data model"/></p>
+<p>We have four nodes (User, URL, Keyword, and Author) and three edges describing the relationships between these nodes.</p>
+<p>We will use the Python library <code>py2neo</code> to connect to our Neo4j instance, define the insertion Cypher query, then iterate through our list of <code>(user, url)</code> tuples, parsing the article for keywords at each iteration before executing the insertion Cypher query for each tuple:</p>
+<pre><code class="lang-python,linenums=true">graphdb = Graph('http://URL_FOR_NEO4J_SERVER_HERE/db/data')
+
+INSERT_USER_URL_QUERY = '''
+    MERGE (user:User {username: {username}})
+    MERGE (url:URL {url: {url}})
+    CREATE UNIQUE (user)-[:SHARED]-&gt;(url)
+    FOREACH (kw in {keywords} | MERGE (k:Keyword {text: kw}) CREATE UNIQUE (k)&lt;-[:IS_ABOUT]-(url))
+    FOREACH (author in {authors} | MERGE (a:Author {name: author}) CREATE UNIQUE(a)&lt;-[:WRITTEN_BY]-(url))
+'''
+
+def insertUserURL(user, url):
+    authors, keywords = parseURL(url)
+    if authors and keywords:
+        params = {}
+        params['username'] = user
+        params['url'] = url
+        params['authors'] = authors
+        params['keywords'] = keywords
+        graphdb.cypher.execute(INSERT_USER_URL_QUERY, params)
+
+for user, url in urls:
+    insertUserURL(user, url)
+</code></pre>
+<p>We've defined a parameterized Cypher query that we can reuse for each insertion. Let's break this query down line by line so we understand how it works.</p>
+<p>First we use a <code>MERGE</code> statement to find or create the <code>User</code> node for the user that tweeted the URL. We will create (or match against, if it has already been created) a <code>username</code> property on the node. <code>username</code> is also the name of a parameter we are using to construct the query:</p>
+<pre><code>ME{}{}E (u{}{}r:{}{}er {u{}{}rn{}{}e: {u{}{}rn{}{}e}{}{}
+</code></pre><p>Next we use the same logic and use a <code>MERGE</code> statment to find or create the <code>URL</code> node for the article shared:</p>
+<pre><code>MERGE (url:URL {url: {url}})
+</code></pre><p>Now we create a <code>:SHARED</code> relationship between the <code>User</code> node and the <code>URL</code> node. The <code>CREATE UNIQUE</code> command ensures that we are not creating duplicate relationships:</p>
+<pre><code>CR{}{}TE UN{}{}UE (u{}{}r){}{}:S{}{}RE{}{}-&gt;{}{}rl)
+</code></pre><p>In this next statement <code>keywords</code> is an array of strings that we are passing as a parameter. We use the <code>FOREACH</code> command to iterate through each keyword and execute a <code>MERGE</code> and <code>CREATE UNIQUE</code> statement to create the <code>Keyword</code> node and the <code>:IS_ABOUT</code> relationship between the <code>Keyword</code> node and <code>URL</code> node. Alternatively we could have used the Cypher <code>UNWIND</code> command here in lieu of <code>FOREACH</code>:</p>
+<pre><code>FOREACH (kw in {keywords} | MERGE (k:Keyword {text: kw}) CREATE UNIQUE (k)&lt;-[:IS_ABOUT]-(url))
+</code></pre><p>Finally, we use a similar <code>FOREACH</code> command for each author of the article (these are the authors of the article, not the tweet, which is why we could have multiple):</p>
+<pre><code>FO{}{}ACH (a{}{}hor in {a{}{}ho{}{}} | ME{}{}E (a{}{}ut{}{}r {n{}{}e: au{}{}or{}{} CR{}{}TE UN{}{}UE{}{})</code></pre><p>This works, but we're spending a lot of time waiting for network requests to complete. This seems like a good opportunity to use concurreny and multi-threading so that we can process multiple articles across threads.</p>
+<pre><code class="lang-python,linenums=true">def doWork():
+    while True:
+        urlTuple = q.get()
+        insertUserURL(urlTuple[0], urlTuple[1])
+        q.task_done()
+
+q = Queue(concurrent * 2)
+
+for i in range(concurrent):
+    t = Thread(target=doWork)
+    t.daemon = True
+    t.start()
+try:
+    with open('twitter_urls_friends.csv', 'r') as f:
+        for line in f:
+            l = line.split(',')
+            url = l[0]
+            user = l[1].replace('\n', '')
+            q.put((user, url))
+    q.join()
+except:
+    pass
+</code></pre>
+<p>There's an IPython Notebook available <a href="https://github.com/johnymontana/topic-rec/blob/master/topic_recommendations.ipynb">here</a> that has the full code for getting data from Twitter and inserting into Neo4j. Note that you'll need to insert your own Twitter API keys and Neo4j server path.</p>
+<h2 id="writing-neo4j-queries">Writing Neo4j Queries</h2>
+<p>Now that we have all our data inserted into Neo4j we can start writing queries to generate personalized recommendations of articles for our friends on Twitter. </p>
+<h3 id="cypher">Cypher</h3>
+<p>Cypher is the query language for making queries to Neo4j. We've already seen it used above to insert our data into Neo4j. Now we'll use it to query our existing data. Let's start with some introductory Cypher queries to explore our data set. There are some great <a href="http://neo4j.com/developer/cypher-query-language/">getting</a> <a href="http://neo4j.com/docs/stable/cypher-query-lang.html">started</a> <a href="https://www.airpair.com/neo4j/posts/getting-started-with-neo4j-and-cypher">tutorials</a> and also the <a href="http://neo4j.com/docs/stable/cypher-refcard/">Cypher Ref Card</a> for reference.</p>
+<h3 id="exploratory-queries">Exploratory Queries</h3>
+<p>To execute Cypher queries we can use the excellent <a href="http://neo4j.com/developer/guide-neo4j-browser/">Neo4j Browser</a> application or execute them from the command line using the <a href="http://neo4j.com/docs/stable/shell.html">Neo4j-shell</a>. I like to use the Neo4j Browser if I want to make use of any of the graphical tools for exploring and visualizing the data set. The Neo4j-shell is useful for running queries on a remote machine where you don't want to go to the hassel of exposing the right ports for access to the browser. I'll be posting responses from both interfaces here.</p>
+<p>I always like to start exploring a dataset by counting things. This helps me to wrap my head around the scope of the data.</p>
+<h4 id="how-many-users-are-in-my-data-set-">How many users are in my data set?</h4>
+<p>Cypher uses pattern matching to define queries: define the pattern with ASCII art like nodes and relationships and Neo4j will return all matches of that pattern.</p>
+<pre><code>ne{}{}j-{}{} (?{}{} MA{}{}H (u{}{}se{}{} RE{}{}RN co{}{}t({}{};
++-{}{}--{}{}--{}{}
+| co{}{}t({}{} |
+</code></pre><h4 id="how-many-articles-are-in-the-dataset-">How many articles are in the dataset?</h4>
+<pre><code>neo4j-sh (?)$ MATCH (url:URL) RETURN count(url);
++------------+
+| count(url) |
++------------+
+| 6103       |
++------------+
+1 row
+165 ms
+</code></pre><h4 id="how-many-articles-have-i-shared-on-twitter-">How many articles have I shared on Twitter?</h4>
+<pre><code>ne{}{}j-{}{} (?{}{} MA{}{}H (u{}{}r:{}{}er {u{}{}rn{}{}e: 'l{}{}nw{}{}}){}{}:S{}{}RE{}{}-&gt;{}{}:U{}{}) RE{}{}RN co{}{}t({}{};
++-{}{}--{}{}--{}{}
+| co{}{}t({}{} |
+</code></pre><h4 id="who-has-shared-the-most-articles-">Who has shared the most articles?</h4>
+<p>We can use <code>ORDER BY</code> and <code>LIMIT</code> to sort and filter our results for only the top five most prolific sharers.</p>
+<pre><code>neo4j-sh (?)$ MATCH (u:User)-[s:SHARED]-&gt;(URL)
+&gt;             WITH u, count(s) AS num
+&gt;             RETURN u.username AS user, num ORDER BY num DESC LIMIT 5;
++-----------------------+
+| user            | num |
++-----------------------+
+| "macstoriesnet" | 178 |
+| "jabawack"      | 122 |
+| "doctorow"      | 121 |
+| "thiakx"        | 118 |
+| "danfoody"      | 105 |
++-----------------------+
+5 rows
+180 ms
+</code></pre><h4 id="how-many-articles-does-each-user-share-on-average-">How many articles does each user share on average?</h4>
+<p>Cypher also has the standard mathematical functions for computing sum, average, standard deviation, etc.</p>
+<pre><code>ne{}{}j-{}{} (?{}{} MA{}{}H (u{}{}se{}{}-[{}{}SH{}{}ED{}{}&gt;({}{}L)
+&gt;             WI{}{} u, co{}{}t({}{} AS num
+&gt;             RE{}{}RN av{}{}nu{}{} AS av{}{}ag{}{}sh{}{}es;
+</code></pre><h4 id="have-any-articles-been-shared-multiples-times-">Have any articles been shared multiples times?</h4>
+<pre><code>neo4j-sh (?)$ MATCH (u:URL)&lt;-[s:SHARED]-()
+&gt;             WITH u, count(s) as shares
+&gt;             RETURN u.url as url, shares ORDER BY shares DESC LIMIT 5;
++-----------------------------------------------------------------------------+
+| url                                                                | shares |
++-----------------------------------------------------------------------------+
+| "http://fiftythree.com/think"                                      | 11     |
+| "http://bit.ly/startupbutte"                                       | 9      |
+| "http://blog.getprismatic.com/deeper-content-analysis-with-..."    | 8      |
+| "http://jexp.de/blog/2015/04/neo4j-server-extension-for-sin..."    | 7      |
+| "https://medium.com/p/aspects-distilled-why-prismatic-s-int..."    | 7      |
++-----------------------------------------------------------------------------+
+5 rows
+760 ms
+</code></pre><h4 id="what-are-the-top-keywords-across-all-articles-">What are the top keywords across all articles?</h4>
+<pre><code>ne{}{}j-{}{} (?{}{} MA{}{}H (u{}{}RL{}{}[r{}{}S_{}{}OU{}{}-&gt;{}{}w:{}{}yw{}{}d)
+&gt;             WI{}{} kw, co{}{}t({}{} AS num
+&gt;             RE{}{}RN kw{}{}ext as ke{}{}or{}{} num OR{}{}R BY num DE{}{} LI{}{}T 10;
+</code></pre><p>Note that not all these keywords are perfect. Some seem to be part of a larger phrase. Others, like "medium" were probably taken out of context - medium probably because of the publishing platform <a href="https://medium.com/">Medium</a>. Really we are intested in the <em>topics</em> of the article, not just keywords. An alternative would be to use something like the <a href="https://github.com/Prismatic/interest-graph">Prismatic Interest Graph API</a>. But this is a pretty good start.</p>
+<h4 id="what-are-the-top-keywords-for-the-articles-that-i-ve-shared-">What are the top keywords for the articles that I've shared?</h4>
+<p>Looking at the keywords extracted from all the articles you've shared on Twitter can really give an in-depth profile of a person, so I won't call out any of my Twitter friends. Instead, let's look at the top keywords from all articles that I've shared:</p>
+<pre><code>neo4j-sh (?)$ MATCH (u:User {username: 'lyonwj'})
+&gt;             MATCH (u)-[:SHARED]-(a:URL)-[r:IS_ABOUT]-&gt;(kw:Keyword)
+&gt;             WITH kw, count(r) AS num
+&gt;             RETURN kw.text as keyword, num 
+&gt;             ORDER BY num DESC LIMIT 25;
++---------------------+
+| keyword       | num |
++---------------------+
+| "startup"     | 8   |
+| "youre"       | 8   |
+| "data"        | 7   |
+| "startups"    | 6   |
+| "world"       | 6   |
+| "graph"       | 6   |
+| "market"      | 5   |
+| "technology"  | 5   |
+| "social"      | 4   |
+| "developers"  | 4   |
+| "users"       | 4   |
+| "chile"       | 4   |
+| "tech"        | 3   |
+| "understand"  | 3   |
+| "mobile"      | 3   |
+| "20"          | 3   |
+| "going"       | 3   |
+| "program"     | 3   |
+| "programming" | 3   |
+| "language"    | 3   |
+| "industry"    | 3   |
+| "web"         | 3   |
+| "team"        | 3   |
+| "app"         | 3   |
+| "way"         | 3   |
++---------------------+
+25 rows
+138 ms
+neo4j-sh (?)$
+</code></pre><p>I'm showing the top 25 here because I think it's interesting to look at the distribution of the top keywords. This is from a total of 564 distinct keywords extracted from the articles I've shared.</p>
+<h3 id="querying-for-recommendations">Querying For Recommendations</h3>
+<p>Now that we've explored the dataset a bit and are familar with Cypher let's generate some article recommendations! There's a lot of <a href="https://www.coursera.org/learn/recommender-systems">great content</a> online about <a href="http://en.wikipedia.org/wiki/Recommender_system">recommender systems</a> - and <a href="http://arxiv.org/pdf/1004.1001.pdf">especially graph based methods</a> so I'm not going to rehash the details too much. Mostly I just want to demonstrate a basic method and show how easy it is to get started using Neo4j. The basic idea here is that we want to use the information about what users have shared as a form of their preferences. From these preferences we want to find content that they might be interested in.</p>
+<h4 id="item-based-recommendations">Item-based recommendations</h4>
+<p>As I mentioned earlier, the purpose of Cypher is to traverse the graph that we have created and stored in Neo4j. But how can we generate personalized recommendations by traversing the graph? What we want to do is find a path from the user we are generating recommendations for (in this case me) through keywords they are interested in and end up on a new piece of content (in this case a <code>URL</code> node in the graph). In essence: </p>
+<blockquote>
+<p>Bob is interested in machine learning. We know this because he tweeted articles about machine learning. Let's find articles about machine learning in the data set and recommend those to him.</p>
+</blockquote>
+<p>The Cypher query for that looks like this (I've broken it up into multiple lines for readability - this is also a good time to reference this <a href="https://vimeo.com/84900121">optimizing Cypher queries</a> talk):</p>
+<pre><code>ne{}{}j-{}{} (?{}{} MA{}{}H (u{}{}r:{}{}er {u{}{}rn{}{}e: 'l{}{}nw{}{}})
+              MA{}{}H (u{}{}r){}{}:S{}{}RE{}{}-&gt;{}{}rl{}{}RL)
+              MA{}{}H (u{}{})-{}{}IS{}{}BO{}{}]-{}{}kw{}{}ey{}{}rd{}{}-[{}{}S_{}{}OU{}{}-({}{}UR{}{}
+</code></pre><p>OK - so we have some urls. In fact, without the <code>LIMIT</code> statement we have over 5000 urls to recommend. We need some way to score these recommendations so we can only recommend the urls the user is most likely to be interested in.</p>
+<p>If we look at the path from me to the first recommended article we see this:</p>
+<p><img src="https://dl.dropboxusercontent.com/u/67572426/item_1.png" alt=""/></p>
+<p>I tweeted an article about business, so I was recommended another article about business. OK that seems somewhat relevant, but a bit generic perhaps. Can we include more information about my preferences to make the recommendation a bit more relevant? If we expand the <code>:IS_ABOUT</code> relationships for each of the articles in that path we see that there are many more keywords for each article. Each article has about a dozen relationships, but the only overlapping keyword is "business":</p>
+<p><img src="https://dl.dropboxusercontent.com/u/67572426/item_2.png" alt=""/></p>
+<p>Of those dozen keywords from the recommended article, how many overlap with keywords that we've identified as interesting to me?</p>
+<p><img src="https://dl.dropboxusercontent.com/u/67572426/item_3.png" alt=""/></p>
+<p>And we can see there are three overlapping keywords: "business", "edition" and "month". We can also see there are multiple paths from the User node to the recommended article, 5 specifcally. Each path goes through an article that I've shared, into a keyword node that is shared by the recommended article. We can use the number of paths as a score for the relevance of the recommendation. The more paths we have between the User and the recommended article, the more relevant the article is likely to be and the stronger the recommendation. Here's how we can use the number of paths as a score for recommenations in Cypher:</p>
+<pre><code>MATCH (u:User {username: 'lyonwj'})-[:SHARED]-&gt;(url:URL)
+MATCH (url)-[r:IS_ABOUT]-&gt;(kw:Keyword)&lt;-[r2:IS_ABOUT]-(u2:URL)
+WHERE NOT (u)-[:SHARED]-&gt;(u2)
+WITH u2.url as article, count(r2) as score
+RETURN article, score ORDER BY score DESC LIMIT 10;
++------------------------------------------------------------------------------+
+| article                                                              | score |
++------------------------------------------------------------------------------+
+| "http://bit.ly/1cWjwrS"                                              | 56    |
+| "http://blog.graphenedb.com/blog/2015/01/16/neo-technology-just..."  | 52    |
+| "http://on.tcrn.ch/l/lonK"                                           | 46    |
+| "http://www.nytimes.com/2014/12/03/business/economy/income-gap-..."  | 44    |
+| "http://genius.com/B-horowitz-the-hard-thing-about-hard-things-..."  | 44    |
+| "http://blog.goomzee.com/2014/09/10/goomzee-black-knight-clarit..."  | 42    |
+| "http://www.defmacro.org/2015/02/25/startup-ideas.html"              | 37    |
+| "https://linkurio.us/rise-full-stack-graph-startup/"                 | 36    |
+| "http://ow.ly/zoBOE"                                                 | 36    |
+| "http://linkurio.us/jobs/"                                           | 35    |
++------------------------------------------------------------------------------+
+10 rows
+347 ms
+</code></pre><p>Now we have a score associated with each url so we can recommend only the top x articles or set some threshold for how relevant we think the article is before we recommend it. Note that I also added this statement to our Cypher query: <code>WHERE NOT (u)-[:SHARED]-&gt;(u2)</code>. We want to be sure to exclude any articles that I've shared myself, as articles that I've obviously already read are not relevant recommendations for content discovery. </p>
+<p>Let's look at all the paths for the top scored recommendation:</p>
+<p><img src="https://dl.dropboxusercontent.com/u/67572426/full_rec_1.png" alt="Query image"/></p>
+<p>Here we can see all the paths (through 9 distinct keywords) to one of the top rated recommended articles. One of the articles I shared even shares an author with this article!</p>
+<h3 id="further-research">Further research</h3>
+<p>There's a lot more we could do with this project. One suggestion I made previously was using a more advanced method for obtaining article topics (such as the Prismatic Interest Graph API). Here are some other things we might want to explore:</p>
+<ol>
+<li><strong>Location</strong> - How can we include location in our method for generating recommendations? Will user's be more interested in articles shared by those close to them?</li>
+<li><strong>Evaluation</strong> - How do we know if the recommendations we are generating are relevant? Are the users actually interested in any of the articles we are recommending?</li>
+<li><strong>Multiple edge types</strong> - Remember above when we saw that we had an overlapping Author? We didn't look at it in this article, but we can certainly <a href="http://scholarworks.umt.edu/cgi/viewcontent.cgi?article=5386&amp;context=etd">make use of those additional relationship types</a> for boosting our recommendation relevance.</li>
+</ol>
+</post>
+
+
+
+  </div></body></html>

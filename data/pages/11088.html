@@ -1,0 +1,111 @@
+<html><body><div><div class="post-text" itemprop="text">
+
+<p>I have the problem that my django application accumulates postgres connections over time. It seems that about every 30min a new connection is established and the old connections don't close (see screen). 
+As max connections is set to 100 after some time all connections are blocked.</p>
+
+<p>Does anyone know what is causing this problem?</p>
+
+<p><a href="http://i.stack.imgur.com/5U5Xm.png" rel="nofollow"><img src="http://i.stack.imgur.com/5U5Xm.png" alt="enter image description here"/></a></p>
+
+<p>I discovered this after I integrated some <code>celery tasks</code>. So I am quite sure that it is related to celery. </p>
+
+<p>So I tried to close the connection manually after every Task using <code>after_return</code> method:</p>
+
+<pre><code>from django.db import connection
+
+class DBTask(Task):
+    abstract = True
+
+    def after_return(self, *args, **kwargs):
+        connection.close()
+
+@task(name='example', base=DBTask)
+def example_task(value):
+    # do some stuff
+</code></pre>
+
+<p>But this also doesn't help. 
+Maybe I am totally wrong and it isn't related to <code>celery</code> at all. </p>
+
+<p>My database configuration:</p>
+
+<pre><code>DATABASES = {
+    'default': {
+        'ENGINE': 'django.contrib.gis.db.backends.postgis',
+        'NAME': 'production', 
+        'USER': 'production', 
+        'HOST': 'some.host', 
+        'CONN_MAX_AGE': 0,
+    },
+}
+</code></pre>
+
+<p>Installed packages:</p>
+
+<ul>
+<li>django 1.8.9</li>
+<li>pyscopg2 2.6.1</li>
+<li>celery 3.1.20</li>
+<li>django-celery 3.1.17</li>
+</ul>
+
+<p>The app is deployed at <a href="https://www.webfaction.com/" rel="nofollow">webfaction</a> (maybe this helps)</p>
+
+<p>I have also seen this <a href="http://stackoverflow.com/questions/29170542/django-exceeds-maximum-postgres-connections">question</a>, but setting <code>CONN_MAX_AGE: 0</code> didn't help.</p>
+
+<h2>Update:</h2>
+
+<p>Tried adding <code>connection.close()</code> at the end of each celery task, but the number of connection is still increasing.</p>
+
+<h2>Update 2:</h2>
+
+<p>Tried adding <code>connection.close()</code> at the top of the celery file, but this didn't help either. </p>
+
+<h2>Update 3:</h2>
+
+<p>Here is the code I am actually using in the celery tasks:</p>
+
+<h1>celery_tasks.py</h1>
+
+<pre><code>@task(name='push_notifications', base=DBTask)
+def push_notifications_task(user_id):
+    user = CustomUser.objects.get(id=user_id)
+    PusherAPI().push_notifications(user)
+    connection.close()
+</code></pre>
+
+<h1>models.py</h1>
+
+<pre><code>class PusherAPI(object):
+
+    def push_notifications(self, user):
+        from .serializers import NotificationSerializer
+        self.pusher.trigger(
+            'user_%s' % user.slug,
+            'notifications',
+            NotificationSerializer(user).data
+        )
+</code></pre>
+
+<h1>serializers.py</h1>
+
+<pre><code>class NotificationSerializer(object):
+
+    def __init__(self, user=None):
+        if user is None:
+            self.user = get_current_user()
+        else:
+            self.user = user
+
+    @property
+    def data(self):
+        # get notifications from db
+        notifications = self.user.notifications.unread()
+        # create the notification dict
+        ...
+        return note_dict
+</code></pre>
+
+<p>The only db-queries are in <code>CustomUser.objects.get(id=user_id)</code> and <code>notifications = self.user.notifications.unread()</code></p>
+    </div>
+    </div></body></html>

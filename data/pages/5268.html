@@ -1,0 +1,140 @@
+<html><body><div><div class="clear padding-top-small">
+                        <p>Many types of real-world problems involve dependencies between records in the data. For example, sociologist are eager to understand how people influence the behaviors of their peers; biologists wish to learn how proteins regulate the actions of other proteins. Problems involving dependencies can often be modeled as graphs, and scientists have developed methods for answering these questions called network analysis.</p>
+
+<p>This post describes how to use the Python library <a href="https://networkx.github.io/">NetworkX</a>, to deal with network data and solve interesting problems in network analysis. You can find a nice IPython Notebook with all the examples below, <a href="https://app.dominodatalab.com/LeJit/FacebookNetwork/browse?">on Domino</a></p>
+
+<h1 id="introtographs">Intro to Graphs</h1>
+
+<p>Before we dive into a real-world network analysis, let's first review what a graph is. A graph consists of a set of objects V called vertices and a set of edges E connecting pairs of vertices.</p>
+
+<p><img src="http://www.cis.upenn.edu/~mkearns/teaching/NetworkedLife/graph.jpg" alt="Example of a Graph"/></p>
+
+<p>In the above picture, the circles represent the vertices and lines connecting the circles are edges. If this graph represented a social network, the circles would represent people, and an edge between two vertices could signify that those two individuals are friends.</p>
+
+<p>We will look at a special type of network called an ego network. In an ego network, there is a "central" vertex or the ego vertex which the network revolves around.</p>
+
+<p><img src="http://networkx.lanl.gov/archive/networkx-1.6/_images/ego_graph.png" alt="Ego network"/></p>
+
+<p>Ego networks are important in sociology because they allow researchers to study the structure of an individual's relationships with respect to his world.</p>
+
+<h1 id="gettingstartedwithnetworkx">Getting started with NetworkX</h1>
+
+<pre><code class="language-prettyprint lang-py">import networkx as nx  
+</code></pre>
+
+<p>Domino offers NetworkX as one of its default Python libraries, so all you have to do is import the library with the above statement. </p>
+
+<p>Now, let's consider a real-world dataset: <a href="https://snap.stanford.edu/data/egonets-Facebook.html">Facebook Ego Networks</a>!</p>
+
+<p>This Facebook combined ego networks datasets contains the aggregated network of ten individuals' Facebook friends list. In this dataset, the vertices represent individuals on Facebook, and an edge between two users means they are Facebook friends. Each ego-network was created by starting with a Facebook user and then mining all of his Facebook friends. The ego-networks are then aggregated by identifying individuals who appear in multiple ego-networks.</p>
+
+<p>Here's some basic information about the network dataset we will be working with:</p>
+
+<ul>
+<li>Nodes: 4039</li>
+<li>Edges: 88,234</li>
+<li>Average Degree: 43.6910</li>
+</ul>
+
+<p><img src="http://i.imgur.com/DG0DOvQ.png" alt="Facebook Network"/></p>
+
+<p>As you can see this is a fairly connected network, and the number of edges in the network is more than 20x the number of nodes, so the network is densely clustered. If you examine the network, you will notice certain hubs of vertices appear.  Hubs like these are an important feature of real-world social networks.  Dense hubs represent high clustering and are often the result of underlying social mechanisms that are of interest to scientists.</p>
+
+<h1 id="parallelbetweenness">Parallel Betweenness</h1>
+
+<p>How do we determine who is the most "important" individual in the network. Well, that depends on the definition of "important". One way to define "importance" is the individual's <a href="https://en.wikipedia.org/wiki/Betweenness_centrality">betweenness centrality</a>.  The betweenness centrality is a measure of how many shortest paths pass through a particular vertex.  The more shortest paths that pass through the vertex, the more central the vertex is to the network. </p>
+
+<p>Because the shortest path between any pair of vertices can be determined independently of any other pair of vertices, we can take advantage of Domino's multi-core hardware to compute the betweenness centrality of each vertex in the network using a parallelized algorithm.</p>
+
+<p>To do this, we will use the Pool object from the <a href="https://docs.python.org/2/library/multiprocessing.html">multiprocessing</a> library and the <a href="https://docs.python.org/2/library/itertools.html">itertools</a> library. A nice introduction to the multiprocessing library and parallel programming in Python can be found <a href="http://sebastianraschka.com/Articles/2014_multiprocessing_intro.html">here</a>.</p>
+
+<pre><code class="language-prettyprint lang-py">from multiprocessing import Pool  
+import itertools  
+</code></pre>
+
+<p>First thing we need to do is partition the vertices of the network into <em>n</em> subsets where <em>n</em> is dependent on the number of processors we have access to. For example, if we use a machine with 32 cores, we partition the Facebook network in 32 chunks with each chunk containing 128 vertices.</p>
+
+<p>Now instead of one processor computing the betweenness for all 4,039 vertices, we can have 32 processors computing the betweenness for each of their 128 vertices in parallel. This drastically reduces the run-time of the algorithm and allows it to scale to larger networks.</p>
+
+<pre><code class="language-prettyprint lang-py">def partitions(nodes, n):  
+    "Partitions the nodes into n subsets"
+    nodes_iter = iter(nodes)
+    while True:
+        partition = tuple(itertools.islice(nodes_iter,n))
+        if not partition:
+            return
+        yield partition
+
+# To begin the parallel computation, we initialize a Pool object with the
+# number of available processors on our hardware. We then partition the
+# network based on the size of the Pool object (the size is equal to the 
+# number of available processors). 
+def between_parallel(G, processes = None):  
+    p = Pool(processes=processes)
+    part_generator = 4*len(p._pool)
+    node_partitions = list(partitions(G.nodes(), int(len(G)/part_generator)))
+    num_partitions = len(node_partitions)
+
+    #Next, we pass each processor a copy of the entire network and 
+    #compute #the betweenness centrality for each vertex assigned to the 
+    #processor.
+
+    bet_map = p.map(btwn_pool,
+                    zip([G]*num_partitions,
+                        [True]*num_partitions,
+                        [None]*num_partitions,
+                        node_partitions))
+
+    #Finally, we collect the betweenness centrality calculations from each 
+    #pool and aggregate them together to compute the overall betweenness 
+    #centrality score for each vertex in the network.
+
+    bt_c = bet_map[0]
+    for bt in bet_map[1:]:
+        for n in bt:
+            bt_c[n] += bt[n]
+    return bt_c
+</code></pre>
+
+<p>Now, let's look at the vertices with the top 10 highest betweenness centrality measures in the network.</p>
+
+<p><img src="http://i.imgur.com/fCE6lKg.png" alt="Betweenness"/></p>
+
+<p>As you can see, vertices that primarily either sit at the center of a hub or acts a bridge between two hubs have higher betweenness centrality. The bridge vertices have high betweenness because all paths connecting the hubs pass through them, and the hub center vertices have high betweenness because all intra-hub paths pass through them.</p>
+
+<h1 id="communitydetection">Community Detection</h1>
+
+<p>For those of you who use Facebook, your Facebook friends probably come from different aspects of your life: Some are your friends from college, others are your co-workers, and maybe some old friends from your hometown. </p>
+
+<p>Because your friends can be broken down into different groups like this, you may wonder if we could identify these different <em>communities</em> in your social network. The answer is yes! Using <em>community detection</em> algorithms, we can break down a social network into different potentially overlapping communities.</p>
+
+<p>The criteria for finding good communities is similar to that for finding good clusters. We want to maximize intra-community edges while minimizing inter-community edges. Formally, the algorithm tries to maximize the modularity of network, or the fraction of edges that fall within the community minus the expected fraction of edges if the edges were distributed by random.  Good communities should have a high number of intra-community edges, so by maximizing the modularity, we detect dense communities that have a high fraction of intra-community edges.</p>
+
+<p>While there is no community detection method in NetworkX, a good samaritan has written a <a href="https://bitbucket.org/taynaud/python-louvain">community detection library built on top of NetworkX</a>.</p>
+
+<pre><code class="language-prettyprint lang-py">import community  
+</code></pre>
+
+<p>This library is easy to use and allows to perform community detection on an undirected graph in less than 3 lines of code!</p>
+
+<pre><code class="language-prettyprint lang-py">parts = community.best_partition(G_fb)  
+values = [parts.get(node) for node in G_fb.nodes()]  
+</code></pre>
+
+<p>That's all there is to it!</p>
+
+<p>Now let's look at the different communities. <br/>
+<img src="http://i.imgur.com/1mHhVS0.png" alt="Communities"/></p>
+
+<p>As you can see, the communities closely align with the vertex hubs. Because this dataset was compiled by aggregating the ego network of ten individuals, the different communities most likely reflect the different ego networks.</p>
+
+<h1 id="conclusion">Conclusion</h1>
+
+<p>Graphs and networks are becoming more popular in data science everyday. <a href="http://neo4j.com/">Neo4j</a> is a database that represents data as a graph, and topological data analysis algorithms and spectral clustering algorithms build upon graphs to identify flexible patterns and sub-structures in data.</p>
+
+<p>You can use Domino to run network algorithms on large hardware to speed up your calculations. The code for this blog post can be found <a href="https://app.dominodatalab.com/LeJit/FacebookNetwork/browse?">here</a> or in a nice <a href="https://app.dominodatalab.com/LeJit/FacebookNetwork/view/results/SocialNetwork.html">IPython Notebook</a>.</p>
+
+<p><img src="/content/images/2015/07/Screen-Shot-2015-07-03-at-1-37-02-PM.png" alt=""/></p>
+                      </div>
+
+                </div></body></html>

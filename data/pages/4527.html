@@ -1,0 +1,431 @@
+<html><body><div><div class="post-body margin-top">
+        <p class="lead">
+
+I was asked if I could write a simple blog post on how to make a
+<a href="https://en.wikipedia.org/wiki/Stack_machine">(process) virtual
+machine</a> — specifically, a
+<a href="https://en.wikipedia.org/wiki/Virtual_machine">stack machine</a>.
+Using Python, I'm going to convince you how easy it is!
+
+</p>
+
+<p><strong><strong>Update</strong>: Based on <a href="https://pay.reddit.com/r/Python/comments/35tg6b/making_a_simple_vm_interpreter_in_python/">comments from r/Python</a>, I've made some small
+code changes. Thanks to robin-gvx, bs4h and Dagur! The code in this post is now
+available on <a href="https://github.com/cslarsen/python-simple-vm">GitHub</a>.</strong></p>
+
+<p>A stack machine doesn't have <a href="https://en.wikipedia.org/wiki/Register_machine">registers</a>. Instead, it puts
+values on a stack and operate on that.  Stack machines are extremely simple,
+but very powerful. There's a reason why Python, Java, PostScript,
+<a href="https://en.wikipedia.org/wiki/Forth_(programming_language)">Forth</a> and many other languages have chosen a stack machine as their
+VM.</p>
+
+<p>Anyway, let's talk a little bit more about the stacks. We need an instruction
+pointer stack, which we'll use to store return addresses. This is so that we
+can call a subroutine (a function, for instance) and then jump back from where
+we came. We <em>could</em> have used self-modifying code instead, like Donald Knuth's
+original <a href="https://en.wikipedia.org/wiki/MIX">MIX</a> did, but then you'd have to manage a stack yourself if you
+wanted recursion to work.  In this post, I won't really implement subroutine
+calls, but they're trivial anyway (consider it an exercise).</p>
+
+<p>With the <em>data stack</em> you get a lot of stuff for free.  For instance, consider
+an expression like <code>(2+3)*4</code>.  On a stack machine, the equivalent code for this
+expression would be <code>2 3 + 4 *</code>: Push two and three on the stack, then the next
+instruction is <code>+</code>, so pop off two numbers and push back the sum.  Next, push
+four on the stack, then pop two values and push their product. Easy!</p>
+
+<p>So, let's start writing a simple class for a stack.  We'll just inherit from
+<code>collections.deque</code>:</p>
+<figure class="highlight"><pre><code class="language-text" data-lang="text">from collections import deque
+
+class Stack(deque):
+    push = deque.append
+
+    def top(self):
+        return self[-1]
+</code></pre></figure>
+<p>We can now <code>push</code> and <code>pop</code> to this stack and peek at the top value with <code>top</code>.</p>
+
+<p>Next, let's make a class for the virtual machine itself. As noted, we need two
+stacks and also some memory for the code itself. We'll rely on Python's dynamic
+typing so we can put anything in the list. Only problem is that we really don't
+discern between strings and built-in functions. The correct way would be to
+insert actual Python functions in the list. Perhaps I'll do that in a future
+update.</p>
+
+<p>We also need an instruction pointer, pointing to the next item to execute in
+the code.</p>
+<figure class="highlight"><pre><code class="language-text" data-lang="text">class Machine:
+    def __init__(self, code):
+        self.data_stack = Stack()
+        self.return_addr_stack = Stack()
+        self.instruction_pointer = 0
+        self.code = code
+        self.dispatch_map = {...} # see below for values
+</code></pre></figure>
+<p>Now we'll create some convenience functions to reduce some typing:</p>
+<figure class="highlight"><pre><code class="language-text" data-lang="text">    def pop(self):
+        return self.data_stack.pop()
+
+    def push(self, value):
+        self.data_stack.push(value)
+
+    def top(self):
+        return self.data_stack.top()
+</code></pre></figure>
+<p>We'll create a <code>dispatch</code> function that takes an "opcode" (we don't really use
+codes, just dynamic types, but you get my point) and executes it. But first,
+let's just create the interpreter loop:</p>
+<figure class="highlight"><pre><code class="language-text" data-lang="text">    def run(self):
+        while self.instruction_pointer &lt; len(self.code):
+            opcode = self.code[self.instruction_pointer]
+            self.instruction_pointer += 1
+            self.dispatch(opcode)
+</code></pre></figure>
+<p>As you can see, it does one thing, and does it pretty well: Fetch the next
+instruction, increment the instruction pointer and then dispatch based on the
+opcode.  The <code>dispatch</code> function is a tad more longer:</p>
+<figure class="highlight"><pre><code class="language-text" data-lang="text">    def dispatch(self, op):
+        if op in self.dispatch_map:
+            self.dispatch_map[op]()
+        elif isinstance(op, int):
+            # push numbers on the data stack
+            self.push(op)
+        elif isinstance(op, str) and op[0]==op[-1]=='"':
+            # push quoted strings on the data stack
+            self.push(op[1:-1])
+        else:
+            raise RuntimeError("Unknown opcode: '%s'" % op)
+</code></pre></figure>
+<p><strong>Update:</strong> The <code>dispatch_map</code> referenced in <code>__init__</code> should contain the
+values below. It used to be constructed in <code>dispatch</code>, but as <a href="https://csl.name/post/vm/#comment-2467436000">EnTerr</a>
+pointed out in the comments below, that is grossly inefficient.</p>
+<figure class="highlight"><pre><code class="language-text" data-lang="text">    dispatch_map = {
+        "%":        self.mod,
+        "*":        self.mul,
+        "+":        self.plus,
+        "-":        self.minus,
+        "/":        self.div,
+        "==":       self.eq,
+        "cast_int": self.cast_int,
+        "cast_str": self.cast_str,
+        "drop":     self.drop,
+        "dup":      self.dup,
+        "if":       self.if_stmt,
+        "jmp":      self.jmp,
+        "over":     self.over,
+        "print":    self.print_,
+        "println":  self.println,
+        "read":     self.read,
+        "stack":    self.dump_stack,
+        "swap":     self.swap,
+    }
+</code></pre></figure>
+<p>Basically, <code>dispatch</code> looks up the opcode, and sees if it's a built-in function like
+<code>*</code> or <code>drop</code> or <code>dup</code>.  By the way, those are <a href="https://en.wikipedia.org/wiki/Forth_(programming_language)">Forth</a> words, a
+brilliant language that you should check out.  In fact, the code you'll see
+here is basically a simple Forth.</p>
+
+<p>Anyway, it looks up an opcode like <code>*</code>, sees it should call <code>self.mul</code> then
+executes it. It looks like this:</p>
+<figure class="highlight"><pre><code class="language-text" data-lang="text">    def mul(self):
+        self.push(self.pop() * self.pop())
+</code></pre></figure>
+<p>All the other functions are like this.  If it can't find the operation in the
+dispatch map, it will first see if it's a number. Numbers are automatically
+pushed on the data stack.  If it's a quoted string, it will push that.</p>
+
+<p>So, there you have it! Congrats!</p>
+
+<p>Let's define a few more operations, then write a program using our newly
+designed virtual machine and <a href="https://en.wikipedia.org/wiki/P-code_machine">p-code language</a>:</p>
+<figure class="highlight"><pre><code class="language-text" data-lang="text">    # Allow to use "print" as a name for our own method:
+    from __future__ import print_function
+
+    # ...
+
+    def plus(self):
+        self.push(self.pop() + self.pop())
+
+    def minus(self):
+        last = self.pop()
+        self.push(self.pop() - last)
+
+    def mul(self):
+        self.push(self.pop() * self.pop())
+
+    def div(self):
+        last = self.pop()
+        self.push(self.pop() / last)
+
+    def print(self):
+        sys.stdout.write(str(self.pop()))
+        sys.stdout.flush()
+
+    def println(self):
+        sys.stdout.write("%s\n" % self.pop())
+        sys.stdout.flush()
+</code></pre></figure>
+<p>Let's write that <code>print((2+3)*4)</code> example using our virtual machine:</p>
+<figure class="highlight"><pre><code class="language-text" data-lang="text">Machine([2, 3, "+", 4, "*", "println"]).run()
+</code></pre></figure>
+<p>You can even try running it!</p>
+
+<p>Now, let's introduce a jump operation, a <em>go-to</em> operation:</p>
+<figure class="highlight"><pre><code class="language-text" data-lang="text">    def jmp(self):
+        addr = self.pop()
+        if isinstance(addr, int) and 0 &lt;= addr &lt; len(self.code):
+            self.instruction_pointer = addr
+        else:
+            raise RuntimeError("JMP address must be a valid integer.")
+</code></pre></figure>
+<p>It just changes the instruction pointer.  Now let's look at branching:</p>
+<figure class="highlight"><pre><code class="language-text" data-lang="text">    def if_stmt(self):
+        false_clause = self.pop()
+        true_clause = self.pop()
+        test = self.pop()
+        self.push(true_clause if test else false_clause)
+</code></pre></figure>
+<p>This is also very straight-forward. If you wanted to add a conditional jump,
+you'd have to simply do <code>test-value true-value false-value IF JMP</code>.  (As
+branching is performed often, many VMs provide instructions like <code>JNE</code>, "jump
+if not equal", for convenience).</p>
+
+<p>Here's a program that asks the user for two numbers, then prints their sum and
+product:</p>
+<figure class="highlight"><pre><code class="language-text" data-lang="text">Machine([
+    '"Enter a number: "', "print", "read", "cast_int",
+    '"Enter another number: "', "print", "read", "cast_int",
+    "over", "over",
+    '"Their sum is: "', "print", "+", "println",
+    '"Their product is: "', "print", "*", "println"
+]).run()
+</code></pre></figure>
+<p>The <code>over</code>, <code>read</code> and <code>cast_int</code> operations look like this:</p>
+<figure class="highlight"><pre><code class="language-text" data-lang="text">    def cast_int(self):
+        self.push(int(self.pop()))
+
+    def over(self):
+        b = self.pop()
+        a = self.pop()
+        self.push(a)
+        self.push(b)
+        self.push(a)
+
+    def read(self):
+        self.push(raw_input())
+</code></pre></figure>
+<p>Here's a simple program that asks the user for a number, prints if it's even or
+odd, then loops:</p>
+<figure class="highlight"><pre><code class="language-text" data-lang="text">Machine([
+    '"Enter a number: "', "print", "read", "cast_int",
+    '"The number "', "print", "dup", "print", '" is "', "print",
+    2, "%", 0, "==", '"even."', '"odd."', "if", "println",
+    0, "jmp" # loop forever!
+]).run()
+</code></pre></figure>
+<p>Now, some exercises for you: Create <code>call</code> and <code>return</code> commands. The <code>call</code>
+will push its current address on the return stack, then call <code>self.jmp()</code>.
+The <code>return</code> operation should simply pop the return stack and set the
+instruction pointer to this value (jumps back, or <em>returns</em> from a <code>call</code>).
+When you've done that, you've got subroutines. </p>
+
+<h2>A simple parser for this language</h2>
+
+<p>Let's create a small language that mimics the code.  We'll <em>compile</em> to our
+machine code:</p>
+<figure class="highlight"><pre><code class="language-text" data-lang="text">import tokenize
+from StringIO import StringIO
+
+# ...
+
+def parse(text):
+    tokens = tokenize.generate_tokens(StringIO(text).readline)
+    for toknum, tokval, _, _, _ in tokens:
+        if toknum == tokenize.NUMBER:
+            yield int(tokval)
+        elif toknum in [tokenize.OP, tokenize.STRING, tokenize.NAME]:
+            yield tokval
+        elif toknum == tokenize.ENDMARKER:
+            break
+        else:
+            raise RuntimeError("Unknown token %s: '%s'" %
+                    (tokenize.tok_name[toknum], tokval))
+</code></pre></figure>
+<h2>A simple optimizer: Constant folding</h2>
+
+<p><a href="https://en.wikipedia.org/wiki/Constant_folding">Constant folding</a> is an example of <a href="https://en.wikipedia.org/wiki/Peephole_optimization">peephole optimization</a>
+that looks for obvious pieces of code that can be precomputed at compile time.
+For instance, mathematical expressions involving constants, e.g. <code>2 3 +</code>.  That
+should be quite simple to implement.</p>
+<figure class="highlight"><pre><code class="language-text" data-lang="text">def constant_fold(code):
+    """Constant-folds simple mathematical expressions like 2 3 + to 5."""
+    while True:
+        # Find two consecutive numbers and an arithmetic operator
+        for i, (a, b, op) in enumerate(zip(code, code[1:], code[2:])):
+            if isinstance(a, int) and isinstance(b, int) \
+                    and op in {"+", "-", "*", "/"}:
+                m = Machine((a, b, op))
+                m.run()
+                code[i:i+3] = [m.top()]
+                print("Constant-folded %s%s%s to %s" % (a,op,b,m.top()))
+                break
+        else:
+            break
+    return code
+</code></pre></figure>
+<p>The only problem with this approach is that we would have to update jump
+locations, and that is hard to do in many cases (e.g. <code>read cast_int jmp</code>).
+There are many solutions to this, but a simple work-around is to only allow
+jumping to named labels in the <em>language</em>, then resolve their actual locations
+after doing optimizations.</p>
+
+<p>If you implement Forth <em>words</em>, or functions, you can do more optimizations,
+like removing code that is provably never used (also known as <a href="https://en.wikipedia.org/wiki/Dead_code_elimination">dead code elimination</a>).</p>
+
+<h2>A REPL</h2>
+
+<p>Now we can make a simple REPL like so:</p>
+<figure class="highlight"><pre><code class="language-text" data-lang="text">def repl():
+    print('Hit CTRL+D or type "exit" to quit.')
+
+    while True:
+        try:
+            source = raw_input("&gt; ")
+            code = list(parse(source))
+            code = constant_fold(code)
+            Machine(code).run()
+        except (RuntimeError, IndexError) as e:
+            print("IndexError: %s" % e)
+        except KeyboardInterrupt:
+            print("\nKeyboardInterrupt")
+</code></pre></figure>
+<p>We can thus test some simple programs:</p>
+<figure class="highlight"><pre><code class="language-text" data-lang="text">&gt; 2 3 + 4 * println
+Constant-folded 2+3 to 5
+Constant-folded 5*4 to 20
+20
+&gt; 12 dup * println
+144
+&gt; "Hello, world!" dup println println
+Hello, world!
+Hello, world!
+</code></pre></figure>
+<p>As you can see, the constant-folder seems to work great!  In the first example,
+it optimizes away all the code down to simply <code>20 println</code>.</p>
+
+<h2>Next steps</h2>
+
+<p>When you have added <code>call</code> and <code>return</code>, you can let the user define new
+functions.  In <a href="https://en.wikipedia.org/wiki/Forth_(programming_language)">Forth</a>, functions are called <em>words</em> and they begin with
+a colon, a name and ends with a semicolon.  For example, an integer square word
+would be:</p>
+<figure class="highlight"><pre><code class="language-text" data-lang="text">: square dup * ;
+</code></pre></figure>
+<p>You can actually try this out in a program like <a href="https://www.gnu.org/software/gforth/">Gforth</a>:</p>
+<figure class="highlight"><pre><code class="language-text" data-lang="text">$ gforth
+Gforth 0.7.3, Copyright (C) 1995-2008 Free Software Foundation, Inc.
+Gforth comes with ABSOLUTELY NO WARRANTY; for details type `license'
+Type `bye' to exit
+: square dup * ;  ok
+12 square . 144  ok
+</code></pre></figure>
+<p>You can also add support for this by looking for <code>:</code> in the parser. When you
+find one, you need to record the name to insert the name along with an address
+(e.g., the current position in the code) and insert them into a <a href="https://en.wikipedia.org/wiki/Symbol_table">symbol
+table</a>.  For simplicity, you could probably even do better by
+just inserting the whole code up to the concluding semicolon in a dictionary,
+e.g.:</p>
+<figure class="highlight"><pre><code class="language-text" data-lang="text">symbol_table = {
+  "square": ["dup", "*"]
+  # ...
+}
+</code></pre></figure>
+<p>When you're finished parsing, you can <a href="https://en.wikipedia.org/wiki/Linker_(computing)">link</a> the program: Go through
+the main code and look for calls to user-defined functions in the symbol table.
+Whenever you find one, add that code to the <em>end</em> of the main code, unless it's
+already there. Then replace the <code>square</code> operation with a <code>&lt;address&gt; call</code>,
+where <code>&lt;address&gt;</code> is the location where the word/function was inserted.</p>
+
+<p>For this to work correctly, you should consider removing the <code>jmp</code> instruction.
+Otherwise, you'll have to resolve them as well.  It <em>can</em> work, but then you
+have to keep track of their references in the same order that the user wrote
+the program. I.e., if you want to move around subroutines, you have to be a bit
+careful. It's fully doable, though.  You should probably also add an <code>exit</code>
+function to stop the program (perhaps with an exit-code to the OS?), so that
+the main code execution won't continue running into the subroutines.</p>
+
+<p>Actually, a good program layout would probably be to put the main code in a
+subroutine itself, called <code>main</code>.  Or whatever, you decide!</p>
+
+<p>As you can see, this is a lot of fun and teaches you a lot about code
+generation, linking, program space layout and so on.</p>
+
+<h2>Even more cool things to do</h2>
+
+<p>You could use a Python bytecode generation library to attempt to translate the
+VM code to native Python bytecode.  Or implement it in Java and do it on the
+JVM; then you'll get <a href="https://en.wikipedia.org/wiki/Just-in-time_compilation">JITing</a> for free!</p>
+
+<p>Also, it would be cool to try to make a <a href="https://en.wikipedia.org/wiki/Register_machine">register machine</a>.
+You could try to implement a <a href="https://en.wikipedia.org/wiki/Call_stack">call stack</a> with
+<a href="https://en.wikipedia.org/wiki/Call_stack#STACK-FRAME">stack frames</a> and establish a calling convention.</p>
+
+<p>Finally, if you don't like the Forth-like language defined here, you can create
+your own simple language that compiles down to this VM.  For instance, you
+should be able to convert infix notation like <code>(2+3)*4</code> to <code>2 3 + 4 *</code> and emit
+code for your VM.  You could allow for C-style code blocks a la <code>{ ... }</code> so
+that a statement like <code>if ( test ) { ... } else { ... }</code> would be translated
+to:</p>
+<figure class="highlight"><pre><code class="language-text" data-lang="text">&lt;true/false test&gt;
+&lt;address of true block&gt;
+&lt;address of false block&gt;
+if
+jmp
+
+&lt;true block&gt;
+&lt;address of end of entire if-statement&gt; jmp
+
+&lt;false block&gt;
+&lt;address of end of entire if-statement&gt; jmp
+</code></pre></figure>
+<p>For instance,</p>
+<figure class="highlight"><pre><code class="language-text" data-lang="text">Address  Code
+-------  ----
+ 0       2 3 &gt;
+ 3       7        # Address of true-block
+ 4       11       # Address of false-block
+ 5       if
+ 6       jmp      # Conditional jump based on test
+
+# True-block
+ 7       "Two is greater than three."
+ 8       println
+ 9       15       # Continue main program
+10       jmp
+
+# False-block ("else { ... }")
+11       "Two is less than three."
+12       println
+13       15       # Continue main program
+14       jmp
+
+# If-statement finished, main program continues here
+15       ...
+</code></pre></figure>
+<p>Oh, you also need to add the comparison operators <code>!= &lt; &lt;= &gt; &gt;=</code> for this to
+work.</p>
+
+<p><a href="https://github.com/cslarsen/stack-machine">I've done some of these things in my C++ stack machine</a>, so
+you can get some hints from there.</p>
+
+<p>I've also turned the code here into a project called <a href="https://github.com/cslarsen/crianza">Crianza</a>. It has
+more optimizations and an experimental mode to compile down to Python bytecode.</p>
+
+<p>Good luck!</p>
+
+<h2>The complete code</h2>
+
+<p>The complete code is available at <a href="https://github.com/cslarsen/python-simple-vm/blob/master/vm.py%5D%5Bvm.py">vm.py on github</a>.</p>
+
+      </div>
+    </div></body></html>

@@ -1,0 +1,210 @@
+<html><body><div><post no-compile=""><p>Developers love Python because it's quick to write, easy to learn, and is --
+mostly -- fast enough. The qualifier there means you'll have situations where
+it just isn't. There's good news -- You have plenty of options to make your
+code faster.</p>
+<ol>
+<li>Profile and optimize your existing code</li>
+<li>Use a C module (or write your own)</li>
+<li>Try a JIT-enabled interpreter like <a href="http://www.jython.org/index.html">Jython</a> or <a href="http://pypy.org/">PyPy</a></li>
+<li>Parallelize your workload</li>
+</ol>
+<p>The difficulty of each depends heavily on your program. We'll be talking about
+profiling and optimizing pure Python code with the help of a few tools. In this
+article, we'll see how to use profilers to improve <a href="https://github.com/ryansb/disq">disq's</a> performance
+by about a third.</p>
+<h2 id="optimizating-python-the-how-and-why">Optimizating Python -- The How and Why</h2>
+<p>Before we get down business, let's talk about optimization. Optimization
+<em>isn't</em> about flailing around tossing <code>@lru_cache</code> around all your functions.
+Instead, it's a series of simple steps repeated until your program is "fast
+enough".</p>
+<p>First, know your behaviors. The easiest way to make a program 100% faster is to
+<code>echo 'exit(99)' &gt; server.py</code>, but that takes the "viable" out of your
+<a href="https://en.wikipedia.org/wiki/Minimum_viable_product">MVP</a>. If it wasn't necessary, we wouldn't be optimizing it. You need to
+be able to repeatably verify your application is correct with automated --
+ideally fast -- tests at the unit and system level.</p>
+<p>Next, pick a metric to optimize for. You'll be trading between several
+dimensions, so know what matters to you. Memory usage, CPU time, bandwidth,
+disk I/O, and storage space are all factors you'll find yourself trading
+between in a sufficiently large application. Build measurements into your
+automated tests, or make a separate system. The closer to real world usage you
+can make these performance metrics, the better off you will be. Performance is
+sensitive to more factors than you can count: CPU cache size, network buffer
+size, kernel version, operating system, dependency versions, and more can <em>all</em>
+skew your numbers.</p>
+<p>You have a goal: use less <em>blank</em>, or do <em>blank</em> faster. You know how much
+<em>blank</em> you're using and are ready to start changing things. Look at the
+metrics and find where you can have the biggest impact.  Where is the hottest
+loop, the biggest object, or the most expensive operation?</p>
+<p>The software we'll be optimizing is <a href="https://github.com/ryansb/disq">Disq</a>, a client for
+<a href="https://github.com/antirez/disque">Disque</a>. Disque is still in alpha and hasn't been rigorously
+benchmarked, profiling the client is still worthwhile. We'll follow the steps
+outlined earlier: verify, measure, alter, repeat. The "verify" step is already
+handled for this client, let's dive into the measuring.</p>
+<h2 id="optimize-slow-code-first">Optimize Slow Code First</h2>
+<p>The use case we'll be optimizing for is the fast consumption and
+acknowledgement of jobs by workers. Disque is built for many small jobs, so it
+makes sense that each worker would be consuming huge numbers of them. We'll
+pretend we have a worker program that follows (roughly) these steps.</p>
+<ol>
+<li>Get a job (or wait for one)</li>
+<li>Do some work</li>
+<li>Acknowledge the job is done (so disque doesn't retry)</li>
+<li>Repeat forever</li>
+</ol>
+<p>We're already doing the work in literally no time, so now we want to trim the
+fat from our Disque client so we can process more jobs.</p>
+<h3 id="benchmarking_script-py">benchmarking_script.py</h3>
+<pre><code class="lang-python">fr{}{} di{}{} im{}{}rt Di{}{}ue
+@p{}{}fi{}{}
+def re{}{}_j{}{}s({}{}
+</code></pre>
+<p><a href="https://github.com/rkern/line_profiler">Line profiler</a> can show where execution time is spent line-by-line.
+Note the "@profile" [decorator][decorator] on the <code>read_jobs</code> benchmark function.
+Lineprof provides the <code>kernprof</code> command that will collect information about
+the code.</p>
+<pre><code>// -l forces line-by-line profiling
+// -v prints the results of the profiling immediately
+$ kernprof -l -v first_script.py
+Timer unit: 1e-06 s (microsecond)
+Function: read_jobs
+
+Line num    Hits         Time  Per Hit   % Time  Line Contents
+     5                                           @profile
+     6                                           def read_jobs():
+     7         1         2273   2273.0      0.3      client = Disque()
+     8      1001         1776      1.8      0.2      while True:
+     9      1001       530698    530.2     65.6          job = client.getjob('q', timeout_ms=1)
+    10      1001         1282      1.3      0.2          if job is None:
+    11         1            2      2.0      0.0              break
+    12                                                   // normally you'd do work here
+    13      1000       273414    273.4     33.8          client.ackjob(job[1])
+</code></pre><p>Immediately, we can see that acknowledging a job takes half as long as
+retrieving one. We need to add the <code>@profile</code> decorator to the <code>getjob</code>
+function in the disq client.py. This turns out to be uninformative because
+getjob just calls <code>self._getjob</code>.</p>
+<h2 id="interactive-profiling-for-python">Interactive Profiling for Python</h2>
+<p>We could continue decorating each level and viewing the results; instead let's
+try a different tool. There's an <a href="https://github.com/what-studio/profiling">interactive profiler</a> for Python
+that covers our needs a bit better.</p>
+<p><img src="https://raw.githubusercontent.com/airpair/optimizing-python-code/edit/profiling-ncurses.png" alt=""/></p>
+<p>We can drill right down to see where the most time is being spent. A full <em>11
+percent</em> of the time is being spent just getting the a connection. No network
+action, just pulling a connection to use from the pool.</p>
+<p>That time is being spent in this snippet of <code>rolling_counter</code> (full code
+available <a href="https://github.com/ryansb/disq/blob/fbd9c7b41e23f475a9f152ea0b1652e8d27b7cb0/disq/rolling_counter.py">here</a>).</p>
+<pre><code class="lang-python">def _e{}{}ir{}{}se{}{})
+    """ ca{}{}ed wh{}{} a co{}{}ec{}{}on is re{}{}ie{}{}d """
+    """ ca{}{} key it{}{}ab{}{} to li{}{} be{}{}use th{}{} lo{}{} can de{}{}te ke{}{}"""
+</code></pre>
+<p>See what takes so long? We <code>bisect</code> a sorted list then slice it to remove times
+older than the sliding window of messages. Why is that there?</p>
+<blockquote>
+<p>If a consumer sees a high message rate received from foreign nodes, it may
+optionally have logic in order to retrieve messages directly from the nodes
+where producers are producing the messages for a given topic. The consumer
+can easily check the source of the messages by checking the Node ID prefix in
+the messages IDs.</p>
+<p>-- <a href="https://github.com/antirez/disque#client-libraries">disque docs</a></p>
+</blockquote>
+<p>It's an optional behavior that accounts 11% of the time it takes to send a
+message out. Turns out that's an expensive default, but I had implemented it
+without checking its impact on performance (there's a lesson there). Let's
+make it optional, since not all users will want to take the performance
+penalty.</p>
+<p>With the option in place, let's see the difference between enabled and
+disabled.</p>
+<p><em>With connection counting</em>
+<img src="https://raw.githubusercontent.com/airpair/optimizing-python-code/edit/with-connection-counter-profile.png" alt=""/></p>
+<p>We pay almost a full <em>second</em> of execution time over 1000 messages to count how
+many jobs come from each node in the cluster. If you're keeping score at home,
+that's a full millisecond per message.</p>
+<p><em>Without connection counting</em>
+<img src="https://raw.githubusercontent.com/airpair/optimizing-python-code/edit/without-connection-counter-profile.png" alt=""/></p>
+<p>Without job source counting, the total runtime decreases from 3.87 to 2.88
+seconds. This is definitely worth a change to the library's default behavior.</p>
+<h3 id="speeding-up-rollingcounter">Speeding Up RollingCounter</h3>
+<p>Now let's try to improve connection counting for users that <em>do</em> want it.
+Here's a starting point (courtesy of lineprof).</p>
+<pre><code>File: counting_profiler.py
+Function: count_incoming at line 7
+
+Line num    Hits         Time  Per Hit   % Time  Line Contents
+     7                                           @profile
+     8                                           def count_incoming():
+     9                                               // Set the count lifetime really low
+    10         1           11     11.0      0.0      rc = RollingCounter(ttl_secs=0.1)
+    11     10001        10424      1.0      2.5      for i, _ in izip(cycle('1234567890'), xrange(10000)):
+    12     10000       306433     30.6     73.4          rc.add(i)
+    13
+    14        66        29167    441.9      7.0      while rc.max() is not None:
+    15        65        71697   1103.0     17.2          sleep(0.001)
+</code></pre><p>Ok, so adding takes a hefty 73% of our runtime, and it's going to be the most
+frequently run, and most of that time is spent adding the time to the
+<code>sortedlist</code> of times messages were received. Think for a second: time is only
+ever going to increase, so we can safely change to an unsorted list and use
+<code>append</code> to skip the cost of sorting values.</p>
+<p>Switching from <code>blist.sortedlist</code> to <code>list</code> only required 3 changed lines,
+here's the <a href="https://github.com/ryansb/disq/commit/ce6fab14b6ac5ebcaeafc3dbad71517ab96446bd">commit</a> that made the change.</p>
+<pre><code>Fi{}{}: co{}{}ti{}{}_p{}{}fi{}{}r.{}{}
+Fu{}{}ti{}{}: co{}{}t_{}{}co{}{}ng at li{}{} 7
+
+</code></pre><p>After switching to <code>list</code>, the <code>add</code> function is 30 times faster, an enormous
+savings. Even better, switching to Python's stdlib <a href="https://docs.python.org/2/library/bisect.html">bisect</a>
+function cut the time it takes to find the most frequent node by 75 percent.</p>
+<h2 id="python-performance-in-practice">Python Performance in Practice</h2>
+<p>Building performant systems is hard work. Duh: that's why there are so many
+systems that <em>aren't</em> performant. The first step to improving your system is to
+have measurements in place that are easy to test between changes. For my
+projects, I use <a href="https://testrun.org/tox/latest/">tox</a> as a test runner because
+it provides the flexibility to define any environments you need -- not just
+unittest/py.test/nose commands.</p>
+<p>To track performance, I use <a href="https://pytest-benchmark.readthedocs.org/en/latest/">pytest-bench</a> in a tox benchmarking
+environment that's as simple as <code>tox -ebenchmark</code> and spits out the results for
+several test workloads. The tox.ini file below is excerpted, and available in
+full <a href="https://github.com/ryansb/disq/blob/master/tox.ini">here</a>.</p>
+<pre><code>[testenv]
+// exit after 2 failures, report fail info, log the 3 slowest tests, display test coverage within the module
+commands = py.test --maxfail=2 -rf --durations=3
+           --cov disq
+           --cov-report html
+           --cov-report term
+           --benchmark-skip {posargs}
+setenv = VIRTUAL_ENV={envdir}
+         PYTHONHASHSEED=0
+deps = -r{toxinidir}/requirements.txt
+       -r{toxinidir}/test-requirements.txt
+
+[testenv:benchmark]
+// benchmarking environment that skips all non-benchmark tests
+commands = py.test -rf --benchmark-only {posargs}
+
+[testenv:pep8]
+// PEP8 environment that forces me to have consistent style
+commands = pep8
+setenv = VIRTUAL_ENV={envdir}
+         PYTHONHASHSEED=0
+</code></pre><p>The output of a benchmark run is simple enough, compare these two results from
+before and after the changes discussed here.</p>
+<pre><code>## Be{}{}re
+--- be{}{}hm{}{}k: 4 te{}{}s, min 5 ro{}{}ds (of min 25{}{}0u{}{}, 1.{}{}s max ti{}{} --
+Na{}{} (t{}{}e in us)                      Min        Max      Me{}{}   St{}{}ev
+</code></pre><p>The real savings was in <code>getjob</code>, which is where we <em>were</em> bisecting the sorted
+list, and now use the stdlib bisect function. And now we can see when
+performance regresses for new changes, since benchmarks are a part of test
+runs.</p>
+<h2 id="optimization-lessons">Optimization Lessons</h2>
+<p>Any application (Python or not) can benefit from the
+verify-measure-alter-repeat pattern we used to improve the performance of disq
+by more than 30 percent. Next time you get a feeling that something is doing
+more work than necessary, follow your judgement and find out just how much
+you're paying for the layer of indirection you just added--you might be
+surprised.</p>
+<p>All of the tools outlined here: line_profiler, profiling, tox, and pytest-bench
+are worthy additions to your toolbox. Use them. Try them out on your pet
+project and get comfortable with changing code to improve performance. Write
+code that does as little work as possible. The disq library turned out to be
+spending huge amounts of time doing unnecessary work, and our profilers were
+able to guide us to it.</p>
+</post>
+
+  </div></body></html>

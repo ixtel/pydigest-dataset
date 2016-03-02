@@ -1,0 +1,848 @@
+<html><body><div><article class="text">
+        
+
+        <header class="article-header">
+            <h1 class="page-title">PEP 0506 -- Adding A Secrets Module To The Standard Library</h1>
+        </header>
+
+        
+
+ 
+  <table class="rfc2822 docutils field-list" frame="void" rules="none">
+   <col class="field-name"/>
+   
+   <col class="field-body"/>
+   
+   <tbody valign="top">
+    <tr class="field">
+     <th class="field-name">
+      PEP:
+     </th>
+     <td class="field-body">
+      506
+     </td>
+    </tr>
+    <tr class="field">
+     <th class="field-name">
+      Title:
+     </th>
+     <td class="field-body">
+      Adding A Secrets Module To The Standard Library
+     </td>
+    </tr>
+    <tr class="field">
+     <th class="field-name">
+      Author:
+     </th>
+     <td class="field-body">
+      Steven D'Aprano &lt;steve at pearwood.info&gt;
+     </td>
+    </tr>
+    <tr class="field">
+     <th class="field-name">
+      Status:
+     </th>
+     <td class="field-body">
+      Draft
+     </td>
+    </tr>
+    <tr class="field">
+     <th class="field-name">
+      Type:
+     </th>
+     <td class="field-body">
+      Standards Track
+     </td>
+    </tr>
+    <tr class="field">
+     <th class="field-name">
+      Created:
+     </th>
+     <td class="field-body">
+      19-Sep-2015
+     </td>
+    </tr>
+    <tr class="field">
+     <th class="field-name">
+      Python-Version:
+     </th>
+     <td class="field-body">
+      3.6
+     </td>
+    </tr>
+    <tr class="field">
+     <th class="field-name">
+      Post-History:
+     </th>
+     <td class="field-body">
+     </td>
+    </tr>
+   </tbody>
+  </table>
+  <hr/>
+  
+  <div class="section" id="abstract">
+   
+   <p>
+    This PEP proposes the addition of a module for common security-related
+functions such as generating tokens to the Python standard library.
+   </p>
+  </div>
+  <div class="section" id="definitions">
+   
+   <p>
+    Some common abbreviations used in this proposal:
+   </p>
+   <ul>
+    <li>
+     <p class="first">
+      PRNG:
+     </p>
+     <p>
+      Pseudo Random Number Generator.  A deterministic algorithm used
+to produce random-looking numbers with certain desirable
+statistical properties.
+     </p>
+    </li>
+    <li>
+     <p class="first">
+      CSPRNG:
+     </p>
+     <p>
+      Cryptographically Strong Pseudo Random Number Generator.  An
+algorithm used to produce random-looking numbers which are
+resistant to prediction.
+     </p>
+    </li>
+    <li>
+     <p class="first">
+      MT:
+     </p>
+     <p>
+      Mersenne Twister.  An extensively studied PRNG which is currently
+used by the
+      <tt class="docutils literal">
+       random
+      </tt>
+      module as the default.
+     </p>
+    </li>
+   </ul>
+  </div>
+  <div class="section" id="rationale">
+   
+   <p>
+    This proposal is motivated by concerns that Python's standard library
+makes it too easy for developers to inadvertently make serious security
+errors.  Theo de Raadt, the founder of OpenBSD, contacted Guido van Rossum
+and expressed some concern
+    <a class="footnote-reference" href="#id36" id="id1">
+     [1]
+    </a>
+    about the use of MT for generating sensitive
+information such as passwords, secure tokens, session keys and similar.
+   </p>
+   <p>
+    Although the documentation for the
+    <tt class="docutils literal">
+     random
+    </tt>
+    module explicitly states that
+the default is not suitable for security purposes
+    <a class="footnote-reference" href="#id37" id="id2">
+     [2]
+    </a>
+    , it is strongly
+believed that this warning may be missed, ignored or misunderstood by
+many Python developers.  In particular:
+   </p>
+   <ul class="simple">
+    <li>
+     developers may not have read the documentation and consequently
+not seen the warning;
+    </li>
+    <li>
+     they may not realise that their specific use of the module has security
+implications; or
+    </li>
+    <li>
+     not realising that there could be a problem, they have copied code
+(or learned techniques) from websites which don't offer best
+practises.
+    </li>
+   </ul>
+   <p>
+    The first
+    <a class="footnote-reference" href="#id38" id="id3">
+     [3]
+    </a>
+    hit when searching for "python how to generate passwords" on
+Google is a tutorial that uses the default functions from the
+    <tt class="docutils literal">
+     random
+    </tt>
+    module
+    <a class="footnote-reference" href="#id39" id="id4">
+     [4]
+    </a>
+    .  Although it is not intended for use in web applications, it is
+likely that similar techniques find themselves used in that situation.
+The second hit is to a StackOverflow question about generating
+passwords
+    <a class="footnote-reference" href="#id40" id="id5">
+     [5]
+    </a>
+    .  Most of the answers given, including the accepted one, use
+the default functions.  When one user warned that the default could be
+easily compromised, they were told "I think you worry too much."
+    <a class="footnote-reference" href="#id41" id="id6">
+     [6]
+    </a>
+   </p>
+   <p>
+    This strongly suggests that the existing
+    <tt class="docutils literal">
+     random
+    </tt>
+    module is an attractive
+nuisance when it comes to generating (for example) passwords or secure
+tokens.
+   </p>
+   <p>
+    Additional motivation (of a more philosophical bent) can be found in the
+post which first proposed this idea
+    <a class="footnote-reference" href="#id42" id="id7">
+     [7]
+    </a>
+    .
+   </p>
+  </div>
+  <div class="section" id="proposal">
+   
+   <p>
+    Alternative proposals have focused on the default PRNG in the
+    <tt class="docutils literal">
+     random
+    </tt>
+    module, with the aim of providing "secure by default" cryptographically
+strong primitives that developers can build upon without thinking about
+security.  (See Alternatives below.)  This proposes a different approach:
+   </p>
+   <ul class="simple">
+    <li>
+     The standard library already provides cryptographically strong
+primitives, but many users don't know they exist or when to use them.
+    </li>
+    <li>
+     Instead of requiring crypto-naive users to write secure code, the
+standard library should include a set of ready-to-use "batteries" for
+the most common needs, such as generating secure tokens.  This code
+will both directly satisfy a need ("How do I generate a password reset
+token?"), and act as an example of acceptable practises which
+developers can learn from
+     <a class="footnote-reference" href="#id43" id="id8">
+      [8]
+     </a>
+     .
+    </li>
+   </ul>
+   <p>
+    To do this, this PEP proposes that we add a new module to the standard
+library, with the suggested name
+    <tt class="docutils literal">
+     secrets
+    </tt>
+    .  This module will contain a
+set of ready-to-use functions for common activities with security
+implications, together with some lower-level primitives.
+   </p>
+   <p>
+    The suggestion is that
+    <tt class="docutils literal">
+     secrets
+    </tt>
+    becomes the go-to module for dealing
+with anything which should remain secret (passwords, tokens, etc.)
+while the
+    <tt class="docutils literal">
+     random
+    </tt>
+    module remains backward-compatible.
+   </p>
+  </div>
+  <div class="section" id="api-and-implementation">
+   
+   <p>
+    The contents of the
+    <tt class="docutils literal">
+     secrets
+    </tt>
+    module is expected to evolve over time, and
+likely will evolve between the time of writing this PEP and actual release
+in the standard library
+    <a class="footnote-reference" href="#id44" id="id9">
+     [9]
+    </a>
+    .  At the time of writing, the following functions
+have been suggested:
+   </p>
+   <ul class="simple">
+    <li>
+     A high-level function for generating secure tokens suitable for use
+in (e.g.) password recovery, as session keys, etc.
+    </li>
+    <li>
+     A limited interface to the system CSPRNG, using either
+     <tt class="docutils literal">
+      os.urandom
+     </tt>
+     directly or
+     <tt class="docutils literal">
+      random.SystemRandom
+     </tt>
+     .  Unlike the
+     <tt class="docutils literal">
+      random
+     </tt>
+     module, this
+does not need to provide methods for seeding, getting or setting the
+state, or any non-uniform distributions.  It should provide the
+following:
+     <ul>
+      <li>
+       A function for choosing items from a sequence,
+       <tt class="docutils literal">
+        secrets.choice
+       </tt>
+       .
+      </li>
+      <li>
+       A function for generating an integer within some range, such as
+       <tt class="docutils literal">
+        secrets.randrange
+       </tt>
+       or
+       <tt class="docutils literal">
+        secrets.randint
+       </tt>
+       <a class="footnote-reference" href="#id45" id="id10">
+        [10]
+       </a>
+       .
+      </li>
+      <li>
+       A function for generating a given number of random bits and/or bytes
+as an integer.
+      </li>
+      <li>
+       A similar function which returns the value as a hex digit string.
+      </li>
+     </ul>
+    </li>
+    <li>
+     <tt class="docutils literal">
+      hmac.compare_digest
+     </tt>
+     under the name
+     <tt class="docutils literal">
+      equal
+     </tt>
+     .
+    </li>
+   </ul>
+   <p>
+    The consensus appears to be that there is no need to add a new CSPRNG to
+the
+    <tt class="docutils literal">
+     random
+    </tt>
+    module to support these uses,
+    <tt class="docutils literal">
+     SystemRandom
+    </tt>
+    will be
+sufficient.
+   </p>
+   <p>
+    Some illustrative implementations have been given by Nick Coghlan
+    <a class="footnote-reference" href="#id46" id="id11">
+     [11]
+    </a>
+    and a minimalist API by Tim Peters
+    <a class="footnote-reference" href="#id47" id="id12">
+     [12]
+    </a>
+    . This idea has also been discussed
+on the issue tracker for the "cryptography" module
+    <a class="footnote-reference" href="#id48" id="id13">
+     [13]
+    </a>
+    .  The following
+pseudo-code can be taken as a possible starting point for the real
+implementation:
+   </p>
+   <pre class="literal-block">
+from random import SystemRandom
+from hmac import compare_digest as equal
+
+_sysrand = SystemRandom()
+
+randrange = _sysrand.randrange
+randint = _sysrand.randint
+randbits = _sysrand.getrandbits
+choice = _sysrand.choice
+
+def randbelow(exclusive_upper_bound):
+    return _sysrand._randbelow(exclusive_upper_bound)
+
+DEFAULT_ENTROPY = 32  # bytes
+
+def token_bytes(nbytes=None):
+    if nbytes is None:
+        nbytes = DEFAULT_ENTROPY
+    return os.urandom(nbytes)
+
+def token_hex(nbytes=None):
+    return binascii.hexlify(token_bytes(nbytes)).decode('ascii')
+
+def token_url(nbytes=None):
+    tok = token_bytes(nbytes)
+    return base64.urlsafe_b64encode(tok).rstrip(b'=').decode('ascii')
+</pre>
+   <p>
+    The
+    <tt class="docutils literal">
+     secrets
+    </tt>
+    module itself will be pure Python, and other Python
+implementations can easily make use of it unchanged, or adapt it as
+necessary. An implementation can be found on BitBucket
+    <a class="footnote-reference" href="#id49" id="id14">
+     [14]
+    </a>
+    .
+   </p>
+   <div class="section" id="default-arguments">
+    
+    <p>
+     One difficult question is "How many bytes should my token be?".  We can
+help with this question by providing a default amount of entropy for the
+"token_*" functions. If the
+     <tt class="docutils literal">
+      nbytes
+     </tt>
+     argument is None or not given, the
+default entropy will be used. This default value should be large enough
+to be expected to be secure for medium-security uses, but is expected to
+change in the future, possibly even in a maintenance release
+     <a class="footnote-reference" href="#id50" id="id15">
+      [15]
+     </a>
+     .
+    </p>
+   </div>
+   <div class="section" id="naming-conventions">
+    
+    <p>
+     One question is the naming conventions used in the module
+     <a class="footnote-reference" href="#id51" id="id16">
+      [16]
+     </a>
+     , whether to
+use C-like naming conventions such as "randrange" or more Pythonic names
+such as "random_range".
+    </p>
+    <p>
+     Functions which are simply bound methods of the private
+     <tt class="docutils literal">
+      SystemRandom
+     </tt>
+     instance (e.g.
+     <tt class="docutils literal">
+      randrange
+     </tt>
+     ), or a thin wrapper around such, should keep
+the familiar names. Those which are something new (such as the various
+     <tt class="docutils literal">
+      token_*
+     </tt>
+     functions) will use more Pythonic names.
+    </p>
+   </div>
+  </div>
+  <div class="section" id="alternatives">
+   
+   <p>
+    One alternative is to change the default PRNG provided by the
+    <tt class="docutils literal">
+     random
+    </tt>
+    module
+    <a class="footnote-reference" href="#id52" id="id17">
+     [17]
+    </a>
+    .  This received considerable scepticism and outright opposition:
+   </p>
+   <ul class="simple">
+    <li>
+     There is fear that a CSPRNG may be slower than the current PRNG (which
+in the case of MT is already quite slow).
+    </li>
+    <li>
+     Some applications (such as scientific simulations, and replaying
+gameplay) require the ability to seed the PRNG into a known state,
+which a CSPRNG lacks by design.
+    </li>
+    <li>
+     Another major use of the
+     <tt class="docutils literal">
+      random
+     </tt>
+     module is for simple "guess a number"
+games written by beginners, and many people are loath to make any
+change to the
+     <tt class="docutils literal">
+      random
+     </tt>
+     module which may make that harder.
+    </li>
+    <li>
+     Although there is no proposal to remove MT from the
+     <tt class="docutils literal">
+      random
+     </tt>
+     module,
+there was considerable hostility to the idea of having to opt-in to
+a non-CSPRNG or any backwards-incompatible changes.
+    </li>
+    <li>
+     Demonstrated attacks against MT are typically against PHP applications.
+It is believed that PHP's version of MT is a significantly softer target
+than Python's version, due to a poor seeding technique
+     <a class="footnote-reference" href="#id53" id="id18">
+      [18]
+     </a>
+     .  Consequently,
+without a proven attack against Python applications, many people object
+to a backwards-incompatible change.
+    </li>
+   </ul>
+   <p>
+    Nick Coghlan made an earlier suggestion for a globally configurable PRNG
+which uses the system CSPRNG by default
+    <a class="footnote-reference" href="#id54" id="id19">
+     [19]
+    </a>
+    , but has since withdrawn it
+in favour of this proposal.
+   </p>
+  </div>
+  <div class="section" id="comparison-to-other-languages">
+   
+   <ul>
+    <li>
+     <p class="first">
+      PHP
+     </p>
+     <p>
+      PHP includes a function
+      <tt class="docutils literal">
+       uniqid
+      </tt>
+      <a class="footnote-reference" href="#id55" id="id20">
+       [20]
+      </a>
+      which by default returns a
+thirteen character string based on the current time in microseconds.
+Translated into Python syntax, it has the following signature:
+     </p>
+     <pre class="literal-block">
+def uniqid(prefix='', more_entropy=False)-&gt;str
+</pre>
+     <p>
+      The PHP documentation warns that this function is not suitable for
+security purposes.  Nevertheless, various mature, well-known PHP
+applications use it for that purpose (citation needed).
+     </p>
+     <p>
+      PHP 5.3 and better also includes a function
+      <tt class="docutils literal">
+       openssl_random_pseudo_bytes
+      </tt>
+      <a class="footnote-reference" href="#id56" id="id21">
+       [21]
+      </a>
+      .  Translated into Python syntax, it has roughly the following
+signature:
+     </p>
+     <pre class="literal-block">
+def openssl_random_pseudo_bytes(length:int)-&gt;Tuple[str, bool]
+</pre>
+     <p>
+      This function returns a pseudo-random string of bytes of the given
+length, and an boolean flag giving whether the string is considered
+cryptographically strong.  The PHP manual suggests that returning
+anything but True should be rare except for old or broken platforms.
+     </p>
+    </li>
+    <li>
+     <p class="first">
+      JavaScript
+     </p>
+     <p>
+      Based on a rather cursory search
+      <a class="footnote-reference" href="#id57" id="id22">
+       [22]
+      </a>
+      , there do not appear to be any
+well-known standard functions for producing strong random values in
+JavaScript.
+      <tt class="docutils literal">
+       Math.random
+      </tt>
+      is often used, despite serious weaknesses
+making it unsuitable for cryptographic purposes
+      <a class="footnote-reference" href="#id58" id="id23">
+       [23]
+      </a>
+      . In recent years
+the majority of browsers have gained support for
+      <tt class="docutils literal">
+       window.crypto.getRandomValues
+      </tt>
+      <a class="footnote-reference" href="#id59" id="id24">
+       [24]
+      </a>
+      .
+     </p>
+     <p>
+      Node.js offers a rich cryptographic module,
+      <tt class="docutils literal">
+       crypto
+      </tt>
+      <a class="footnote-reference" href="#id60" id="id25">
+       [25]
+      </a>
+      , most of
+which is beyond the scope of this PEP. It does include a single function
+for generating random bytes,
+      <tt class="docutils literal">
+       crypto.randomBytes
+      </tt>
+      .
+     </p>
+    </li>
+    <li>
+     <p class="first">
+      Ruby
+     </p>
+     <p>
+      The Ruby standard library includes a module
+      <tt class="docutils literal">
+       SecureRandom
+      </tt>
+      <a class="footnote-reference" href="#id61" id="id26">
+       [26]
+      </a>
+      which includes the following methods:
+     </p>
+     <ul class="simple">
+      <li>
+       base64 - returns a Base64 encoded random string.
+      </li>
+      <li>
+       hex - returns a random hexadecimal string.
+      </li>
+      <li>
+       random_bytes - returns a random byte string.
+      </li>
+      <li>
+       random_number - depending on the argument, returns either a random
+integer in the range(0, n), or a random float between 0.0 and 1.0.
+      </li>
+      <li>
+       urlsafe_base64 - returns a random URL-safe Base64 encoded string.
+      </li>
+      <li>
+       uuid - return a version 4 random Universally Unique IDentifier.
+      </li>
+     </ul>
+    </li>
+   </ul>
+  </div>
+  <div class="section" id="what-should-be-the-name-of-the-module">
+   
+   <p>
+    There was a proposal to add a "random.safe" submodule, quoting the Zen
+of Python "Namespaces are one honking great idea" koan.  However, the
+author of the Zen, Tim Peters, has come out against this idea
+    <a class="footnote-reference" href="#id62" id="id27">
+     [27]
+    </a>
+    , and
+recommends a top-level module.
+   </p>
+   <p>
+    In discussion on the python-ideas mailing list so far, the name "secrets"
+has received some approval, and no strong opposition.
+   </p>
+   <p>
+    There is already an existing third-party module with the same name
+    <a class="footnote-reference" href="#id63" id="id28">
+     [28]
+    </a>
+    ,
+but it appears to be unused and abandoned.
+   </p>
+  </div>
+  <div class="section" id="frequently-asked-questions">
+   
+   <ul>
+    <li>
+     <p class="first">
+      Q: Is this a real problem? Surely MT is random enough that nobody can
+predict its output.
+     </p>
+     <p>
+      A: The consensus among security professionals is that MT is not safe
+in security contexts.  It is not difficult to reconstruct the internal
+state of MT
+      <a class="footnote-reference" href="#id64" id="id29">
+       [29]
+      </a>
+      <a class="footnote-reference" href="#id65" id="id30">
+       [30]
+      </a>
+      and so predict all past and future values.  There
+are a number of known, practical attacks on systems using MT for
+randomness
+      <a class="footnote-reference" href="#id66" id="id31">
+       [31]
+      </a>
+      .
+     </p>
+     <p>
+      While there are currently no known direct attacks on applications
+written in Python due to the use of MT, there is widespread agreement
+that such usage is unsafe.
+     </p>
+    </li>
+    <li>
+     <p class="first">
+      Q: Is this an alternative to specialise cryptographic software such as SSL?
+     </p>
+     <p>
+      A: No. This is a "batteries included" solution, not a full-featured
+"nuclear reactor".  It is intended to mitigate against some basic
+security errors, not be a solution to all security-related issues. To
+quote Nick Coghlan referring to his earlier proposal
+      <a class="footnote-reference" href="#id67" id="id32">
+       [32]
+      </a>
+      :
+     </p>
+     <pre class="literal-block">
+"...folks really are better off learning to use things like
+cryptography.io for security sensitive software, so this change
+is just about harm mitigation given that it's inevitable that a
+non-trivial proportion of the millions of current and future
+Python developers won't do that."
+</pre>
+    </li>
+    <li>
+     <p class="first">
+      Q: What about a password generator?
+     </p>
+     <dl class="docutils">
+      <dt>
+       A: The consensus is that the requirements for password generators are too
+      </dt>
+      <dd>
+       <p class="first last">
+        variable for it to be a good match for the standard library
+        <a class="footnote-reference" href="#id68" id="id33">
+         [33]
+        </a>
+        . No
+password generator will be included in the initial release of the
+module, instead it will be given in the documentation as a recipe (Ă  la
+the recipes in the
+        <tt class="docutils literal">
+         itertools
+        </tt>
+        module)
+        <a class="footnote-reference" href="#id69" id="id34">
+         [34]
+        </a>
+        .
+       </p>
+      </dd>
+     </dl>
+    </li>
+    <li>
+     <dl class="first docutils">
+      <dt>
+       Q: Will
+       <tt class="docutils literal">
+        secrets
+       </tt>
+       use /dev/random (which blocks) or /dev/urandom (which
+      </dt>
+      <dd>
+       <p class="first last">
+        doesn't block) on Linux? What about other platforms?
+       </p>
+      </dd>
+      <dt>
+       A:
+       <tt class="docutils literal">
+        secrets
+       </tt>
+       will be based on
+       <tt class="docutils literal">
+        os.urandom
+       </tt>
+       and
+       <tt class="docutils literal">
+        random.SystemRandom
+       </tt>
+       ,
+      </dt>
+      <dd>
+       <p class="first last">
+        which are interfaces to your operating system's best source of
+cryptographic randomness. On Linux, that may be
+        <tt class="docutils literal">
+         /dev/urandom
+        </tt>
+        <a class="footnote-reference" href="#id70" id="id35">
+         [35]
+        </a>
+        ,
+on Windows it may be
+        <tt class="docutils literal">
+         CryptGenRandom()
+        </tt>
+        , but see the documentation
+and/or source code for the detailed implementation details.
+       </p>
+      </dd>
+     </dl>
+    </li>
+   </ul>
+  </div>
+  
+  <div class="section" id="copyright">
+   
+   <p>
+    This document has been placed in the public domain.
+   </p>
+   
+  </div>
+ 
+Source: <a href="https://hg.python.org/peps/file/tip/pep-0506.txt">https://hg.python.org/peps/file/tip/pep-0506.txt</a>
+
+    </article>
+
+
+                </div></body></html>

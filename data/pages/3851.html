@@ -1,0 +1,123 @@
+<html><body><div><div class="text"><h3>Preamble – introducing nameko</h3>
+
+<p><a href="http://t.umblr.com/redirect?z=https%3A%2F%2Fgithub.com%2Fonefinestay%2Fnameko%2F&amp;t=OGViN2QzMDg2OGNmYTYxZjhjZmJmM2RiM2MwOTU0MzljZTUzNWEzOSxnZEtlZExXeg%3D%3D">nameko</a> is onefinestay’s service framework. It’s the glue that sticks together our ‘platform’, a collection of services that provide our core business logic.</p>
+
+<p>A ‘service’ is a lump of business logic decorated with ‘entrypoints’ (its public interface) and ‘injections’ (its links to the outside world, so called because they’re provided by dependency injection).</p>
+
+<p>Our services communicate synchronously using RPC, and the transport is AMQP.</p>
+
+<p>Here’s a simple service with a single RPC entrypoint:</p>
+
+<pre>from nameko.rpc import rpc
+
+class StringService(object):
+    name = 'strings'
+
+    @rpc
+    def uppercase(self, arg):
+        return arg.upper()
+</pre>
+
+<p>Once this service is running inside a nameko cluster, you can call it:</p>
+
+<pre>&gt;&gt;&gt; from nameko.standalone.rpc import RpcProxy
+&gt;&gt;&gt; 
+&gt;&gt;&gt; config = {'AMQP_URI': 'amqp://guest:guest@localhost:5672/'}
+&gt;&gt;&gt; with RpcProxy('strings', config) as proxy:
+...     proxy.uppercase('hello world')
+...
+&gt;&gt;&gt; u'HELLO WORLD'
+</pre>
+
+<h3>Handling errors</h3>
+
+<p>We monitor uncaught exceptions in our services and send them to our <a href="http://t.umblr.com/redirect?z=https%3A%2F%2Fgetsentry.com%2Fwelcome%2F&amp;t=ZTdjOGMzMjFmZGQ2YjE5YzJkYjdiZjQ5MmVlMjY5YjY3NTY2YjQyYyxnZEtlZExXeg%3D%3D">sentry</a> instance. Sentry logs the call stack and then sends the engineering team a text message, so one of us can investigate.</p>
+
+<p>This is great for catching logic errors and other programmatic problems. But increasingly we’re allowing our services to be called by humans - by our data analysts and so on. If one of them accidentally calls an RPC method with the wrong signature, we don’t want to know.</p>
+
+<pre>&gt;&gt;&gt; from nameko.standalone.rpc import RpcProxy
+&gt;&gt;&gt; 
+&gt;&gt;&gt; config = {'AMQP_URI': 'amqp://guest:guest@localhost:5672/'}
+&gt;&gt;&gt; with RpcProxy('strings', config) as proxy:
+...     proxy.uppercase('hello world', 'another phrase')
+...
+Traceback (most recent call last):
+  File "&lt;stdin&gt;", line 2, in &lt;module&gt;
+  File ".../lib/python2.7/site-packages/nameko/rpc.py", line 354, in __call__
+    raise RemoteErrorWrapper.deserialize(error)
+nameko.exceptions.RemoteError: TypeError uppercase() takes exactly 2 arguments (3 given)
+</pre>
+
+<p>Sirens, alarms, angry engineers!</p>
+
+<h3>The problem with Python</h3>
+
+<p>Python is a <a href="http://t.umblr.com/redirect?z=http%3A%2F%2Fwww.quora.com%2FPython-programming-language-1%2FHave-I-have-fallen-in-love-with-Python-because-she-is-beautiful&amp;t=ZDJlMmIwNTk4YmRkN2QyZWEyYTBiZjQ3M2QxNGFmZmFhY2U1OTJjYixnZEtlZExXeg%3D%3D">beautiful</a>, <a href="http://t.umblr.com/redirect?z=http%3A%2F%2Fwww.voidspace.org.uk%2Fpython%2Farticles%2Fduck_typing.shtml&amp;t=ZDk3OTYzMmYxMjQxYTFmYjA4MzEwMTFmZTVlMzMxZDYxODBlODY4MSxnZEtlZExXeg%3D%3D">dynamic</a> language. But you pay a price for the flexibility that affords you. Consider the following function:</p>
+
+<pre>def get_eligible_things(requirement):
+    """ Return all the things that pass the given
+    eligibility `requirement`.
+    """
+    return [thing for thing in get_all_things()
+            if thing.is_eligible(requirement)]
+</pre>
+
+<p>If <code>get_all_things()</code> returns something that isn’t iterable, python throws a <code>TypeError</code>. This is the sort of error we want to know about - it usually indicates a bug.</p>
+
+<p>But you will also get a <code>TypeError</code> if the method is called incorrectly:</p>
+
+<pre>&gt;&gt;&gt; get_eligible_things()
+Traceback (most recent call last):
+  File "&lt;stdin&gt;", line 1, in &lt;module&gt;
+TypeError: get_eligible_things() takes exactly 1 argument (0 given)
+</pre>
+
+<p>In a statically-typed language, you <em>can’t</em> call a method incorrectly - the compiler won’t let you, and will give a nice descriptive error about why not. But python can’t tell the difference between the incorrect invocation of a function and an error its execution.</p>
+
+<h3>Python to the rescue</h3>
+
+<p>The only way to avoid a <code>TypeError</code> when a user calls a method incorrectly is to check their arguments before invoking it. We could <a href="http://t.umblr.com/redirect?z=https%3A%2F%2Fdocs.python.org%2F2%2Flibrary%2Finspect.html&amp;t=NDc2NjRlMWJmNTU5MWE0ZWI2YzI0NjU5OTkyY2QyZjdiMzIzYWU4OSxnZEtlZExXeg%3D%3D">inspect</a> the method and verify the provided arguments conform to certain rules, but the flexibility of Python’s (awesome) <code>*args</code> and <code>**kwargs</code> turns this task into quite a large and unseemly blob of logic.</p>
+
+<p>You can see how many variations there are by studying our <a href="http://t.umblr.com/redirect?z=https%3A%2F%2Fgithub.com%2Fonefinestay%2Fnameko%2Fblob%2F582978308fb2ecf2e67e692b81ff01b5621a5ff6%2Ftest%2Ftest_rpc.py%23L412&amp;t=YTBlYWM4MjUzMTc4YTg5MzYxYmE3M2Y4MjkxNWY1NDJjZTM1YjViYSxnZEtlZExXeg%3D%3D">tests</a> for this feature.</p>
+
+<p>Instead of duplicating Python’s own checks, we get the interpreter do the heavy lifting for us. When nameko hosts a service and its RPC entrypoints initialize, they create a “shadow” for the method that they will invoke.</p>
+
+<p>A shadow is an empty lambda function with the same signature as its corresponding method:</p>
+
+<pre>&gt;&gt;&gt; fn = StringService.uppercase
+&gt;&gt;&gt; argspec = inspect.getargspec(fn)
+&gt;&gt;&gt; argspec.args[:1] = []  # remove self
+&gt;&gt;&gt; signature = inspect.formatargspec(*argspec)[1:-1]  # remove parens
+
+&gt;&gt;&gt; src = "lambda {}: None".format(signature)
+&gt;&gt;&gt; print src
+... lambda requirement: None
+&gt;&gt;&gt; shadow = eval(src)
+</pre>
+
+<p>And there’s the bombshell, those four little characters: <code>eval</code>. Everyone knows “eval is evil”, and when you use it you’ve almost definitely made a bad design decision and probably introduced a security hole.</p>
+
+<p>Not so in this case - the body of the function we’re executing is <code>None</code> i.e. a NOOP. There is no security hole, and we’ve saved ourselves from duplicating a load of logic.</p>
+
+<p>So now when a method is invoked with some <code>args</code> tuple and <code>kwargs</code> dict, we can first check them against the shadow:</p>
+
+<pre>method_name = StringService.uppercase.__name__
+try:
+    shadow(*args, **kwargs)
+except TypeError as exc:
+    msg = str(exc).replace('&lt;lambda&gt;', method_name)
+    raise IncorrectSignature(msg)
+</pre>
+
+<p>Any <code>TypeError</code> raised here can <em>only</em> be due to incorrect invocation.
+With this approach, the caller gets a helpful error, Python does all the hard work, and our engineering team doesn’t get woken up when someone makes a typo.</p>
+
+<h4>UPDATE!</h4>
+
+<p>Following some <a href="http://t.umblr.com/redirect?z=https%3A%2F%2Fgithub.com%2Fonefinestay%2Fnameko%2Fpull%2F119%23issuecomment-41438002&amp;t=NTkzMGZlMGYyMTFiMGE5NTU3M2QyYWFhYmVjZDljOThmZGFkOGQxMSxnZEtlZExXeg%3D%3D">suggestions from the community</a>, <a href="http://t.umblr.com/redirect?z=https%3A%2F%2Fgithub.com%2Fdavidszotten&amp;t=MzBjNDI2OWFjMWEwZjczMWY0ZWQyMWM2ZTllNDBhMzM0NzI1ZTk3YixnZEtlZExXeg%3D%3D">@davidszotten</a> has written a <a href="http://tech.onefinestay.com/post/84435442712/eval-profiling">follow-up</a> to this blog post.</p>
+
+      
+            
+      
+      
+    </div></div></body></html>

@@ -1,0 +1,45 @@
+<html><body><div><div class="post-body entry-content" id="post-body-5867524633114694658" itemprop="description articleBody"><p>
+The latest PyDev 3.8.0 has just been released... along with a bunch of bugfixes, the major feature added is the possibility of attaching the debugger to a running process.</p>
+<p>
+So, I thought about explaining a bit how to use it (and later a bit on how it was done).
+</p><p>
+The first thing is that the Debug perspective must be activated (as the attach to process menu is only shown by default in the Debug Perspective). Then, when on the debug perspective, select PyDev &gt; Attach to Process (as the image below shows).
+
+</p>
+
+<p>
+When that action is activated, a list with the active processes is shown so that the process we should attach to can be selected (as a note, by default only Python processes are filtered, but if you have an executable running Python under a different name, it's also possible to select it).
+
+</p>
+<p>
+After selecting the executable, the user must provide a Python interpreter that's compatible with the interpreter we'll attach to (i.e.: if we're attaching to a 64 bit interpreter, the interpreter selected must also be a 64 bit process -- and likewise for 32 bits).
+
+</p>
+<p>
+And if everything went right, we'll be connected with the process after that step (you can note in the screenshot below that in the Debug View we have a process running regularly and we connected to the process through the remote debugger) -- after it's connected, it's possible to pause the running process (through right-click process &gt; suspend)
+
+</p>
+<p>
+So, this was how to use it within PyDev... now, I'll explain a bit on the internals as I had a great time implementing that feature :)
+</p><p>
+The first thing to note is that we currently support (only) Windows and Linux... although the basic idea is the same on both cases (we get a dll loaded in the target process and then execute our attach code through it), the implementations are actually pretty different (as it's Open Source, it can be seen at: </p><a href="https://github.com/fabioz/PyDev.Debugger/tree/development/pydevd_attach_to_process">https://github.com/fabioz/PyDev.Debugger/tree/development/pydevd_attach_to_process</a><p>)
+</p><p>
+So, let me start with the Windows implementation...
+</p><p>
+In the Windows world, I must thank a bunch of people that came before me in order to make it work:</p><p>
+First, Mario Vilas for Winappdbg: </p><a href="https://github.com/MarioVilas/winappdbg">https://github.com/MarioVilas/winappdbg</a><p> -- mostly, this is a Windows debugger written in Python. We use it to attach a dll to a target process. Then, after the dll is loaded, there's some hand-crafted shellcode created to execute a function from that dll (which is actually different for 32 bits and for 64 bits -- I did spend quite some time here since my assembly knowledge was mostly theoretical, so, it was nice to see it working in practice: that's the GenShellCodeHelper class in </p><a href="https://github.com/fabioz/PyDev.Debugger/blob/development/pydevd_attach_to_process/add_code_to_python_process.py">add_code_to_python_process.py</a><p> and it's used in </p><span class="nf">the run_python_code_windows</span><span class="p"/><p> function).
+</p><p>
+Ok, so, that gives us the basic hackery needed in order to execute some code in a different process (which Winappdbg does through the Windows CreateRemoteThread API) -- so, initially I had a simple version working which did (all in shellcode) an acquire of the Python GIL/run some hand-crafted Python code through PyRun_SimpleString/release GIL... but there are a number of problems with that simple approach: the first one is that although we'll execute some Python code there, we'll do it under a new thread, which under Python 3 meant that this would be no good since we have to initialize the Python threading if it still wasn't initialized. Also, to setup the Debugger we need to call sys.settrace on existing threads (while executing in that thread -- or at least making Python think we're at that thread as there's no API for that)... at that point I decided on having the dll (and not only shellcode).
+</p><p>
+So, here I must thank the PVTS guys (which actually have an attach to process on Windows which does mixed mode debugging), so, the </p><a href="https://github.com/fabioz/PyDev.Debugger/blob/development/pydevd_attach_to_process/dll/attach.cpp">attach.cpp</a><p> file which generates our dll is adapted from PVTS to the PyDev use case. It goes through a number of hoops to initialize the threading facility in Python if it still wasn't initialized and does the sys.settrace while having all threads suspended and makes Python think we're actually at the proper thread to make that call... looking at it, I find it really strange that Python itself doesn't have an API for that (it should be easy to do on Python, but it's such a major hack on the debugger because that API is not available).
+</p><p>
+Now, on to Linux: in Linux the approach is simpler as we reuse a debugger that should be readily available for Linux developers: gdb. Also, because gdb stops threads for us and executes the code in an existing thread, things become </p><b>much</b><p> simpler... first, because we're executing in an existing thread, we don't have to start the threading if it's not started -- the only reason this is needed in Windows is because we're executing the code in a new thread in the process, created through CreateRemoteThread -- and also, as gdb has a way to script in </p><a href="https://github.com/fabioz/PyDev.Debugger/blob/development/pydevd_attach_to_process/linux/gdb_threads_settrace.py">Python were we can switch threads</a><p> and execute something in it while having other threads stopped, we also don't need to do the trick on Python to make it think we're in a thread to execute a sys.settrace as if we were in a thread when in reality we weren't, as we can switch to a thread and really execute code on it.
+</p><p>
+So, all in all, it should be working properly, although there are a number of caveats... it may fail if we don't have permissions for the CreateRemoteThread on Windows or in Linux it could fail if the ptrace permissions are not set for us to attach with GDB -- and probably a bunch of other things I still didn't think of :)
+</p><p>
+Still, it's nice to see it working!
+</p><p>
+Also, the last thanks goes to JetBrains/PyCharm, which helped in sponsoring the work in the debugger -- as I mentioned earlier: </p><a href="http://pydev.blogspot.com.br/2014/08/pydev-370-pydevpycharm-debugger-merge.html">http://pydev.blogspot.com.br/2014/08/pydev-370-pydevpycharm-debugger-merge.html</a><p> the debugger in PyDev/PyCharm is now merged :)
+</p><p/>
+</div>
+</div></body></html>

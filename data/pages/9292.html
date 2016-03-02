@@ -1,0 +1,422 @@
+<html><body><div><header class="page-header">
+    
+      <p class="meta text-muted text-uppercase">
+        
+
+
+
+
+
+
+
+
+
+
+
+
+<span class="glyphicon glyphicon-calendar"/> <time datetime="2015-04-17T07:30:04-06:00" pubdate="" data-updated="true">Apr 17<sup>th</sup>, 2015</time>
+        
+           | <a href="#disqus_thread" data-disqus-identifier="https://realpython.com">Comments</a>
+        
+      </p>
+    
+    
+    <h1 class="entry-title">
+        Dockerizing Flask With Compose and Machine - From Localhost to the Cloud
+        
+    </h1>
+    
+  </header>
+
+
+<div class="entry-content clearfix">
+
+
+
+
+
+
+
+<p><a href="https://www.docker.com/">Docker</a> is a powerful tool for spinning up isolated, reproducible application environment <em>containers</em>. <strong>This piece looks at just that – how to containerize a Flask app for local development along with delivering the application to a cloud hosting provider via Docker Compose and Docker Machine.</strong></p>
+
+
+
+
+<p><em>Updates:</em></p>
+
+<ul>
+<li>11/16/2015: Updated to the latest versions of Docker – Docker client (v1.9.0), Docker compose (v1.5.0), and Docker Machine (v0.5.0)</li>
+<li>04/25/2015: Fixed small typo, and updated the <em>docker-compose.yml</em> file to properly copy static files.</li>
+<li>04/19/2015: Added a shell script for copying static files.</li>
+</ul>
+
+
+<blockquote><p>Interested in creating a similar environment for Django? Check out <a href="https://realpython.com/blog/python/django-development-with-docker-compose-and-machine/">this</a> blog post.</p></blockquote>
+
+<a name="Local.Setup"/>
+<h2>Local Setup</h2>
+
+<p>Along with Docker (v1.9.0) we’ll be using –</p>
+
+<ul>
+<li><em><a href="https://docs.docker.com/compose/">Docker Compose</a></em> (v1.5.0) – previously known as fig – for orchestrating a multi-container application into a single app, and</li>
+<li><em><a href="https://docs.docker.com/machine/">Docker Machine</a></em> (v0.5.0) for creating Docker hosts both locally and in the cloud.</li>
+</ul>
+
+
+<p>Follow the directions <a href="http://docs.docker.com/compose/install/">here</a> and <a href="https://docs.docker.com/machine/#installation">here</a> to install Docker Compose and Machine, respectively.</p>
+
+<blockquote><p>Running either Mac OS X or Windows, then your best bet is to install <a href="https://www.docker.com/docker-toolbox">Docker Toolbox</a>.</p></blockquote>
+
+<p>Test out the installs:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>docker-machine --version
+</span><span class="line">docker-machine version 0.5.0 <span class="o">(</span>04cfa58<span class="o">)</span>
+</span><span class="line"><span class="nv">$ </span>docker-compose --version
+</span><span class="line">docker-compose version: 1.5.0
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Next clone the project from the <a href="https://github.com/realpython/orchestrating-docker">repository</a> or create your own project based on the project structure found on the repo:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+<span class="line-number">14</span>
+<span class="line-number">15</span>
+<span class="line-number">16</span>
+<span class="line-number">17</span>
+<span class="line-number">18</span>
+<span class="line-number">19</span>
+<span class="line-number">20</span>
+<span class="line-number">21</span>
+<span class="line-number">22</span>
+<span class="line-number">23</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line">├── docker-compose.yml
+</span><span class="line">├── nginx
+</span><span class="line">│   ├── Dockerfile
+</span><span class="line">│   └── sites-enabled
+</span><span class="line">│       └── flask_project
+</span><span class="line">└── web
+</span><span class="line">    ├── Dockerfile
+</span><span class="line">    ├── app.py
+</span><span class="line">    ├── config.py
+</span><span class="line">    ├── create_db.py
+</span><span class="line">    ├── models.py
+</span><span class="line">    ├── requirements.txt
+</span><span class="line">    ├── static
+</span><span class="line">    │   ├── css
+</span><span class="line">    │   │   ├── bootstrap.min.css
+</span><span class="line">    │   │   └── main.css
+</span><span class="line">    │   ├── img
+</span><span class="line">    │   └── js
+</span><span class="line">    │       ├── bootstrap.min.js
+</span><span class="line">    │       └── main.js
+</span><span class="line">    └── templates
+</span><span class="line">        ├── _base.html
+</span><span class="line">        └── index.html
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>We’re now ready to get the containers up and running. Enter Docker Machine.</p>
+
+<a name="Docker.Machine"/>
+<h2>Docker Machine</h2>
+
+<p>To start Docker Machine, first make sure you’re in the project root and then simply run:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>docker-machine create -d virtualbox dev<span class="p">;</span>
+</span><span class="line">Running pre-create checks...
+</span><span class="line">Creating machine...
+</span><span class="line">Waiting <span class="k">for </span>machine to be running, this may take a few minutes...
+</span><span class="line">Machine is running, waiting <span class="k">for </span>SSH to be available...
+</span><span class="line">Detecting operating system of created instance...
+</span><span class="line">Provisioning created instance...
+</span><span class="line">Copying certs to the <span class="nb">local </span>machine directory...
+</span><span class="line">Copying certs to the remote machine...
+</span><span class="line">Setting Docker configuration on the remote daemon...
+</span><span class="line">To see how to connect Docker to this machine, run: docker-machine env dev
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>The <code>create</code> command setup a “machine” (called <em>dev</em>) for Docker development. In essence, it downloaded boot2docker and started a VM with Docker running. Now just point the Docker client at the <em>dev</em> machine via:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span><span class="nb">eval</span> <span class="s2">"$(docker-machine env dev)"</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Run the following command to view the currently running Machines:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>docker-machine ls
+</span><span class="line">NAME      ACTIVE   DRIVER       STATE     URL                         SWARM
+</span><span class="line">dev       *        virtualbox   Running   tcp://192.168.99.100:2376
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Next, let’s fire up the containers with Docker Compose and get the Flask app and Postgres database up and running.</p>
+
+<a name="Docker.Compose"/>
+<h2>Docker Compose</h2>
+
+<p>Take a look at the <em>docker-compose.yml</em> file:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+<span class="line-number">11</span>
+<span class="line-number">12</span>
+<span class="line-number">13</span>
+<span class="line-number">14</span>
+<span class="line-number">15</span>
+<span class="line-number">16</span>
+<span class="line-number">17</span>
+<span class="line-number">18</span>
+<span class="line-number">19</span>
+<span class="line-number">20</span>
+<span class="line-number">21</span>
+<span class="line-number">22</span>
+<span class="line-number">23</span>
+<span class="line-number">24</span>
+<span class="line-number">25</span>
+<span class="line-number">26</span>
+<span class="line-number">27</span>
+<span class="line-number">28</span>
+<span class="line-number">29</span>
+<span class="line-number">30</span>
+<span class="line-number">31</span>
+<span class="line-number">32</span>
+<span class="line-number">33</span>
+<span class="line-number">34</span>
+<span class="line-number">35</span>
+<span class="line-number">36</span>
+<span class="line-number">37</span>
+<span class="line-number">38</span>
+</pre></td><td class="code"><pre><code class="yaml"><span class="line"><span class="l-Scalar-Plain">web</span><span class="p-Indicator">:</span>
+</span><span class="line">  <span class="l-Scalar-Plain">restart</span><span class="p-Indicator">:</span> <span class="l-Scalar-Plain">always</span>
+</span><span class="line">  <span class="l-Scalar-Plain">build</span><span class="p-Indicator">:</span> <span class="l-Scalar-Plain">./web</span>
+</span><span class="line">  <span class="l-Scalar-Plain">expose</span><span class="p-Indicator">:</span>
+</span><span class="line">    <span class="p-Indicator">-</span> <span class="s">"8000"</span>
+</span><span class="line">  <span class="l-Scalar-Plain">links</span><span class="p-Indicator">:</span>
+</span><span class="line">    <span class="p-Indicator">-</span> <span class="l-Scalar-Plain">postgres:postgres</span>
+</span><span class="line">  <span class="l-Scalar-Plain">volumes</span><span class="p-Indicator">:</span>
+</span><span class="line">    <span class="p-Indicator">-</span> <span class="l-Scalar-Plain">/usr/src/app/static</span>
+</span><span class="line">  <span class="l-Scalar-Plain">env_file</span><span class="p-Indicator">:</span> <span class="l-Scalar-Plain">.env</span>
+</span><span class="line">  <span class="l-Scalar-Plain">command</span><span class="p-Indicator">:</span> <span class="l-Scalar-Plain">/usr/local/bin/gunicorn -w 2 -b :8000 app:app</span>
+</span><span class="line">
+</span><span class="line"><span class="l-Scalar-Plain">nginx</span><span class="p-Indicator">:</span>
+</span><span class="line">  <span class="l-Scalar-Plain">restart</span><span class="p-Indicator">:</span> <span class="l-Scalar-Plain">always</span>
+</span><span class="line">  <span class="l-Scalar-Plain">build</span><span class="p-Indicator">:</span> <span class="l-Scalar-Plain">./nginx/</span>
+</span><span class="line">  <span class="l-Scalar-Plain">ports</span><span class="p-Indicator">:</span>
+</span><span class="line">    <span class="p-Indicator">-</span> <span class="s">"80:80"</span>
+</span><span class="line">  <span class="l-Scalar-Plain">volumes</span><span class="p-Indicator">:</span>
+</span><span class="line">    <span class="p-Indicator">-</span> <span class="l-Scalar-Plain">/www/static</span>
+</span><span class="line">  <span class="l-Scalar-Plain">volumes_from</span><span class="p-Indicator">:</span>
+</span><span class="line">    <span class="p-Indicator">-</span> <span class="l-Scalar-Plain">web</span>
+</span><span class="line">  <span class="l-Scalar-Plain">links</span><span class="p-Indicator">:</span>
+</span><span class="line">    <span class="p-Indicator">-</span> <span class="l-Scalar-Plain">web:web</span>
+</span><span class="line">
+</span><span class="line"><span class="l-Scalar-Plain">data</span><span class="p-Indicator">:</span>
+</span><span class="line">  <span class="l-Scalar-Plain">restart</span><span class="p-Indicator">:</span> <span class="l-Scalar-Plain">no</span>
+</span><span class="line">  <span class="l-Scalar-Plain">image</span><span class="p-Indicator">:</span> <span class="l-Scalar-Plain">postgres:latest</span>
+</span><span class="line">  <span class="l-Scalar-Plain">volumes</span><span class="p-Indicator">:</span>
+</span><span class="line">    <span class="p-Indicator">-</span> <span class="l-Scalar-Plain">/var/lib/postgresql</span>
+</span><span class="line">  <span class="l-Scalar-Plain">command</span><span class="p-Indicator">:</span> <span class="l-Scalar-Plain">true</span>
+</span><span class="line">
+</span><span class="line"><span class="l-Scalar-Plain">postgres</span><span class="p-Indicator">:</span>
+</span><span class="line">  <span class="l-Scalar-Plain">restart</span><span class="p-Indicator">:</span> <span class="l-Scalar-Plain">always</span>
+</span><span class="line">  <span class="l-Scalar-Plain">image</span><span class="p-Indicator">:</span> <span class="l-Scalar-Plain">postgres:latest</span>
+</span><span class="line">  <span class="l-Scalar-Plain">volumes_from</span><span class="p-Indicator">:</span>
+</span><span class="line">    <span class="p-Indicator">-</span> <span class="l-Scalar-Plain">data</span>
+</span><span class="line">  <span class="l-Scalar-Plain">ports</span><span class="p-Indicator">:</span>
+</span><span class="line">    <span class="p-Indicator">-</span> <span class="s">"5432:5432"</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Here, we’re defining four services – <em>web</em>, <em>nginx</em>, <em>postgres</em>, and <em>data</em>.</p>
+
+<ol>
+<li>First, the <em>web</em> service is built via the instructions in the <em>Dockerfile</em> within the “web” directory – where the Python environment is setup, requirements are installed, and the Flask app is fired up on port 8000. That port is then forwarded to port 80 on the host environment – e.g., the Docker Machine. This service also adds environment variables to the container that are defined in the <em>.env</em> file.</li>
+<li>The <em>nginx</em> service is used for reverse proxy to forward requests either to the Flask app or the static files.</li>
+<li>Next, the <em>postgres</em> service is built from the the official <a href="https://registry.hub.docker.com/_/postgres/">PostgreSQL image</a> from <a href="https://hub.docker.com/">Docker Hub</a>, which install Postgres and runs the server on the default port 5432.</li>
+<li>Finally, notice how there is a separate <a href="https://docs.docker.com/userguide/dockervolumes/">volume</a> container that’s used to store the database data, <em>data</em>. This helps ensure that the data persists even if the Postgres container is completely destroyed.</li>
+</ol>
+
+
+<p>Now, to get the containers running, build the images and then start the services:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>docker-compose build
+</span><span class="line"><span class="nv">$ </span>docker-compose up -d
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Grab a cup of coffee. Or two. Check out the <a href="https://realpython.com/courses/">Real Python courses</a>. This will take a while the first time you run it.</p>
+
+<p>We also need to create the database table:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>docker-compose run web /usr/local/bin/python create_db.py
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Open your browser and navigate to the IP address associated with Docker Machine (<code>docker-machine ip</code>):</p>
+
+
+
+
+
+
+
+
+
+<p>Nice!</p>
+
+<p>To see which environment variables are available to the <em>web</em> service, run:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>docker-compose run web env
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>To view the logs:</p>
+
+<figure class="code"><figcaption><span/></figcaption></figure>
+
+
+<p>You can also enter the Postgres Shell – since we forward the port to the host environment in the <em>docker-compose.yml</em> file – to add users/roles as well as databases via:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>psql -h 192.168.99.100 -p 5432 -U postgres --password
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Once done, stop the processes via <code>docker-compose stop</code>.</p>
+
+<a name="Deployment"/>
+<h2>Deployment</h2>
+
+<p>So, with our app running locally, we can now push this exact same environment to a cloud hosting provider with Docker Machine. Let’s deploy to a <a href="https://www.digitalocean.com/?refcode=d8f211a4b4c2">Digital Ocean</a> droplet.</p>
+
+<p>After you <a href="https://www.digitalocean.com/?refcode=d8f211a4b4c2">sign up</a> for Digital Ocean, generate a <a href="https://www.digitalocean.com/community/tutorials/how-to-use-the-digitalocean-api-v2">Personal Access Token</a>, and then run the following command:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>docker-machine create <span class="se">\</span>
+</span><span class="line">-d digitalocean <span class="se">\</span>
+</span><span class="line">--digitalocean-access-token<span class="o">=</span>ADD_YOUR_TOKEN_HERE <span class="se">\</span>
+</span><span class="line">production
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>This will take a few minutes to provision the droplet and setup a new Docker Machine called <em>production</em>:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+<span class="line-number">5</span>
+<span class="line-number">6</span>
+<span class="line-number">7</span>
+<span class="line-number">8</span>
+<span class="line-number">9</span>
+<span class="line-number">10</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line">Running pre-create checks...
+</span><span class="line">Creating machine...
+</span><span class="line">Waiting <span class="k">for </span>machine to be running, this may take a few minutes...
+</span><span class="line">Machine is running, waiting <span class="k">for </span>SSH to be available...
+</span><span class="line">Detecting operating system of created instance...
+</span><span class="line">Provisioning created instance...
+</span><span class="line">Copying certs to the <span class="nb">local </span>machine directory...
+</span><span class="line">Copying certs to the remote machine...
+</span><span class="line">Setting Docker configuration on the remote daemon...
+</span><span class="line">To see how to connect Docker to this machine, run: docker-machine env production
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Now we have two Machines running, one locally and one on Digital Ocean:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+<span class="line-number">4</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>docker-machine ls
+</span><span class="line">NAME         ACTIVE   DRIVER         STATE     URL                         SWARM
+</span><span class="line">dev          *        virtualbox     Running   tcp://192.168.99.100:2376
+</span><span class="line">production   -        digitalocean   Running   tcp://104.131.93.156:2376
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Then set <em>production</em> as the active machine and load the Docker environment into the shell:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span><span class="nb">eval</span> <span class="s2">"$(docker-machine env production)"</span>
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Finally, let’s build the Flask app again in the cloud:</p>
+
+<figure class="code"><figcaption><span/></figcaption><div class="highlight"><table><tr><td class="gutter"><pre class="line-numbers"><span class="line-number">1</span>
+<span class="line-number">2</span>
+<span class="line-number">3</span>
+</pre></td><td class="code"><pre><code class="sh"><span class="line"><span class="nv">$ </span>docker-compose build
+</span><span class="line"><span class="nv">$ </span>docker-compose up -d
+</span><span class="line"><span class="nv">$ </span>docker-compose run web /usr/local/bin/python create_db.py
+</span></code></pre></td></tr></table></div></figure>
+
+
+<p>Grab the IP address associated with that Digital Ocean account from the <a href="https://cloud.digitalocean.com/droplets">control panel</a> and view it in the browser. If all went well, you should see your app running.</p>
+
+<a name="Conclusion"/>
+<h2>Conclusion</h2>
+
+<p>Cheers!</p>
+
+<ul>
+<li>Grab the code from the <a href="https://github.com/realpython/orchestrating-docker">Github repo</a> (star it too!).</li>
+<li>Comment below with questions.</li>
+<li>Next time we’ll extend this workflow to include two more Docker containers running the Flask app and incorporate load balancing into the mix. Stay tuned!</li>
+</ul>
+
+</div>
+
+
+      </div></body></html>

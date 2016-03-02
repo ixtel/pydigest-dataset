@@ -1,0 +1,85 @@
+<html><body><div><div itemprop="articleBody"><p>Ok, introductory stuff: before python 2.5 generators were just a unidirectional computation structure. That means one could get values out of the generator. In python 2.5 we have the enhancements from <a class="reference external" href="http://www.python.org/dev/peps/pep-0342/">PEP 342: Coroutines via Enhanced Generators</a> - generators have 3 extra methods: sent, throw and close and the yield statement is a expression now. So the idea is that the generators are now a bidirectional computation structure: we can get values out and in the generator.</p><p>Here's a very simple example of what you can do now:</p><div class="highlight"><pre><span/><span class="gp">&gt;&gt;&gt; </span><span class="k">def</span> <span class="nf">somegenerator</span><span class="p">():</span>
+<span class="gp">... </span>    <span class="k">print</span> <span class="p">(</span><span class="k">yield</span> <span class="mi">1</span><span class="p">)</span>
+<span class="gp">... </span>    <span class="k">print</span> <span class="p">(</span><span class="k">yield</span> <span class="mi">2</span><span class="p">)</span>
+<span class="gp">...</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">g</span> <span class="o">=</span> <span class="n">somegenerator</span><span class="p">()</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="k">print</span> <span class="n">g</span><span class="o">.</span><span class="n">next</span><span class="p">()</span>
+<span class="go">1</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="k">print</span> <span class="n">g</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="s1">'a'</span><span class="p">)</span>
+<span class="go">a</span>
+<span class="go">2</span>
+<span class="go">&gt;&gt;&gt;</span>
+</pre></div><p>Coroutines are program components that generalize subroutines to allow multiple entry points and suspending and resuming of execution at certain locations, to quote <a class="reference external" href="http://en.wikipedia.org/wiki/Coroutine">wikipedia</a>. So we could look at a generator as a coroutine and the yield expressions as suspend/resume points. Take this example:</p><div class="highlight"><pre><span/><span class="k">def</span> <span class="nf">somecoroutine</span><span class="p">():</span>
+    <span class="n">data</span> <span class="o">=</span> <span class="p">(</span><span class="k">yield</span> <span class="n">nonblocking_read</span><span class="p">(</span><span class="n">my_socket</span><span class="p">,</span> <span class="n">nbytes</span><span class="p">))</span>
+</pre></div><p>Well, this example is actually from the <a class="reference external" href="http://www.python.org/dev/peps/pep-0342/">PEP342</a> spec.Here's an example that uses cogen:</p><div class="highlight"><pre><span/><span class="kn">from</span> <span class="nn">cogen.core.coroutine</span> <span class="kn">import</span> <span class="n">coroutine</span>
+<span class="kn">from</span> <span class="nn">cogen.core.schedulers</span> <span class="kn">import</span> <span class="n">Scheduler</span>
+<span class="kn">from</span> <span class="nn">cogen.core.sockets</span> <span class="kn">import</span> <span class="n">Socket</span>
+<span class="kn">from</span> <span class="nn">cogen.core.reactors</span> <span class="kn">import</span> <span class="n">SelectReactor</span>
+
+<span class="nd">@coroutine</span>
+<span class="k">def</span> <span class="nf">somecoroutine</span><span class="p">():</span>
+    <span class="n">mysocket</span> <span class="o">=</span> <span class="n">Socket</span><span class="p">()</span> <span class="c1"># cogen's socket wrapper</span>
+    <span class="k">yield</span> <span class="n">mysocket</span><span class="o">.</span><span class="n">connect</span><span class="p">((</span><span class="s1">'www.google.com'</span><span class="p">,</span><span class="mi">80</span><span class="p">))</span>
+    <span class="k">yield</span> <span class="n">mysocket</span><span class="o">.</span><span class="n">writeall</span><span class="p">(</span><span class="s2">"GET / HTTP/1.1</span><span class="se">\r\n</span><span class="s2">Host: www.google.com</span><span class="se">\r\n\r\n</span><span class="s2">"</span><span class="p">)</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="k">yield</span> <span class="n">mysocket</span><span class="o">.</span><span class="n">read</span><span class="p">(</span><span class="mi">10240</span><span class="p">)</span>
+    <span class="k">print</span> <span class="n">result</span>
+
+<span class="n">sched</span> <span class="o">=</span> <span class="n">Scheduler</span><span class="p">(</span><span class="n">reactor</span><span class="o">=</span><span class="n">SelectReactor</span><span class="p">)</span>
+<span class="n">sched</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">somecoroutine</span><span class="p">)</span>
+<span class="n">sched</span><span class="o">.</span><span class="n">run</span><span class="p">()</span> <span class="c1"># this is the main loop</span>
+</pre></div><ul class="simple"><li>coroutine is a special decorator that wrapps generators and functions alike in a special Coroutine class. So for example, if you decorate a function that isn't actualy a generator nothing bad will happen.</li><li>Socket is a special wrapper that looks like the regular socket object (well, we actualy have a different flavour for usual recv and send, namely: read, readall, readline, write, writeall) but returns some special objects that we call operations. These operations instruct the cogen scheduler what to do with the coroutine.</li><li>reactor=SelectReactor - there are actually 5 reactors: SelectReactor, PollReactor, KQueueReactor, EpollReactor, IOCPProactor. For KQueueReactor and EpollReactor you need C extension modules (that are provided in the lib directory) and for IOCPProactor you need the pywin32 extensions - also, IOCPProactor is in development atm. The reactor coupled with the socket operations handles all the nasty asynchronous networking code.</li></ul><p>Also, there are a bunch of examples <a class="reference external" href="http://code.google.com/p/cogen/source/browse/trunk/examples/">here</a>.</p><p>Calls to other coroutines need to be made through the scheduler. To call another coroutine you yield a Call operation. Here's an example:</p><div class="highlight"><pre><span/><span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">cogen.core.coroutine</span> <span class="kn">import</span> <span class="n">coroutine</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">cogen.core.schedulers</span> <span class="kn">import</span> <span class="n">Scheduler</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">cogen.core</span> <span class="kn">import</span> <span class="n">events</span>
+<span class="go">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="nd">@coroutine</span>
+<span class="gp">... </span><span class="k">def</span> <span class="nf">foo</span><span class="p">():</span>
+<span class="gp">... </span>    <span class="k">print</span> <span class="s1">'foo'</span>
+<span class="gp">... </span>    <span class="n">result</span> <span class="o">=</span> <span class="k">yield</span> <span class="n">events</span><span class="o">.</span><span class="n">Call</span><span class="p">(</span><span class="n">bar</span><span class="p">,</span> <span class="n">args</span><span class="o">=</span><span class="p">(</span><span class="s2">"ham"</span><span class="p">,))</span>
+<span class="gp">... </span>    <span class="k">print</span> <span class="n">result</span>
+<span class="gp">...</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="nd">@coroutine</span>
+<span class="gp">... </span><span class="k">def</span> <span class="nf">bar</span><span class="p">(</span><span class="n">what</span><span class="p">):</span>
+<span class="gp">... </span>    <span class="k">print</span> <span class="s1">'bar'</span>
+<span class="gp">... </span>    <span class="k">raise</span> <span class="ne">StopIteration</span><span class="p">(</span><span class="s2">"spam, </span><span class="si">%s</span><span class="s2"> and eggs"</span> <span class="o">%</span> <span class="n">what</span><span class="p">)</span>
+<span class="gp">...</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">sched</span> <span class="o">=</span> <span class="n">Scheduler</span><span class="p">()</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">sched</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">foo</span><span class="p">)</span>
+<span class="go">&lt;foo Coroutine instance at 0x00D1E6B8 wrapping &lt;function foo at 0x00C01B30&gt;, state: NOTSTARTED&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">sched</span><span class="o">.</span><span class="n">run</span><span class="p">()</span>
+<span class="go">foo</span>
+<span class="go">bar</span>
+<span class="go">spam, ham and eggs</span>
+<span class="go">&gt;&gt;&gt;</span>
+</pre></div><p><tt class="docutils literal">cogen</tt> has also other usefull operations. Take for example this using signals:</p><div class="highlight"><pre><span/><span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">cogen.core.coroutine</span> <span class="kn">import</span> <span class="n">coroutine</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">cogen.core.schedulers</span> <span class="kn">import</span> <span class="n">Scheduler</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span> <span class="nn">cogen.core</span> <span class="kn">import</span> <span class="n">events</span>
+<span class="go">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="nd">@coroutine</span>
+<span class="gp">... </span><span class="k">def</span> <span class="nf">foo</span><span class="p">():</span>
+<span class="gp">... </span>    <span class="k">yield</span> <span class="n">events</span><span class="o">.</span><span class="n">Signal</span><span class="p">(</span><span class="s2">"bar"</span><span class="p">,</span> <span class="s1">'spam'</span><span class="p">)</span>
+<span class="gp">... </span>    <span class="k">yield</span> <span class="n">events</span><span class="o">.</span><span class="n">Signal</span><span class="p">(</span><span class="s2">"bar"</span><span class="p">,</span> <span class="s1">'ham'</span><span class="p">)</span>
+<span class="gp">... </span>    <span class="k">yield</span> <span class="n">events</span><span class="o">.</span><span class="n">Signal</span><span class="p">(</span><span class="s2">"bar"</span><span class="p">,</span> <span class="s1">'eggs'</span><span class="p">)</span>
+<span class="gp">... </span>    <span class="k">yield</span> <span class="n">events</span><span class="o">.</span><span class="n">Sleep</span><span class="p">(</span><span class="mi">3</span><span class="p">)</span>
+<span class="gp">...</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="nd">@coroutine</span>
+<span class="gp">... </span><span class="k">def</span> <span class="nf">bar</span><span class="p">():</span>
+<span class="gp">... </span>    <span class="k">print</span> <span class="p">(</span><span class="k">yield</span> <span class="n">events</span><span class="o">.</span><span class="n">WaitForSignal</span><span class="p">(</span><span class="s2">"bar"</span><span class="p">))</span>
+<span class="gp">... </span>    <span class="k">print</span> <span class="p">(</span><span class="k">yield</span> <span class="n">events</span><span class="o">.</span><span class="n">WaitForSignal</span><span class="p">(</span><span class="s2">"bar"</span><span class="p">))</span>
+<span class="gp">... </span>    <span class="k">print</span> <span class="p">(</span><span class="k">yield</span> <span class="n">events</span><span class="o">.</span><span class="n">WaitForSignal</span><span class="p">(</span><span class="s2">"bar"</span><span class="p">))</span>
+<span class="gp">... </span>    <span class="k">try</span><span class="p">:</span>
+<span class="gp">... </span>        <span class="k">print</span> <span class="p">(</span><span class="k">yield</span> <span class="n">events</span><span class="o">.</span><span class="n">WaitForSignal</span><span class="p">(</span><span class="s2">"bar"</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mi">2</span><span class="p">))</span>
+<span class="gp">... </span>    <span class="k">except</span> <span class="n">events</span><span class="o">.</span><span class="n">OperationTimeout</span><span class="p">:</span>
+<span class="gp">... </span>        <span class="k">print</span> <span class="s1">'No more stuff!'</span>
+<span class="gp">...</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">sched</span> <span class="o">=</span> <span class="n">Scheduler</span><span class="p">()</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">sched</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">bar</span><span class="p">)</span>
+<span class="go">&lt;bar Coroutine instance at 0x00D1E6B8 wrapping &lt;function bar at 0x00C551F0&gt;, state: NOTSTARTED&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">sched</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">foo</span><span class="p">)</span>
+<span class="go">&lt;foo Coroutine instance at 0x00D1EC90 wrapping &lt;function foo at 0x00C01B30&gt;, state: NOTSTARTED&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">sched</span><span class="o">.</span><span class="n">run</span><span class="p">()</span>
+<span class="go">spam</span>
+<span class="go">ham</span>
+<span class="go">eggs</span>
+<span class="go">No more stuff!</span>
+<span class="go">&gt;&gt;&gt;</span>
+</pre></div><ul class="simple"><li><tt class="docutils literal">events.Signal(name, value)</tt> - name is an object that needs to be immutable (strings, tuples, numbers and frozen sets are immutable for example); value is what is yield <tt class="docutils literal">events.WaitForSignal</tt> going to return.</li><li><tt class="docutils literal">cogen</tt>'s scheduler main loop (run) exits when there is no more stuff to run (no active coroutines, no socket operations waiting etc) - <tt class="docutils literal">events.WaitForSignal</tt> does not qualify, otherwise the scheduler would run endlessly and nothing would happen (no other coroutines to raise the signal), that is why there is a <tt class="docutils literal">events.Sleep(3)</tt> in <tt class="docutils literal">foo</tt>.</li></ul><p>There's a lot more to talk about, so check the docs on <a class="reference external" href="http://code.google.com/p/cogen/wiki/Docs_CogenCoreEvents">events</a> and <a class="reference external" href="http://code.google.com/p/cogen/wiki/Docs_CogenCoreSocketsSocket">sockets</a>, the <a class="reference external" href="http://code.google.com/p/cogen/source/browse/trunk/examples/">examples</a>.</p></div></div></body></html>

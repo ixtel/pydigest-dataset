@@ -1,0 +1,549 @@
+<html><body><div><div class="entry-content">
+		<p>In the <a href="https://orenmn.wordpress.com/2016/01/09/understanding-cpython-by-patching-part-3/">previous post</a>, we have continued exploring CPython in order to find a way to turn the default base of integer literals in Python source code from decimal to hexadecimal.<br/>
+We have added a patch to make the tokenizer identify a hex integer literal without any special prefix or suffix as a NUMBER token.</p>
+<p>Somewhat as expected, the patch caused a faulty behavior in case of a hex integer literal:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+&gt;&gt;&gt; 2f3
+ValueError: could not convert string to float: 2f3
+</pre>
+<p>This is expected because the tokenizer classified an invalid token as a NUMBER token, while all other parts of the interpreter are oblivious to the change (in <a href="https://orenmn.wordpress.com/2016/01/02/understanding-cpython-by-patching-part-2/">part 2</a> we have gone over the steps taken by the CPython interpreter to run a piece of Python source code).</p>
+<p>Actually, this error is probably raised by the code that tries to convert a NUMBER token into a Python numeric object (i.e. an instance of any of Python’s numeric types: ‘int’, ‘float’ and ‘complex’).</p>
+<p>Let’s find that code.</p>
+<p>We search for ‘could not convert string to float’, and find it in Modules\_pickle.c, Objects\floatobject.c and Python\pystrtod. The ‘pickle’ module is certainly irrelevant, so we start by examining the one in Objects\floatobject.c:</p>
+<pre class="brush: cpp; title: ; notranslate" title="">
+PyObject *
+PyFloat_FromString(PyObject *v)
+{
+    ...
+    if (end != last) {
+        PyErr_Format(PyExc_ValueError,
+                     "could not convert string to float: "
+                     "%R", v);
+        ...
+    }
+    ...
+}
+</pre>
+<p>Sounds like this function receives a ‘str’ object. To be sure, we search for ‘PyFloat_FromString’ and find its declaration in Include\floatobject.h:</p>
+<pre class="brush: cpp; title: ; notranslate" title="">
+/* Return Python float from string PyObject. */
+PyAPI_FUNC(PyObject *) PyFloat_FromString(PyObject*);
+</pre>
+<p>As we thought. </p>
+<p>Now, it sounds very unlikely for the interpreter to first convert numeric literals in the source into ‘str’ objects, and only then convert them into numeric objects. So <i>PyFloat_FromString</i> is probably not the one that raised that ‘could not convert string to float’ error.</p>
+<p>We turn to look at Python\pystrtod.c:</p>
+<pre class="brush: cpp; title: ; notranslate" title="">
+/* PyOS_string_to_double converts a null-terminated byte string s (interpreted
+   as a string of ASCII characters) to a float.  The string should not have
+   leading or trailing whitespace.  The conversion is independent of the
+   current locale.
+   ...
+*/
+
+double
+PyOS_string_to_double(const char *s,
+                      char **endptr,
+                      PyObject *overflow_exception)
+{
+    ...
+    else if (!endptr &amp;&amp; (fail_pos == s || *fail_pos != '\0'))
+        PyErr_Format(PyExc_ValueError,
+                      "could not convert string to float: "
+                      "%.200s", s);
+    else if (fail_pos == s)
+        PyErr_Format(PyExc_ValueError,
+                      "could not convert string to float: "
+                      "%.200s", s);
+    ...
+}
+</pre>
+<p>Hmmm…<br/>
+Converting a string of ASCII chars into a float sounds more like something related to the handling of a numeric literal in Python source code.</p>
+<p>We search for ‘PyOS_string_to_double’, and find it in 8 different files. However, one file stands out among all others: There is a call to <i>PyOS_string_to_double</i> in <b>Python\ast.c</b>, from the static function <i><b>parsenumber</b></i>.</p>
+<p>Awesome!<br/>
+In part 2 we have found that <i>PyAST_FromNodeObject</i> in Python\ast.c transforms the CST into an AST. Optimistic as ever, we guess that <i>parsenumber</i> is part of the code that transforms the CST into an AST. </p>
+<p>But a guess is not enough, so we examine Python\ast.c more closely:</p>
+<pre class="brush: cpp; title: ; notranslate" title="">
+...
+static int validate_stmts(asdl_seq *);
+static int validate_exprs(asdl_seq *, expr_context_ty, int);
+static int validate_nonempty_seq(asdl_seq *, const char *, const char *);
+static int validate_stmt(stmt_ty);
+static int validate_expr(expr_ty, expr_context_ty);
+...
+int
+PyAST_Validate(mod_ty mod)
+{
+    ...
+}
+...
+static PyObject *parsenumber(struct compiling *, const char *);
+...
+
+/* Transform the CST rooted at node * to the appropriate AST
+*/
+
+mod_ty
+PyAST_FromNodeObject(const node *n, PyCompilerFlags *flags,
+                     PyObject *filename, PyArena *arena)
+{
+    ...
+}
+
+mod_ty
+PyAST_FromNode(const node *n, PyCompilerFlags *flags, const char *filename_str,
+               PyArena *arena)
+{
+    mod_ty mod;
+    PyObject *filename;
+    filename = PyUnicode_DecodeFSDefault(filename_str);
+    ...
+    mod = PyAST_FromNodeObject(n, flags, filename, arena);
+    ...
+    return mod;
+
+}
+...
+static PyObject *
+parsenumber(struct compiling *c, const char *s)
+{
+    ...
+}
+...
+</pre>
+<p>It seems like Python\ast.c consists of two quite separate parts (there aren’t any calls from one part to functions in the other part):</p>
+<ol>
+<li>A part that contains functions related to validation checks, whose only non-static function is <i>PyAST_Validate</i>.</li>
+<li>A part that contains functions related to transforming the CST into an AST. The only non-static functions in this part are <i>PyAST_FromNodeObject</i> and <i>PyAST_FromNode</i>, while <i>PyAST_FromNode</i> just decodes some filename, and calls <i>PyAST_FromNodeObject</i>.</li>
+</ol>
+<p>The second part is obviously the one we care about, so we would just ignore <i>PyAST_Validate</i>.<br/>
+This means, in short, that the only way for <i>parsenumber</i> to ever be called, is through <i>PyAST_FromNodeObject</i>.</p>
+<p>Very well.<br/>
+This is our current hypothesis about the way in which the CPython interpreter handles numeric literals: </p>
+<ol>
+<li>The tokenizer classifies a numeric literal as a NUMBER token.</li>
+<li>The parser makes a CST node for the NUMBER token, in which it stores the token in some format, while also storing the literal’s source as a utf-8 encoded string.</li>
+<li>The parser adds the CST node to the appropriate place in the CST.</li>
+<li>While the CST is converted into an AST, that CST node is parsed and entered into the AST in some form. Among others, the literal’s source as a utf-8 encoded string is passed to <i>parsenumber</i>, which converts it into a Python numeric object (which is actually stored in the AST node).</li>
+</ol>
+<p>In the previous post, we have seen that <i>parsetok</i> (in Parser\parsetok.c) calls <i>PyTokenizer_Get</i> to get the next token, and then calls <i>PyParser_AddToken</i> to add the token to the CST. <i>parsetok</i> passes the following information (which was received from <i>PyTokenizer_Get</i>) to <i>PyParser_AddToken</i>:</p>
+<ol>
+<li>the token’s type</li>
+<li>the token’s source as a utf-8 encoded string</li>
+<li>the token’s location in the source</li>
+<li>the address of some error code variable</li>
+</ol>
+<p>In part 2, we have seen that (at least in the implementation of builtin ‘eval’), the CST is constructed and passed to <i>PyAST_FromNodeObject</i> right away.<br/>
+Thus, to prove our hypothesis, we need only to:</p>
+<ol>
+<li>find how a token’s source as a utf-8 encoded string is stored in a CST node</li>
+<li>verify that the string passed to <i>parsenumber</i> is retrieved from where the token’s source was stored</li>
+</ol>
+<p>Let us start by looking at <i>PyParser_AddToken</i>‘s implementation.<br/>
+We search for ‘PyParser_AddToken’, and find it in Parser\parser.c.<br/>
+Oh boy.<br/>
+It seems like <i>PyParser_AddToken</i> is full of compilers stuff, which I don’t understand yet. Luckily, the source as a utf-8 encoded string parameter is used only 3 times in the function, so we would just follow the references to it:</p>
+<pre class="brush: cpp; title: ; notranslate" title="">
+int
+PyParser_AddToken(parser_state *ps, int type, char *str,
+                  int lineno, int col_offset, int *expected_ret)
+{
+    int ilabel;
+    ...
+    D(printf("Token %s/'%s' ... ", _PyParser_TokenNames[type], str));
+    ...
+    /* Find out which label this token is */
+    ilabel = classify(ps, type, str);
+    ...
+    /* Loop until the token is shifted or an error occurred */
+    for (;;) {
+        ...
+        /* Check accelerator */
+        if (s-&gt;s_lower &lt;= ilabel &amp;&amp; ilabel &lt; s-&gt;s_upper) {
+            ...
+            if (x != -1) {
+                ...
+                /* Shift the token */
+                if ((err = shift(&amp;ps-&gt;p_stack, type, str,
+                                x, lineno, col_offset)) &gt; 0) {
+                    ...
+                }
+                ...
+            }
+        }
+        ...
+    }
+}
+</pre>
+<p>Let’s go over the references one by one.</p>
+<p>Ah? A function named ‘D’? Weird.<br/>
+We look for ‘D’ in Parser\parser.c and find out it is actually a macro:</p>
+<pre class="brush: cpp; title: ; notranslate" title="">
+#ifdef Py_DEBUG
+extern int Py_DebugFlag;
+#define D(x) if (!Py_DebugFlag); else x
+#else
+#define D(x)
+#endif
+</pre>
+<p>In other words, anything inside <i>D</i> would run only if we are in some debug mode.</p>
+<p>Back to <i>PyParser_AddToken</i>.</p>
+<p>We continue to the second reference to the source string.</p>
+<p>Maybe <i>classify</i> stores the source string somewhere…<br/>
+We search for ‘classify’, and find it in Parser\parser.c:</p>
+<pre class="brush: cpp; title: ; notranslate" title="">
+static int
+classify(parser_state *ps, int type, const char *str)
+{
+    ...
+    if (type == NAME) {
+        const char *s = str;
+        ...
+        for (i = n; i &gt; 0; i--, l++) {
+            if (l-&gt;lb_type != NAME || l-&gt;lb_str == NULL ||
+                l-&gt;lb_str[0] != s[0] ||
+                strcmp(l-&gt;lb_str, s) != 0)
+                continue;
+                ...
+            ...
+            D(printf("It's a keyword\n"));
+            return n - i;
+        }
+    }
+    ...
+}
+</pre>
+<p>In case <i>classify</i> receives a NAME token, it copies the address of the source string, and compares it to some strings.<br/>
+In the previous post, we have seen that the tokenizer classifies most keywords (all of them, actually, except for ‘async’ and ‘await’) as NAME tokens. Looks like <i>classify</i> is the one that receives (among others) all NAME tokens, and distinguishes between real names and Python keywords.<br/>
+(Hmmm… <i>str</i> is copied into <i>s</i> for no apparent reason. I have opened an issue about that in CPython’s bug tracker.)</p>
+<p>Back to <i>PyParser_AddToken</i>. </p>
+<p>Inside some infinite loop, it seems the token is shifted by calling <i>shift</i>. We don’t really know what that means, but we just follow references to the source string, so we search for ‘shift’ and find it also in Parser\parser.c:</p>
+<pre class="brush: cpp; title: ; notranslate" title="">
+static int
+shift(stack *s, int type, char *str, int newstate, int lineno, int col_offset)
+{
+    ...
+    err = PyNode_AddChild(s-&gt;s_top-&gt;s_parent, type, str, lineno, col_offset);
+    ...
+    return 0;
+}
+</pre>
+<p>We search for ‘PyNode_AddChild’, and find it in Parser\node.c:</p>
+<pre class="brush: cpp; title: ; notranslate" title="">
+int
+PyNode_AddChild(node *n1, int type, char *str, int lineno, int col_offset)
+{
+    ...
+    node *n;
+    ...
+    n = &amp;n1-&gt;n_child[n1-&gt;n_nchildren++];
+    n-&gt;n_type = type;
+    n-&gt;n_str = str;
+    n-&gt;n_lineno = lineno;
+    n-&gt;n_col_offset = col_offset;
+    n-&gt;n_nchildren = 0;
+    n-&gt;n_child = NULL;
+    return 0;
+}
+</pre>
+<p>The next empty child node of <i>n1</i> is filled with the token’s attributes, just as they are, no conversions.<br/>
+Most importantly for our purpose, we now know that the token’s source as a utf-8 encoded string is stored in the <i>n_str</i> field of every CST node.</p>
+<p>Ok then, so to prove our hypothesis, we only have to verify that the string passed to <i>parsenumber</i> is retrieved from the <i>n_str</i> field of a CST node.</p>
+<p>We search for ‘parsenumber’ and find (in Python\ast.c) a single call to it:</p>
+<pre class="brush: cpp; title: ; notranslate" title="">
+static expr_ty
+ast_for_atom(struct compiling *c, const node *n)
+{
+    /* atom: '(' [yield_expr|testlist_comp] ')' | '[' [testlist_comp] ']'
+       | '{' [dictmaker|testlist_comp] '}' | NAME | NUMBER | STRING+
+       | '...' | 'None' | 'True' | 'False'
+    */
+    node *ch = CHILD(n, 0);
+    int bytesmode = 0;
+
+    switch (TYPE(ch)) {
+    case NAME: {
+        PyObject *name;
+        const char *s = STR(ch);
+        size_t len = strlen(s);
+        if (len &gt;= 4 &amp;&amp; len &lt;= 5) {
+            if (!strcmp(s, "None"))
+                return NameConstant(Py_None, LINENO(n), n-&gt;n_col_offset, c-&gt;c_arena);
+            if (!strcmp(s, "True"))
+                return NameConstant(Py_True, LINENO(n), n-&gt;n_col_offset, c-&gt;c_arena);
+            if (!strcmp(s, "False"))
+                return NameConstant(Py_False, LINENO(n), n-&gt;n_col_offset, c-&gt;c_arena);
+        }
+        name = new_identifier(s, c);
+        ...
+        /* All names start in Load context, but may later be changed. */
+        return Name(name, Load, LINENO(n), n-&gt;n_col_offset, c-&gt;c_arena);
+    }
+    case STRING: {
+        PyObject *str = parsestrplus(c, n, &amp;bytesmode);
+        ...
+        if (bytesmode)
+            return Bytes(str, LINENO(n), n-&gt;n_col_offset, c-&gt;c_arena);
+        else
+            return Str(str, LINENO(n), n-&gt;n_col_offset, c-&gt;c_arena);
+    }
+    case NUMBER: {
+        PyObject *pynum = parsenumber(c, STR(ch));
+        ...
+        return Num(pynum, LINENO(n), n-&gt;n_col_offset, c-&gt;c_arena);
+    }
+    case ELLIPSIS: /* Ellipsis */
+        ...
+    case LPAR: /* some parenthesized expressions */
+        ...
+    case LSQB: /* list (or list comprehension) */
+        ...
+    case LBRACE: {
+        ...
+    }
+    ...
+}
+</pre>
+<p>We can not resist the temptation of glancing over the irrelevant (for our purpose) parts of <i>ast_for_atom</i>.</p>
+<p>We start with the comment at the top of the function. </p>
+<p>Hmmm… What is this atom thing, anyway? Maybe it is another word for a literal? We google ‘python atom literal’, and find <a href="https://docs.python.org/3/reference/expressions.html">6. Expressions — Python 3.5.1 documentation</a>.</p>
+<p>So identifiers, literals and enclosures are all atoms. And <i>ast_for_atom</i> probably handles all of these.</p>
+<p>Looks like <i>ast_for_atom</i> starts by retrieving a child node of the received node, using <i>CHILD</i>. We search for ‘CHILD’, and find it (along with some more macros we have seen in <i>ast_for_atom</i>) in Include\node.h:</p>
+<pre class="brush: cpp; title: ; notranslate" title="">
+/* Node access functions */
+#define NCH(n)      ((n)-&gt;n_nchildren)
+
+#define CHILD(n, i) (&amp;(n)-&gt;n_child[i])
+#define RCHILD(n, i)    (CHILD(n, NCH(n) + i))
+#define TYPE(n)     ((n)-&gt;n_type)
+#define STR(n)      ((n)-&gt;n_str)
+#define LINENO(n)       ((n)-&gt;n_lineno)
+</pre>
+<p>Great! Macros to access the fields of a CST node!</p>
+<p>Back to <i>ast_for_atom</i>.</p>
+<p>Indeed, the address of the first child of the received CST node is stored in <i>ch</i>.</p>
+<p>After that, there is a switch case on the type of the first child, which is probably the type given to it by the tokenizer:</p>
+<ol>
+<li>A <i>NAME</i> CST node is checked to determine whether its source string is ‘None’, ‘True’ or ‘False’ (the check is done by using <i>STR</i>, which returns the source string of a CST node):
+<ol>
+<li>If it is, a <i>NameConstant</i> AST node that contains the right constant is returned.</li>
+<li>Otherwise, it looks like <i>new_identifier</i> is called to convert the source string into a ‘str’ object. Then, a <i>Name</i> AST node which contains the ‘str’ object is returned.</li>
+</ol>
+</li><li>A <i>STRING</i> CST node is converted into either a ‘str’ or ‘bytes’ object by <i>parsestrplus</i>. Later, either a <i>Str</i> or <i>Bytes</i> AST node (containing the converted object) is returned.</li>
+<li>A <i>NUMBER</i> CST node is converted into a Python numeric object (we guess) by <i>parsenumber</i>. Thankfully, we note that <i>STR</i> is used to pass the <i>n_str</i> field of the CST node to <i>parsenumber</i>. Subsequently, a <i>Num</i> AST node which contains the converted object is returned.</li>
+<li><i>ELLIPSIS</i>, <i>LPAR</i> (left parenthesis), <i>LSQB</i> (left square parenthesis) and <i>LBRACE</i> (left curly parenthesis) CST nodes are also handled, but we would leave those for another time.</li>
+</ol>
+<p>Excellent.</p>
+<p>Seems our hypothesis proved right.<br/>
+Which means we only have to realize how <i>parsenumber</i> works, patch it, and we are done!</p>
+<p>Finally, we turn to examine <i>parsenumber</i>:</p>
+<pre class="brush: cpp; title: ; notranslate" title="">
+static PyObject *
+parsenumber(struct compiling *c, const char *s)
+{
+    const char *end;
+    long x;
+    double dx;
+    Py_complex compl;
+    int imflag;
+    ...
+    errno = 0;
+    end = s + strlen(s) - 1;
+    imflag = *end == 'j' || *end == 'J';
+    if (s[0] == '0') {
+        x = (long) PyOS_strtoul(s, (char **)&amp;end, 0);
+        if (x &lt; 0 &amp;&amp; errno == 0) {
+            return PyLong_FromString(s, (char **)0, 0);
+        }
+    }
+    else
+        x = PyOS_strtol(s, (char **)&amp;end, 0);
+    if (*end == '\0') {
+        if (errno != 0)
+            return PyLong_FromString(s, (char **)0, 0);
+        return PyLong_FromLong(x);
+    }
+    /* XXX Huge floats may silently fail */
+    if (imflag) {
+        ...
+        return PyComplex_FromCComplex(compl);
+    }
+    else
+    {
+        dx = PyOS_string_to_double(s, NULL, NULL);
+        ...
+        return PyFloat_FromDouble(dx);
+    }
+}
+</pre>
+<p>First thing first, we should give a quick look to some of the functions called here (i.e. the ones that look relevant for our purpose).<br/>
+We search for ‘PyLong_FromLong’ and ‘PyLong_FromString’, and find both in Objects\longobject.c:</p>
+<pre class="brush: cpp; title: ; notranslate" title="">
+/* Create a new int object from a C long int */
+
+PyObject *
+PyLong_FromLong(long ival)
+{
+    ...
+}
+...
+/* Parses an int from a bytestring. Leading and trailing whitespace will be
+ * ignored.
+ *
+ * If successful, a PyLong object will be returned and 'pend' will be pointing
+ * to the first unused byte unless it's NULL.
+ *
+ * If unsuccessful, NULL will be returned.
+ */
+PyObject *
+PyLong_FromString(const char *str, char **pend, int base)
+{
+    ...
+}
+</pre>
+<p>Quite straight forward… Oh, and this <i>base</i> parameter looks promising.</p>
+<p>Next, we search for ‘PyOS_strtoul’ and ‘PyOS_strtol’, and find their definitions next to each other in Python\mystrtoul.c:</p>
+<pre class="brush: cpp; title: ; notranslate" title="">
+/*
+**      strtoul
+**              This is a general purpose routine for converting
+**              an ascii string to an integer in an arbitrary base.
+**              Leading white space is ignored.  If 'base' is zero
+**              it looks for a leading 0b, 0o or 0x to tell which
+**              base.  If these are absent it defaults to 10.
+**              Base must be 0 or between 2 and 36 (inclusive).
+**              If 'ptr' is non-NULL it will contain a pointer to
+**              the end of the scan.
+**              Errors due to bad pointers will probably result in
+**              exceptions - we don't check for them.
+*/
+unsigned long
+PyOS_strtoul(const char *str, char **ptr, int base)
+{
+    ...
+    /* set pointer to point to the last character scanned */
+    if (ptr)
+        *ptr = (char *)str;
+
+    return result;
+
+overflowed:
+    if (ptr) {
+        /* spool through remaining digit characters */
+        while (_PyLong_DigitValue[Py_CHARMASK(*str)] &lt; base)
+            ++str;
+        *ptr = (char *)str;
+    }
+    errno = ERANGE;
+    return (unsigned long)-1;
+}
+...
+long
+PyOS_strtol(const char *str, char **ptr, int base)
+{
+    long result;
+    unsigned long uresult;
+    char sign;
+
+    while (*str &amp;&amp; Py_ISSPACE(Py_CHARMASK(*str)))
+        str++;
+
+    sign = *str;
+    if (sign == '+' || sign == '-')
+        str++;
+
+    uresult = PyOS_strtoul(str, ptr, base);
+
+    if (uresult &lt;= (unsigned long)LONG_MAX) {
+        result = (long)uresult;
+        if (sign == '-')
+            result = -result;
+    }
+    ...
+    else {
+        errno = ERANGE;
+        result = LONG_MAX;
+    }
+    return result;
+}
+</pre>
+<p>The comment of <i>PyOS_strtoul</i> is really informative. Also, we realize that <i>PyOS_strtoul</i> fails in case it receives a number which is too big (to fit a C unsigned long), but it would still set the received pointer to the last character scanned (i.e. one char after the last digit char).</p>
+<p><i>PyOS_strtol</i> doesn’t have a useful comment, but it is short, so we would go over it quickly.</p>
+<p>It starts with a while loop to skip all leading spaces in the number’s string. The first non-space char of the number is stored in <i>sign</i>, and is skipped in case it  really is a sign symbol.</p>
+<p>Now that it has the number stripped from the sign symbol, it just passes it to <i>PyOS_strtoul</i>, to do the job of converting it into a C unsigned long.</p>
+<p>At last, the converted number (as a C unsigned long) is converted yet again (if possible), this time into a C long, which is returned.<br/>
+If it isn’t possible (or if the number couldn’t be converted into a C unsigned long in the first place), the global <i>errno</i> is set to ERANGE (which probably means range error), and an error value is returned.</p>
+<p>Back to <i>parsenumber</i>. This time for real.</p>
+<p>First, the address of the number’s last char is calculated and stored in <i>end</i>. Whether this is an imaginary number literal (i.e. whether the last char is the letter ‘j’) is stored in <i>imflag</i>.</p>
+<p>Then, if the number’s first char is zero, it is obviously not a negative number. Therefore, <i>PyOS_strtoul</i> is called to try to convert it into a C unsigned long, and the value it returns is casted into a C long.</p>
+<p>What happens after the call to <i>PyOS_strtoul</i> is up to the number:</p>
+<ol>
+<li>If the number is too big to fit into a C unsigned long, <i>errno</i> is ERANGE, and <i>x</i> is -1.</li>
+<li>If the number fits into a C unsigned long, but not into a C long, <i>errno</i> is zero, and <i>x</i> is negative. In this case, the following if condition is met, so <i>PyLong_FromString</i> is called, and its return value is returned.</li>
+<li>If the number fits into a C unsigned long as well as into a C long, <i>errno</i> is zero, and <i>x</i> is positive.</li>
+</ol>
+<p>If the number’s first char is not zero, it might be negative, so <i>PyOS_strtol</i> is called. Luckily, as we have seen earlier, <i>PyOS_strtol</i> keeps it simple. So there are only two options after calling it: </p>
+<ol>
+<li>The number fits into a C long, <i>errno</i> is zero, and <i>x</i> is the number.</li>
+<li>The number does not fit into a C long, <i>errno</i> is ERANGE, and <i>x</i> is some error value.</li>
+</ol>
+<p>At this point, <i>PyOS_strtoul</i> must have been called, either explicitly, or implicitly through <i>PyOS_strtol</i>. Anyway, <i>PyOS_strtoul</i> has updated <i>end</i> to point to the char after the last digit it parsed.</p>
+<p>Whatever comes next is determined by where <i>end</i> points to:</p>
+<ol>
+<li><i>PyOS_strtoul</i> has parsed the whole number, and thus <i>end</i> points to the null-terminator. Whatever led us here, if <i>errno</i> is ERANGE, the number didn’t fit into a C long, so <i>PyLong_FromString</i> is called, and its return value is returned. Else, the number did fit into <i>x</i> (a C long), and so <i>PyLong_FromLong</i> is called, and its return value is returned.</li>
+<li><i>PyOS_strtoul</i> has not finished parsing the number because it ends with the letter ‘j’. In that case, <i>imflag</i> is set. Ultimately, <i>PyComplex_FromCComplex</i> is called, and its return value is returned.</li>
+<li><i>PyOS_strtoul</i> has not finished parsing the number because it is a number with an exponent part, which begins with the letter ‘e’. This time, <i>imflag</i> is not set, and as a result, <i>PyOS_string_to_double</i> is called to convert the number into a C double. Finally, <i>PyFloat_FromDouble</i> is called, and its return value is returned.</li>
+<li><i>PyOS_strtoul</i> has not finished parsing the number because it is a fraction, which has a dot somewhere, and the flow is the same as the one in the previous scenario.</li>
+<li>There shouldn’t be any more scenarios… unless someone actually patched CPython in some weird way, just as we did <span class="wp-smiley wp-emoji wp-emoji-smile" title=":)">:)</span><br/>
+    In our patched CPython, it might be that the number <i>PyOS_strtoul</i> received is a hex integer literal without a prefix, but <i>PyOS_strtoul</i> treats it like a decimal integer literal, and stops parsing it on any of its alphabetical hex digits. In that case, <i>imflag</i> is not set, so just as in the two previous scenarios, <i>PyOS_string_to_double</i> is called. It fails, of course, as we have seen at the end of the last post, and the beginning of this one.</li>
+</ol>
+<p>Hmmm…</p>
+<p>It seems like, eventually, we are ready for the second patch.<br/>
+We don’t care about the part of <i>parsenumber</i> that handles numbers starting with zero, nor do we care about the part that handles imaginary numbers or fractions.</p>
+<p>We simply want integer literals without any prefix to be treated as hexadecimal numbers.</p>
+<p>Again, our patch turns out to be quite simple:</p>
+<pre class="brush: cpp; title: ; notranslate" title="">
+static PyObject *
+parsenumber(struct compiling *c, const char *s)
+{
+    const char *end;
+    long x;
+    double dx;
+    Py_complex compl;
+    int imflag;
+    ...
+    errno = 0;
+    end = s + strlen(s) - 1;
+    imflag = *end == 'j' || *end == 'J';
+    if (s[0] == '0') {
+        x = (long) PyOS_strtoul(s, (char **)&amp;end, 0);
+        if (x &lt; 0 &amp;&amp; errno == 0) {
+            return PyLong_FromString(s, (char **)0, 0);
+        }
+    }
+    else
+        // origLine: x = PyOS_strtol(s, (char **)&amp;end, 0);
+        x = PyOS_strtol(s, (char **)&amp;end, 0x10);   // orenmnLine
+    if (*end == '\0') {
+        if (errno != 0)
+            // origLine: return PyLong_FromString(s, (char **)0, 0);
+            return PyLong_FromString(s, (char **)0, 0x10);     // orenmnLine
+        return PyLong_FromLong(x);
+    }
+    /* XXX Huge floats may silently fail */
+    if (imflag) {
+        ...
+        return PyComplex_FromCComplex(compl);
+    }
+    else
+    {
+        dx = PyOS_string_to_double(s, NULL, NULL);
+        ...
+        return PyFloat_FromDouble(dx);
+    }
+}
+</pre>
+<p>We build our <a href="https://github.com/orenmn/orenmnCpython/tree/f0c0609b09a6561bbb3d2fb28d935b97422ffd20">patched CPython</a>, and somewhat surprisingly, the default base of integer literals indeed seems to be hexadecimal.</p>
+<div id="jp-post-flair" class="sharedaddy sd-like-enabled sd-sharing-enabled"><div class="sharedaddy sd-block sd-like jetpack-likes-widget-wrapper jetpack-likes-widget-unloaded" id="like-post-wrapper-104378497-612-56d5c7d6efb57" data-src="//widgets.wp.com/likes/#blog_id=104378497&amp;post_id=612&amp;origin=orenmn.wordpress.com&amp;obj_id=104378497-612-56d5c7d6efb57" data-name="like-post-frame-104378497-612-56d5c7d6efb57"><h3 class="sd-title">Like this:</h3><p class="likes-widget-placeholder post-likes-widget-placeholder"><span class="button"><span>Like</span></span> <span class="loading">Loading...</span></p><span class="sd-text-color"/><a class="sd-link-color"/></div></div>			</div>
+
+	</div></body></html>

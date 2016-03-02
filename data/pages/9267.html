@@ -1,0 +1,263 @@
+<html><body><div><div dir="ltr" trbidi="on">
+<p>
+В прошлый раз мы начали обсуждать бекенд CPython - все то, что стоит за транслятором текста в байткод. Бекенд этот имеет как минимум два выраженных слоя - стековую машину и низкоуровневый фреймворк моделирования простых сущностей, изображающих встроенные и пользовательские типы данных и их инстансы. Между этими двумя слоями лежит тонкая прослойка API функций, которыми пользуется как сама машина для доступа к самому нижнему слою, так и разработчики расширений, написанных на C. Таким образом стековая машина и слой API функций выполняют роль интерфейса бекенда - первая задает модель вычислений, второй же - абстрагирует компоненты низлежащего слоя. Настоящая же работа происходит на самом нижнем слое - слое объектов о котором сегодня и поговорим.</p>
+
+<b>Центральная идея</b>
+<div><p>
+В свое время меня удивило то, что многие решения, наблюдаемые в современном питоне были приняты в очень бородатые годы. Знакомьтесь, </p><a href="https://github.com/magniff/relict/tree/master/python/1.0.1">это CPython 1.0.1</a><p>, для желающих его собрать вот </p><a href="http://code.activestate.com/lists/python-list/625737/">инструкция</a><p>. Уже тогда BDFLу было понято не только то, что питон должен быть ООП языком с классами (пользовательские классы были тогда совсем другими, впрочем), но и то, как это сделать, причем реализация в корне не изменилась до сих пор. Заключается она вот в чем - все объекты, операбельные питоном, расширяют тип PyObject, который грязные хиппи девяностых (вроде так всё было) называли просто object, а потом переименовали из-за конфликта имен с чем-то виндовым. Сейчас он выглядит так:</p></div>
+<pre class="c"><span>typedef</span> <span>struct</span> _object <span>{</span>
+    _PyObject_HEAD_EXTRA
+    Py_ssize_t ob_refcnt<span>;</span>
+    <span>struct</span> _typeobject <span>*</span>ob_type<span>;</span>
+<span>}</span> PyObject<span>;</span></pre>
+<p>
+Вот такой крошечный структ на два поля, макрос _PyObject_HEAD_EXTRA в релизных сборках обычно разворачивается в ничто. Поле ob_refcnt - это счетчик ссылок на этот объект, используется в gc, ob_type - ссылка на тип объекта. Тип имеет смысл описателя поведения объекта, и сам по себе он не обязан быть чем то питоновским, типы могли бы быть реализованы как чисто сишный хардкод где то в недрах интерпретатора. Но если бы это было так, программирование на питоне стало бы довольно скучным занятием - даже простое наследование стало бы невозможным. В результате инсайт заключается в том, что мы скорее договорились до объктно-классовой интерпретации, в то время как на самом деле есть только объекты (всевозможные расширения PyObject) ссылающиеся на другие объекты (и даже на себя) как на типы. Поскольку у всех объектов по определению есть тип, и все типы нарочно реализованы как объекты мы естественно приходим к знаменитому "в питоне всё - объект некоторого класса".</p>
+<p>
+<br/></p>
+<b>Задраить люки!</b>
+<p>
+Писать статью дальше было довольно сложно. Штука в том, что исследуя что-то для себя новое ты неизбежно проходишь множество тупиковых путей. Понятное дело, что такое изучение может затянуться на значительное время, зато в результате картина исследуемого объекта становится более объемной. И вот однажды ты думаешь "хэй, да я же могу написать об этом статью в бложике" и удивляешься тому, насколько сложно проложить для другого человека дорогу вдоль которой изучаемый объект делал бы максимум смысла, если вы понимаете о чем я. В твоей копилке просто нет такого пути, и всё что ты можешь сделать - это построить его плохонькую аппроксимацию. Как и в прошлый раз в качестве такой аппроксимации мы просто что-нибудь запустим и попытаемся расслышать шепот из под капота CPython.</p>
+<p>
+<br/></p>
+<p>
+Теперь, когда фундаментальные основы слоя объектов установлены мы можем рассмотреть отношения объект-класс в непосредственной близости. Мы ещё не касались тонкостей анатомии объектов (да и не будем в этот раз, как-то это утомительно), пока нам достаточно того, что это структы, расширяющие PyObject. Давайте рассмотрим поиск атрибута у объекта. Дизассемблируем простой лукап, вроде foo.bar</p>
+<pre class="python"><span>&gt;&gt;&gt;</span> <span>import</span> <span>dis</span>
+<span>&gt;&gt;&gt;</span> <span>dis</span>.<span>dis</span><span>(</span><span>"foo.bar"</span><span>)</span>
+  <span>1</span>           <span>0</span> LOAD_NAME                <span>0</span> <span>(</span>foo<span>)</span>
+              <span>3</span> LOAD_ATTR                <span>1</span> <span>(</span>bar<span>)</span>
+              <span>6</span> RETURN_VALUE</pre>
+<span>В момент исполнения по имени foo интерпретатор попытается загрузить на связанный с текущим фреймом value stack некоторый объект. Для этого сначала будет просмотрен словарь локального окружения, затем глобального и, напоследок, встроенного (builtin). У каждого фрейма эти словари свои. Если такой лукап не окончился ошибкой, то далее будет выполнен опкод LOAD_ATTR, вот соответствуюший отрывок из PyEval_EvalFrameEx:</span>
+<pre class="c">TARGET<span>(</span>LOAD_ATTR<span>)</span> <span>{</span>
+    PyObject <span>*</span>name <span>=</span> GETITEM<span>(</span>names<span>,</span> oparg<span>)</span><span>;</span>
+    PyObject <span>*</span>owner <span>=</span> TOP<span>(</span><span>)</span><span>;</span>
+    PyObject <span>*</span>res <span>=</span> PyObject_GetAttr<span>(</span>owner<span>,</span> name<span>)</span><span>;</span>
+    Py_DECREF<span>(</span>owner<span>)</span><span>;</span>
+    SET_TOP<span>(</span>res<span>)</span><span>;</span>
+    <span>if</span> <span>(</span>res <span>==</span> NULL<span>)</span>
+        <span>goto</span> error<span>;</span>
+    DISPATCH<span>(</span><span>)</span><span>;</span>
+<span>}</span></pre>
+<div>
+<span>Из специального массивчика имен, который лежит в объекте кода и доступен в питоне как атрибут co_names, по индексу 1 (см. дизассемблерный листинг) забирается строчка "bar", после чего она "лукапится" у объекта owner специализированной C-API функцией PyObject_GetAttr.  Она является частью abstract objects layer. Этот "слой" (логический слой C-API) представлен шестью группами функций или, как их называет дока, <a href="https://docs.python.org/3.4/c-api/abstract.html">протоколами</a>. За счет использования протоколов стековая машина в значительной мере изолирована от слоя объектов. Реализация этой функции так же довольно абстрактна: берем тип объекта (переменная tp) и уже у него просим достать из объекта атрибут.</span></div>
+<pre class="c">PyObject <span>*</span>
+PyObject_GetAttr<span>(</span>PyObject <span>*</span>v<span>,</span> PyObject <span>*</span>name<span>)</span>
+<span>{</span>
+    PyTypeObject <span>*</span>tp <span>=</span> Py_TYPE<span>(</span>v<span>)</span><span>;</span>
+ 
+    <span>if</span> <span>(</span>tp<span>-&gt;</span>tp_getattro <span>!=</span> NULL<span>)</span>
+        <span>return</span> <span>(</span><span>*</span>tp<span>-&gt;</span>tp_getattro<span>)</span><span>(</span>v<span>,</span> name<span>)</span><span>;</span>
+ 
+    PyErr_Format<span>(</span>PyExc_AttributeError<span>,</span>
+                 <span>"'%.50s' object has no attribute '%U'"</span><span>,</span>
+                 tp<span>-&gt;</span>tp_name<span>,</span> name<span>)</span><span>;</span>
+    <span>return</span> NULL<span>;</span>
+<span>}</span></pre>
+<p>
+Важно понимать, что такое делегирование запроса в тип не является особенностью именно этой API функции. Объект выражает лишь конкретное значение, в то время как его поведение определено в типе.</p>
+<p>
+Все типы - это расширения базового типа PyTypeObject, который, конечно, тоже является PyObject`ом. Так, класс всех классов type - это лишь очередная реализация PyTypeObject, наряду с остальными, причем его PyObject-&gt;ob_type смотрит на себя, так что он сам себе класс. Шаблон, которым и является PyTypeObject - это здоровенный структ, состоящий преимущественно из указателей на сишные функции. В терминах местной тусовки подобные члены структа называются слотами. Слоты - любопытнейшая штука, многие из них, хотя и не все, отображаются в некоторый magic атрибут класса, навроде __call__, __new__ или __add__. Магия заключается в том, что несмотря на их низкоуровневость, слотами можно рулить из питона, причем в динамике:</p>
+<pre class="python"><span>class</span> A: <span>pass</span>
+<span>&gt;&gt;&gt;</span> A.<span>__call__</span> <span>=</span> <span>lambda</span> <span>self</span>: <span>print</span><span>(</span><span>'HelloWorld'</span><span>)</span>
+<span>&gt;&gt;&gt;</span> A<span>(</span><span>)</span><span>(</span><span>)</span>
+HelloWorld
+<span>&gt;&gt;&gt;</span> A.<span>__call__</span> <span>=</span> <span>lambda</span> <span>self</span>: <span>print</span><span>(</span><span>'Some other text, maybe'</span><span>)</span>
+<span>&gt;&gt;&gt;</span> A<span>(</span><span>)</span><span>(</span><span>)</span>
+Some other text<span>,</span> maybe</pre>
+<p>
+Как именно это происходит мы будем говорить в следуюший раз, для этого нам понадобится пониманием механизмов, стоящих за встроенным метаклассом type. Вернемся к слоту tp_getattro, в питоне он отображается в атрибут __getattribute__, так что в общем случае его значение определено только в рантайме. Тем не менее у него есть стандартная реализация, которую использует большинство встроенных типов. Давайте поймаем её в отладчике, будем реверсить такой код:</p>
+<pre class="python">a <span>=</span> A<span>(</span><span>)</span>
+stop<span>(</span><span>)</span>  <span># мы обсудили эту функцию в прошлый раз</span>
+a.<span>b</span></pre>
+<p>
+Сразу после SIGTRAP, сгенериррованного вызовом stop() ставим новый брейк</p>
+<pre class="bash"><span>(</span><span>gdb</span><span>)</span> b PyObject_GetAttr
+Breakpoint <span>1</span> at 0x4cbb21: <span>file</span> Objects<span>/</span>object.c, line <span>864</span>.</pre>
+<p>
+и даем интерпретатору до него добраться</p>
+<pre class="bash"><span>(</span><span>gdb</span><span>)</span> cont</pre>
+<p>
+В месте остановки (мы внутри PyObject_GetAttr в Си и на строчке a.b в питоне) мы имеем доступ к локальным переменным, возьмем тип объекта a</p>
+<pre class="bash"><span>(</span><span>gdb</span><span>)</span> p tp
+<span>(</span>PyTypeObject <span>*</span><span>)</span> 0x9f6458</pre>
+<p>
+По адресу 0x9f6458 лежит класс A, осталось лишь заглянуть ему под днище</p>
+<pre class="bash"><span>(</span><span>gdb</span><span>)</span> p <span>(</span><span>(</span>PyTypeObject <span>*</span><span>)</span> 0x9f6508<span>)</span>-<span>&gt;</span>tp_getattro
+<span>(</span>getattrofunc<span>)</span> 0x4cc71d <span>&lt;</span>PyObject_GenericGetAttr<span>&gt;</span></pre>
+<p>
+Итого видим, что дефолтовая реализация tp_getattro - это функция PyObject_GenericGetAttr, имеющая разочаровывающе предсказуемое имя. Чуть ниже мы рассмотрим её подробнее, оказывается, что её устройство имеет фундаментальные корни. Пока подведем мини-итог:</p>
+<p>
+1. Объекты и их типы представлены одной и той же базовой сущностью PyObject. Связь между ними заключается в поле ob_type объекта и куче сишного хардкода в типе.</p>
+<p>
+2. Поведение любого объекта всегда определяется его типом, даже если он сам является типом.</p>
+<p>
+3. Каждый тип определяет некоторое множество слотов - функций, определяющих реакцию его инстансов на те или иные внешние раздражители.</p>
+<p>
+Убедимся, что для написания простейших программ нам не нужен ни сам питон, ни стековая машина. Давайте вычислим значение выражения 123 + 456.</p>
+<p>
+Создаем новые PyLongObject - объекты класса int в питоне, соответствуюшие числам 123 и 456:</p>
+<pre class="bash"><span>(</span><span>gdb</span><span>)</span> call PyLong_FromLong<span>(</span><span>123</span><span>)</span>
+<span>(</span>PyObject <span>*</span><span>)</span> 0x9836e0
+<span>(</span><span>gdb</span><span>)</span> call PyLong_FromLong<span>(</span><span>456</span><span>)</span>
+<span>(</span>PyObject <span>*</span><span>)</span> 0x7ffff7f64e50</pre>
+<p>
+Теперь попросим объект PyLong_Type их сложить, дернув соответствующий слот:</p>
+<pre class="bash"><span>(</span><span>gdb</span><span>)</span> call PyLong_Type-<span>&gt;</span>tp_as_number-<span>&gt;</span>nb_add<span>(</span>0x9836e0, 0x7ffff7f64e50<span>)</span>
+<span>(</span>PyObject <span>*</span><span>)</span> 0x7ffff7f64ea0</pre>
+<p>
+В результате в памяти по адресу 0x7ffff7f64ea0 лежит результат - новый инстанс класса int, попринтим его что-ли:</p>
+<pre class="bash"><span>(</span><span>gdb</span><span>)</span> call PyObject_Print<span>(</span>0x7ffff7f64ea0, stderr, <span>1</span><span>)</span>
+<span>579</span></pre>
+<p>
+Похоже на то, что 123 + 456 = 579. Если эту задачу отдать типу PyComplex_Type, то в результате получится (579+0j), как и ожидается.</p>
+<p>
+<br/></p>
+<b>Атрибуты</b>
+<div><p>
+Пример, рассмотренный выше, может показаться местячковым, ну подумаешь лукап всякого из объекта. Однако не стоит забывать, что любое вычисление - это чтение, обработка и запись  данных, которые в питоне хранятся в виде атрибутов объектов. Более того, оказывается, что эти механизмы неявно используются повсеместно, так без них невозможна правильная работа функций. Работа поиска атрибутов крутится вокруг результата функции _PyType_Lookup, на диаграмме ниже показан путь, по которому проходит её результат descr</p>
+<span id="docs-internal-guid-fd393c4b-3bf4-2e0e-f6c1-c3df1b67b426"><img alt="azaza (3).png" src="https://lh4.googleusercontent.com/GPwqEBMXYt3YzFYlVaXpb1jDHnsdQWLg3PE24RWnsLUJJGkZEDejQoZnf1bNDHeA_RrzQyx5POjj_n8cQv7ObsaDtF2DHnsID8C9gNVqQC20s6gOog8cF4zv-bS-yfmsjFetVDn4Qw"/></span><p>
+Именно _PyType_Lookup реализует правильный обход линеаризации графа наследования (о том что это, поговорим в следующий раз). Результатом является указатель на питоновский объект или null. Дальше, согласно диаграмме, если тип объекта descr реализует слоты tp_descr_get &amp; tp_descr_set (последнее будет проверено в is_data?), то такой объект нарекают дата дескриптором и возвращают результат работы его tp_descr_get слота. Если объект descr оказался null или не дата дескрипртором, то поиск атрибута происходит в дикте самого объекта. И только если атрибута в дикте не оказалось, будет возвращено значение слота tp_descr_get если он не null. Рассмотренный дата дескриптор является частной реализацией так называемого </p><a href="https://docs.python.org/3.4/howto/descriptor.html">протокола дескрипторов</a><p>. Произвольный класс, реализующий питоновские методы __get__, __set__ или __del__ называется дескриптором (описателем) атрибута. Наглядный пример работы дата дескрипторов представлен ниже.</p></div>
+<p>
+Создаем класс, реализующий поведение дата дескриптора:</p>
+<pre class="python"><span>class</span> DataDescriptor:
+    <span>def</span> <span>__get__</span><span>(</span><span>self</span><span>,</span> obj<span>,</span> klass<span>=</span><span>None</span><span>)</span>:
+        <span>return</span> <span>"This came from descr_get."</span>
+    <span>def</span> <span>__set__</span><span>(</span><span>self</span><span>,</span> obj<span>,</span> value<span>)</span>:
+        <span>return</span> <span>"This is descr_set speaking."</span></pre>
+<p>
+Создаем пользователя этого дескриптора</p>
+<pre class="python"><span>class</span> Foo:
+    bar <span>=</span> DataDescriptor<span>(</span><span>)</span></pre>
+<p>
+Атрибут bar в классе теперь контролируется дескриптором</p>
+<pre class="python"><span>&gt;&gt;&gt;</span> <span>print</span><span>(</span>Foo.<span>bar</span><span>)</span>
+This came <span>from</span> descr_get.</pre><p>
+так же как и в инстансе
+</p><pre class="python"><span>&gt;&gt;&gt;</span> f <span>=</span> Foo<span>(</span><span>)</span>
+<span>&gt;&gt;&gt;</span> f.<span>bar</span>
+This came <span>from</span> descr_get.</pre><p>
+В этом инстансе мы, конечно, можем хранить другое значение для bar
+</p><pre class="python"><span>&gt;&gt;&gt;</span> f.<span>__dict__</span><span>[</span><span>"bar"</span><span>]</span> <span>=</span> <span>"This came from instance."</span>
+<span>&gt;&gt;&gt;</span> f.<span>__dict__</span><span>[</span><span>'bar'</span><span>]</span>
+This came <span>from</span> instance.</pre><p>
+Но PyObject_GenericGetAttr предпочитает этого не замечать
+</p><pre class="python"><span>&gt;&gt;&gt;</span> f.<span>bar</span>
+This came <span>from</span> descr_get.</pre>
+<p>
+Заметьте, что этот пример работает только для дата дескрипторов, т.е. помимо __get__ мы должны иметь ненулевой __set__. Выбросим последний и чуда не случится.</p>
+<p>
+И тут мы вплотную подходим к самому интересному - к пониманию того, что дескрипторы являются универсальным клеем внутри питона, на котором висят все magic атрибуты и многое другое. Рассмотрим довольно типичный код:</p>
+<pre class="python"><span>&gt;&gt;&gt;</span> <span>class</span> SomeClass: <span>pass</span>
+<span>&gt;&gt;&gt;</span> s <span>=</span> SomeClass<span>(</span><span>)</span>
+<span>&gt;&gt;&gt;</span> s.<span>foo</span> <span>=</span> <span>10</span>
+<span>&gt;&gt;&gt;</span> s.<span>__dict__</span>
+<span>{</span><span>'foo'</span>: <span>10</span><span>}</span>
+<span>&gt;&gt;&gt;</span> s.<span>__dict__</span><span>[</span><span>'bar'</span><span>]</span> <span>=</span> <span>20</span>
+<span>&gt;&gt;&gt;</span> s.<span>bar</span>
+<span>20</span></pre>
+<p>
+Не знаю как у вас, а у меня такое поведение вызывает массу вопросов, хотя бы вот:</p>
+<p>
+1. как атрибуты, доступные через точку оказываются в дикте объекта;</p>
+<p>
+2. почему изменяя какой то там дикт, пусть на него даже есть ссылка в объекте, мы изменяем атрибуты объекта;</p>
+<p>
+3. что вообще такое __dict__ в конце концов, я такой атрибут не просил и почему s.__dict__ != SomeClass.__dict__, в то время как для других атрибутов ожидается противоположное. What kind of black sorcery is this?</p>
+<p>
+Ну что же, %username%, думаю, ты уже все понял, __dict__ - это дескриптор, который нашла _PyType_Lookup в слоте tp_dict самого SomeClass. Чтобы копать дальше, хотелось бы взглянуть на __dict__ класса SomeClass, но мы уже поняли, что вокруг обман, так что для начала проверим слот как есть, SomeClass у меня лежит в 0x9f6808:</p>
+<pre class="bash"><span>(</span><span>gdb</span><span>)</span> call PyObject_Print<span>(</span><span>(</span><span>(</span>PyTypeObject <span>*</span><span>)</span> 0x9f6808<span>)</span>-<span>&gt;</span>tp_dict, stderr, <span>0</span><span>)</span>
+<span>{</span>..., <span>'__dict__'</span>: <span>&lt;</span>attribute <span>'__dict__'</span> of <span>'SomeClass'</span> objects<span>&gt;</span>, ...<span>}</span></pre>
+<p>
+Ключи этого дикта в точности совпадают с ключами в SomeClass.__dict__, хотя тип последнего и не dict, а некий mapping_proxy, это нас устраивает:</p>
+<pre class="python"><span>&gt;&gt;&gt;</span> SomeClass.<span>__dict__</span><span>[</span><span>'__dict__'</span><span>]</span>
+<span>&lt;</span>attribute <span>'__dict__'</span> of <span>'SomeClass'</span> objects<span>&gt;</span>
+<span>&gt;&gt;&gt;</span> <span>type</span><span>(</span>SomeClass.<span>__dict__</span><span>[</span><span>'__dict__'</span><span>]</span><span>)</span>
+<span>&lt;</span><span>class</span> <span>'getset_descriptor'</span><span>&gt;</span></pre>
+<p>
+Получается что атрибут __dict__ инстансов класса SomeClass контролируется дескриптором getset_descriptor. Мы можем дернуть его __get__, чтобы получить __dict__ объекта s:</p>
+<pre class="python"><span>&gt;&gt;&gt;</span> SomeClass.<span>__dict__</span><span>[</span><span>'__dict__'</span><span>]</span>.<span>__get__</span><span>(</span>s<span>,</span> SomeClass<span>)</span>
+<span>{</span><span>'foo'</span>: <span>10</span><span>}</span></pre>
+<p>
+Достигается это за счет того, что внутри объекта s и правда есть ссылка на питоновский dict, лежащий где-то в памяти. Положение этой ссылки внутри объекта знает класс SomeClass - в слоте tp_dictoffset в явном виде лежит смещение внутри памяти объекта s в байтах, чем и пользуется getset_descriptor. Если бы в tp_dict класса SomeClass по ключу __dict__ был бы обычный питонячий __dict__, пункт 2 не мог бы быть правдой, давайте в этом тоже убедимся:</p>
+<pre class="python"><span>&gt;&gt;&gt;</span> <span>import</span> ctypes
+<span>&gt;&gt;&gt;</span> pointer <span>=</span> ctypes.<span>cast</span><span>(</span>
+      <span>id</span><span>(</span>SomeClass<span>)</span>+<span>type</span>.__dictoffset__<span>,</span> ctypes.<span>POINTER</span><span>(</span>ctypes.<span>py_object</span><span>)</span>
+    <span>)</span>
+<span>&gt;&gt;&gt;</span> pointer<span>[</span><span>0</span><span>]</span>
+<span># pointer[0] это то, что лежит в tp_dict в явном виде, мы обошли стороной все трюки дескрипторов</span>
+<span>{</span><span>'__dict__'</span>: <span>&lt;</span>attribute <span>'__dict__'</span> of <span>'SomeClass'</span> objects<span>&gt;,</span> ...<span>}</span></pre><p>
+Суем вместо дескриптора пустой дикт:
+</p><pre class="python"><span>&gt;&gt;&gt;</span> pointer<span>[</span><span>0</span><span>]</span><span>[</span><span>'__dict__'</span><span>]</span> <span>=</span> <span>{</span><span>}</span>
+<span>&gt;&gt;&gt;</span> s.<span>__dict__</span><span>[</span><span>'tar'</span><span>]</span> <span>=</span> <span>"may there be light"</span></pre><p>
+Видим, что отображение дикта в атрибуты больше не работает, чтд
+</p><pre class="python"><span>&gt;&gt;&gt;</span> s.<span>tar</span>
+<span>AttributeError</span>: <span>'SomeClass'</span> <span>object</span> has no attribute <span>'tar'</span></pre>
+<p>
+Рассмотренное выше является лишь каплей в море, сами зацените остальные magic`и. Я понимаю, что эти технические подробности вряд ли будут полезны сами по себе. Задача этой секции заключалась в том, чтобы дать ощущение некой нелокальности CPython. Так, мы увидели, что попросить атрибут у объекта в питоне совсем не то же самое, что достать поле из сишного структа, где этот процесс очень прямолинейный. Напротив, даже простые действия в CPython разбиты на множество независимых ступеней, относящихся при этом к разным слоям абстракций, на каждом из которых реализацию можно подогнать под свои нужды.</p>
+<p>
+<br/></p>
+<b>Функции как дескрипторы</b>
+<p>
+Рассмотрим еще более жизненный пример использования дескрипторов в CPython. Вы, должно быть, знаете о том, что PyFunc_Type (в питоне types.FunctionType - класс функций) реализует свойства дескрипторов. Нужно это для того, чтобы красиво вклинить реализацию методов объектов, методов классов, статических методов и пропертей в общую канву, наряду с простыми функциями. Вот отрывок из реализации класса функций</p>
+<pre class="c">PyTypeObject PyFunction_Type <span>=</span> <span>{</span>
+    PyVarObject_HEAD_INIT<span>(</span><span>&amp;</span>amp<span>;</span>PyType_Type<span>,</span> <span>0</span><span>)</span>
+    <span>"function"</span><span>,</span>
+    ...
+    <span>func_descr_get</span><span>,</span>             <span>/* tp_descr_get */</span>
+    <span>0</span><span>,</span>                          <span>/* tp_descr_set */</span>
+    ...
+<span>}</span><span>;</span></pre>
+<p>
+Видно, что реализована только часть протокола дескриптора - отсутствует set. Это значит, что в инстансе класса можно перекрыть метод:</p>
+<pre class="python"><span>class</span> SomeClass:
+    <span>def</span> foo<span>(</span><span>self</span><span>)</span>:
+        <span>return</span> <span>"InClass implementation"</span>
+ 
+s <span>=</span> SomeClass<span>(</span><span>)</span>
+s.<span>foo</span> <span>=</span> <span>lambda</span> <span>self</span>: <span>"InInstance implementation"</span>
+ 
+<span>&gt;&gt;&gt;</span> s.<span>foo</span><span>(</span>s<span>)</span>
+InInstance implementation</pre>
+<p>
+Обратите внимание, что s.foo баунд методом так и не стала - ей нужно явным образом передавать self. Теперь, когда мы знаем как работает PyObject_GenericGetAttr такое поведение становится самоочевидным. Идем дальше, заглянем в tp_descr_get функции.</p>
+<pre class="c"><span>static</span> PyObject <span>*</span>
+func_descr_get<span>(</span>PyObject <span>*</span>func<span>,</span> PyObject <span>*</span>obj<span>,</span> PyObject <span>*</span>type<span>)</span>
+<span>{</span>
+    <span>if</span> <span>(</span>obj <span>==</span> Py_None <span>||</span> obj <span>==</span> NULL<span>)</span> <span>{</span>
+        Py_INCREF<span>(</span>func<span>)</span><span>;</span>
+        <span>return</span> func<span>;</span>
+    <span>}</span>
+    <span>return</span> PyMethod_New<span>(</span>func<span>,</span> obj<span>)</span><span>;</span>
+<span>}</span></pre>
+<p>
+Иными словами, если функцию попросили у типа (т.е. obj == Py_None), то в ответ мы получим её саму в первозданном виде. Именно поэтому методы в тройке (щас доберемся до модифицирующих декораторов) при лукапе из класса выглядят обычными функциями - они и есть обычные функции. Если же obj != Py_None, то возвращается PyMethodObject, его собирает PyMethod_New из функции func и инстанса obj. Слот tp_call типа метода оборочивает вызов фунции func, автоматически подставляя туда первым аргументом obj. Как только мы осознаем всё это, вопросы об устройстве декораторов вроде classmethod и пр. отпадают сами собой (ну мне так кажется). И да, classmethod - это класс, можете наследоваться от него. Более того, само его наличие в стандартной поставке решает, скорее, вопрос производительности, вы можете реализовать все фичи classmethod и компании на чистом питоне.</p>
+<p>
+Теперь убедимся, что любая функция может быть использована как метод любого класса или объекта, например "приделаем" к десятке метод factorial</p>
+<pre class="python"><span>def</span> factorial<span>(</span><span>self</span><span>)</span>:
+    <span>return</span> <span>1</span> <span>if</span> <span>self</span> <span>==</span> <span>1</span> <span>else</span> factorial<span>(</span>self-<span>1</span><span>)</span> * <span>self</span>
+ 
+ten_factorial <span>=</span> factorial.<span>__get__</span><span>(</span><span>10</span><span>,</span> <span>int</span><span>)</span></pre>
+<p>
+Несмотря на всю нелепость происходящего, ten_factorial - это вполне себе нормальный метод объекта 10:</p>
+<pre class="python"><span>&gt;&gt;&gt;</span> ten_factorial
+<span>&lt;</span>bound method <span>int</span>.<span>factorial</span> of <span>10</span><span>&gt;</span>
+ 
+<span>&gt;&gt;&gt;</span> ten_factorial<span>(</span><span>)</span>
+<span>3628800</span></pre>
+
+<b>Подведем итоги</b>
+<p>
+1. Классы и их инстансы - это структы, расширяющие PyObject.</p>
+<p>
+2. В результате этого все объекты питона без исключения имеют тип (класс).</p>
+<p>
+3. Поведение любого объекта определяется его типом, один и тот же объект будет вести себя по-разному в зависимости от навязанного типа (это можно сделать в gdb).</p>
+<p>
+4. Высокоуровневое поведение объектов весьма неявно мапится в их низкоуровневую реализацию. Вы никогда не видите объекты такими, какие они есть на самом деле, любое представление объекта в питоне - это результат работы какого то кода (возможно очень развесистого).</p>
+<p>
+5. Большую роль в жизни объектов играют дескрипторы, которым делегируется взаимодействие с атрибутами.</p>
+<p>
+<br/></p>
+<p>
+В следующие разы, мы обсудим работу наследования типов, работу метаклассов, super, флаги классов - tp_flags, роль класса object и мб что-то ещё, пишите в коментариях. Надеюсь это было кому то полезно, однако тут без личного погружения в пучины вод не разобраться. Спасибо за ваше время.</p>
+</div>
+</div></body></html>

@@ -1,0 +1,150 @@
+<html><body><div><div class="post-text" itemprop="text">
+<p>Here is a modified version of the code that allocates the return array in the called DLL.  Since that would be harder to test with pure Python, and since I don't know rust, I built a cheesy C library for the actual test:</p>
+
+<pre><code>#include &lt;stdlib.h&gt;
+#include &lt;stdio.h&gt;
+
+typedef struct FFIParams {
+    int source_ints;
+    int len;
+    void * a;
+    void * b;
+} FFIParams, *FFIParamsPtr;
+
+typedef int * intptr;
+typedef float * floatptr;
+
+void * to_float(FFIParamsPtr p) {
+    floatptr result;
+    intptr a = p-&gt;a;
+    intptr b = p-&gt;b;
+    int i;
+    int size = sizeof(result[0]) * 2 * p-&gt;len;
+    result = malloc(size);
+    printf("Allocated %x bytes at %x\n", size, (unsigned int)result);
+    for (i = 0; i &lt; p-&gt;len; i++) {
+        result[i*2+0] = (float)(a[i]);
+        result[i*2+1] = (float)(b[i]);
+    }
+    return result;
+}
+
+void * to_int(FFIParamsPtr p) {
+    intptr result;
+    floatptr a = p-&gt;a;
+    floatptr b = p-&gt;b;
+    int i;
+    int size = sizeof(result[0]) * 2 * p-&gt;len;
+    result = malloc(size);
+    printf("Allocated %x bytes at %x\n", size, (unsigned int)result);
+    for (i = 0; i &lt; p-&gt;len; i++) {
+        result[i*2+0] = (int)(a[i]);
+        result[i*2+1] = (int)(b[i]);
+    }
+    return result;
+}
+
+void * convert_to_bng(FFIParamsPtr p) {
+    if (p-&gt;source_ints)
+        return to_float(p);
+    return to_int(p);
+}
+
+void free_bng_mem(void * data) {
+    printf("Deallocating memory at %x\n", (unsigned int)data);
+    free(data);
+}
+</code></pre>
+
+<p>Here is the Python code that calls it:</p>
+
+<pre><code>from ctypes import c_uint32, c_float, c_size_t, c_void_p
+from ctypes import Structure, POINTER, pointer, cast, cdll
+from itertools import izip, islice
+
+
+class _BNG_FFIParams(Structure):
+    _fields_ = [("source_ints", c_uint32),
+                ("len", c_size_t),
+                ("a", c_void_p),
+                ("b", c_void_p)]
+
+class _BNG_FFI(object):
+
+    int_type = c_uint32
+    float_type = c_float
+    _array_type = type(10 * int_type)
+    _lib = cdll.LoadLibrary('./testlib.so')
+    _converter = _lib.convert_to_bng
+    _converter.restype = c_void_p
+    _deallocate = _lib.free_bng_mem
+
+    _result_type = {int_type: float_type,
+                    float_type: int_type}
+
+    def __init__(self):
+        my_params = _BNG_FFIParams()
+        self._params = my_params
+        self._pointer = POINTER(_BNG_FFIParams)(my_params)
+
+
+    def _getarray(self, seq, data_type):
+        # Optimization for pre-allocated correct array type
+        if type(type(seq)) == self._array_type and seq._type_ is data_type:
+            print("Optimized!")
+            return seq
+        return (data_type * len(seq))(*seq)
+
+    def __call__(self, a, b, data_type=float_type):
+        length = len(a)
+        if length != len(b):
+            raise ValueError("Input lengths must be same")
+
+        a, b = (self._getarray(x, data_type) for x in (a, b))
+
+        # This has the salutary side-effect of insuring we were
+        # passed a valid type
+        result_type = POINTER(length * 2 * self._result_type[data_type])
+
+        params = self._params
+        params.source_ints = data_type is self.int_type
+        params.len = length
+        params.a = cast(pointer(a), c_void_p)
+        params.b = cast(pointer(b), c_void_p)
+
+        resptr = self._converter(self._pointer)
+        result = cast(resptr, result_type).contents
+
+        evens = islice(result, 0, None, 2)
+        odds = islice(result, 1, None, 2)
+        result = list(izip(evens, odds))
+
+        self._deallocate(resptr)
+
+        return result
+
+convert = _BNG_FFI()
+
+if __name__ == '__main__':
+    print(convert([1.0, 2.0, 3.0], [4.0, 5.0, 6.0], c_float))
+    print(convert([1, 2, 3], [4, 5, 6], c_uint32))
+    print(convert([1, 2, 3], (c_uint32 * 3)(4, 5, 6), c_uint32))
+</code></pre>
+
+<p>And here is the result when I executed it:</p>
+
+<pre><code>Allocated 18 bytes at 9088468
+Deallocating memory at 9088468
+[(1L, 4L), (2L, 5L), (3L, 6L)]
+Allocated 18 bytes at 908a6b8
+Deallocating memory at 908a6b8
+[(1.0, 4.0), (2.0, 5.0), (3.0, 6.0)]
+Optimized!
+Allocated 18 bytes at 90e1ae0
+Deallocating memory at 90e1ae0
+[(1.0, 4.0), (2.0, 5.0), (3.0, 6.0)]
+</code></pre>
+
+<p>This happens to be a 32 bit Ubuntu 14.04 system. I used Python 2.7, and I built the library with <code>gcc --shared ffitest.c -o testlib.so -Wall</code></p>
+    </div>
+    </div></body></html>

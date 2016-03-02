@@ -1,0 +1,281 @@
+<html><body><div><div class="post-text" itemprop="text">
+
+<p>I was writing some etcd modules for SaltStack and ran into this strange issue where it's somehow preventing me from catching an exception and I'm interested in how it's doing that.  It seems specifically centered around urllib3.</p>
+
+<p>A small script ( not salt ):</p>
+
+<pre><code>import etcd
+c = etcd.Client('127.0.0.1', 4001)
+print c.read('/test1', wait=True, timeout=2)
+</code></pre>
+
+<p>And when we run it:</p>
+
+<pre><code>[root@alpha utils]# /tmp/etcd_watch.py
+Traceback (most recent call last):
+  File "/tmp/etcd_watch.py", line 5, in &lt;module&gt;
+    print c.read('/test1', wait=True, timeout=2)
+  File "/usr/lib/python2.6/site-packages/etcd/client.py", line 481, in read
+    timeout=timeout)
+  File "/usr/lib/python2.6/site-packages/etcd/client.py", line 788, in api_execute
+    cause=e
+etcd.EtcdConnectionFailed: Connection to etcd failed due to ReadTimeoutError("HTTPConnectionPool(host='127.0.0.1', port=4001): Read timed out.",)
+</code></pre>
+
+<p>Ok, let's catch that bugger:</p>
+
+<pre><code>#!/usr/bin/python
+
+import etcd
+c = etcd.Client('127.0.0.1', 4001)
+
+try:
+  print c.read('/test1', wait=True, timeout=2)
+except etcd.EtcdConnectionFailed:
+  print 'connect failed'
+</code></pre>
+
+<p>Run it:</p>
+
+<pre><code>[root@alpha _modules]# /tmp/etcd_watch.py
+connect failed
+</code></pre>
+
+<p>Looks good - it's all working python.  So what's the issue?  I have this in the salt etcd module:</p>
+
+<pre><code>[root@alpha _modules]# cat sjmh.py
+import etcd
+
+def test():
+  c = etcd.Client('127.0.0.1', 4001)
+  try:
+    return c.read('/test1', wait=True, timeout=2)
+  except etcd.EtcdConnectionFailed:
+    return False
+</code></pre>
+
+<p>And when we run that:</p>
+
+<pre><code>[root@alpha _modules]# salt 'alpha' sjmh.test
+alpha:
+    The minion function caused an exception: Traceback (most recent call last):
+      File "/usr/lib/python2.6/site-packages/salt/minion.py", line 1173, in _thread_return
+        return_data = func(*args, **kwargs)
+      File "/var/cache/salt/minion/extmods/modules/sjmh.py", line 5, in test
+        c.read('/test1', wait=True, timeout=2)
+      File "/usr/lib/python2.6/site-packages/etcd/client.py", line 481, in read
+        timeout=timeout)
+      File "/usr/lib/python2.6/site-packages/etcd/client.py", line 769, in api_execute
+        _ = response.data
+      File "/usr/lib/python2.6/site-packages/urllib3/response.py", line 150, in data
+        return self.read(cache_content=True)
+      File "/usr/lib/python2.6/site-packages/urllib3/response.py", line 218, in read
+        raise ReadTimeoutError(self._pool, None, 'Read timed out.')
+    ReadTimeoutError: HTTPConnectionPool(host='127.0.0.1', port=4001): Read timed out.
+</code></pre>
+
+<p>Hrm, that's weird.  etcd's read should have returned etcd.EtcdConnectionFailed.  So, let's look at it further.  Our module is now this:</p>
+
+<pre><code>import etcd
+
+def test():
+  c = etcd.Client('127.0.0.1', 4001)
+  try:
+    return c.read('/test1', wait=True, timeout=2)
+  except Exception as e:
+    return str(type(e))
+</code></pre>
+
+<p>And we get:</p>
+
+<pre><code>[root@alpha _modules]# salt 'alpha' sjmh.test
+alpha:
+    &lt;class 'urllib3.exceptions.ReadTimeoutError'&gt;
+</code></pre>
+
+<p>Ok, so we know that we can catch this thing.  And we now know it threw a ReadTimeoutError, so let's catch that.  The newest version of our module:</p>
+
+<pre><code>import etcd
+import urllib3.exceptions
+
+def test():
+  c = etcd.Client('127.0.0.1', 4001)
+  try:
+    c.read('/test1', wait=True, timeout=2)
+  except urllib3.exceptions.ReadTimeoutError as e:
+    return 'caught ya!'
+  except Exception as e:
+    return str(type(e))
+</code></pre>
+
+<p>And our test..</p>
+
+<pre><code>[root@alpha _modules]# salt 'alpha' sjmh.test
+alpha:
+    &lt;class 'urllib3.exceptions.ReadTimeoutError'&gt;
+</code></pre>
+
+<p>Er, wait, what? Why didn't we catch that?  Exceptions work, right.. ?</p>
+
+<p>How about if we try and catch the base class from urllib3..</p>
+
+<pre><code>[root@alpha _modules]# cat sjmh.py
+import etcd
+import urllib3.exceptions
+
+def test():
+  c = etcd.Client('127.0.0.1', 4001)
+  try:
+    c.read('/test1', wait=True, timeout=2)
+  except urllib3.exceptions.HTTPError:
+    return 'got you this time!'
+</code></pre>
+
+<p>Hope and pray..</p>
+
+<pre><code>[root@alpha _modules]# salt 'alpha' sjmh.test
+alpha:
+    The minion function caused an exception: Traceback (most recent call last):
+      File "/usr/lib/python2.6/site-packages/salt/minion.py", line 1173, in _thread_return
+        return_data = func(*args, **kwargs)
+      File "/var/cache/salt/minion/extmods/modules/sjmh.py", line 7, in test
+        c.read('/test1', wait=True, timeout=2)
+      File "/usr/lib/python2.6/site-packages/etcd/client.py", line 481, in read
+        timeout=timeout)
+      File "/usr/lib/python2.6/site-packages/etcd/client.py", line 769, in api_execute
+        _ = response.data
+      File "/usr/lib/python2.6/site-packages/urllib3/response.py", line 150, in data
+        return self.read(cache_content=True)
+      File "/usr/lib/python2.6/site-packages/urllib3/response.py", line 218, in read
+        raise ReadTimeoutError(self._pool, None, 'Read timed out.')
+    ReadTimeoutError: HTTPConnectionPool(host='127.0.0.1', port=4001): Read timed out.
+</code></pre>
+
+<p>BLAST YE!   Ok, let's try a different method that returns a different etcd Exception.  Our module now looks like this:</p>
+
+<pre><code>import etcd
+
+def test():
+  c = etcd.Client('127.0.0.1', 4001)
+  try:
+    c.delete('/')
+  except etcd.EtcdRootReadOnly:
+    return 'got you this time!'
+</code></pre>
+
+<p>And our run:</p>
+
+<pre><code>[root@alpha _modules]# salt 'alpha' sjmh.test
+alpha:
+    got you this time!
+</code></pre>
+
+<p>As a final test, I made this module, which I can run either from straight python, or as a salt module..</p>
+
+<pre><code>import etcd
+import urllib3
+
+def test():
+  c = etcd.Client('127.0.0.1', 4001)
+  try:
+    c.read('/test1', wait=True, timeout=2)
+  except urllib3.exceptions.ReadTimeoutError:
+    return 'got you this time!'
+  except etcd.EtcdConnectionFailed:
+    return 'cant get away from me!'
+  except etcd.EtcdException:
+    return 'oh no you dont'
+  except urllib3.exceptions.HTTPError:
+    return 'get back here!'
+  except Exception as e:
+    return 'HOW DID YOU GET HERE? {0}'.format(type(e))
+
+if __name__ == "__main__":
+  print test()
+</code></pre>
+
+<p>Through python:</p>
+
+<pre><code>[root@alpha _modules]# python ./sjmh.py
+cant get away from me!
+</code></pre>
+
+<p>Through salt:</p>
+
+<pre><code>[root@alpha _modules]# salt 'alpha' sjmh.test
+alpha:
+    HOW DID YOU GET HERE? &lt;class 'urllib3.exceptions.ReadTimeoutError'&gt;
+</code></pre>
+
+<p>So, we can catch exceptions from etcd that it throws.  But, while we normally are able to catch the urllib3 ReadTimeoutError when we run python-etcd by its lonesome, when I run it through salt, nothing seems to be able to catch that urllib3 exception, except a blanket 'Exception' clause.</p>
+
+<p>I can do that, but I'm really curious as to what the heck salt is doing that's making it so that an exception is uncatchable.  I've never seen this before when working with python, so I'd be curious as to how it's happening and how I can work around it.</p>
+
+<p>Edit:</p>
+
+<p>So I was finally able to catch it.</p>
+
+<pre><code>import etcd
+import urllib3.exceptions
+from urllib3.exceptions import ReadTimeoutError
+
+def test():
+  c = etcd.Client('127.0.0.1', 4001)
+  try:
+    c.read('/test1', wait=True, timeout=2)
+  except urllib3.exceptions.ReadTimeoutError:
+    return 'caught 1'
+  except urllib3.exceptions.HTTPError:
+    return 'caught 2'
+  except ReadTimeoutError:
+    return 'caught 3'
+  except etcd.EtcdConnectionFailed as ex:
+    return 'cant get away from me!'
+  except Exception as ex:
+    return 'HOW DID YOU GET HERE? {0}'.format(type(ex))
+
+if __name__ == "__main__":
+  print test()
+</code></pre>
+
+<p>And when run:</p>
+
+<pre><code>[root@alpha _modules]# salt 'alpha' sjmh.test
+alpha:
+    caught 3
+</code></pre>
+
+<p>It still doesn't make sense though.  From what I know of exceptions, the return should be 'caught 1'.  Why should I have to import the name of the exception directly, rather than just using full class name?</p>
+
+<p>MORE EDITS!</p>
+
+<p>So, adding the comparison between the two classes produces 'False' - which is sorta obvious, because the except clause wasn't working, so those couldn't be the same.</p>
+
+<p>I added the following to the script, right before I call the c.read().</p>
+
+<pre><code>log.debug(urllib3.exceptions.ReadTimeoutError.__module__)
+log.debug(ReadTimeoutError.__module__)
+</code></pre>
+
+<p>And now I get this in the log:</p>
+
+<pre><code>[DEBUG   ] requests.packages.urllib3.exceptions
+[DEBUG   ] urllib3.exceptions
+</code></pre>
+
+<p>So, that appears to be the reason that is getting caught the way it is.  This is also reproducible by just downloading the etcd and requests library and doing something like this:</p>
+
+<pre><code>#!/usr/bin/python
+
+#import requests
+import etcd
+
+c = etcd.Client('127.0.0.1', 4001)
+c.read("/blah", wait=True, timeout=2)
+</code></pre>
+
+<p>You'll end up getting the 'right' exception raised - etcd.EtcdConnectionFailed.  However, uncomment 'requests' and you'll end up with urllib3.exceptions.ReadTimeoutError, because etcd now no longer catches the exception.</p>
+
+<p>So it appears that when requests is imported, it rewrites the urllib3 exceptions, and any other module that is trying to catch those, fails.  Also, it appears that newer versions of requests do not have this issue.</p>
+    </div>
+    </div></body></html>

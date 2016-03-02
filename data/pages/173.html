@@ -1,0 +1,204 @@
+<html><body><div><div class="entry-content" itemprop="articleBody">
+    
+        <p>I've previously written about <a href="http://www.jeffknupp.com/blog/2013/04/07/improve-your-python-yield-and-generators-explained/">"yield" and generators.</a> In that article, I mention it's a topic that novices find confusing. The purpose and creation of <strong>decorators</strong> is another such topic (using them, however, is rather easy). In this post, you'll learn what decorators are, how they're created, and why they're so useful.</p>
+
+
+<h3>A Brief Aside...</h3>
+<h4>Passing Functions</h4>
+<p>Before we get started, recall that <em>everything</em> in Python is an object that can
+be treated like a value (e.g. functions, classes, modules). You can bind names
+to these objects, pass them as arguments to functions, and return them
+from functions (among other things). The following code
+is an example of what I'm talking about:</p>
+<div class="codehilite"><pre><span class="k">def</span> <span class="nf">is_even</span><span class="p">(</span><span class="n">value</span><span class="p">):</span>
+    <span class="sd">"""Return True if *value* is even."""</span>
+    <span class="k">return</span> <span class="p">(</span><span class="n">value</span> <span class="o">%</span> <span class="mi">2</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span>
+
+<span class="k">def</span> <span class="nf">count_occurrences</span><span class="p">(</span><span class="n">target_list</span><span class="p">,</span> <span class="n">predicate</span><span class="p">):</span>
+    <span class="sd">"""Return the number of times applying the callable *predicate* to a</span>
+<span class="sd">    list element returns True."""</span>
+    <span class="k">return</span> <span class="nb">sum</span><span class="p">([</span><span class="mi">1</span> <span class="k">for</span> <span class="n">e</span> <span class="ow">in</span> <span class="n">target_list</span> <span class="k">if</span> <span class="n">predicate</span><span class="p">(</span><span class="n">e</span><span class="p">)])</span>
+
+<span class="n">my_predicate</span> <span class="o">=</span> <span class="n">is_even</span>
+<span class="n">my_list</span> <span class="o">=</span> <span class="p">[</span><span class="mi">2</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="mi">6</span><span class="p">,</span> <span class="mi">7</span><span class="p">,</span> <span class="mi">9</span><span class="p">,</span> <span class="mi">11</span><span class="p">]</span>
+<span class="n">result</span> <span class="o">=</span> <span class="n">count_occurrences</span><span class="p">(</span><span class="n">my_list</span><span class="p">,</span> <span class="n">my_predicate</span><span class="p">)</span>
+<span class="k">print</span><span class="p">(</span><span class="n">result</span><span class="p">)</span>
+</pre></div>
+
+
+<p>We've written a function that takes a list and another function (which happens
+to be a <em>predicate function</em>, meaning it returns True or False based on some 
+property of the argument passed to it), and returns the number of times our predicate function
+holds true for an element in the list. While there are built-in functions to
+accomplish this, it's useful for illustrative purposes.</p>
+<p>The magic is in the lines <code>my_predicate = is_even</code>. We bound the name
+<code>my_predicate</code> to the function itself (not the value returned when calling it) 
+and can use it like any "normal" variable. Passing it to <code>count_occurrences</code> allows <code>count_occurrences</code> to
+apply the function to the elements of the list, even though it doesn't "know"
+what <code>my_predicate</code> does. It just assumes it's a function that can be called 
+with a single argument and returns True or False.</p>
+<p>Hopefully, this is all old hat to you. If, however, this is the first time
+you've seen functions used in this manner, I recommend reading <a href="http://www.jeffknupp.com/blog/2013/02/14/drastically-improve-your-python-understanding-pythons-execution-model/">Drastically Improve Your Python: Understanding Python's Execution Model</a> before continuing here.</p>
+<h3>Returning Functions</h3>
+<p>We just saw that functions can be passed as arguments to other functions. They
+can also be <em>returned</em> from functions as the return value. The following
+demonstrates how that might be useful:</p>
+<div class="codehilite"><pre><span class="k">def</span> <span class="nf">surround_with</span><span class="p">(</span><span class="n">surrounding</span><span class="p">):</span>
+    <span class="sd">"""Return a function that takes a single argument and."""</span>
+    <span class="k">def</span> <span class="nf">surround_with_value</span><span class="p">(</span><span class="n">word</span><span class="p">):</span>
+        <span class="k">return</span> <span class="s">'{}{}{}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">surrounding</span><span class="p">,</span> <span class="n">word</span><span class="p">,</span> <span class="n">surrounding</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">surround_with_value</span>
+
+<span class="k">def</span> <span class="nf">transform_words</span><span class="p">(</span><span class="n">content</span><span class="p">,</span> <span class="n">targets</span><span class="p">,</span> <span class="n">transform</span><span class="p">):</span>
+    <span class="sd">"""Return a string based on *content* but with each occurrence </span>
+<span class="sd">    of words in *targets* replaced with</span>
+<span class="sd">    the result of applying *transform* to it."""</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="s">''</span>
+    <span class="k">for</span> <span class="n">word</span> <span class="ow">in</span> <span class="n">content</span><span class="o">.</span><span class="n">split</span><span class="p">():</span>
+        <span class="k">if</span> <span class="n">word</span> <span class="ow">in</span> <span class="n">targets</span><span class="p">:</span>
+            <span class="n">result</span> <span class="o">+=</span> <span class="s">' {}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">transform</span><span class="p">(</span><span class="n">word</span><span class="p">))</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">result</span> <span class="o">+=</span> <span class="s">' {}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">word</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">result</span>
+
+<span class="n">markdown_string</span> <span class="o">=</span> <span class="s">'My name is Jeff Knupp and I like Python but I do not own a Python'</span>
+<span class="n">markdown_string_italicized</span> <span class="o">=</span> <span class="n">transform_words</span><span class="p">(</span><span class="n">markdown_string</span><span class="p">,</span> <span class="p">[</span><span class="s">'Python'</span><span class="p">,</span> <span class="s">'Jeff'</span><span class="p">],</span>
+        <span class="n">surround_with</span><span class="p">(</span><span class="s">'*'</span><span class="p">))</span>
+<span class="k">print</span><span class="p">(</span><span class="n">markdown_string_italicized</span><span class="p">)</span>
+</pre></div>
+
+
+<p>The purpose of the <code>transform_words</code> function is to search <code>content</code> for any
+occurrences of a word in the list of <code>targets</code> and apply the <code>transform</code>
+argument to them. In our example, we imagine we have a Markdown string and would
+like to italicize all occurrences of the words <code>Python</code> and <code>Jeff</code> (a word is
+italicized in Markdown when it is surrounded by asterisks).</p>
+<p>Here we make use of the fact that functions can be returned as the result of
+calling a function. In the process, we create a <em>new</em> function that, when called, prepends and
+appends the given argument. We then pass that new function as an argument to
+<code>transform_words</code>, where it is applied to the words in our search list:
+(<code>['Python', 'Jeff']</code>).</p>
+<p>You can think of <code>surround_with</code> as a little function "factory". It sits there
+waiting to create a function. You give it a value, and it gives you back a
+function that will surround a word argument with the value you gave it.
+Understanding what's happening here is crucial to understanding decorators.
+Our "function factory" doesn't <em>ever</em> return a "normal" value; it always returns
+a new function. Note that <code>surround_with</code> doesn't actually do the surrounding itself, it 
+just creates a function that can do it whenever it's needed.</p>
+<p><code>surround_with_value</code> makes use of the fact that nested functions have access to
+names bound in the scope in which they were created. Therefore,
+<code>surround_with_value</code> doesn't need any special machinery to access <code>surrounding</code>
+(which would defeat the purpose). It simply "knows" it has access to it and 
+uses it when required.</p>
+<h3>Putting it all together</h3>
+<p>We've now seen that functions can both be sent as arguments to a function and
+returned as the result of a function. What if we made use of both of those facts
+together? Can we create a function that takes a function as a parameter and
+returns a function as the result. Would that be useful?</p>
+<p>Indeed it would be. Imagine we were using a web framework and have models with
+lots of currency related fields like <code>price</code>, <code>cart_subtotal</code>, <code>savings</code> etc. 
+Ideally, when we output these fields, we would always prepend a "$". If we could somehow
+mark functions that produce these values in a way that would do that for us,
+that would be great.</p>
+<p>This is exactly what decorators do. The function below is used to show the
+<code>price</code> with <code>tax</code> applied:</p>
+<div class="codehilite"><pre><span class="k">class</span> <span class="nc">Product</span><span class="p">(</span><span class="n">db</span><span class="o">.</span><span class="n">Model</span><span class="p">):</span>
+
+    <span class="n">name</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">StringColumn</span>
+    <span class="n">price</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">FloatColumn</span>
+
+    <span class="k">def</span> <span class="nf">price_with_tax</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">tax_rate_percentage</span><span class="p">):</span>
+        <span class="sd">"""Return the price with *tax_rate_percentage* applied.</span>
+<span class="sd">        *tax_rate_percentage* is the tax rate expressed as a float, like</span>
+<span class="sd">        "7.0" for a 7% tax rate."""</span>
+        <span class="k">return</span> <span class="n">price</span> <span class="o">*</span> <span class="p">(</span><span class="mi">1</span> <span class="o">+</span> <span class="p">(</span><span class="n">tax_rate_percentage</span> <span class="o">*</span> <span class="o">.</span><span class="mo">01</span><span class="p">))</span>
+</pre></div>
+
+
+<p>How can use the language to augment this function so that the return value has a "$" prepended?
+We create a <code>decorator</code> function, which has a useful shorthand notation: <code>@</code>.
+To create our <code>decorator</code>, we create a function which takes a function (the
+function to be decorated) and returns a new function (the original function
+with decoration applied). Here's how we would do that in our application:</p>
+<div class="codehilite"><pre><span class="k">def</span> <span class="nf">currency</span><span class="p">(</span><span class="n">f</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">wrapper</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="k">return</span> <span class="s">'$'</span> <span class="o">+</span> <span class="nb">str</span><span class="p">(</span><span class="n">f</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">))</span>
+
+    <span class="k">return</span> <span class="n">wrapper</span>
+</pre></div>
+
+
+<p>We include the '<em>args' and '</em>*kwargs' as parameters to the <code>wrapper</code> function to
+make it more flexible. Since we don't know the parameters the function we're
+wrapping may take (and <code>wrapper</code> needs to call that function), we accept all
+possible positional (<code>*args</code>) and keyword (<code>**args</code>) arguments as parameters and
+"forward" them to the function call.</p>
+<p>With <code>currency</code> defined, we can now use the <code>decorator</code> notation to decorate our
+<code>price_with_tax</code> function, like so:</p>
+<div class="codehilite"><pre><span class="k">class</span> <span class="nc">Product</span><span class="p">(</span><span class="n">db</span><span class="o">.</span><span class="n">Model</span><span class="p">):</span>
+
+    <span class="n">name</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">StringColumn</span>
+    <span class="n">price</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">FloatColumn</span>
+
+    <span class="nd">@currency</span>
+    <span class="k">def</span> <span class="nf">price_with_tax</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">tax_rate_percentage</span><span class="p">):</span>
+        <span class="sd">"""Return the price with *tax_rate_percentage* applied.</span>
+<span class="sd">        *tax_rate_percentage* is the tax rate expressed as a float, like "7.0"</span>
+<span class="sd">        for a 7% tax rate."""</span>
+        <span class="k">return</span> <span class="n">price</span> <span class="o">*</span> <span class="p">(</span><span class="mi">1</span> <span class="o">+</span> <span class="p">(</span><span class="n">tax_rate_percentage</span> <span class="o">*</span> <span class="o">.</span><span class="mo">01</span><span class="p">))</span>
+</pre></div>
+
+
+<p>Now, to other code, it seems as though <code>price_with_tax</code> is a function that
+returns the price with tax prepended by a dollar sign. Notice, however, that we
+didn't change any code in <code>price_with_tax</code> itself to achieve this. We simply
+"decorated" the function with a <code>decorator</code>, giving it additional functionality.</p>
+<h4>Brief aside</h4>
+<p>One problem (easily solved) is that wrapping <code>price_with_tax</code> with <code>currency</code>
+changes its <code>.__name__</code> and <code>.__doc__</code> to that of <code>currency</code>, which is certainly
+not what we want. The <code>functools</code> modules contains a useful tool, <code>wraps</code>, which
+will restore these values to what we would expect them to be. It is used like
+so: </p>
+<div class="codehilite"><pre><span class="kn">from</span> <span class="nn">functools</span> <span class="kn">import</span> <span class="n">wraps</span>
+
+<span class="k">def</span> <span class="nf">currency</span><span class="p">(</span><span class="n">f</span><span class="p">):</span>
+    <span class="nd">@wraps</span><span class="p">(</span><span class="n">f</span><span class="p">)</span>
+    <span class="k">def</span> <span class="nf">wrapper</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+        <span class="k">return</span> <span class="s">'$'</span> <span class="o">+</span> <span class="nb">str</span><span class="p">(</span><span class="n">f</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">))</span>
+
+    <span class="k">return</span> <span class="n">wrapper</span>
+</pre></div>
+
+
+<h2>Raw Power</h2>
+<p>This notion of wrapping a function with additional functionality without
+changing the wrapped function is <em>extremely</em> powerful and useful. Much can
+be done with <code>decorators</code> that would otherwise require lots of boilerplate code
+or simply wouldn't be possible. They also act as a convenient way for frameworks
+and libraries to provide functionality. <a href="http://flaks.pocoo.org">Flask</a> uses
+<code>decorators</code> as a means for adding new endpoints to the web application, as in
+this example from the documentation:</p>
+<div class="codehilite"><pre><span class="nd">@app.route</span><span class="p">(</span><span class="s">'/'</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">hello_world</span><span class="p">():</span>
+    <span class="k">return</span> <span class="s">'Hello World!'</span>
+</pre></div>
+
+
+<p>Notice that decorators (being functions themselves) can take arguments. I'll
+save decorator arguments, along with class decorators, for the next article in
+this series. </p>
+<h2>In Closing</h2>
+<p>Today we learned how decorators can be used to manipulate the language (much
+like C macros) <em>using</em> the language we're manipulating (i.e. Python). This has
+very powerful implications, which we'll explore in the next article. For now,
+however, you should have a solid grasp on how the vast majority of decorators 
+are created and used. More importantly, you should now understand how they work
+and when they're useful.</p>
+        <small>Posted on <time datetime="2013-11-29 12:21:00" pubdate="" data-updated="true" itemprop="datePublished">Nov 29, 2013</time> by <span itemprop="author"> Jeff Knupp</span></small>
+    <p class="meta">
+    <a href="/blog/2013/11/15/supercharge-your-python-developers" title="Previous Post: Supercharge Your Python Developers">« Previous Post: Supercharge Your Python Developers</a>
+    </p>
+      
+
+</div>
+</div></body></html>

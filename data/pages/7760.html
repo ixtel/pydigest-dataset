@@ -1,0 +1,152 @@
+<html><body><div><div class="post-text" itemprop="text">
+
+<p>I have no idea why my cron is running 20 minutes and it is terminated. On openshift, if you run cron, it gets killed after 5 minutes. If you run with nohup, it gets killed after 20 minutes.<br/>
+This is my error log on cron_daily. File <code>update_dave_list</code> was running 20 minutes:</p>
+
+<pre><code>Thu Nov 19 03:08:08 EST 2015: START daily cron run
+__________________________________________________________________________
+/var/lib/openshift/55a000094/app-root/runtime/repo//.openshift/cron/daily/update_dave_list:
+WARNING:py.warnings:/var/lib/openshift/55a0000094/python/virtenv/lib/python2.7/site-packages/django_crontab-0.6.0-py2.7.egg/django_crontab/crontab.py:13: RemovedInDjango19Warning: django.uti$
+  from django.utils.importlib import import_module
+/usr/libexec/openshift/cartridges/cron/bin/cron_runjobs.sh: line 114: 181616 Killed                  $executor "$SCRIPTS_DIR"
+Warning: daily cron run terminated as it exceeded max run time
+__________________________________________________________________________
+Thu Nov 19 03:28:09 EST 2015: END daily cron run - status=137
+__________________________________________________________________________
+</code></pre>
+
+<p>The problem is that <code>update_dave_list</code> takes only ~20 seconds to run:
+<code>update_dave_list</code> content:</p>
+
+<pre><code>#!/bin/bash
+date
+nohup /var/lib/openshift/55000094/python/virtenv/bin/python /var/lib/openshift/55000094/app-root/runtime/repo/wsgi/digrin/manage.py crontab run 18e10bf4fb745d8a480230a3 # update dave lists
+date
+</code></pre>
+
+<p>output:</p>
+
+<pre><code>Št nov 19 03:43:47 EST 2015
+nohup: ignoring input and appending output to `nohup.out'
+Št nov 19 03:44:05 EST 2015
+</code></pre>
+
+<p>Problem is also that none of my other daily crons are run if one is killed. 
+Oh and here is the code in case you wonder what am I running for 20 seconds:</p>
+
+<pre><code>def update_dave_list():
+    # if settings.ON_OPENSHIFT:
+    response = urlopen("http://www.dripinvesting.org/tools/U.S.DividendChampions.xls")
+    excell = xlrd.open_workbook(file_contents=response.read())
+    for sheet in range(0,3): #for champions, challengers and contenders
+        worksheet = excell.sheet_by_index(sheet)
+        list, created = List.objects.get_or_create(name=worksheet.name, short_name=worksheet.name,
+                                                   source="http://www.dripinvesting.org/tools/tools.asp")
+        num_rows = worksheet.nrows - 1
+        curr_row = 5
+        symbol_list = []
+        while curr_row &lt; num_rows:
+            curr_row += 1
+            symbol = worksheet.cell(curr_row, 1)
+            if symbol.ctype != 1: #break if you are out of symbol
+                break
+                #print  cell.value.replace(".", "-")
+            symbol_list.append(unify_symbol(symbol.value))
+            industry = worksheet.cell(curr_row, 2)
+            sector = worksheet.cell(curr_row, 77)
+            years = worksheet.cell(curr_row, 3)
+            try:
+                list_stock, created = ListStock.objects.get_or_create(stock=Stock.objects.get(symbol=unify_symbol(symbol.value)))
+            except ObjectDoesNotExist:
+                AddStock.objects.get_or_create(symbol=unify_symbol(symbol.value))
+                continue
+            list_stock.industry = industry.value
+            list_stock.years_paying = years.value
+            if sector.ctype == 1:
+                if list_stock.stock.sector == None:
+                    sector_obj, created = Sector.objects.get_or_create(name=sector.value)
+                    list_stock.stock.sector = sector_obj
+                    list_stock.stock.save()
+            list_stock.save()
+            #add stocks to list
+            list.stocks.add(list_stock)
+        #delete removed stocks
+        for list_stock in list.stocks.all():
+            if list_stock.stock.symbol not in symbol_list:
+                list.stocks.remove(list_stock)
+    return
+</code></pre>
+
+<p>But it is probably not dependent on code, since if I run my cron file (<code>./update_dave_list</code>) it finishes in 20 seconds, when run by cron it will not finish. Any idea what problem here might be?</p>
+
+<hr/>
+
+<p><strong>EDIT1:</strong>
+So I tried to comment out file <code>update_dave_list</code> like this:</p>
+
+<pre><code>#!/bin/bash
+#/var/lib/openshift/55a0310e4382ec4b84000094/python/virtenv/bin/python /var/lib/openshift/55a0310e4382ec4b84000094/app-root/runtime/repo/wsgi/digrin/manage.py crontab run 18e10bf4fb92741b69745d8a480230a3 # update dave lists
+</code></pre>
+
+<p>My daily cron folder on openshift looks like this:</p>
+
+<pre><code>drwx------. 2 55a00094 55a00094 4096 nov 22 17:55 .
+drwx------. 7 55a00094 55a00094 4096 nov 22 17:39 ..
+-rw-------. 1 55a00094 55a00094    0 nov 22 17:37 .gitignore
+-rwxr-xr-x. 1 55a00094 55a00094  236 nov 22 17:37 update_dave_list
+-rwxr-xr-x. 1 55a00094 55a00094  235 nov 22 17:37 update_dgr
+-rwxr-xr-x. 1 55a00094 55a00094  244 nov 22 17:37 update_ex_dividends
+-rwxr-xr-x. 1 55a00094 55a00094  250 nov 22 17:37 update_frequency
+-rwxr-xr-x. 1 55a00094 55a00094  236 nov 22 17:37 update_industry
+-rwxr-xr-x. 1 55a00094 55a00094  472 nov 22 17:37 update_stocks
+-rwxr-xr-x. 1 55a00094 55a00094  243 nov 22 17:37 update_years_paying
+-rwxr-xr-x. 1 55a00094 55a00094  252 nov 22 17:37 watcher
+</code></pre>
+
+<p>After I commented out dave list update, this is log from <strong>cron_daily.log</strong>:</p>
+
+<pre><code>__________________________________________________________________________
+Mon Nov 23 03:25:54 EST 2015: START daily cron run
+__________________________________________________________________________
+/usr/libexec/openshift/cartridges/cron/bin/cron_runjobs.sh: line 114: 28445 Killed                  $executor "$SCRIPTS_DIR"
+Warning: daily cron run terminated as it exceeded max run time
+__________________________________________________________________________
+Mon Nov 23 03:45:54 EST 2015: END daily cron run - status=137
+__________________________________________________________________________
+</code></pre>
+
+<p>I think it means that none of my files are run and error is in cron_runjobs.sh. But I do not get support on openshift and reporting bug does not help (I reported one few weeks ago and no update yet). It is weird that my daily crons do not work, hourly cron work ok. </p>
+
+<hr/>
+
+<p>EDIT2:
+I tried to restart cron cartridge:  </p>
+
+<pre><code>rhc cartridge remove cron -a &lt;app&gt;
+rhc cartridge add cron -a &lt;app&gt;
+</code></pre>
+
+<p>Did not help:  </p>
+
+<pre><code>__________________________________________________________________________
+Tue Nov 24 03:12:47 EST 2015: START daily cron run
+__________________________________________________________________________
+/usr/libexec/openshift/cartridges/cron/bin/cron_runjobs.sh: line 114: 211644 Killed                  $executor "$SCRIPTS_DIR"
+Warning: daily cron run terminated as it exceeded max run time
+__________________________________________________________________________
+Tue Nov 24 03:32:47 EST 2015: END daily cron run - status=137
+__________________________________________________________________________
+</code></pre>
+
+<p>I ma not sure what to do now. If file in daily cron is started, it looks like this:</p>
+
+<pre><code>__________________________________________________________________________
+Mon Nov 23 13:01:05 EST 2015: START hourly cron run
+__________________________________________________________________________
+/var/lib/openshift/55a000094/app-root/runtime/repo//.openshift/cron/hourly/add_stocks:
+...
+</code></pre>
+
+<p>But daily cron does not run any file in daily directory.</p>
+    </div>
+    </div></body></html>

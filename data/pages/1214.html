@@ -1,0 +1,262 @@
+<html><body><div><div class="snipMain">
+      <h1 id="SnippetName"><pre itemprop="name">Steps to configure a django app on digitalocean.com</pre></h1>
+      <div class="snipDesc" id="snipDescription">
+        <pre>
+          <span itemprop="articleSection">
+              Steps to configure a django app on digitalocean.com: 
+digitalocean-deploy-django
+          </span>
+        </pre>
+      </div>
+      <div id="codeBlock" class="">
+        
+
+        <div class="expandablePanel">
+
+          
+
+          <p id="SnippetCodeEditor" class="viewOnly">deploy django app on digitalocean
+=================================
+
+# Packages
+
+    sudo apt-get install python-pip python-dev python-virtualenv supervisor nginx
+
+# Create dirs
+
+    mkdir -p /webapps/my-project/{logs,run}
+    &gt; /webapps/my-project/logs/gunicorn_supervisor.log
+
+# Virtualenv
+
+    cd /webapps/my-project
+    virtualenv .
+
+# Gunicorn
+
+    pip install gunicorn
+    &gt; /webapps/my-project/bin/start.sh
+    #!/bin/bash
+    NAME="my-project"
+    DJANGODIR=/webapps/my-project/conf              # Django project directory
+    SOCKFILE=/webapps/my-project/run/gunicorn.sock  # we will communicte using this unix socket
+    USER=myproject_user                             # the user to run as
+    GROUP=webapps                                   # the group to run as
+    NUM_WORKERS=3                                   # how many worker processes should Gunicorn spawn
+    DJANGO_SETTINGS_MODULE=conf.settings            # which settings file should Django use
+    DJANGO_WSGI_MODULE=conf.wsgi                    # WSGI module name
+
+    echo "Starting $NAME as `whoami`"
+
+    # Activate the virtual environment
+    cd $DJANGODIR
+    source ../bin/activate
+    export DJANGO_SETTINGS_MODULE=$DJANGO_SETTINGS_MODULE
+    export PYTHONPATH=$DJANGODIR:$PYTHONPATH
+
+    # Start your Django Unicorn
+    # Programs meant to be run under supervisor should not daemonize themselves (do not use --daemon)
+    exec ../bin/gunicorn ${DJANGO_WSGI_MODULE}:application \
+      --name $NAME \
+      --workers $NUM_WORKERS \
+      --user=$USER --group=$GROUP \
+      --bind=unix:$SOCKFILE \
+      --log-level=debug \
+      --log-file=-
+
+# Supervisor
+
+    &gt; /etc/supervisor/conf.d/my-project.conf
+    [program:myproject]
+    command = /webapps/my-project/bin/start.sh
+    user = carolcycles
+    stdout_logfile = /webapps/my-project/logs/gunicorn_supervisor.log
+    redirect_stderr = true
+    environment=LANG=en_US.UTF-8,LC_ALL=en_US.UTF-8
+    autostart=true
+    autorestart=true
+    redirect_stderr=true
+
+    sudo supervisorctl reread
+    sudo supervisorctl update
+
+# Nginx for static
+
+    edit /etc/nginx/nginx.conf
+    server_names_hash_bucket_size 64;
+
+    &gt; /etc/nginx/sites-available/my-project
+    ln -s /etc/nginx/sites-available/my-project /etc/nginx/sites-enabled/my-project
+
+    upstream myproject_app {
+        server unix:/webapps/my-project/run/gunicorn.sock fail_timeout=0;
+    }
+     
+    server {
+        listen 80;
+        server_name example.com;
+        client_max_body_size 4G;
+        access_log /webapps/my-project/logs/nginx-access.log;
+        error_log /webapps/my-project/logs/nginx-error.log;
+        location /static/ {
+            alias /webapps/my-project/static/;
+        }
+        location /media/ {
+            alias /webapps/my-project/media/;
+        }
+     
+        location / {
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header Host $http_host;
+            proxy_redirect off;
+            if (!-f $request_filename) {
+                proxy_pass http://myproject_app;
+                break;
+            }
+        }
+     
+        # Error pages
+        error_page 500 502 503 504 /500.html;
+        location = /500.html {
+            root /webapps/my-project/static/;
+        }
+    }
+
+# Configure settings.py
+
+    STATIC_DIR = '/webapps/my-project/static/'
+    python manage.py collectstatic
+
+
+</p>
+          <meta itemprop="articleBody" content="deploy django app on digitalocean&#10;=================================&#10;&#10;# Packages&#10;&#10;    sudo apt-get install python-pip python-dev python-virtualenv supervisor nginx&#10;&#10;# Create dirs&#10;&#10;    mkdir -p /webapps/my-project/{logs,run}&#10;    &gt; /webapps/my-project/logs/gunicorn_supervisor.log&#10;&#10;# Virtualenv&#10;&#10;    cd /webapps/my-project&#10;    virtualenv .&#10;&#10;# Gunicorn&#10;&#10;    pip install gunicorn&#10;    &gt; /webapps/my-project/bin/start.sh&#10;    #!/bin/bash&#10;    NAME=&quot;my-project&quot;&#10;    DJANGODIR=/webapps/my-project/conf              # Django project directory&#10;    SOCKFILE=/webapps/my-project/run/gunicorn.sock  # we will communicte using this unix socket&#10;    USER=myproject_user                             # the user to run as&#10;    GROUP=webapps                                   # the group to run as&#10;    NUM_WORKERS=3                                   # how many worker processes should Gunicorn spawn&#10;    DJANGO_SETTINGS_MODULE=conf.settings            # which settings file should Django use&#10;    DJANGO_WSGI_MODULE=conf.wsgi                    # WSGI module name&#10;&#10;    echo &quot;Starting $NAME as `whoami`&quot;&#10;&#10;    # Activate the virtual environment&#10;    cd $DJANGODIR&#10;    source ../bin/activate&#10;    export DJANGO_SETTINGS_MODULE=$DJANGO_SETTINGS_MODULE&#10;    export PYTHONPATH=$DJANGODIR:$PYTHONPATH&#10;&#10;    # Start your Django Unicorn&#10;    # Programs meant to be run under supervisor should not daemonize themselves (do not use --daemon)&#10;    exec ../bin/gunicorn ${DJANGO_WSGI_MODULE}:application \&#10;      --name $NAME \&#10;      --workers $NUM_WORKERS \&#10;      --user=$USER --group=$GROUP \&#10;      --bind=unix:$SOCKFILE \&#10;      --log-level=debug \&#10;      --log-file=-&#10;&#10;# Supervisor&#10;&#10;    &gt; /etc/supervisor/conf.d/my-project.conf&#10;    [program:myproject]&#10;    command = /webapps/my-project/bin/start.sh&#10;    user = carolcycles&#10;    stdout_logfile = /webapps/my-project/logs/gunicorn_supervisor.log&#10;    redirect_stderr = true&#10;    environment=LANG=en_US.UTF-8,LC_ALL=en_US.UTF-8&#10;    autostart=true&#10;    autorestart=true&#10;    redirect_stderr=true&#10;&#10;    sudo supervisorctl reread&#10;    sudo supervisorctl update&#10;&#10;# Nginx for static&#10;&#10;    edit /etc/nginx/nginx.conf&#10;    server_names_hash_bucket_size 64;&#10;&#10;    &gt; /etc/nginx/sites-available/my-project&#10;    ln -s /etc/nginx/sites-available/my-project /etc/nginx/sites-enabled/my-project&#10;&#10;    upstream myproject_app {&#10;        server unix:/webapps/my-project/run/gunicorn.sock fail_timeout=0;&#10;    }&#10;     &#10;    server {&#10;        listen 80;&#10;        server_name example.com;&#10;        client_max_body_size 4G;&#10;        access_log /webapps/my-project/logs/nginx-access.log;&#10;        error_log /webapps/my-project/logs/nginx-error.log;&#10;        location /static/ {&#10;            alias /webapps/my-project/static/;&#10;        }&#10;        location /media/ {&#10;            alias /webapps/my-project/media/;&#10;        }&#10;     &#10;        location / {&#10;            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;&#10;            proxy_set_header Host $http_host;&#10;            proxy_redirect off;&#10;            if (!-f $request_filename) {&#10;                proxy_pass http://myproject_app;&#10;                break;&#10;            }&#10;        }&#10;     &#10;        # Error pages&#10;        error_page 500 502 503 504 /500.html;&#10;        location = /500.html {&#10;            root /webapps/my-project/static/;&#10;        }&#10;    }&#10;&#10;# Configure settings.py&#10;&#10;    STATIC_DIR = '/webapps/my-project/static/'&#10;    python manage.py collectstatic&#10;&#10;&#10;"/>
+          <pre id="rawCode">deploy django app on digitalocean
+=================================
+
+# Packages
+
+    sudo apt-get install python-pip python-dev python-virtualenv supervisor nginx
+
+# Create dirs
+
+    mkdir -p /webapps/my-project/{logs,run}
+    &gt; /webapps/my-project/logs/gunicorn_supervisor.log
+
+# Virtualenv
+
+    cd /webapps/my-project
+    virtualenv .
+
+# Gunicorn
+
+    pip install gunicorn
+    &gt; /webapps/my-project/bin/start.sh
+    #!/bin/bash
+    NAME="my-project"
+    DJANGODIR=/webapps/my-project/conf              # Django project directory
+    SOCKFILE=/webapps/my-project/run/gunicorn.sock  # we will communicte using this unix socket
+    USER=myproject_user                             # the user to run as
+    GROUP=webapps                                   # the group to run as
+    NUM_WORKERS=3                                   # how many worker processes should Gunicorn spawn
+    DJANGO_SETTINGS_MODULE=conf.settings            # which settings file should Django use
+    DJANGO_WSGI_MODULE=conf.wsgi                    # WSGI module name
+
+    echo "Starting $NAME as `whoami`"
+
+    # Activate the virtual environment
+    cd $DJANGODIR
+    source ../bin/activate
+    export DJANGO_SETTINGS_MODULE=$DJANGO_SETTINGS_MODULE
+    export PYTHONPATH=$DJANGODIR:$PYTHONPATH
+
+    # Start your Django Unicorn
+    # Programs meant to be run under supervisor should not daemonize themselves (do not use --daemon)
+    exec ../bin/gunicorn ${DJANGO_WSGI_MODULE}:application \
+      --name $NAME \
+      --workers $NUM_WORKERS \
+      --user=$USER --group=$GROUP \
+      --bind=unix:$SOCKFILE \
+      --log-level=debug \
+      --log-file=-
+
+# Supervisor
+
+    &gt; /etc/supervisor/conf.d/my-project.conf
+    [program:myproject]
+    command = /webapps/my-project/bin/start.sh
+    user = carolcycles
+    stdout_logfile = /webapps/my-project/logs/gunicorn_supervisor.log
+    redirect_stderr = true
+    environment=LANG=en_US.UTF-8,LC_ALL=en_US.UTF-8
+    autostart=true
+    autorestart=true
+    redirect_stderr=true
+
+    sudo supervisorctl reread
+    sudo supervisorctl update
+
+# Nginx for static
+
+    edit /etc/nginx/nginx.conf
+    server_names_hash_bucket_size 64;
+
+    &gt; /etc/nginx/sites-available/my-project
+    ln -s /etc/nginx/sites-available/my-project /etc/nginx/sites-enabled/my-project
+
+    upstream myproject_app {
+        server unix:/webapps/my-project/run/gunicorn.sock fail_timeout=0;
+    }
+     
+    server {
+        listen 80;
+        server_name example.com;
+        client_max_body_size 4G;
+        access_log /webapps/my-project/logs/nginx-access.log;
+        error_log /webapps/my-project/logs/nginx-error.log;
+        location /static/ {
+            alias /webapps/my-project/static/;
+        }
+        location /media/ {
+            alias /webapps/my-project/media/;
+        }
+     
+        location / {
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header Host $http_host;
+            proxy_redirect off;
+            if (!-f $request_filename) {
+                proxy_pass http://myproject_app;
+                break;
+            }
+        }
+     
+        # Error pages
+        error_page 500 502 503 504 /500.html;
+        location = /500.html {
+            root /webapps/my-project/static/;
+        }
+    }
+
+# Configure settings.py
+
+    STATIC_DIR = '/webapps/my-project/static/'
+    python manage.py collectstatic
+
+
+</pre>
+
+</div>
+      </div>
+
+
+
+        <div class="signupFromSnip"><p>
+          If you want to be updated about similar snippets,
+          </p><a href="https://www.snip2code.com/Access/Signup?redirUrl=Channel/Channels">Sign in</a><p>
+          and follow our </p><a href="/Channel/Channels">Channels</a>
+        </div>
+
+          
+
+    </div>
+  </div></body></html>

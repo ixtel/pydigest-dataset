@@ -1,0 +1,95 @@
+<html><body><div><div class="entry-content" itemprop="text"><p>Following on from <a title="SSH and SFTP with Paramiko &amp; Python" href="http://www.iodigitalsec.com/ssh-sftp-paramiko-python/">SSH and SFTP with Paramiko &amp; Python</a>, I recently had the need to gain a remote SSH server’s fingerprint and hostkey for verification purposes. This is achievable through setting up a socket, and then applying paramiko.Transport over our established socket. First, we include the various bits and pieces we’ll need:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+import socket
+import paramiko
+import hashlib
+import base64
+</pre>
+<p>Next, we establish a socket connection ‘mySocket’ to “localhost” on port 22 – our dummy SSH server. We then use <em>paramiko.Transport</em> to gain access to paramiko’s core SSH protocol options on the socket.</p>
+<pre class="brush: python; title: ; notranslate" title="">
+mySocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+mySocket.connect(("localhost", 22))
+myTransport = paramiko.Transport(mySocket)
+myTransport.start_client()
+</pre>
+<p>To get the remote hostkey, we call <em>myTransport.get_remote_server_key()</em>:<br/>
+<span id="more-2457"/></p>
+<pre class="brush: python; title: ; notranslate" title="">
+sshKey = myTransport.get_remote_server_key()
+</pre>
+<p>At this point <em>sshKey.__str__()</em> contains the <b>binary</b> representation of the hostkey. Calling <em>print sshKey.__str__()</em> will output said binary data to our terminal.</p>
+<p>We can then immediately close both the paramiko transport and the socket, as <em>sshKey</em> contains the information we need.</p>
+<pre class="brush: python; title: ; notranslate" title="">
+myTransport.close()
+mySocket.close()
+</pre>
+<p>For a printable (base64 encoded) representation:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+printableKey = '%s %s' %(sshKey.get_name(), base64.encodestring(sshKey.__str__()).replace('\n', ''))
+print printableKey
+</pre>
+<p>In my case, this returns:</p>
+<pre class="brush: plain; title: ; notranslate" title="">
+&gt;&gt;&gt; print printableKey
+ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEA0JCrB2J5YWa3m6buNqQ5/Scd/X9xs0gvDVZhokPZtFdtMgYnZhpAge3WZyFZxnt8ToE8K8d+haEQW5PaZykqD61Ur7gzW3KSZkA9L1q3IqIFLkUcI/Db82j5+rZ0w8W8oARfoOb4aR9Q+N4FbnMxO4FUzlCD1LpDA2XMnoOyDrr7WzYoopJencPuCCLm56+40QuHRoEI3gkUg34Utq8pV9vOqEBNMK21LEeG82CIIPB1nASNsaTfbAj1K9RBKrlobLiLFVPagxJY+Vd5lUPY/0RGgRBRofy7hRA4JUTPTqhkTg582Kw1GRNRDCf2AMIuPZLe3qqPWmJZ8fV897U2QQ==
+</pre>
+<p>To gain the host fingerprint, which is an MD5 hash of the key:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+sshFingerprint = hashlib.md5(sshKey.__str__()).hexdigest()
+</pre>
+<p>This returns a 32 byte MD5 representation:</p>
+<pre class="brush: plain; title: ; notranslate" title="">
+&gt;&gt;&gt; print sshFingerprint
+5203d8c22dec1016514334668f4d42f9
+</pre>
+<p>Lastly, to convert that to the colon separated fingerprint that we’re familiar with:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+printableFingerprint = ':'.join(a+b for a,b in zip(sshFingerprint[::2], sshFingerprint[1::2]))
+</pre>
+<pre class="brush: plain; title: ; notranslate" title="">
+&gt;&gt;&gt; print printableFingerprint
+52:03:d8:c2:2d:ec:10:16:51:43:34:66:8f:4d:42:f9
+</pre>
+<p>To put it all together:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+import socket
+import paramiko
+import hashlib
+import base64
+import sys
+
+if len(sys.argv) != 3:
+	print "Usage: %s &lt;ip&gt; &lt;port&gt;" % sys.argv[0]
+	quit()
+
+try:
+	mySocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+	mySocket.connect((sys.argv[1], int(sys.argv[2])))
+except socket.error:
+	print "Error opening socket"
+	quit()
+
+try:
+	myTransport = paramiko.Transport(mySocket)
+	myTransport.start_client()
+	sshKey = myTransport.get_remote_server_key()
+except paramiko.SSHException:
+	print "SSH error"
+	quit()
+
+myTransport.close()
+mySocket.close()
+
+
+printableType = sshKey.get_name()
+printableKey = base64.encodestring(sshKey.__str__()).replace('\n', '')
+sshFingerprint = hashlib.md5(sshKey.__str__()).hexdigest()
+printableFingerprint = ':'.join(a+b for a,b in zip(sshFingerprint[::2], sshFingerprint[1::2]))
+print "HostKey Type: %s, Key: %s (Fingerprint: %s)" %(printableType, printableKey, printableFingerprint)
+</pre>
+<p>Which is run as follows:</p>
+<pre class="brush: plain; title: ; notranslate" title="">
+root@w:~/tmp# ./pyHostKey.py localhost 22
+HostKey Type: ssh-rsa, Key: AAAAB3NzaC1yc2EAAAABIwAAAQEA0JCrB2J5YWa3m6buNqQ5/Scd/X9xs0gvDVZhokPZtFdtMgYnZhpAge3WZyFZxnt8ToE8K8d+haEQW5PaZykqD61Ur7gzW3KSZkA9L1q3IqIFLkUcI/Db82j5+rZ0w8W8oARfoOb4aR9Q+N4FbnMxO4FUzlCD1LpDA2XMnoOyDrr7WzYoopJencPuCCLm56+40QuHRoEI3gkUg34Utq8pV9vOqEBNMK21LEeG82CIIPB1nASNsaTfbAj1K9RBKrlobLiLFVPagxJY+Vd5lUPY/0RGgRBRofy7hRA4JUTPTqhkTg582Kw1GRNRDCf2AMIuPZLe3qqPWmJZ8fV897U2QQ== (Fingerprint: 52:03:d8:c2:2d:ec:10:16:51:43:34:66:8f:4d:42:f9)
+</pre>
+</div></div></body></html>

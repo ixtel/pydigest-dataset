@@ -1,0 +1,90 @@
+<html><body><div><div class="entry-content">
+		<p>Last Saturday was the closing day of the <a href="http://en.wikipedia.org/wiki/Six_Nations_Championship">Six Nations Championship</a>, an annual international <a href="http://en.wikipedia.org/wiki/Rugby_union">rugby</a> competition. Before turning on the TV to watch Italy being trashed by Wales, I decided to use this event to collect some data from Twitter and perform some exploratory text analysis on something more interesting than the small list of my tweets.</p>
+<p>This article continues the tutorial on Twitter Data Mining, re-using what we discussed in the previous articles with some more realistic data. It also expands the analysis by introducing the concept of term co-occurrence.</p>
+<p>Tutorial Table of Contents:</p>
+
+<h2>The Application Domain</h2>
+<p>As the name suggests, six teams are involved in the competition: England, Ireland, Wales, Scotland, France and Italy. This means that we can expect the event to be tweeted in multiple languages (English, French, Italian, Welsh, Gaelic, possibly other languages as well), with English being the major language. Assuming the team names will be mentioned frequently, we could decide to look also for their nicknames, e.g. <em>Les Bleus</em> for France or <em>Azzurri</em> for Italy. During the last day of the competition, three matches are played sequentially. Three teams in particular had a shot for the title: England, Ireland and Wales. At the end, Ireland won the competition but everything was open until the very last minute.</p>
+<h2>Setting Up</h2>
+<p>I used the <a href="http://marcobonzanini.com/2015/03/02/mining-twitter-data-with-python-part-1/">streaming API</a> to download all the tweets containing the string <tt>#rbs6nations</tt> during the day. Obviously not all the tweets about the event contained the hashtag, but this is a good baseline. The time frame for the download was from around <strong>12:15PM to 7:15PM GMT</strong>, that is from about 15 minutes before the first match, to about 15 minutes after the last match was over. At the end, more than <strong>18,000 tweets</strong> have been downloaded in JSON format, making for about <strong>75Mb</strong> of data. This should be small enough to quickly do some processing in memory, and at the same time big enough to observe something possibly interesting.</p>
+<p>The textual content of the tweets has been pre-processed with <a href="http://marcobonzanini.com/2015/03/09/mining-twitter-data-with-python-part-2/">tokenisation and lowercasing</a> using the <tt>preprocess()</tt> function introduced in Part 2 of the tutorial.</p>
+<h2>Interesting terms and hashtags</h2>
+<p>Following what we discussed in <a href="http://marcobonzanini.com/2015/03/17/mining-twitter-data-with-python-part-3-term-frequencies/">Part 3 (Term Frequencies)</a>, we want to observe the most common terms and hashtags used during day. If you have followed the discussion about creating different lists of tokens in order to capture terms without hashtags, hashtags only, removing stop-words, etc. you can play around with the different lists.</p>
+<p>This is the unsurprising list of top 10 most frequent terms (<tt>terms_only</tt> in Part 3) in the data set.</p>
+<pre>[('ireland', 3163), ('england', 2584), ('wales', 2271), ('…', 2068), ('day', 1479), ('france', 1380), ('win', 1338), ('rugby', 1253), ('points', 1221), ('title', 1180)]</pre>
+<p>The first three terms correspond to the teams who had a go for the title. The frequencies also respect the order in the final table. The fourth term is instead a punctuation mark that we missed and didn’t include in the list of stop-words. This is because <tt>string.punctuation</tt> only contains ASCII symbols, while here we’re dealing with a unicode character. If we dig into the data, there will be more examples like this, but for the moment we don’t worry about it.</p>
+<p>After adding the suspension-points symbol to the list of stop-words, we have a new entry at the end of the list:</p>
+<pre>[('ireland', 3163), ('england', 2584), ('wales', 2271), ('day', 1479), ('france', 1380), ('win', 1338), ('rugby', 1253), ('points', 1221), ('title', 1180), ('🍀', 1154)]</pre>
+<p>Interestingly, a new token we didn’t account for, an <a href="http://en.wikipedia.org/wiki/Emoji">Emoji symbol</a> (in this case, the <a href="http://en.wikipedia.org/wiki/Shamrock">Irish Shamrock</a>).</p>
+<p>If we have a look at the most common hashtags, we need to consider that <tt>#rbs6nations</tt> will be by far the most common token (that’s our search term for downloading the tweets), so we can exclude it from the list. This leave us with:</p>
+<pre>[('#engvfra', 1701), ('#itavwal', 927), ('#rugby', 880), ('#scovire', 692), ('#ireland', 686), ('#angfra', 554), ('#xvdefrance', 508), ('#crunch', 500), ('#wales', 446), ('#england', 406)]</pre>
+<p>We can observe that the most common hashtags, a part from <tt>#rugby</tt>, are related to the individual matches. In particular England v France has received the highest number of mentions, probably being the last match of the day with a dramatic finale. Something interesting to notice is that a fair amount of tweets also contained terms in French: the count for <tt>#angfra</tt> should in fact be added to <tt>#engvfra</tt>. Those unfamiliar with rugby probably wouldn’t recognise that also <tt>#crunch</tt> should be included with <tt>#EngvFra</tt> match, as <em>Le Crunch</em> is the traditional name for this event. So by far, the last match has received a lot of attention.</p>
+<h2>Term co-occurrences</h2>
+<p>Sometimes we are interested in the terms that occur together. This is mainly because the <em>context</em> gives us a better insight about the meaning of a term, supporting applications such as word disambiguation or semantic similarity. We discussed the option of using <em>bigrams</em> <a href="http://marcobonzanini.com/2015/03/17/mining-twitter-data-with-python-part-3-term-frequencies/">in the previous article</a>, but we want to extend the context of a term to the whole tweet. </p>
+<p>We can refactor the code from <a href="http://marcobonzanini.com/2015/03/17/mining-twitter-data-with-python-part-3-term-frequencies/">the previous article</a> in order to capture the <strong>co-occurrences</strong>. We build a co-occurrence matrix <tt>com</tt> such that <tt>com[x][y]</tt> contains the number of times the term <tt>x</tt> has been seen in the same tweet as the term <tt>y</tt>:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+from collections import defaultdict
+# remember to include the other import from the previous post
+
+com = defaultdict(lambda : defaultdict(int))
+
+# f is the file pointer to the JSON data set
+for line in f: 
+    tweet = json.loads(line)
+    terms_only = [term for term in preprocess(tweet['text']) 
+                  if term not in stop 
+                  and not term.startswith(('#', '@'))]
+
+    # Build co-occurrence matrix
+    for i in range(len(terms_only)-1):            
+        for j in range(i+1, len(terms_only)):
+            w1, w2 = sorted([terms_only[i], terms_only[j]])                
+            if w1 != w2:
+                com[w1][w2] += 1
+</pre>
+<p>While building the co-occurrence matrix, we don’t want to count the same term pair twice, e.g. <tt>com[A][B] == com[B][A]</tt>, so the inner for loop starts from <tt>i+1</tt> in order to build a triangular matrix, while <tt>sorted</tt> will preserve the alphabetical order of the terms.</p>
+<p>For each term, we then extract the 5 most frequent co-occurrent terms, creating a list of tuples in the form <tt>((term1, term2), count)</tt>:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+com_max = []
+# For each term, look for the most common co-occurrent terms
+for t1 in com:
+    t1_max_terms = max(com[t1].items(), key=operator.itemgetter(1))[:5]
+    for t2 in t1_max_terms:
+        com_max.append(((t1, t2), com[t1][t2]))
+# Get the most frequent co-occurrences
+terms_max = sorted(com_max, key=operator.itemgetter(1), reverse=True)
+print(terms_max[:5])
+</pre>
+<p>The results:</p>
+<pre>[(('6', 'nations'), 845), (('champions', 'ireland'), 760), (('nations', 'rbs'), 742), (('day', 'ireland'), 731), (('ireland', 'wales'), 674)]</pre>
+<p>This implementation is pretty straightforward, but depending on the data set and on the use of the matrix, one might want to look into tools like <tt>scipy.sparse</tt> for building a sparse matrix.</p>
+<p>We could also look for a specific term and extract its most frequent co-occurrences. We simply need to modify the main loop including an extra counter, for example:</p>
+<pre class="brush: python; title: ; notranslate" title="">
+search_word = sys.argv[1] # pass a term as a command-line argument
+count_search = Counter()
+for line in f:
+    tweet = json.loads(line)
+    terms_only = [term for term in preprocess(tweet['text']) 
+                  if term not in stop 
+                  and not term.startswith(('#', '@'))]
+    if search_word in terms_only:
+        count_search.update(terms_only)
+print(&amp;quot;Co-occurrence for %s:&amp;quot; % search_word)
+print(count_search.most_common(20))
+</pre>
+<p>The outcome for “ireland”:</p>
+<pre>[('champions', 756), ('day', 727), ('nations', 659), ('wales', 654), ('2015', 638), ('6', 613), ('rbs', 585), ('http://t.co/y0nvsvayln', 559), ('🍀', 526), ('10', 522), ('win', 377), ('england', 377), ('twickenham', 361), ('40', 360), ('points', 356), ('sco', 355), ('ire', 355), ('title', 346), ('scotland', 301), ('turn', 295)]</pre>
+<p>The outcome for “rugby”:</p>
+<pre>[('day', 476), ('game', 160), ('ireland', 143), ('england', 132), ('great', 105), ('today', 104), ('best', 97), ('well', 90), ('ever', 89), ('incredible', 87), ('amazing', 84), ('done', 82), ('amp', 71), ('games', 66), ('points', 64), ('monumental', 58), ('strap', 56), ('world', 55), ('team', 55), ('http://t.co/bhmeorr19i', 53)]</pre>
+<p>Overall, quite interesting.</p>
+<h2>Summary</h2>
+<p>This article has discussed a toy example of Text Mining on Twitter, using some realistic data taken during a sport event. Using what we have learnt in the previous episodes, we have downloaded some data using the streaming API, pre-processed the data in JSON format and extracted some interesting terms and hashtags from the tweets. The article has also introduced the concept of term co-occurrence, shown how to build a co-occurrence matrix and discussed how to use it to find some interesting insight.</p>
+<p><a href="http://www.twitter.com/marcobonzanini">@MarcoBonzanini</a></p>
+
+<div id="jp-post-flair" class="sharedaddy sd-like-enabled sd-sharing-enabled"><div class="sharedaddy sd-block sd-like jetpack-likes-widget-wrapper jetpack-likes-widget-unloaded" id="like-post-wrapper-82018920-95-56d59b52280c2" data-src="//widgets.wp.com/likes/#blog_id=82018920&amp;post_id=95&amp;origin=marcobonzanini.wordpress.com&amp;obj_id=82018920-95-56d59b52280c2" data-name="like-post-frame-82018920-95-56d59b52280c2"><h3 class="sd-title">Like this:</h3><p class="likes-widget-placeholder post-likes-widget-placeholder"><span class="button"><span>Like</span></span> <span class="loading">Loading...</span></p><span class="sd-text-color"/><a class="sd-link-color"/></div>
+<p id="jp-relatedposts" class="jp-relatedposts">
+	<h3 class="jp-relatedposts-headline"><em>Related</em></h3>
+</p></div>	</div>
+
+	
+</div></body></html>

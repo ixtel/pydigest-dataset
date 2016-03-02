@@ -1,0 +1,151 @@
+<html><body><div><div class="post-text" itemprop="text">
+<h1>Answer</h1>
+
+<p>As pointed in the comments to the question, matplotlib does not do really 3d plotting, and the approximation it does can give you limited results. The issue you are encountering it is actually acknowledged in the <a href="http://matplotlib.org/mpl_toolkits/mplot3d/faq.html#i-don-t-like-how-the-3d-plot-is-laid-out-how-do-i-change-that" rel="nofollow"><code>mplot3d</code> module's FAQ</a>.</p>
+
+<p>They also direct you to <a href="http://code.enthought.com/projects/mayavi/documentation.php" rel="nofollow">MayaVi</a> if you want to do serious 3D plotting. If you don't really need 3D plotting and only care about the top view then I would do a 2D plot directly as suggested by Bensciens in the comments...</p>
+
+<h1>Dirty Workarounds</h1>
+
+<p>Of course, if you're willing to pay with programmer souls, there is almost always a <em>solution</em> involving some dark magic... :P</p>
+
+<h3>Option 1</h3>
+
+<p>If you really only need the two views you put as example and the surfaces are something similar to those ones, you can plot first the part that lays behind of surface A, then all surface B and then the part that lays on top of surface A... Let me explain:</p>
+
+<p>As pointed out <a href="http://stackoverflow.com/a/11038838/3406193">here</a> and <a href="http://stackoverflow.com/a/28587846/3406193">here</a> <code>plot_surfaces()</code> does not care about masks, but you can use <code>NaN</code> values to get a similar effect. You can use this to plot first only the values that are below the other surface and then only the ones that are above...</p>
+
+<pre><code>from mpl_toolkits.mplot4d import Axes3D
+import matplotlib.pyplot as plt
+import numpy as np
+
+fig = plt.figure()
+ax = fig.gca(projection='3d')
+X = np.arange(-5, 5, 0.25)
+Y = np.arange(-5, 5, 0.25)
+X, Y = np.meshgrid(X, Y)
+
+R = (X+Y)
+Z1 = R/R.max()
+Z2 = -R/R.max()
+
+surfA_bottom = ax.plot_surface(X, Y, np.where(Z1&lt;=Z2,Z1, np.nan),
+                               rstride=1, cstride=1, color='r', linewidth=0)
+
+surfB = ax.plot_surface(X, Y, Z2,
+                        rstride=1, cstride=1, color='b', linewidth=0)
+
+surfA_top = ax.plot_surface(X, Y, np.where(Z1&gt;=Z2,Z1, np.nan),
+                            rstride=1, cstride=1, color='r', linewidth=0)
+
+ax.set_zlim3d(-1, 1)
+ax.set_ylim(-5,5)
+ax.set_xlim(-5,5)
+
+plt.show()
+</code></pre>
+
+<p><img src="http://i.stack.imgur.com/vSioY.png" alt="3d plot with masked array 1"/></p>
+
+<p><img src="http://i.stack.imgur.com/xZX6a.png" alt="3d plot with masked array 2"/></p>
+
+<h3>Option 2</h3>
+
+<p><strong>(It has some explanation, skip to the last piece of code if you want just the solution!)</strong></p>
+
+<p>This solution is slightly more complicated but more robust also to more complex surfaces... The thing is that 3d plots in <code>matplotlib</code> don't handle well the depth for <em>different</em> objects... right? but it does for a <em>single</em> object...
+What about plotting both surfaces as a <strong>single</strong> surface, then??</p>
+
+<p>To do this you need to to merge all the points into a single surface (you can have multiple Z values for repeated X-Y combinations). To differentiate the two parts of our new surface (our former two surfaces) we can use the <code>facecolors</code> kwarg. (I added some <code>alpha</code> value to see more clearly what's going on)</p>
+
+<pre><code>from mpl_toolkits.mplot4d import Axes3D
+import matplotlib.pyplot as plt
+import numpy as np
+
+fig = plt.figure()
+ax = fig.gca(projection='3d')
+X = np.arange(-5, 5, 0.25)
+Y = np.arange(-5, 5, 0.25)
+X, Y = np.meshgrid(X, Y)
+
+Z1 = np.sin(np.sqrt(X**2+Y**2))
+Z2 = np.ones_like(Z1)*0.6
+
+C1 = np.empty_like(X, dtype=str)
+C1.fill('b')
+C2 = C1.copy()
+C2.fill('r')
+
+X3 = np.vstack([X,X])
+Y3 = np.vstack([Y,Y])
+Z3 = np.vstack([Z1,Z2])
+C3 = np.vstack([C1,C2])
+
+
+surf3 = ax.plot_surface(X3, Y3, Z3, rstride=1, cstride=1,
+                       facecolors=C3, linewidth=0,
+                       antialiased=False, alpha=0.5)
+
+ax.set_zlim3d(-1, 2)
+plt.show()
+</code></pre>
+
+<p><img src="http://i.stack.imgur.com/FU73a.png" alt="3d plot merging to one array 1"/></p>
+
+<p>As you can see the results are pretty good but there is some weird effect since one extreme of one surface is connected to the other extreme of the other surface. How to get rid of it?
+Transparencies are not an option since, as far as I know, <code>plot_surface()</code> allows only an <code>alpha</code> value that affects the whole surface. I also tried to <em>mask</em> the transitions using a row of <code>NaN</code> values in X,Y and Z in a similar way as <strong>in workaround 1</strong>, but then the render gets broken. You may try, maybe it depends on my installation.</p>
+
+<p><strong>EDIT:</strong> I found a less elegant and more problematic solution, but as @will points out you <em>can</em> set transparency only in the bridge region by specifying the colors with <code>rgba</code> synthax. I'll leave my version for the review history, since the answer is already long enough... :P</p>
+
+<p>(you could get softer edges increasing the number of points)</p>
+
+<pre><code>from mpl_toolkits.mplot3d import Axes3D
+import matplotlib.pyplot as plt
+import numpy as np
+
+fig = plt.figure()
+ax = fig.gca(projection='3d')
+X = np.arange(-5, 5, 0.25)
+Y = np.arange(-5, 5, 0.25)
+X, Y = np.meshgrid(X, Y)
+
+# Complex shape from examples in matplotlib gallery
+Z1 = np.sin(np.sqrt(X**2+Y**2))
+Z2 = np.ones_like(Z1)*0.6
+
+# Define the color for each one of our surfaces
+# (it doesn't need to be a gradient)
+color1 = np.empty_like(X, dtype=str)
+color1.fill('b')
+color2 = np.empty_like(X, dtype=str)
+color2.fill('r')
+
+# Create a white bridge region
+X_bridge = np.vstack([X[-1,:],X[0,:]])
+Y_bridge = np.vstack([Y[-1,:],Y[0,:]])
+Z_bridge = np.vstack([Z1[-1,:],Z2[0,:]])
+color_bridge = np.empty_like(Z_bridge, dtype=object)
+color_bridge.fill((1,1,1,0))
+
+# Join the two surfaces (using also the bridge)
+X_full = np.vstack([X, X_bridge, X])
+Y_full = np.vstack([Y, Y_bridge, Y])
+Z_full = np.vstack([Z1, Z_bridge, Z2])
+color_full = np.vstack([color1, color_bridge, color2])
+
+surf_full = ax.plot_surface(X_full, Y_full, Z_full, rstride=1, cstride=1,
+                                    facecolors=color_full, linewidth=0,
+                                                                antialiased=False)
+
+ax.set_zlim3d(-1, 2)
+ax.set_ylim(-5,5)
+ax.set_xlim(-5,5)
+
+plt.show()
+</code></pre>
+
+<p><img src="http://i.stack.imgur.com/4rRVd.png" alt="enter image description here"/></p>
+
+<p><img src="http://i.stack.imgur.com/Z4mWO.png" alt="enter image description here"/></p>
+    </div>
+    </div></body></html>

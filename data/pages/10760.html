@@ -1,0 +1,371 @@
+<html><body><div><div class="content html_format"><p>
+      Предисловие: </p><a href="http://jackstouffer.com/blog/nd_slice.html">Я пишу</a><p> на Python более 6 лет и могу назвать себя профессионалом в этом языке. Недавно я даже написал о нем </p><a href="https://www.packtpub.com/web-development/mastering-flask">книгу</a><p>. Однако последние 8 месяцев я переключился на D и уже 4 месяца активно участвую в разработке этого языка по части расширения стандартной библиотеки Phobos. Так же я участвовал в код-ревью модуля std.ndslice о котором и пойдет речь.
+</p><p>
+std.ndslice так же как и Numpy предназначен для работы с многомерными массивами. Однако в отличие от Numpy ndslice имет крайне низкий оверхэд так как базируется на ranges (диапазонах), которые используются в штатной библиотеке повсеместно. Ranges позволяют избежать лишние процедуры копирования, а так же позволяют красиво организовать ленивые вычисления. 
+</p><p>
+В этой статье мне хотелось бы рассказать о том какие преимущества std.ndslice дает по сравнению с Numpy.
+</p><a name="habracut"/>
+<h4>Почему программисты Python должны посмотреть в сторону D?</h4><p>
+Потому что D позволяет писать практически такой же простой и понятный код как Python, при этом этот код будет работать значительно быстрее чем код на Python.
+</p><p>
+Следующий пример создает диапазон чисел от 0 до 999 используя функцию </p><code>iota</code><p> (аналог в Python называется </p><code>xrange</code><p>) и возвращает массив размерностью 5x5x40.
+
+</p><pre><code>import std.range : iota;
+import std.experimental.ndslice;
+
+void main() {
+    auto slice = sliced(iota(1000), 5, 5, 40);
+}</code></pre><p>
+Хотя D статически типизируемый язык, и явное указание типа повышает читаемость кода, чтобы программистам на Python было проще мы воспользуемся автоматической типизацией с использованием ключевого слова </p><code>auto</code><p>.
+</p><p>
+Функций </p><code>sliced</code><p> возвращает многомерный срез. На входе она может принимать как простые массивы так и </p><code>ranges</code><p>. В итоге у нас получился куб размером 5x5x40 состоящий из чисел от 0 до 999.
+</p><p>
+Пару слов о том что такое Ranges. На русский язык их правильнее переводить как диапазоны. Ranges позволяют описать правила перебора данных любого типа данных, будь то класс или структура. Для этого достаточно чтобы вы реализовали функцию: </p><code>front</code><p>, возвращающую первый элемент диапазона, </p><code>popFront</code><p>, переходящий к следующему элементу и </p><code>empty</code><p> возвращающую булевое значение показывающую, что перебираемая последовательность пуста. </p><code>Ranges</code><p> позволяют выполнять ленивый перебор обращаясь к данным по мере их необходимости. Более подробно концепция Ranges </p><a href="http://ddili.org/ders/d.en/ranges.html">освещена тут</a><p>.
+</p><p>
+Обратите внимание, что никаких пустых аллокаций памяти! Это происходит потому что </p><code>iota</code><p> так же позволяет генерировать ленивые диапазоны, а </p><code>sliced</code><p> в ленивом режиме так же принимает данные из </p><code>iota</code><p> и обрабатывает их по мере поступления. 
+</p><p>
+Как вы видите std.ndslice работает несколько иначе чем Numpy. Numpy создает собственный тип для данных, тогда как std.ndslice представляет способ манипуляции с уже существующими данными. Это позволяет вам во всей вашей программе использовать одни и те же данные не тратя ресурсы на бесполезный мемори аллокейшен! Не сложно догадаться, что это крайне серьезно сказывается на производительности ваших решений. 
+</p><p>
+Давайте посмотрим на следующий пример. В нем мы будем получать данные из </p><code>stdin</code><p>, фильтровать только уникальные строки, сортировать их, и затем возвращать в </p><code>stdout</code><p>.
+
+</p><pre><code>import std.stdio;
+import std.array;
+import std.algorithm;
+
+void main() {
+    stdin
+        // get stdin as a range
+        .byLine(KeepTerminator.yes)
+        .uniq
+        // stdin is immutable, so we need a copy
+        .map!(a =&gt; a.idup)
+        .array
+        .sort
+        // stdout.lockingTextWriter() is an output range, meaning values can be
+        // inserted into to it, which in this case will be sent to stdout
+        .copy(stdout.lockingTextWriter());
+}</code></pre><p>
+Желающим более подробно разобраться с ленивой генерацией диапазонов рекомендую почитать </p><a href="http://wiki.dlang.org/Component_programming_with_ranges">эту</a><p> статью.
+</p><p>
+Так как </p><code>slice</code><p> имеет три измерения это диапазон который возвращает диапазон диапазонов (ranges of ranges). Это хорошо видно на следующем примере:
+
+</p><pre><code>import std.range : iota;
+import std.stdio : writeln;
+import std.experimental.ndslice;
+
+void main() {
+    auto slice = sliced(iota(1000), 5, 5, 40);
+
+    foreach (item; slice) {
+        writeln(item);
+    }
+}</code></pre><p>
+Результат его работы будет следующим (троеточия для краткости):
+
+</p><pre><code>[[0, 1, ... 38, 39], [40, 41, ... 78, 79], [80, 81, ... 118, 119], [120, 121, ... 158, 159], [160, 161, ... 198, 199]]
+
+...
+
+[[800, 801, ... 838, 839], [840, 841, ... 878, 879], [880, 881, ... 918, 919], [920, 921, ... 958, 959], [960, 961, ... 998, 999]]</code></pre><p>
+Цикл </p><code>foreach</code><p> работает почти так же как </p><code>for</code><p> в Python. Однако в D вы можете его использовать так в стиле Cи, так и на манер циклов в Python, но без мороки с </p><code>enumerate</code><p> или </p><code>xrange</code><p>. 
+</p><p>
+Используя UFCS (Uniform Function Call Syntax) вы можете переписать код на следующий манер:
+
+</p><pre><code>import std.range : iota;
+import std.experimental.ndslice;
+
+void main() {
+    auto slice = 1000.iota.sliced(5, 5, 40);
+}</code></pre>
+<a href="http://www.drdobbs.com/cpp/uniform-function-call-syntax/232700394">UFCS</a><p> позволяет записывать вызов методов по цепочке и писать:
+
+</p><pre><code>a.func(b)</code></pre><p>
+вместо: 
+
+</p><pre><code>func(a, b)</code></pre><p>
+Давайте теперь сгенирируем пустой проект при помощи менеджера пакетов </p><a href="http://code.dlang.org/getting_started">dub</a><p>. Командой </p><code>dub init</code><p> и в файле </p><code>\source\app.d</code><p> напишем:
+
+</p><pre><code>import std.experimental.ndslice;
+
+void main() {
+}</code></pre><p>
+В настоящий момент </p><code>std.experimental.ndslice;</code><p> находится в секции </p><code>std.experimental</code><p>. Это не значит, что он сырой. Это значит, что ему нужно настояться.
+</p><p>
+Теперь соберем проект командой:
+
+</p><pre><code>dub</code></pre><p>
+Модуль D ndslice весьма похож на Numpy:
+
+</p><pre><code>a = numpy.arange(1000).reshape((5, 5, 40))
+b = a[2:-1, 1, 10:20]</code></pre><p>
+Равнозначно:
+
+</p><pre><code>auto a = 1000.iota.sliced(5, 5, 40);
+auto b = a[2 .. $, 1, 10 .. 20];</code></pre><p>
+Теперь давайте создадим двухмерный массив и получим середину каждой его колонки.
+</p><p>
+Python: 
+
+</p><pre><code>import numpy
+
+data = numpy.arange(100000).reshape((100, 1000))
+means = numpy.mean(data, axis=0)</code></pre><p>
+D:
+
+</p><pre><code>import std.range;
+import std.algorithm.iteration;
+import std.experimental.ndslice;
+import std.array : array;
+
+void main() {
+    auto means = 100_000.iota
+        .sliced(100, 1000)
+        .transposed
+        .map!(r =&gt; sum(r) / r.length)
+        .array;
+}</code></pre><p>
+Для того, чтобы данный код не работал в ленивом режиме мне пришлось вызывать метод </p><code>array</code><p>. Однако в реальном приложении результат не будет рассчитан, пока он используется в другой части программы. 
+</p><p>
+В настоящий момент в Phobos нет встроенных модулей работы со </p><a href="https://github.com/DlangScience/dstats">статистикой</a><p>. Поэтому в примере используется простая лямбда для нахождения среднего значения. Функция </p><code>map!</code><p> имеет в конце восклицательный знак. Это значит, что это шаблонная функция. Она позволяет на этапе компиляции генерировать код основанный на выражении указанном в ее теле. Вот хорошая статья о том как работают сами </p><a href="http://nomad.so/2013/07/templates-in-d-explained/">шаблоны в D</a><p>.
+</p><p>
+Хотя код на D и получился чуть более многословным, чем на Python, но благодаря </p><code>map!</code><p> код будет работать с любыми входными данными являющимися диапазоном (range). В то время как код на Python будет работать только со специальными массивами из Numpy.
+</p><p>
+Тут нужно сказать, что после проведения этого теста оказалось, что Python проиграл D в разы и после долгих дисскусий на Hacker News, я понял что допустил ошибку и сравнение оказалось не совсем корректным. </p><code>iota</code><p> динамически создает данные которые принимает функция </p><code>sliced</code><p>. И соответственно мы не трогаем память до момента последней ее релокации. Так же D возвращает массив с типом данных </p><code>long</code><p> в то время как Numpy из </p><code>double</code><p>. В итоге переписал код и довел значение массива до 1000 000 вместо 10 000. Вот что получилось:
+
+</p><pre><code>import std.range : iota;
+import std.array : array;
+import std.algorithm;
+import std.datetime;
+import std.conv : to;
+import std.stdio;
+import std.experimental.ndslice;
+
+enum test_count = 10_000;
+
+double[] means;
+int[] data;
+
+void f0() {
+    means = data
+        .sliced(100, 10000)
+        .transposed
+        .map!(r =&gt; sum(r, 0L) / cast(double) r.length)
+        .array;
+}
+
+void main() {
+    data = 1_000_000.iota.array;
+
+    auto r = benchmark!(f0)(test_count);
+    auto f0Result = to!Duration(r[0] / test_count);
+    f0Result.writeln;
+}</code></pre><p>
+Тесты проводил на 2015 MacBook Pro with a 2.9 GHz Intel Core Broadwell i5. В Python для замера скорости использовал функцию </p><code>%timeit</code><p> в D </p><code>std.datetime.benchmark</code><p>. Компилировал все при помощи LDC v0.17 со следующими ключами: </p><code>ldmd2 -release -inline -boundscheck=off -O</code><p>. Или если вы используете dub то аналогом этих ключей будут опции </p><code>dub --build=release-nobounds --compiler=ldmd2</code><p>.
+</p><p>
+Вот результаты первого теста:
+
+</p><pre><code>Python: 145 µs
+LDC:      5 µs
+
+D is 29x faster</code></pre><p>
+Вот теста исправленной версии:
+
+</p><pre><code>Python: 1.43 msec
+LDC:  628    μs
+
+D is 2.27x faster</code></pre><p>
+Согласитесь весьма не плохая разница учитывая то что Numpy написан на С, а в D все ругают сборщик мусора.
+
+</p><h4>Как D позволяет избежать проблем Numpy?</h4><p>
+Да Numpy быстр, но быстр он лишь в сравнении с простыми масисвами Python. Но проблема в том, что он с этими простыми массивами совместим лишь частично.
+</p><p>
+Библиотека Numpy находится где то сбоку от остального Python. Она живет своей жизнью. В ней используются свои функции, она работает со своими типами. К примеру если нам потребуется использовать массив созданный в Python в NumPy нам нужно будет использовать </p><code>np.asarray</code><p> который скопирует его в новую переменную. Беглый </p><a href="https://github.com/search?l=python&amp;amp;q=np.asarray&amp;amp;type=Code&amp;amp;utf8=%E2%9C%93">поиск по github</a><p> показал что тысячи проектов используют этот костыль. В то время как данные могли бы быть просто переданы из одной функции в другую без этих пустых копирований.
+
+</p><pre><code>import numpy as np
+
+a = [[0.2,0.5,0.3], [0.2,0.5,0.3]]
+p = np.asarray(a)
+y = np.asarray([0,1])</code></pre><p>
+Эту проблему пытаются решить переписав часть стандартной библиотеки Python на использование типов Numpy. Однако это все равно не полноценное решение, которое приводит к замечательным приколам, когда написав:
+
+</p><pre><code>sum(a)</code></pre><p>
+вместо:
+
+</p><pre><code>a.sum()</code></pre><p>
+мы получаем 10x кратное падение в скорости.
+</p><p>
+У D таких проблем просто нет by design. Это компилируемый, статически типизируемый язык. Во время генерации кода известны все типы переменных. В самом std.ndslice вы получаете полный доступ ко всем функциям библиотеки Phobos к примеру к таким замечательным вещам как std.algorithm и std.range. Ах да, при этом вы сможете использовать </p><a href="http://nomad.so/2013/07/templates-in-d-explained/">шаблоны D</a><p> позволяющие генерировать код прямо на этапе компиляции.
+</p><p>
+Вот пример:
+
+</p><pre><code>import std.range : iota;
+import std.algorithm.iteration : sum;
+import std.experimental.ndslice;
+
+void main() {
+    auto slice = 1000.iota.sliced(5, 5, 40);
+    auto result = slice
+        // sum expects an input range of numerical values, so to get one
+        // we call std.experimental.ndslice.byElement to get the unwound
+        // range
+        .byElement
+        .sum;
+}</code></pre><p>
+Вы берете и просто используете функцию </p><code>sum</code><p> и она просто берет и работает, ровно как и любая другая функция из базовой библиотеки.
+</p><p>
+В самом Python для того чтобы получить список опреленной длинны инициализированный определенным значением нам нужно написать:
+
+</p><pre><code>a = [0] * 1000</code></pre><p>
+В Numpy уже будет совсем по-другому:
+
+</p><pre><code>a = numpy.zeros((1000))</code></pre><p>
+И если вы не вспользуетесь Numpy то ваш код будет в 4 раза медленне не считая лишней операции копирования съедающей память. В D нам на помощь приходят range, который позволяют сделать эту же операцию быстро и без пустых операций копирования:
+
+</p><pre><code>auto a = repeat(0, 1000).array;</code></pre><p>
+И если нужно мы можем тут же вызвать ndslice:
+
+</p><pre><code>auto a = repeat(0, 1000).array.sliced(5, 5, 40);</code></pre><p>
+Главное преимущество Numpy в настоящее время это его распространенность. Сейчас он используется реально очень широко от банковских систем до машинного обучения. По нему очень много книг, примеров и статей. Однако математические возможности в D очевидно будут уже очень скоро расширены. Так автор ndslice </p><a href="http://forum.dlang.org/thread/nilhvnqbsgqhxdshpqfl@forum.dlang.org">заявил</a><p>, что сейчас ведет работы над BLAS (Basic Linear Algebra Subprograms) для Phobos, который так же будет полностью </p><a href="https://github.com/DlangScience/mir">интегрирован</a><p> с ndslice и со стандартной библиотекой. 
+</p><p>
+Мощная математическая подсистема позволит очень эффективно решать ряд задач где необходима работы с большими данными. К примеру системы компьютерного видения. Прототип одной из таких систем уже разрабатывается и называется </p><a href="https://github.com/ljubobratovicrelja/dcv">DCV</a><p>.
+
+</p><h4>Обработка изображений на D</h4><p>
+Следующий пример покажет как работает медианный фильтр позволяющий ликвидировать шумы на изображении. Функция </p><code>movingWindowByChannel</code><p> может быть использована так же в других фильтрах где требуется использование скользящее окно. </p><code>movingWindowByChannel</code><p> позволяет перемещаться по изображению используя скользящее окно. Каждое такое окно передается в фильтр, который рассчитывает значения пикселей на основании выбранной зоны. 
+</p><p>
+Эта функция не обрабатывает зоны с частичным перекрытием. Однако с ее помощью можно вычеслить значения в них тоже. Для этого нужно создать увеличенное изображение с краями отражающими границы оригинального изображения и затем обработать его.
+
+</p><pre><code>/**
+Params:
+    filter = unary function. Dimension window 2D is the argument.
+    image = image dimensions `(h, w, c)`,
+        where с is the number of channels in the image
+    nr = number of rows in the window
+    nс = number of columns in the window
+
+Returns:
+    image dimensions `(h - nr + 1, w - nc + 1, c)`,
+        where с is the number of channels in the image.
+        Dense data layout is guaranteed.
+*/
+Slice!(3, C*) movingWindowByChannel(alias filter, C)
+(Slice!(3, C*) image, size_t nr, size_t nc)
+{
+    // local imports in D work much like Python's local imports,
+    // meaning if your code never runs this function, these will
+    // never be imported because this function wasn't compiled
+    import std.algorithm.iteration: map;
+    import std.array: array;
+
+    // 0. 3D
+    // The last dimension represents the color channel.
+    auto wnds = image
+        // 1. 2D composed of 1D
+        // Packs the last dimension.
+        .pack!1
+        // 2. 2D composed of 2D composed of 1D
+        // Splits image into overlapping windows.
+        .windows(nr, nc)
+        // 3. 5D
+        // Unpacks the windows.
+        .unpack
+        // 4. 5D
+        // Brings the color channel dimension to the third position.
+        .transposed!(0, 1, 4)
+        // 5. 3D Composed of 2D
+        // Packs the last two dimensions.
+        .pack!2;
+
+    return wnds
+        // 6. Range composed of 2D
+        // Gathers all windows in the range.
+        .byElement
+        // 7. Range composed of pixels
+        // 2D to pixel lazy conversion.
+        .map!filter
+        // 8. `C[]`
+        // The only memory allocation in this function.
+        .array
+        // 9. 3D
+        // Returns slice with corresponding shape.
+        .sliced(wnds.shape);
+}</code></pre><p>
+Следующая функция пример того как можно рассчитать медиану у объекта. Функция сильно упрощена в целях повышения читаемости.
+
+</p><pre><code>/**
+Params:
+    r = input range
+    buf = buffer with length no less than the number of elements in `r`
+Returns:
+    median value over the range `r`
+*/
+T median(Range, T)(Range r, T[] buf)
+{
+    import std.algorithm.sorting: sort;
+
+    size_t n;
+
+    foreach (e; r) {
+        buf[n++] = e;
+    }
+
+    buf[0 .. n].sort();
+    immutable m = n &gt;&gt; 1;
+    return n &amp; 1 ? buf[m] : cast(T)((buf[m - 1] + buf[m]) / 2);
+}</code></pre><p>
+Ну а теперь собственно сам Main:
+
+</p><pre><code>void main(string[] args)
+{
+    import std.conv: to;
+    import std.getopt: getopt, defaultGetoptPrinter;
+    import std.path: stripExtension;
+
+    // In D, getopt is part of the standard library
+    uint nr, nc, def = 3;
+    auto helpInformation = args.getopt(
+        "nr", "number of rows in window, default value is " ~ def.to!string, &amp;nr,
+        "nc", "number of columns in window, default value is equal to nr", &amp;nc);
+
+    if (helpInformation.helpWanted)
+    {
+        defaultGetoptPrinter(
+            "Usage: median-filter [&lt;options...&gt;] [&lt;file_names...&gt;]\noptions:",
+            helpInformation.options);
+        return;
+    }
+
+    if (!nr) nr = def;
+    if (!nc) nc = nr;
+
+    auto buf = new ubyte[nr * nc];
+
+    foreach (name; args[1 .. $])
+    {
+        import imageformats; // can be found at code.dlang.org
+
+        IFImage image = read_image(name);
+
+        auto ret = image.pixels
+            .sliced(cast(size_t)image.h, cast(size_t)image.w, cast(size_t)image.c)
+            .movingWindowByChannel
+                !(window =&gt; median(window.byElement, buf))
+                 (nr, nc);
+
+        write_image(
+            name.stripExtension ~ "_filtered.png",
+            ret.length!1,
+            ret.length!0,
+            (&amp;ret[0, 0, 0])[0 .. ret.elementsCount]);
+    }
+}</code></pre><p>
+Если не все примеры показались вам понятными рекомендую вам прочитать бесплатную версию замечательной книги </p><a href="http://ddili.org/ders/d.en/">Programming in D</a><p>.
+</p><p>
+P.S. Если знаете как данную публикацию перевести в статус "переводы", то напишите в приват.
+
+
+      
+      </p><p class="clear"/>
+    </div>
+
+    
+  </div></body></html>

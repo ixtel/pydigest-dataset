@@ -1,0 +1,54 @@
+<html><body><div><div class="entry">
+				<p>"Multiprocessing", "multi-threading", "parallelism", "concurrency" etc. etc. can give you two kinds of benefits:</p>
+<ul>
+<li>Doing many things at once – 1000 multiplications every cycle.</li>
+<li><em>Waiting </em>for many things at once – wait for 1000 HTTP requests just issued.</li>
+</ul>
+<p>Some systems help with one of these but not the other, so you want to know which one – and if it's the one you need.</p>
+<p>For instance, CPython has the infamous <a href="https://wiki.python.org/moin/GlobalInterpreterLock">GIL</a> – global interpreter lock. To what extent does the GIL render CPython "useless on multiple cores"?</p>
+<ul>
+<li>Indeed you can hardly <em>do </em>many things at once – not in a single pure Python process. One thread doing something takes the GIL and the other thread waits.</li>
+<li>You can however <em>wait </em>for many things at once just fine – for example, <a href="https://medium.com/building-things-on-the-internet/40e9b2b36148">using the multiprocessing module</a> (pool.map), or you could spawn your own thread pool to do the same. Many Python threads can concurrently issue system calls that wait for data – reading from TCP sockets, etc. Then instead of 1000 request-wait, request-wait steps, you issue 1000 requests and wait for them all simultaneously. Could be close to a 1000x speed-up for long waits (with a 1000-thread worker pool; more on that below). Works like a charm.</li>
+</ul>
+<p>So GIL is not a problem for "simultaneous waiting" for I/O. Is GIL a problem for simultaneous processing? If you ask me – no, because:</p>
+<ul>
+<li>If you want performance, it's kinda funny to use pure Python and then mourn the fact that you can't run, on 8 cores, Python code that's 30-50x slower than C to begin with.</li>
+<li>On the other hand, if you use C bindings, then the C code <em>could </em>use multiple threads actually running on multiple cores just fine; numpy does it if properly configured, for instance. Numpy also uses SIMD/vector instructions (SSE etc.) – another kind of "doing many things at once" that pure Python can't do regardless of the GIL.</li>
+</ul>
+<p>So IMO Python doesn't have as bad a story in this department as it's reputed to have – and if it does look bad to you, you probably can't tolerate Python's slowness doing <em>one</em> thing at a time in the first place.</p>
+<p>So Python – or C, for that matter – is OK for simultaneous waiting, but is it <em>great?</em> Probably not as great as Go or Erlang – which let you wait in parallel for <em>millions</em> of things. How do they do it? Cheap context management.</p>
+<p>Context management is a big challenge of waiting for many things at once. If you wait for a million things, you need a million sets of variables keeping track of what exactly you're waiting for (has the header arrived? then I'm waiting for the query. has it arrived? then I ask the database and wait for it etc. etc.)</p>
+<p>If those variables are thread-local variables in a million threads, then you run into one of the problems with C – and hence OS-supported threads designed to run C. The problem is that C has no idea how much stack it's gonna need (because of the halting problem, so you can't blame C); and C has no mechanism to detect that it ran out of stack space at runtime and allocate some more (because that's how its ABIs have evolved; in theory C could do this, but it doesn't.)</p>
+<p>So the best thing a Unixy OS could do is, give C one page for the stack (say 4K), and make say the next 1-2M of the virtual address space unaccessible (with 64b pointers, address space is cheap). When C page-faults upon stack overflow, give it more physical memory – say another 4K. This method means at least 4K of allocated physical memory per thread, or 4G for a million threads – rather wasteful. (I think in practice it's usually way worse.) All regardless of us often needing a fraction of that memory for the actual state.</p>
+<p>And that's before we got to the cost of context switching – which can be made smaller if we use <a href="http://www.embeddedrelated.com/showarticle/455.php">setjmp/longjmp-based coroutines</a> or something similar, but that wouldn't help much with stack space. C's lax approach to stack management – which is the way it is to shave a few cycles off the function call cost – can thus make C terribly inefficient in terms of memory footprint (speed vs space is generally a common trade-off – it's just a bad one in the specific use case of "massive waiting" in C).</p>
+<p>So Go/Erlang don't rely on the C-ish OS threads but roll their own – based on their stack management, which doesn't require a contiguous block of addresses. And AFAIK you really can't get readable <em>and </em>efficient "massive waiting" code in any other way – your alternatives, apart from the readable but inefficient threads, are:</p>
+<ul>
+<li>Manual state machine management – yuck</li>
+<li>Layered state machines as in <a href="https://twistedmatrix.com/documents/current/core/howto/servers.html">Twisted</a> – better, but you still have callbacks looking at state variables</li>
+<li>Continuation passing as in <a href="http://nodejs.org/about/">Node.js</a> – perhaps nicer still, but still far from the smoothness of threads/processes/coroutines</li>
+</ul>
+<p>The <a href="http://s3.amazonaws.com/four.livejournal/20091117/jsconf.pdf">old Node.js slides</a> say that "green threads/coroutines can improve the situation dramatically, but there is still machinery involved". I'm not sure how that machinery – the machinery in Go or Erlang – is any worse than the machinery involved in continuation passing and event loops (unless the argument is about compatibility more than efficiency – in which case machinery seems to me a surprising choice of words.)</p>
+<p>Millions of cheap threads or whatever you call them are exciting if you wait for many events. Are they exciting if you do many things at once? No; C threads are just fine – and C is faster to begin with. You likely don't want to use threads directly – it's ugly – but you can multiplex tasks onto threads easily enough.</p>
+<p>A "task" doesn't need to have its own context – it's just a function bound to its arguments. When a worker thread is out of work, it grabs the task out of a queue and <em>runs it to completion</em>. Because the machine <em>works </em>- rather than <em>waits </em>- you don't have the problems with stack management created by waiting. You only wait when there's no more work, but never <em>in the middle</em> of things.</p>
+<p>So a thread pool running millions of <em>tasks </em>doesn't need<em> </em>a million <em>threads. </em>It can be a thread per core, maybe more if you have <em>some </em>waiting – say, if you wait for stuff offloaded to a GPU/DSP.</p>
+<p>I really don't understand how Joe Armstrong could <a href="http://joearms.github.io/2013/03/28/solving-the-wrong-problem.html">say</a> Erlang is faster than C on multiple cores, or things to that effect, with examples involving image processing – instead of event handling which is where Erlang <em>can </em>be said to be more efficient.</p>
+<p>Finally, a hardware-level example – which kind of hardware is good at simultaneous working, and which is good at simultaneous waiting?</p>
+<p>If your goal is parallelizing work, eventually you'll deteriorate to SIMD. SIMD is great because there's just one "manager" – instruction sequencer – for many "workers" – ALUs. CPUs, DSPs and GPUs all have SIMD. NVIDIA calls its ALUs "cores" and 16-32 ALUs running the same instruction "threads", but that's just <a href="http://www.yosefk.com/blog/simd-simt-smt-parallelism-in-nvidia-gpus.html">shameless marketing</a>. A "thread" implies, to everyone but a marketeer, independent control flow, while GPU "threads" march in lockstep.</p>
+<p>In practice, SIMD is hard despite thousands of man-years having been invested into better languages and libraries – because telling a bunch of dumb soldiers marching in lockstep what to do is just harder than running a bunch of self-motivating threads each doing its own thing.</p>
+<p>(Harder in one way, easier in another: marching in lockstep precludes races – non-deterministic, once-in-a-blue-moon, scary races. But races <em>of the kind arising between worker threads</em> can be almost <a href="https://github.com/yosefk/checkedthreads">completely remedied with tools</a>. Managing the dumb ALUs can not be made easier with tools and libraries to the same extent – not even close. Where I work, roughly there's an entire team responsible for SIMD programming, while threading is mostly automatic and bugs are weeded out by automated testing.)</p>
+<p>If, however, you expect to be waiting much of the time – for memory or for high-latency floating point operations, for instance – then hoards of hardware threads <em>lacking their own ALUs</em>, as in barrel threading or hyper-threading, can be a great idea, while SIMD might do nothing for you. Similarly, a bunch of weaker cores can be <a href="http://www.yosefk.com/blog/amdahls-law-in-reverse-the-wimpy-core-advantage.html">better</a> than a smaller number of stronger cores. The point being, what you really need here is a cheap way to keep context and switch between contexts, while actually doing a lot at once is unlikely to be possible in the first place.</p>
+<p><strong>Conclusions</strong></p>
+<ul>
+<li>Doing little or nothing while waiting for many things is both surprisingly <em>useful </em>and surprisingly <em>hard </em>(which took me way too long to internalize both in my hardware-related and software/server-related work). It motivates things looking rather strange, such as "green threads" and hardware threads without their own ALUs.</li>
+<li>Actually doing many things in parallel – to me the more "obviously useful" thing – is difficult in an entirely different way. It tends to drag in ugly languages, intrinsics, libraries etc. about as much as having to do <em>one single thing</em> quickly. The "parallelism" part is actually the simplest (few threads so easy context management; races either non-existent [SIMD] or very easy to weed out [worker pool running tasks])</li>
+<li>People doing servers (which wait a lot) and people doing number-crunching (work) think very differently about these things. Transplanting experience/advice from one area to the other can lead to nonsensical conclusions.</li>
+</ul>
+<p><strong>See also</strong></p>
+<p><a href="http://www.yosefk.com/blog/parallelism-and-concurrency-need-different-tools.html">Parallelism and concurrency need different tools</a> – expands on the reasons for races being easy to find in computational code – but impossible to even uniformly <em>define </em>for most event handling code.</p>
+							</div>
+			
+			
+
+
+
+</div></body></html>
