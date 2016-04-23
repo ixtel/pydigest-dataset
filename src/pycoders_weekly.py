@@ -1,15 +1,13 @@
-# # -*- coding: utf-8 -*-
-# from __future__ import unicode_literals
-#
-# from urllib.error import URLError
-# from urllib.request import urlopen
-#
-# import lxml.html as html
-# from bs4 import BeautifulSoup
-# from bs4.element import Tag
-# from lxml import etree
-#
-#
+# -*- coding: utf-8 -*-
+from __future__ import unicode_literals
+
+import os
+
+import requests
+
+ISSUE_FOLDER = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'digests', 'PycodersWeekly'))
+
+
 # def _get_content(url: str) -> str:
 #     try:
 #         result = urlopen(url, timeout=10).read()
@@ -64,3 +62,18 @@
 #     pass
 #     # map(_get_block_item, _get_blocks)
 #
+
+
+def download_issues():
+    path = os.path.join(ISSUE_FOLDER, 'issues.txt')
+    with open(path, 'r') as fio:
+        issues = [x.strip() for x in fio.readlines() if x]
+    for i, issue in enumerate(reversed(issues), start=1):
+        res = requests.get(issue)
+        print(i, issue)
+        issue_path = os.path.join(ISSUE_FOLDER, '%s.html' % i)
+        with open(issue_path, 'w') as fio:
+            fio.write(res.text)
+
+
+download_issues()
