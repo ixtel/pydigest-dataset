@@ -8,12 +8,9 @@ from typing import List, Dict
 import requests
 from bs4 import BeautifulSoup
 
+from src import get_issue_from_file
+
 ISSUE_FOLDER = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'digests', 'ImportPython'))
-
-
-def get_issue_from_file(file_path):
-    with open(file_path, 'r') as fio:
-        return fio.read()
 
 
 def getlist1(list1):
@@ -160,16 +157,17 @@ def parse_part1():
 # main()
 
 # gen_inbox()
+if __name__ == '__main__':
 
-all_links = []
-all_links.extend(parse_part1())
-all_links.extend(parse_part2())
-all_links.extend(parse_part3())
+    all_links = []
+    all_links.extend(parse_part1())
+    all_links.extend(parse_part2())
+    all_links.extend(parse_part3())
 
-with open('import_python.csv', 'w') as fio:
-    fieldnames = all_links[0].keys()
-    writer = csv.DictWriter(fio, fieldnames=fieldnames)
-    headers = dict((n, n) for n in fieldnames)
-    writer.writerow(headers)
-    for x in all_links:
-        writer.writerow(x)
+    with open('import_python.csv', 'w') as fio:
+        fieldnames = all_links[0].keys()
+        writer = csv.DictWriter(fio, fieldnames=fieldnames)
+        headers = dict((n, n) for n in fieldnames)
+        writer.writerow(headers)
+        for x in all_links:
+            writer.writerow(x)
